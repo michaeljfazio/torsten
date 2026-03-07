@@ -2,8 +2,8 @@ use crate::immutable_db::ImmutableDB;
 use crate::volatile_db::VolatileDB;
 use std::path::Path;
 use thiserror::Error;
-use torsten_primitives::block::Tip;
-use torsten_primitives::hash::BlockHeaderHash;
+use torsten_primitives::block::{Point, Tip};
+use torsten_primitives::hash::{BlockHeaderHash, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
 
 #[derive(Error, Debug)]
@@ -72,11 +72,86 @@ impl ChainDB {
         self.volatile.get_tip().unwrap_or_else(Tip::origin)
     }
 
+    /// Rollback to a given point by removing blocks from the volatile DB.
+    /// Returns the hashes of the removed blocks (most recent first).
+    pub fn rollback_to_point(&mut self, point: &Point) -> Result<Vec<BlockHeaderHash>, ChainDBError> {
+        let target_hash = match point {
+            Point::Origin => {
+                // Rolling back to origin: clear all volatile blocks
+                let tip = self.volatile.get_tip();
+                if let Some(tip) = tip {
+                    if let Some(tip_hash) = tip.point.hash() {
+                        let chain = self.volatile.get_chain_back_to(tip_hash, &Hash32::ZERO);
+                        if let Some(hashes) = chain {
+                            for hash in &hashes {
+                                self.volatile.remove_block(hash);
+                            }
+                            return Ok(hashes);
+                        }
+                    }
+                }
+                return Ok(vec![]);
+            }
+            Point::Specific(_, hash) => *hash,
+        };
+
+        let tip = self.volatile.get_tip();
+        let tip_hash = match tip {
+            Some(t) => match t.point.hash() {
+                Some(h) => *h,
+                None => return Ok(vec![]),
+            },
+            None => return Ok(vec![]),
+        };
+
+        if tip_hash == target_hash {
+            return Ok(vec![]); // Already at this point
+        }
+
+        // Get the chain of blocks to remove
+        let chain = self
+            .volatile
+            .get_chain_back_to(&tip_hash, &target_hash)
+            .ok_or_else(|| {
+                ChainDBError::BlockNotFound(format!(
+                    "Cannot find chain from {} back to {}",
+                    tip_hash.to_hex(),
+                    target_hash.to_hex()
+                ))
+            })?;
+
+        // Remove blocks from volatile DB
+        for hash in &chain {
+            self.volatile.remove_block(hash);
+        }
+
+        // Update the tip to the rollback point
+        self.volatile.update_tip_to(&target_hash);
+
+        Ok(chain)
+    }
+
+    /// Check if a block exists in the chain DB
+    pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
+        self.volatile.get_block(hash).is_some()
+            || self.immutable.get_block_by_hash(hash).ok().flatten().is_some()
+    }
+
     /// Flush old blocks from volatile to immutable when chain is long enough
     fn maybe_flush_to_immutable(&mut self) -> Result<(), ChainDBError> {
-        // In production, this would track the immutable tip and move
-        // blocks that are k-deep from volatile to immutable.
-        // For now, this is a placeholder.
+        let volatile_count = self.volatile.block_count();
+        if volatile_count <= SECURITY_PARAM_K {
+            return Ok(());
+        }
+
+        // Get oldest blocks that are beyond k-deep and flush them
+        let to_flush = volatile_count - SECURITY_PARAM_K;
+        let flushed = self.volatile.drain_oldest(to_flush);
+
+        for (hash, slot, _block_no, cbor) in flushed {
+            self.immutable.put_block(slot, &hash, &cbor)?;
+        }
+
         Ok(())
     }
 }
@@ -122,5 +197,81 @@ mod tests {
 
         let tip = chain_db.get_tip();
         assert_eq!(tip.block_number, BlockNo(50));
+    }
+
+    fn make_hash(n: u8) -> BlockHeaderHash {
+        Hash32::from_bytes([n; 32])
+    }
+
+    fn build_chain(chain_db: &mut ChainDB, count: u8) {
+        for i in 1..=count {
+            chain_db
+                .add_block(
+                    make_hash(i),
+                    SlotNo(i as u64),
+                    BlockNo(i as u64),
+                    make_hash(i - 1),
+                    format!("block{}", i).into_bytes(),
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_rollback_to_specific_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut chain_db = ChainDB::open(dir.path()).unwrap();
+
+        // Build chain: 0 <- 1 <- 2 <- 3 <- 4 <- 5
+        build_chain(&mut chain_db, 5);
+        assert_eq!(chain_db.get_tip().block_number, BlockNo(5));
+
+        // Rollback to block 3
+        let removed = chain_db
+            .rollback_to_point(&Point::Specific(SlotNo(3), make_hash(3)))
+            .unwrap();
+
+        assert_eq!(removed.len(), 2); // blocks 5 and 4
+        assert_eq!(removed[0], make_hash(5));
+        assert_eq!(removed[1], make_hash(4));
+        assert_eq!(chain_db.get_tip().block_number, BlockNo(3));
+    }
+
+    #[test]
+    fn test_rollback_to_current_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut chain_db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut chain_db, 3);
+
+        // Rollback to current tip should be a no-op
+        let removed = chain_db
+            .rollback_to_point(&Point::Specific(SlotNo(3), make_hash(3)))
+            .unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(chain_db.get_tip().block_number, BlockNo(3));
+    }
+
+    #[test]
+    fn test_rollback_to_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut chain_db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut chain_db, 3);
+
+        let removed = chain_db.rollback_to_point(&Point::Origin).unwrap();
+        assert_eq!(removed.len(), 3);
+    }
+
+    #[test]
+    fn test_has_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut chain_db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut chain_db, 2);
+
+        assert!(chain_db.has_block(&make_hash(1)));
+        assert!(chain_db.has_block(&make_hash(2)));
+        assert!(!chain_db.has_block(&make_hash(99)));
     }
 }

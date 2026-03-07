@@ -160,6 +160,43 @@ impl VolatileDB {
         }
     }
 
+    /// Update the tip to point to a specific block hash (used during rollback)
+    pub fn update_tip_to(&self, hash: &BlockHeaderHash) {
+        let blocks = self.blocks.read();
+        if let Some(entry) = blocks.get(hash) {
+            *self.tip.write() = Some((*hash, entry.slot, entry.block_no));
+        } else {
+            // Block not in volatile DB — tip goes to None (origin)
+            *self.tip.write() = None;
+        }
+    }
+
+    /// Drain the oldest blocks, returning their data for flushing to immutable DB.
+    /// Returns Vec of (hash, slot, block_no, cbor).
+    pub fn drain_oldest(&self, count: usize) -> Vec<(BlockHeaderHash, SlotNo, BlockNo, Vec<u8>)> {
+        let mut result = Vec::new();
+        let mut blocks = self.blocks.write();
+        let mut slot_index = self.slot_index.write();
+
+        let mut drained = 0;
+        while drained < count {
+            if let Some((&oldest_slot, _)) = slot_index.iter().next() {
+                if let Some(hashes) = slot_index.remove(&oldest_slot) {
+                    for hash in hashes {
+                        if let Some(entry) = blocks.remove(&hash) {
+                            result.push((hash, entry.slot, entry.block_no, entry.cbor));
+                            drained += 1;
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        result
+    }
+
     pub fn block_count(&self) -> usize {
         self.blocks.read().len()
     }
