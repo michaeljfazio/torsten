@@ -1,0 +1,102 @@
+[workspace]
+members = [
+    "crates/torsten-primitives",
+    "crates/torsten-crypto",
+    "crates/torsten-serialization",
+    "crates/torsten-network",
+    "crates/torsten-consensus",
+    "crates/torsten-ledger",
+    "crates/torsten-mempool",
+    "crates/torsten-storage",
+    "crates/torsten-node",
+    "crates/torsten-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/example/torsten"
+description = "Torsten - A Rust implementation of the Cardano node"
+
+[workspace.dependencies]
+# Workspace crates
+torsten-primitives = { path = "crates/torsten-primitives" }
+torsten-crypto = { path = "crates/torsten-crypto" }
+torsten-serialization = { path = "crates/torsten-serialization" }
+torsten-network = { path = "crates/torsten-network" }
+torsten-consensus = { path = "crates/torsten-consensus" }
+torsten-ledger = { path = "crates/torsten-ledger" }
+torsten-mempool = { path = "crates/torsten-mempool" }
+torsten-storage = { path = "crates/torsten-storage" }
+torsten-node = { path = "crates/torsten-node" }
+torsten-cli = { path = "crates/torsten-cli" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+minicbor = { version = "0.25", features = ["std", "derive"] }
+hex = "0.4"
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+blake2 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Networking
+tokio-tungstenite = "0.24"
+pallas-network = "0.31"
+pallas-codec = "0.31"
+pallas-primitives = "0.31"
+pallas-traverse = "0.31"
+pallas-crypto = "0.31"
+pallas-addresses = "0.31"
+
+# Storage
+rocksdb = "0.22"
+tempfile = "3"
+
+# Logging & diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Misc
+bytes = "1"
+byteorder = "1"
+derive_more = { version = "1", features = ["display", "from"] }
+dashmap = "6"
+parking_lot = "0.12"
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+bech32 = "0.11"
+base16ct = { version = "0.2", features = ["alloc"] }
+crc32fast = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

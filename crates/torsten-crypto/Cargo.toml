@@ -1,0 +1,20 @@
+[package]
+name = "torsten-crypto"
+version.workspace = true
+edition.workspace = true
+description = "Cryptographic primitives for the Torsten Cardano node"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake2 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+minicbor = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

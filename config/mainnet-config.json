@@ -1,0 +1,21 @@
+{
+  "Network": "Mainnet",
+  "NetworkMagic": 764824073,
+  "Protocol": {
+    "RequiresNetworkMagic": "RequiresMagic"
+  },
+  "EnableP2P": true,
+  "TargetNumberOfActivePeers": 20,
+  "TargetNumberOfEstablishedPeers": 40,
+  "TargetNumberOfKnownPeers": 100,
+  "TraceOptions": {
+    "TraceBlockFetchClient": false,
+    "TraceBlockFetchServer": false,
+    "TraceChainDb": true,
+    "TraceChainSyncClient": true,
+    "TraceChainSyncServer": false,
+    "TraceForge": true,
+    "TraceMempool": true
+  },
+  "MinSeverity": "Info"
+}

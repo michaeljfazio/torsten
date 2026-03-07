@@ -1,0 +1,23 @@
+[package]
+name = "torsten-storage"
+version.workspace = true
+edition.workspace = true
+description = "Block and chain storage for Torsten (ImmutableDB + VolatileDB)"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+torsten-serialization = { workspace = true }
+torsten-crypto = { workspace = true }
+rocksdb = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+crc32fast = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

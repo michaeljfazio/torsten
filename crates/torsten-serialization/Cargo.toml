@@ -1,0 +1,16 @@
+[package]
+name = "torsten-serialization"
+version.workspace = true
+edition.workspace = true
+description = "CBOR serialization for Cardano wire format compatibility"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+minicbor = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

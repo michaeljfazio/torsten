@@ -1,0 +1,24 @@
+[package]
+name = "torsten-network"
+version.workspace = true
+edition.workspace = true
+description = "Ouroboros network mini-protocols for Torsten"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+torsten-crypto = { workspace = true }
+torsten-serialization = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+minicbor = { workspace = true }
+pallas-network = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

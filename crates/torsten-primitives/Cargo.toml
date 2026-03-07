@@ -1,0 +1,22 @@
+[package]
+name = "torsten-primitives"
+version.workspace = true
+edition.workspace = true
+description = "Core primitive types for the Torsten Cardano node"
+
+[dependencies]
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+derive_more = { workspace = true }
+bytes = { workspace = true }
+num-bigint = { workspace = true }
+num-rational = { workspace = true }
+num-traits = { workspace = true }
+chrono = { workspace = true }
+bech32 = { workspace = true }
+blake2 = { workspace = true }
+minicbor = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

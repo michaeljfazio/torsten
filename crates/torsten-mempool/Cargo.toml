@@ -1,0 +1,18 @@
+[package]
+name = "torsten-mempool"
+version.workspace = true
+edition.workspace = true
+description = "Transaction mempool for Torsten"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+torsten-ledger = { workspace = true }
+torsten-crypto = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
