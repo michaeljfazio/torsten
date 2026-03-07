@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 minicbor = { workspace = true }
 pallas-network = { workspace = true }
+pallas-crypto = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1754,6 +1754,7 @@ dependencies = [
  "bytes",
  "futures",
  "minicbor",
+ "pallas-crypto",
  "pallas-network",
  "tempfile",
  "thiserror 2.0.18",
