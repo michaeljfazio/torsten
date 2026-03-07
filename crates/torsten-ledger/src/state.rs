@@ -21,6 +21,8 @@ pub struct LedgerState {
     pub era: Era,
     /// Current epoch
     pub epoch: EpochNo,
+    /// Epoch length in slots
+    pub epoch_length: u64,
     /// Current protocol parameters
     pub protocol_params: ProtocolParameters,
     /// Stake distribution
@@ -33,11 +35,41 @@ pub struct LedgerState {
     pub delegations: BTreeMap<Hash32, Hash28>,
     /// Pool registrations: pool_id -> pool registration
     pub pool_params: BTreeMap<Hash28, PoolRegistration>,
+    /// Pool retirements pending at a given epoch
+    pub pending_retirements: BTreeMap<EpochNo, Vec<Hash28>>,
+    /// Stake snapshots for the Cardano "mark/set/go" snapshot model
+    pub snapshots: EpochSnapshots,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StakeDistributionState {
     pub stake_map: BTreeMap<Hash32, Lovelace>,
+}
+
+/// Cardano uses a "mark / set / go" snapshot model:
+/// - "mark" is the snapshot taken at the current epoch boundary
+/// - "set" is the snapshot from the previous epoch (used for leader election)
+/// - "go" is the snapshot from two epochs ago (used for reward calculation)
+#[derive(Debug, Clone, Default)]
+pub struct EpochSnapshots {
+    /// Snapshot from the most recent epoch boundary ("mark")
+    pub mark: Option<StakeSnapshot>,
+    /// Snapshot from one epoch ago ("set") — used for leader election
+    pub set: Option<StakeSnapshot>,
+    /// Snapshot from two epochs ago ("go") — used for reward distribution
+    pub go: Option<StakeSnapshot>,
+}
+
+/// A snapshot of the stake distribution at an epoch boundary
+#[derive(Debug, Clone)]
+pub struct StakeSnapshot {
+    pub epoch: EpochNo,
+    /// stake credential hash -> pool_id delegation
+    pub delegations: BTreeMap<Hash32, Hash28>,
+    /// pool_id -> total active stake delegated to that pool
+    pub pool_stake: BTreeMap<Hash28, Lovelace>,
+    /// pool_id -> pool parameters at snapshot time
+    pub pool_params: BTreeMap<Hash28, PoolRegistration>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,12 +89,15 @@ impl LedgerState {
             tip: Tip::origin(),
             era: Era::Conway,
             epoch: EpochNo(0),
+            epoch_length: 432000, // mainnet default
             protocol_params: params,
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
             reserves: Lovelace(0),
             delegations: BTreeMap::new(),
             pool_params: BTreeMap::new(),
+            pending_retirements: BTreeMap::new(),
+            snapshots: EpochSnapshots::default(),
         }
     }
 
@@ -100,6 +135,12 @@ impl LedgerState {
             for reward_account in tx.body.withdrawals.keys() {
                 self.process_withdrawal(reward_account);
             }
+        }
+
+        // Check for epoch transition
+        let block_epoch = EpochNo(block.slot().0 / self.epoch_length);
+        if block_epoch > self.epoch {
+            self.process_epoch_transition(block_epoch);
         }
 
         // Update tip
@@ -154,14 +195,16 @@ impl LedgerState {
                 debug!("Pool registered: {}", params.operator.to_hex());
                 self.pool_params.insert(params.operator, pool_reg);
             }
-            Certificate::PoolRetirement {
-                pool_hash,
-                epoch: _,
-            } => {
-                debug!("Pool retirement scheduled: {}", pool_hash.to_hex());
-                // Pool retirement takes effect at epoch boundary; we just record it here
-                // A full implementation would track pending retirements
-                self.pool_params.remove(pool_hash);
+            Certificate::PoolRetirement { pool_hash, epoch } => {
+                debug!(
+                    "Pool retirement scheduled at epoch {}: {}",
+                    epoch,
+                    pool_hash.to_hex()
+                );
+                self.pending_retirements
+                    .entry(EpochNo(*epoch))
+                    .or_default()
+                    .push(*pool_hash);
             }
             Certificate::RegStakeDeleg {
                 credential,
@@ -186,6 +229,52 @@ impl LedgerState {
                 // Conway governance — will be implemented in a later iteration
             }
         }
+    }
+
+    /// Process an epoch transition
+    pub fn process_epoch_transition(&mut self, new_epoch: EpochNo) {
+        debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
+
+        // Rotate snapshots: go = set, set = mark, mark = new snapshot
+        self.snapshots.go = self.snapshots.set.take();
+        self.snapshots.set = self.snapshots.mark.take();
+
+        // Take a new "mark" snapshot of current stake distribution
+        let mut pool_stake: BTreeMap<Hash28, Lovelace> = BTreeMap::new();
+        for (cred_hash, pool_id) in &self.delegations {
+            let stake = self
+                .stake_distribution
+                .stake_map
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += stake;
+        }
+
+        self.snapshots.mark = Some(StakeSnapshot {
+            epoch: new_epoch,
+            delegations: self.delegations.clone(),
+            pool_stake,
+            pool_params: self.pool_params.clone(),
+        });
+
+        // Process pending pool retirements for this epoch
+        if let Some(retiring_pools) = self.pending_retirements.remove(&new_epoch) {
+            for pool_id in &retiring_pools {
+                self.pool_params.remove(pool_id);
+                debug!(
+                    "Pool retired at epoch {}: {}",
+                    new_epoch.0,
+                    pool_id.to_hex()
+                );
+            }
+        }
+
+        // Clean up retirements from past epochs (shouldn't happen but be safe)
+        self.pending_retirements
+            .retain(|epoch, _| *epoch >= new_epoch);
+
+        self.epoch = new_epoch;
     }
 
     /// Process a withdrawal from a reward account
@@ -531,10 +620,103 @@ mod tests {
         state.process_certificate(&Certificate::PoolRegistration(pool_params));
         assert!(state.pool_params.contains_key(&pool_id));
 
+        // Schedule retirement at epoch 2
         state.process_certificate(&Certificate::PoolRetirement {
             pool_hash: pool_id,
-            epoch: 300,
+            epoch: 2,
         });
+        // Pool still exists (retirement is pending)
+        assert!(state.pool_params.contains_key(&pool_id));
+        assert!(state.pending_retirements.contains_key(&EpochNo(2)));
+
+        // Trigger epoch transition to epoch 2
+        state.process_epoch_transition(EpochNo(2));
+        // Now the pool should be retired
         assert!(!state.pool_params.contains_key(&pool_id));
+    }
+
+    #[test]
+    fn test_epoch_transition_snapshots() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100; // Small epochs for testing
+
+        let cred = Credential::VerificationKey(Hash28::from_bytes([42u8; 28]));
+        let pool_id = Hash28::from_bytes([1u8; 28]);
+
+        // Register stake and delegate
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+        let key = credential_to_hash(&cred);
+        state
+            .stake_distribution
+            .stake_map
+            .insert(key, Lovelace(1_000_000));
+
+        // Register pool
+        state.process_certificate(&Certificate::PoolRegistration(PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([2u8; 32]),
+            pledge: Lovelace(100),
+            cost: Lovelace(100),
+            margin: Rational {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: vec![0u8; 29],
+            pool_owners: vec![pool_id],
+            relays: vec![],
+            pool_metadata: None,
+        }));
+
+        // Delegate to pool
+        state.process_certificate(&Certificate::StakeDelegation {
+            credential: cred.clone(),
+            pool_hash: pool_id,
+        });
+
+        // Epoch 0 -> 1: first snapshot taken
+        state.process_epoch_transition(EpochNo(1));
+        assert!(state.snapshots.mark.is_some());
+        assert!(state.snapshots.set.is_none());
+        assert!(state.snapshots.go.is_none());
+
+        let mark = state.snapshots.mark.as_ref().unwrap();
+        assert_eq!(mark.pool_stake[&pool_id], Lovelace(1_000_000));
+
+        // Epoch 1 -> 2: mark becomes set
+        state.process_epoch_transition(EpochNo(2));
+        assert!(state.snapshots.mark.is_some());
+        assert!(state.snapshots.set.is_some());
+        assert!(state.snapshots.go.is_none());
+
+        let set = state.snapshots.set.as_ref().unwrap();
+        assert_eq!(set.epoch, EpochNo(1));
+
+        // Epoch 2 -> 3: set becomes go
+        state.process_epoch_transition(EpochNo(3));
+        assert!(state.snapshots.mark.is_some());
+        assert!(state.snapshots.set.is_some());
+        assert!(state.snapshots.go.is_some());
+
+        let go = state.snapshots.go.as_ref().unwrap();
+        assert_eq!(go.epoch, EpochNo(1));
+    }
+
+    #[test]
+    fn test_epoch_transition_in_apply_block() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100; // Small epochs for testing
+
+        // Apply a block in epoch 0
+        let block = make_test_block(50, 1, Hash32::ZERO, vec![]);
+        state.apply_block(&block).unwrap();
+        assert_eq!(state.epoch, EpochNo(0));
+
+        // Apply a block in epoch 1 (slot 100+)
+        let block = make_test_block(150, 2, *block.hash(), vec![]);
+        state.apply_block(&block).unwrap();
+        assert_eq!(state.epoch, EpochNo(1));
+        assert!(state.snapshots.mark.is_some());
     }
 }
