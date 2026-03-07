@@ -1,7 +1,6 @@
 use thiserror::Error;
-use torsten_primitives::block::{Block, BlockHeader, Point, Tip};
-use torsten_primitives::hash::{BlockHeaderHash, Hash32};
-use torsten_primitives::time::{BlockNo, EpochLength, EpochNo, SlotNo};
+use torsten_primitives::block::{BlockHeader, Tip};
+use torsten_primitives::time::{EpochLength, EpochNo, SlotNo};
 
 #[derive(Error, Debug)]
 pub enum ConsensusError {
@@ -136,6 +135,8 @@ impl Default for OuroborosPraos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torsten_primitives::hash::Hash32;
+    use torsten_primitives::time::{BlockNo, SlotNo};
 
     #[test]
     fn test_new_praos() {

@@ -1,6 +1,4 @@
-use torsten_primitives::block::{Block, Point, Tip};
-use torsten_primitives::hash::BlockHeaderHash;
-use torsten_primitives::time::{BlockNo, SlotNo};
+use torsten_primitives::block::{Point, Tip};
 
 /// Chain selection rule: prefer the longest chain (by block number)
 ///
@@ -65,6 +63,7 @@ impl Default for ChainSelection {
 mod tests {
     use super::*;
     use torsten_primitives::hash::Hash32;
+    use torsten_primitives::time::{BlockNo, SlotNo};
 
     fn make_tip(block_no: u64, slot: u64) -> Tip {
         Tip {

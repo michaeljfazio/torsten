@@ -1,5 +1,5 @@
 use crate::era::Era;
-use crate::hash::{BlockHeaderHash, Hash32, VrfKeyHash};
+use crate::hash::{BlockHeaderHash, Hash32};
 use crate::time::{BlockNo, SlotNo};
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};

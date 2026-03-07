@@ -7,7 +7,7 @@
 /// The VRF implementation uses Ed25519-based VRF (ECVRF-ED25519-SHA512-Elligator2)
 /// as specified in the Cardano Praos paper and IETF draft-irtf-cfrg-vrf-15.
 
-use torsten_primitives::hash::{blake2b_256, Hash32};
+use torsten_primitives::hash::blake2b_256;
 
 /// VRF key pair (placeholder - full implementation requires libsodium bindings)
 #[derive(Debug, Clone)]

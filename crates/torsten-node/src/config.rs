@@ -130,6 +130,7 @@ impl NodeConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub fn network_magic(&self) -> u64 {
         self.network_magic.unwrap_or_else(|| self.network.magic())
     }

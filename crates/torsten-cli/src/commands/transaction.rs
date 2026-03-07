@@ -99,7 +99,7 @@ impl TransactionCmd {
                 // TODO: Implement transaction submission via local socket
                 Ok(())
             }
-            TxSubcommand::TxId { tx_file } => {
+            TxSubcommand::TxId { tx_file: _ } => {
                 println!("Calculating transaction ID...");
                 // TODO: Read tx file, hash body, print hash
                 Ok(())

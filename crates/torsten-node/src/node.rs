@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{info, warn, error};
+use tracing::info;
 
 use torsten_consensus::OuroborosPraos;
 use torsten_ledger::LedgerState;
@@ -24,6 +24,7 @@ pub struct NodeArgs {
 }
 
 /// The main Torsten node
+#[allow(dead_code)]
 pub struct Node {
     config: NodeConfig,
     topology: Topology,

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Node metrics for monitoring
+#[allow(dead_code)]
 pub struct NodeMetrics {
     pub blocks_received: AtomicU64,
     pub blocks_applied: AtomicU64,
@@ -16,6 +17,7 @@ pub struct NodeMetrics {
     pub mempool_bytes: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl NodeMetrics {
     pub fn new() -> Self {
         NodeMetrics {

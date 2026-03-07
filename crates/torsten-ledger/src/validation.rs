@@ -1,7 +1,6 @@
-use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{Transaction, TransactionBody};
-use torsten_primitives::value::{Lovelace, Value};
+use torsten_primitives::transaction::Transaction;
+use torsten_primitives::value::Lovelace;
 use crate::utxo::UtxoSet;
 
 #[derive(Debug, thiserror::Error)]

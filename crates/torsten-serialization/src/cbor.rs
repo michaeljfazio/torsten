@@ -1,9 +1,7 @@
 use crate::error::SerializationError;
 use torsten_primitives::block::Point;
-use torsten_primitives::hash::{Hash28, Hash32};
-use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::{TransactionInput, PlutusData, TransactionMetadatum};
-use torsten_primitives::value::{AssetName, Lovelace, Value};
+use torsten_primitives::hash::Hash32;
+use torsten_primitives::transaction::{PlutusData, TransactionInput, TransactionMetadatum};
 
 /// Encode a Hash32 to CBOR bytes
 pub fn encode_hash32(hash: &Hash32) -> Vec<u8> {
@@ -287,6 +285,7 @@ pub fn encode_metadatum(metadatum: &TransactionMetadatum) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torsten_primitives::time::SlotNo;
 
     #[test]
     fn test_encode_uint_small() {

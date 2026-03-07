@@ -78,14 +78,14 @@ impl QueryCmd {
             }
             QuerySubcommand::Utxo {
                 address,
-                socket_path,
+                socket_path: _,
             } => {
                 println!("Querying UTxOs for {}...", address);
                 // TODO: Connect to node and query UTxOs
                 Ok(())
             }
             QuerySubcommand::ProtocolParameters {
-                socket_path,
+                socket_path: _,
                 out_file,
             } => {
                 let params = torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults();
@@ -98,29 +98,29 @@ impl QueryCmd {
                 }
                 Ok(())
             }
-            QuerySubcommand::StakeDistribution { socket_path } => {
+            QuerySubcommand::StakeDistribution { socket_path: _ } => {
                 println!("Querying stake distribution...");
                 Ok(())
             }
             QuerySubcommand::StakeAddressInfo {
                 address,
-                socket_path,
+                socket_path: _,
             } => {
                 println!("Querying stake address info for {}...", address);
                 Ok(())
             }
-            QuerySubcommand::GovState { socket_path } => {
+            QuerySubcommand::GovState { socket_path: _ } => {
                 println!("Querying governance state...");
                 Ok(())
             }
             QuerySubcommand::DrepState {
-                drep_key_hash,
-                socket_path,
+                drep_key_hash: _,
+                socket_path: _,
             } => {
                 println!("Querying DRep state...");
                 Ok(())
             }
-            QuerySubcommand::CommitteeState { socket_path } => {
+            QuerySubcommand::CommitteeState { socket_path: _ } => {
                 println!("Querying committee state...");
                 Ok(())
             }

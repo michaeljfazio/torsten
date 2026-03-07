@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use std::collections::BTreeMap;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
-use torsten_primitives::value::{Lovelace, Value};
+use torsten_primitives::value::Lovelace;
 
 /// The UTxO set: maps transaction inputs to their unspent outputs
 #[derive(Debug, Clone)]

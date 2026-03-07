@@ -2,7 +2,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use torsten_primitives::hash::{blake2b_224, blake2b_256, Hash28, Hash32};
+use torsten_primitives::hash::{blake2b_224, Hash28};
 
 #[derive(Error, Debug)]
 pub enum KeyError {

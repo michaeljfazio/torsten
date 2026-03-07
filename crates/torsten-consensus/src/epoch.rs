@@ -1,5 +1,5 @@
 use torsten_primitives::hash::Hash32;
-use torsten_primitives::time::{EpochLength, EpochNo, SlotNo};
+use torsten_primitives::time::{EpochLength, SlotNo};
 
 /// Epoch transition handling
 ///

@@ -1,4 +1,4 @@
-use crate::hash::{Hash28, PolicyId};
+use crate::hash::PolicyId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

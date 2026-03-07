@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
-use torsten_primitives::hash::{blake2b_256, TransactionHash};
+use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::Transaction;
 use torsten_primitives::value::Lovelace;
 
@@ -24,6 +24,7 @@ impl Default for MempoolConfig {
 }
 
 /// Transaction entry in the mempool
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MempoolEntry {
     tx: Transaction,

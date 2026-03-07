@@ -1,6 +1,4 @@
-use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
-use crate::miniprotocols::MiniProtocolId;
 
 /// Ouroboros network multiplexer
 ///

@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
-use torsten_primitives::block::{Block, Point, Tip};
+use torsten_primitives::block::{Point, Tip};
 use torsten_primitives::hash::BlockHeaderHash;
 use torsten_primitives::time::{BlockNo, SlotNo};
 
@@ -16,6 +16,7 @@ pub enum VolatileDBError {
 }
 
 /// Entry in the volatile DB
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct VolatileEntry {
     slot: SlotNo,

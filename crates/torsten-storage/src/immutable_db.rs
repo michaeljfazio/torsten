@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use torsten_primitives::block::{Block, Point};
 use torsten_primitives::hash::BlockHeaderHash;
 use torsten_primitives::time::SlotNo;
 

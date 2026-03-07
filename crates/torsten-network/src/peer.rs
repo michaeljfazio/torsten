@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::time::Instant;
-use torsten_primitives::block::{Point, Tip};
+use torsten_primitives::block::Tip;
 
 /// Peer connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

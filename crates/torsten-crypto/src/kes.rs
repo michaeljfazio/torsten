@@ -1,14 +1,3 @@
-/// KES (Key Evolving Signature) support
-///
-/// In Cardano's Ouroboros Praos, KES provides forward security:
-/// - Block producers sign blocks with a KES key
-/// - The KES key evolves every KES period (~36 hours on mainnet)
-/// - Old key material is securely deleted, preventing retroactive forgery
-///
-/// Cardano uses a sum-composition KES scheme with depth 6,
-/// allowing 2^6 = 64 KES period evolutions per operational certificate.
-
-use torsten_primitives::hash::{blake2b_256, Hash32};
 
 /// KES period (each period is 129600 slots = 36 hours on mainnet)
 pub const KES_PERIOD_SLOTS: u64 = 129600;

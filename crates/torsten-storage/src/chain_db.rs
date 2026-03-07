@@ -2,7 +2,7 @@ use crate::immutable_db::ImmutableDB;
 use crate::volatile_db::VolatileDB;
 use std::path::Path;
 use thiserror::Error;
-use torsten_primitives::block::{Point, Tip};
+use torsten_primitives::block::Tip;
 use torsten_primitives::hash::BlockHeaderHash;
 use torsten_primitives::time::{BlockNo, SlotNo};
 

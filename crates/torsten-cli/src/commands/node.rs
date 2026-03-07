@@ -38,9 +38,9 @@ impl NodeCmd {
     pub fn run(self) -> Result<()> {
         match self.command {
             NodeSubcommand::KeyGen {
-                cold_verification_key_file,
-                cold_signing_key_file,
-                operational_certificate_counter_file,
+                cold_verification_key_file: _,
+                cold_signing_key_file: _,
+                operational_certificate_counter_file: _,
             } => {
                 println!("Generating node cold keys...");
                 let sk = torsten_crypto::keys::PaymentSigningKey::generate();

@@ -6,7 +6,7 @@ mod metrics;
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::{info, error};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 /// Torsten - A Rust implementation of the Cardano node
