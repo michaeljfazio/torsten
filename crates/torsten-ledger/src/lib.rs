@@ -6,4 +6,4 @@ pub mod validation;
 
 pub use state::LedgerState;
 pub use utxo::UtxoSet;
-pub use validation::{ValidationError, validate_transaction};
+pub use validation::{ValidationError, validate_transaction, evaluate_native_script};

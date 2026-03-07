@@ -1,7 +1,10 @@
+use torsten_primitives::hash::Hash32;
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::Transaction;
+use torsten_primitives::time::SlotNo;
+use torsten_primitives::transaction::{NativeScript, Transaction};
 use torsten_primitives::value::Lovelace;
 use crate::utxo::UtxoSet;
+use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
@@ -165,12 +168,38 @@ fn has_plutus_scripts(tx: &Transaction) -> bool {
         || !tx.witness_set.redeemers.is_empty()
 }
 
+/// Evaluate a native script given the set of key hashes that signed
+/// the transaction and the current slot validity interval.
+pub fn evaluate_native_script(
+    script: &NativeScript,
+    signers: &HashSet<Hash32>,
+    current_slot: SlotNo,
+) -> bool {
+    match script {
+        NativeScript::ScriptPubkey(keyhash) => signers.contains(keyhash),
+        NativeScript::ScriptAll(scripts) => scripts
+            .iter()
+            .all(|s| evaluate_native_script(s, signers, current_slot)),
+        NativeScript::ScriptAny(scripts) => scripts
+            .iter()
+            .any(|s| evaluate_native_script(s, signers, current_slot)),
+        NativeScript::ScriptNOfK(n, scripts) => {
+            let count = scripts
+                .iter()
+                .filter(|s| evaluate_native_script(s, signers, current_slot))
+                .count();
+            count >= *n as usize
+        }
+        NativeScript::InvalidBefore(slot) => current_slot >= *slot,
+        NativeScript::InvalidHereafter(slot) => current_slot < *slot,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use torsten_primitives::address::{Address, ByronAddress};
     use torsten_primitives::hash::Hash32;
-    use torsten_primitives::time::SlotNo;
     use torsten_primitives::transaction::*;
     use torsten_primitives::value::Value;
     use std::collections::BTreeMap;
@@ -195,6 +224,7 @@ mod tests {
 
     fn make_simple_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction {
         Transaction {
+            hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
                 outputs: vec![TransactionOutput {
@@ -348,5 +378,119 @@ mod tests {
         // Pass a tx_size larger than max
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 20000);
         assert!(result.is_err());
+    }
+
+    // Native script evaluation tests
+
+    #[test]
+    fn test_native_script_pubkey_match() {
+        let key = Hash32::from_bytes([1u8; 32]);
+        let script = NativeScript::ScriptPubkey(key);
+        let signers: HashSet<Hash32> = [key].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_pubkey_no_match() {
+        let key = Hash32::from_bytes([1u8; 32]);
+        let other_key = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptPubkey(key);
+        let signers: HashSet<Hash32> = [other_key].into();
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_all() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptAll(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::ScriptPubkey(k2),
+        ]);
+        let signers: HashSet<Hash32> = [k1, k2].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+
+        // Missing one signer
+        let partial: HashSet<Hash32> = [k1].into();
+        assert!(!evaluate_native_script(&script, &partial, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_any() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptAny(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::ScriptPubkey(k2),
+        ]);
+        let signers: HashSet<Hash32> = [k2].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+
+        // No matching signers
+        let empty: HashSet<Hash32> = HashSet::new();
+        assert!(!evaluate_native_script(&script, &empty, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_n_of_k() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let k3 = Hash32::from_bytes([3u8; 32]);
+        let script = NativeScript::ScriptNOfK(
+            2,
+            vec![
+                NativeScript::ScriptPubkey(k1),
+                NativeScript::ScriptPubkey(k2),
+                NativeScript::ScriptPubkey(k3),
+            ],
+        );
+
+        // 2 of 3 present
+        let signers: HashSet<Hash32> = [k1, k3].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+
+        // Only 1 of 3 present
+        let one: HashSet<Hash32> = [k1].into();
+        assert!(!evaluate_native_script(&script, &one, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_invalid_before() {
+        let script = NativeScript::InvalidBefore(SlotNo(50));
+        let signers: HashSet<Hash32> = HashSet::new();
+
+        assert!(evaluate_native_script(&script, &signers, SlotNo(50)));
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(49)));
+    }
+
+    #[test]
+    fn test_native_script_invalid_hereafter() {
+        let script = NativeScript::InvalidHereafter(SlotNo(100));
+        let signers: HashSet<Hash32> = HashSet::new();
+
+        assert!(evaluate_native_script(&script, &signers, SlotNo(99)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(101)));
+    }
+
+    #[test]
+    fn test_native_script_nested_timelock_multisig() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        // Require k1 signature AND slot in [50, 200)
+        let script = NativeScript::ScriptAll(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::InvalidBefore(SlotNo(50)),
+            NativeScript::InvalidHereafter(SlotNo(200)),
+        ]);
+
+        let signers: HashSet<Hash32> = [k1].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(49)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(200)));
+
+        // Missing signer
+        let empty: HashSet<Hash32> = HashSet::new();
+        assert!(!evaluate_native_script(&script, &empty, SlotNo(100)));
     }
 }

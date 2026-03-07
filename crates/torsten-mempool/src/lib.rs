@@ -227,6 +227,7 @@ mod tests {
 
     fn make_dummy_tx() -> Transaction {
         Transaction {
+            hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
                     transaction_id: Hash32::ZERO,

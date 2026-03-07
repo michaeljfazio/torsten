@@ -132,6 +132,7 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
 }
 
 fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, SerializationError> {
+    let tx_hash = pallas_hash_to_torsten32(&tx.hash());
     let inputs = tx.inputs().iter().map(convert_input).collect();
 
     let outputs = tx
@@ -196,6 +197,7 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
     };
 
     Ok(Transaction {
+        hash: tx_hash,
         body,
         witness_set,
         is_valid: tx.is_valid(),

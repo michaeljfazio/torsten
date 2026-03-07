@@ -335,6 +335,8 @@ pub struct ExUnitPrices {
 /// A complete Cardano transaction (Babbage/Conway era)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
+    /// The blake2b-256 hash of the serialized transaction body
+    pub hash: crate::hash::TransactionHash,
     pub body: TransactionBody,
     pub witness_set: TransactionWitnessSet,
     pub is_valid: bool,
