@@ -45,10 +45,7 @@ impl NodeCmd {
                 println!("Generating node cold keys...");
                 let sk = torsten_crypto::keys::PaymentSigningKey::generate();
                 let vk = sk.verification_key();
-                println!(
-                    "Cold verification key hash: {}",
-                    vk.hash().to_hex()
-                );
+                println!("Cold verification key hash: {}", vk.hash().to_hex());
                 // TODO: Write key files
                 Ok(())
             }

@@ -74,8 +74,14 @@ impl AddressCmd {
 
                 let addr_bytes = address.to_bytes();
                 let hrp = match (&address, network_id) {
-                    (Address::Base(_) | Address::Enterprise(_) | Address::Pointer(_), NetworkId::Mainnet) => "addr",
-                    (Address::Base(_) | Address::Enterprise(_) | Address::Pointer(_), NetworkId::Testnet) => "addr_test",
+                    (
+                        Address::Base(_) | Address::Enterprise(_) | Address::Pointer(_),
+                        NetworkId::Mainnet,
+                    ) => "addr",
+                    (
+                        Address::Base(_) | Address::Enterprise(_) | Address::Pointer(_),
+                        NetworkId::Testnet,
+                    ) => "addr_test",
                     _ => "addr",
                 };
 
@@ -99,33 +105,31 @@ impl AddressCmd {
                 println!("Bytes: {} bytes", data.len());
 
                 match Address::from_bytes(&data) {
-                    Ok(addr) => {
-                        match &addr {
-                            Address::Base(a) => {
-                                println!("Type: Base");
-                                println!("Network: {:?}", a.network);
-                                println!("Payment: {:?}", a.payment);
-                                println!("Stake: {:?}", a.stake);
-                            }
-                            Address::Enterprise(a) => {
-                                println!("Type: Enterprise");
-                                println!("Network: {:?}", a.network);
-                                println!("Payment: {:?}", a.payment);
-                            }
-                            Address::Reward(a) => {
-                                println!("Type: Reward");
-                                println!("Network: {:?}", a.network);
-                                println!("Stake: {:?}", a.stake);
-                            }
-                            Address::Pointer(a) => {
-                                println!("Type: Pointer");
-                                println!("Network: {:?}", a.network);
-                            }
-                            Address::Byron(_) => {
-                                println!("Type: Byron (legacy)");
-                            }
+                    Ok(addr) => match &addr {
+                        Address::Base(a) => {
+                            println!("Type: Base");
+                            println!("Network: {:?}", a.network);
+                            println!("Payment: {:?}", a.payment);
+                            println!("Stake: {:?}", a.stake);
                         }
-                    }
+                        Address::Enterprise(a) => {
+                            println!("Type: Enterprise");
+                            println!("Network: {:?}", a.network);
+                            println!("Payment: {:?}", a.payment);
+                        }
+                        Address::Reward(a) => {
+                            println!("Type: Reward");
+                            println!("Network: {:?}", a.network);
+                            println!("Stake: {:?}", a.stake);
+                        }
+                        Address::Pointer(a) => {
+                            println!("Type: Pointer");
+                            println!("Network: {:?}", a.network);
+                        }
+                        Address::Byron(_) => {
+                            println!("Type: Byron (legacy)");
+                        }
+                    },
                     Err(e) => {
                         println!("Could not decode address: {}", e);
                     }

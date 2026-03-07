@@ -7,7 +7,7 @@
 /// - Treasury withdrawals
 /// - Protocol parameter updates via governance
 /// - Plutus V3
-
+#[derive(Default)]
 pub struct ConwayLedger;
 
 impl ConwayLedger {

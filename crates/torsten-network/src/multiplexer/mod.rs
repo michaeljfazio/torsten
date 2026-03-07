@@ -5,7 +5,7 @@ use thiserror::Error;
 /// The multiplexer allows multiple mini-protocols to share a single
 /// TCP or Unix domain socket connection. Each segment has a header
 /// indicating which mini-protocol it belongs to.
-
+///
 /// Multiplexer segment header (8 bytes)
 /// Format:
 ///   - transmission_time: u32 (4 bytes, network byte order)

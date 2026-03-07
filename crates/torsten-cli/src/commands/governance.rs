@@ -109,7 +109,10 @@ impl GovernanceCmd {
                     });
 
                     std::fs::write(&signing_key_file, serde_json::to_string_pretty(&sk_env)?)?;
-                    std::fs::write(&verification_key_file, serde_json::to_string_pretty(&vk_env)?)?;
+                    std::fs::write(
+                        &verification_key_file,
+                        serde_json::to_string_pretty(&vk_env)?,
+                    )?;
 
                     println!("DRep keys generated.");
                     Ok(())

@@ -100,9 +100,9 @@ impl UtxoSet {
 
     /// Calculate total ADA in the UTxO set
     pub fn total_lovelace(&self) -> Lovelace {
-        self.utxos
-            .values()
-            .fold(Lovelace(0), |acc, output| Lovelace(acc.0 + output.value.coin.0))
+        self.utxos.values().fold(Lovelace(0), |acc, output| {
+            Lovelace(acc.0 + output.value.coin.0)
+        })
     }
 
     /// Get all UTxOs at a specific address
@@ -245,7 +245,9 @@ mod tests {
         let inputs = vec![genesis_input.clone()];
         let outputs = vec![make_output(7_000_000), make_output(3_000_000)];
 
-        utxo_set.apply_transaction(&tx_hash, &inputs, &outputs).unwrap();
+        utxo_set
+            .apply_transaction(&tx_hash, &inputs, &outputs)
+            .unwrap();
 
         // Genesis UTxO should be spent
         assert!(!utxo_set.contains(&genesis_input));
@@ -260,8 +262,14 @@ mod tests {
             transaction_id: tx_hash,
             index: 1,
         };
-        assert_eq!(utxo_set.lookup(&new_input_0).unwrap().value.coin.0, 7_000_000);
-        assert_eq!(utxo_set.lookup(&new_input_1).unwrap().value.coin.0, 3_000_000);
+        assert_eq!(
+            utxo_set.lookup(&new_input_0).unwrap().value.coin.0,
+            7_000_000
+        );
+        assert_eq!(
+            utxo_set.lookup(&new_input_1).unwrap().value.coin.0,
+            3_000_000
+        );
     }
 
     #[test]
@@ -313,7 +321,7 @@ mod tests {
         let tx_hash = Hash32::from_bytes([2u8; 32]);
         let outputs = vec![make_output(7_000_000), make_output(3_000_000)];
         utxo_set
-            .apply_transaction(&tx_hash, &[genesis_input.clone()], &outputs)
+            .apply_transaction(&tx_hash, std::slice::from_ref(&genesis_input), &outputs)
             .unwrap();
 
         // Rollback
@@ -326,7 +334,10 @@ mod tests {
         // Original UTxO should be restored
         assert!(utxo_set.contains(&genesis_input));
         assert_eq!(utxo_set.len(), 1);
-        assert_eq!(utxo_set.lookup(&genesis_input).unwrap().value.coin.0, 10_000_000);
+        assert_eq!(
+            utxo_set.lookup(&genesis_input).unwrap().value.coin.0,
+            10_000_000
+        );
     }
 
     #[test]

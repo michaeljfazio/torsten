@@ -1,7 +1,7 @@
 pub mod address;
+pub mod governance;
 pub mod key;
-pub mod transaction;
+pub mod node;
 pub mod query;
 pub mod stake_pool;
-pub mod governance;
-pub mod node;
+pub mod transaction;

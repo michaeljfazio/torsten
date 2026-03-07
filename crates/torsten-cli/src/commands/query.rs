@@ -88,7 +88,8 @@ impl QueryCmd {
                 socket_path: _,
                 out_file,
             } => {
-                let params = torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults();
+                let params =
+                    torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults();
                 let json = serde_json::to_string_pretty(&params)?;
                 if let Some(out) = out_file {
                     std::fs::write(&out, &json)?;

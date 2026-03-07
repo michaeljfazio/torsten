@@ -36,7 +36,8 @@ impl ImmutableDB {
         opts.create_if_missing(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
-        let db = rocksdb::DB::open(&opts, path).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
+        let db =
+            rocksdb::DB::open(&opts, path).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
         Ok(ImmutableDB {
             db_path: path.to_path_buf(),
@@ -46,16 +47,26 @@ impl ImmutableDB {
     }
 
     /// Store a block's raw CBOR in the immutable DB
-    pub fn put_block(&mut self, slot: SlotNo, hash: &BlockHeaderHash, cbor: &[u8]) -> Result<(), ImmutableDBError> {
-        let db = self.db.as_ref().ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
+    pub fn put_block(
+        &mut self,
+        slot: SlotNo,
+        hash: &BlockHeaderHash,
+        cbor: &[u8],
+    ) -> Result<(), ImmutableDBError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
 
         // Key by slot number
         let slot_key = slot.0.to_be_bytes();
-        db.put(slot_key, cbor).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
+        db.put(slot_key, cbor)
+            .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
         // Secondary index: hash -> slot
         let hash_key = [b"hash:", hash.as_bytes().as_slice()].concat();
-        db.put(hash_key, slot_key).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
+        db.put(hash_key, slot_key)
+            .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
         if slot > self.tip_slot {
             self.tip_slot = slot;
@@ -66,22 +77,33 @@ impl ImmutableDB {
 
     /// Get a block's raw CBOR by slot
     pub fn get_block_by_slot(&self, slot: SlotNo) -> Result<Option<Vec<u8>>, ImmutableDBError> {
-        let db = self.db.as_ref().ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
         let key = slot.0.to_be_bytes();
         db.get(key)
             .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))
     }
 
     /// Get a block's raw CBOR by hash
-    pub fn get_block_by_hash(&self, hash: &BlockHeaderHash) -> Result<Option<Vec<u8>>, ImmutableDBError> {
-        let db = self.db.as_ref().ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
+    pub fn get_block_by_hash(
+        &self,
+        hash: &BlockHeaderHash,
+    ) -> Result<Option<Vec<u8>>, ImmutableDBError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
         let hash_key = [b"hash:", hash.as_bytes().as_slice()].concat();
 
-        match db.get(hash_key).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))? {
-            Some(slot_bytes) => {
-                db.get(slot_bytes)
-                    .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))
-            }
+        match db
+            .get(hash_key)
+            .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?
+        {
+            Some(slot_bytes) => db
+                .get(slot_bytes)
+                .map_err(|e| ImmutableDBError::RocksDB(e.to_string())),
             None => Ok(None),
         }
     }
@@ -134,10 +156,12 @@ mod tests {
 
         assert_eq!(db.tip_slot(), SlotNo(0));
 
-        db.put_block(SlotNo(50), &Hash32::from_bytes([1u8; 32]), b"block1").unwrap();
+        db.put_block(SlotNo(50), &Hash32::from_bytes([1u8; 32]), b"block1")
+            .unwrap();
         assert_eq!(db.tip_slot(), SlotNo(50));
 
-        db.put_block(SlotNo(100), &Hash32::from_bytes([2u8; 32]), b"block2").unwrap();
+        db.put_block(SlotNo(100), &Hash32::from_bytes([2u8; 32]), b"block2")
+            .unwrap();
         assert_eq!(db.tip_slot(), SlotNo(100));
     }
 }

@@ -2,7 +2,6 @@
 ///
 /// Simple ping/pong protocol to keep connections alive
 /// and measure round-trip time.
-
 #[derive(Debug, Clone)]
 pub enum KeepAliveMessage {
     KeepAlive(u16),
@@ -20,6 +19,12 @@ pub enum KeepAliveState {
 pub struct KeepAliveClient {
     pub state: KeepAliveState,
     pub cookie: u16,
+}
+
+impl Default for KeepAliveClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KeepAliveClient {

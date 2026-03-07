@@ -1,4 +1,5 @@
 use crate::utxo::UtxoSet;
+use std::collections::BTreeMap;
 use torsten_primitives::block::{Block, Point, Tip};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
@@ -7,7 +8,6 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::{BlockNo, EpochNo, SlotNo};
 use torsten_primitives::transaction::Certificate;
 use torsten_primitives::value::Lovelace;
-use std::collections::BTreeMap;
 use tracing::debug;
 
 /// The complete ledger state
@@ -97,7 +97,7 @@ impl LedgerState {
             }
 
             // Process withdrawals (rewards are consumed, no UTxO effect)
-            for (reward_account, _amount) in &tx.body.withdrawals {
+            for reward_account in tx.body.withdrawals.keys() {
                 self.process_withdrawal(reward_account);
             }
         }
@@ -122,7 +122,10 @@ impl LedgerState {
         match cert {
             Certificate::StakeRegistration(credential) => {
                 let key = credential_to_hash(credential);
-                self.stake_distribution.stake_map.entry(key).or_insert(Lovelace(0));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 debug!("Stake key registered: {}", key.to_hex());
             }
             Certificate::StakeDeregistration(credential) => {
@@ -131,7 +134,10 @@ impl LedgerState {
                 self.delegations.remove(&key);
                 debug!("Stake key deregistered: {}", key.to_hex());
             }
-            Certificate::StakeDelegation { credential, pool_hash } => {
+            Certificate::StakeDelegation {
+                credential,
+                pool_hash,
+            } => {
                 let key = credential_to_hash(credential);
                 self.delegations.insert(key, *pool_hash);
                 debug!("Stake delegated to pool: {}", pool_hash.to_hex());
@@ -148,15 +154,25 @@ impl LedgerState {
                 debug!("Pool registered: {}", params.operator.to_hex());
                 self.pool_params.insert(params.operator, pool_reg);
             }
-            Certificate::PoolRetirement { pool_hash, epoch: _ } => {
+            Certificate::PoolRetirement {
+                pool_hash,
+                epoch: _,
+            } => {
                 debug!("Pool retirement scheduled: {}", pool_hash.to_hex());
                 // Pool retirement takes effect at epoch boundary; we just record it here
                 // A full implementation would track pending retirements
                 self.pool_params.remove(pool_hash);
             }
-            Certificate::RegStakeDeleg { credential, pool_hash, .. } => {
+            Certificate::RegStakeDeleg {
+                credential,
+                pool_hash,
+                ..
+            } => {
                 let key = credential_to_hash(credential);
-                self.stake_distribution.stake_map.entry(key).or_insert(Lovelace(0));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 self.delegations.insert(key, *pool_hash);
             }
             // Governance certificates — tracked but not yet acted upon
@@ -245,10 +261,7 @@ mod tests {
                     kes_period: 0,
                     sigma: vec![],
                 },
-                protocol_version: torsten_primitives::block::ProtocolVersion {
-                    major: 9,
-                    minor: 0,
-                },
+                protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
             },
             transactions,
             era: Era::Conway,
@@ -276,7 +289,9 @@ mod tests {
             index: 0,
         };
         let genesis_output = TransactionOutput {
-            address: Address::Byron(ByronAddress { payload: vec![0u8; 32] }),
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
@@ -289,7 +304,9 @@ mod tests {
             body: TransactionBody {
                 inputs: vec![genesis_input],
                 outputs: vec![TransactionOutput {
-                    address: Address::Byron(ByronAddress { payload: vec![0u8; 32] }),
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
@@ -352,7 +369,9 @@ mod tests {
         state.utxo_set.insert(
             genesis_input.clone(),
             TransactionOutput {
-                address: Address::Byron(ByronAddress { payload: vec![0u8; 32] }),
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
@@ -450,7 +469,10 @@ mod tests {
             vrf_keyhash: Hash32::from_bytes([2u8; 32]),
             pledge: Lovelace(500_000_000),
             cost: Lovelace(340_000_000),
-            margin: Rational { numerator: 1, denominator: 100 },
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
             reward_account: vec![0u8; 29],
             pool_owners: vec![pool_id],
             relays: vec![],
@@ -496,7 +518,10 @@ mod tests {
             vrf_keyhash: Hash32::from_bytes([2u8; 32]),
             pledge: Lovelace(500_000_000),
             cost: Lovelace(340_000_000),
-            margin: Rational { numerator: 1, denominator: 100 },
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
             reward_account: vec![0u8; 29],
             pool_owners: vec![pool_id],
             relays: vec![],

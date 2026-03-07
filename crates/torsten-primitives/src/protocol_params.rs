@@ -17,11 +17,11 @@ pub struct ProtocolParameters {
     // Staking
     pub key_deposit: Lovelace,
     pub pool_deposit: Lovelace,
-    pub e_max: u64,         // maximum epoch for pool retirement
-    pub n_opt: u64,         // desired number of stake pools
-    pub a0: Rational,       // pool pledge influence
-    pub rho: Rational,      // monetary expansion
-    pub tau: Rational,       // treasury growth rate
+    pub e_max: u64,    // maximum epoch for pool retirement
+    pub n_opt: u64,    // desired number of stake pools
+    pub a0: Rational,  // pool pledge influence
+    pub rho: Rational, // monetary expansion
+    pub tau: Rational, // treasury growth rate
 
     // Minimum values
     pub min_pool_cost: Lovelace,

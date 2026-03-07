@@ -1,4 +1,3 @@
-
 /// KES period (each period is 129600 slots = 36 hours on mainnet)
 pub const KES_PERIOD_SLOTS: u64 = 129600;
 

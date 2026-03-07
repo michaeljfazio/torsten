@@ -111,7 +111,13 @@ mod tests {
 
         let hash = Hash32::from_bytes([1u8; 32]);
         chain_db
-            .add_block(hash, SlotNo(100), BlockNo(50), Hash32::ZERO, b"data".to_vec())
+            .add_block(
+                hash,
+                SlotNo(100),
+                BlockNo(50),
+                Hash32::ZERO,
+                b"data".to_vec(),
+            )
             .unwrap();
 
         let tip = chain_db.get_tip();

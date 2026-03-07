@@ -218,13 +218,25 @@ mod tests {
     fn test_tip_tracking() {
         let vdb = VolatileDB::new(100);
 
-        vdb.put_block(make_hash(1), SlotNo(100), BlockNo(50), make_hash(0), b"b1".to_vec())
-            .unwrap();
+        vdb.put_block(
+            make_hash(1),
+            SlotNo(100),
+            BlockNo(50),
+            make_hash(0),
+            b"b1".to_vec(),
+        )
+        .unwrap();
         let tip = vdb.get_tip().unwrap();
         assert_eq!(tip.block_number, BlockNo(50));
 
-        vdb.put_block(make_hash(2), SlotNo(200), BlockNo(51), make_hash(1), b"b2".to_vec())
-            .unwrap();
+        vdb.put_block(
+            make_hash(2),
+            SlotNo(200),
+            BlockNo(51),
+            make_hash(1),
+            b"b2".to_vec(),
+        )
+        .unwrap();
         let tip = vdb.get_tip().unwrap();
         assert_eq!(tip.block_number, BlockNo(51));
     }
@@ -233,10 +245,22 @@ mod tests {
     fn test_slot_index() {
         let vdb = VolatileDB::new(100);
 
-        vdb.put_block(make_hash(1), SlotNo(100), BlockNo(50), make_hash(0), b"b1".to_vec())
-            .unwrap();
-        vdb.put_block(make_hash(2), SlotNo(100), BlockNo(50), make_hash(0), b"b2".to_vec())
-            .unwrap();
+        vdb.put_block(
+            make_hash(1),
+            SlotNo(100),
+            BlockNo(50),
+            make_hash(0),
+            b"b1".to_vec(),
+        )
+        .unwrap();
+        vdb.put_block(
+            make_hash(2),
+            SlotNo(100),
+            BlockNo(50),
+            make_hash(0),
+            b"b2".to_vec(),
+        )
+        .unwrap();
 
         let blocks_at_100 = vdb.get_blocks_at_slot(SlotNo(100));
         assert_eq!(blocks_at_100.len(), 2);
@@ -262,9 +286,30 @@ mod tests {
         let vdb = VolatileDB::new(100);
 
         // Build a chain: 0 <- 1 <- 2 <- 3
-        vdb.put_block(make_hash(1), SlotNo(1), BlockNo(1), make_hash(0), b"b1".to_vec()).unwrap();
-        vdb.put_block(make_hash(2), SlotNo(2), BlockNo(2), make_hash(1), b"b2".to_vec()).unwrap();
-        vdb.put_block(make_hash(3), SlotNo(3), BlockNo(3), make_hash(2), b"b3".to_vec()).unwrap();
+        vdb.put_block(
+            make_hash(1),
+            SlotNo(1),
+            BlockNo(1),
+            make_hash(0),
+            b"b1".to_vec(),
+        )
+        .unwrap();
+        vdb.put_block(
+            make_hash(2),
+            SlotNo(2),
+            BlockNo(2),
+            make_hash(1),
+            b"b2".to_vec(),
+        )
+        .unwrap();
+        vdb.put_block(
+            make_hash(3),
+            SlotNo(3),
+            BlockNo(3),
+            make_hash(2),
+            b"b3".to_vec(),
+        )
+        .unwrap();
 
         let chain = vdb.get_chain_back_to(&make_hash(3), &make_hash(1)).unwrap();
         assert_eq!(chain.len(), 2); // [3, 2]

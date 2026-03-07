@@ -74,7 +74,10 @@ impl Node {
     pub async fn run(&mut self) -> Result<()> {
         let tip = self.chain_db.get_tip();
         info!("Current chain tip: {tip}");
-        info!("UTxO set size: {} entries", self.ledger_state.utxo_set.len());
+        info!(
+            "UTxO set size: {} entries",
+            self.ledger_state.utxo_set.len()
+        );
         info!("Mempool: {} transactions", self.mempool.len());
 
         // Setup shutdown signal
@@ -92,7 +95,10 @@ impl Node {
             return Ok(());
         }
 
-        let network_magic = self.config.network_magic.unwrap_or_else(|| self.config.network.magic());
+        let network_magic = self
+            .config
+            .network_magic
+            .unwrap_or_else(|| self.config.network.magic());
 
         // Try each peer until we connect successfully
         let mut client = None;

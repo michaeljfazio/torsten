@@ -38,6 +38,12 @@ pub struct TxSubmissionClient {
     pub state: TxSubmissionState,
 }
 
+impl Default for TxSubmissionClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TxSubmissionClient {
     pub fn new() -> Self {
         TxSubmissionClient {

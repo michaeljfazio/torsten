@@ -117,7 +117,7 @@ impl NodeConfig {
                 .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
             // Try JSON first (cardano-node format), then TOML
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 serde_json::from_str(&content)
                     .with_context(|| format!("Failed to parse JSON config: {}", path.display()))
             } else {
@@ -169,8 +169,10 @@ mod tests {
 
     #[test]
     fn test_custom_magic() {
-        let mut config = NodeConfig::default();
-        config.network_magic = Some(42);
+        let config = NodeConfig {
+            network_magic: Some(42),
+            ..NodeConfig::default()
+        };
         assert_eq!(config.network_magic(), 42);
     }
 }

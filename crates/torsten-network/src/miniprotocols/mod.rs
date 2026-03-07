@@ -1,10 +1,10 @@
-pub mod chainsync;
 pub mod blockfetch;
-pub mod txsubmission;
-pub mod keepalive;
+pub mod chainsync;
 pub mod handshake;
-pub mod localtxsubmission;
+pub mod keepalive;
 pub mod localstatequery;
+pub mod localtxsubmission;
+pub mod txsubmission;
 
 /// Mini-protocol IDs as used by the Ouroboros multiplexer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

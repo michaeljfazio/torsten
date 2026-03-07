@@ -76,7 +76,7 @@ impl Address {
 
         match addr_type {
             // Base addresses (types 0-3)
-            0b0000 | 0b0001 | 0b0010 | 0b0011 => {
+            0b0000..=0b0011 => {
                 if bytes.len() < 57 {
                     return Err(AddressError::TooShort);
                 }
@@ -89,7 +89,7 @@ impl Address {
                 }))
             }
             // Pointer addresses (types 4-5)
-            0b0100 | 0b0101 => {
+            0b0100..=0b0101 => {
                 if bytes.len() < 29 {
                     return Err(AddressError::TooShort);
                 }
@@ -102,7 +102,7 @@ impl Address {
                 }))
             }
             // Enterprise addresses (types 6-7)
-            0b0110 | 0b0111 => {
+            0b0110..=0b0111 => {
                 if bytes.len() < 29 {
                     return Err(AddressError::TooShort);
                 }

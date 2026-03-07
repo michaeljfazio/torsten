@@ -63,7 +63,7 @@ pub fn encode_point(point: &Point) -> Vec<u8> {
         Point::Specific(slot, hash) => {
             let mut buf = Vec::new();
             buf.push(0x82); // array of 2
-            // Encode slot as unsigned integer
+                            // Encode slot as unsigned integer
             buf.extend(encode_uint(slot.0));
             // Encode hash as byte string
             buf.extend(encode_hash32(hash));
@@ -387,10 +387,7 @@ mod tests {
 
     #[test]
     fn test_encode_plutus_data_list() {
-        let data = PlutusData::List(vec![
-            PlutusData::Integer(1),
-            PlutusData::Integer(2),
-        ]);
+        let data = PlutusData::List(vec![PlutusData::Integer(1), PlutusData::Integer(2)]);
         let encoded = encode_plutus_data(&data);
         assert_eq!(encoded, vec![0x82, 0x01, 0x02]);
     }
@@ -400,7 +397,7 @@ mod tests {
         let data = PlutusData::Constr(0, vec![PlutusData::Integer(1)]);
         let encoded = encode_plutus_data(&data);
         assert_eq!(encoded[0], 0xd8); // tag
-        assert_eq!(encoded[1], 121);  // constructor 0 = tag 121
+        assert_eq!(encoded[1], 121); // constructor 0 = tag 121
         assert_eq!(encoded[2], 0x81); // array of 1
         assert_eq!(encoded[3], 0x01); // integer 1
     }

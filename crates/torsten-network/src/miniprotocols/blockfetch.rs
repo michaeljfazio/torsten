@@ -34,6 +34,12 @@ pub struct BlockFetchClient {
     pub state: BlockFetchState,
 }
 
+impl Default for BlockFetchClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockFetchClient {
     pub fn new() -> Self {
         BlockFetchClient {

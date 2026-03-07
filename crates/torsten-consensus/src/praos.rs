@@ -49,7 +49,11 @@ impl OuroborosPraos {
         }
     }
 
-    pub fn with_params(active_slot_coeff: f64, security_param: u64, epoch_length: EpochLength) -> Self {
+    pub fn with_params(
+        active_slot_coeff: f64,
+        security_param: u64,
+        epoch_length: EpochLength,
+    ) -> Self {
         OuroborosPraos {
             active_slot_coeff,
             security_param,
@@ -59,7 +63,11 @@ impl OuroborosPraos {
     }
 
     /// Validate a block header against consensus rules
-    pub fn validate_header(&self, header: &BlockHeader, current_slot: SlotNo) -> Result<(), ConsensusError> {
+    pub fn validate_header(
+        &self,
+        header: &BlockHeader,
+        current_slot: SlotNo,
+    ) -> Result<(), ConsensusError> {
         // Block must not be from the future
         if header.slot > current_slot {
             return Err(ConsensusError::FutureBlock {
@@ -88,9 +96,7 @@ impl OuroborosPraos {
     /// Check if a slot is within the stability window (last k blocks)
     pub fn is_in_stability_window(&self, slot: SlotNo) -> bool {
         match self.tip.point.slot() {
-            Some(tip_slot) => {
-                tip_slot.0.saturating_sub(self.stability_window()) <= slot.0
-            }
+            Some(tip_slot) => tip_slot.0.saturating_sub(self.stability_window()) <= slot.0,
             None => true,
         }
     }
@@ -112,7 +118,7 @@ impl OuroborosPraos {
 
     /// Check if we're at an epoch boundary
     pub fn is_epoch_boundary(&self, slot: SlotNo) -> bool {
-        slot.0 % self.epoch_length.0 == 0
+        slot.0.is_multiple_of(self.epoch_length.0)
     }
 
     /// Maximum rollback depth
@@ -206,10 +212,7 @@ mod tests {
                 kes_period: 0,
                 sigma: vec![],
             },
-            protocol_version: torsten_primitives::block::ProtocolVersion {
-                major: 9,
-                minor: 0,
-            },
+            protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
         };
 
         let result = praos.validate_header(&header, SlotNo(100));
@@ -239,10 +242,7 @@ mod tests {
                 kes_period: 0,
                 sigma: vec![],
             },
-            protocol_version: torsten_primitives::block::ProtocolVersion {
-                major: 9,
-                minor: 0,
-            },
+            protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
         };
 
         let result = praos.validate_header(&header, SlotNo(200));

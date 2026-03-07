@@ -1,20 +1,16 @@
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::SlotNo;
 
-/// Slot leader check
-///
-/// A stake pool is elected as slot leader if its VRF output for the slot
-/// satisfies: vrf_output < threshold(stake, f)
-///
-/// The threshold function is: phi_f(sigma) = 1 - (1-f)^sigma
-/// where f is the active slot coefficient and sigma is relative stake.
+// Slot leader check
+//
+// A stake pool is elected as slot leader if its VRF output for the slot
+// satisfies: vrf_output < threshold(stake, f)
+//
+// The threshold function is: phi_f(sigma) = 1 - (1-f)^sigma
+// where f is the active slot coefficient and sigma is relative stake.
 
-/// Check if a pool is the slot leader for a given slot
-pub fn is_slot_leader(
-    vrf_output: &[u8],
-    relative_stake: f64,
-    active_slot_coeff: f64,
-) -> bool {
+/// Check if a pool is the slot leader for a given slot.
+pub fn is_slot_leader(vrf_output: &[u8], relative_stake: f64, active_slot_coeff: f64) -> bool {
     torsten_crypto::vrf::check_leader_value(vrf_output, relative_stake, active_slot_coeff)
 }
 

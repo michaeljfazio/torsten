@@ -6,7 +6,6 @@
 ///
 /// The VRF implementation uses Ed25519-based VRF (ECVRF-ED25519-SHA512-Elligator2)
 /// as specified in the Cardano Praos paper and IETF draft-irtf-cfrg-vrf-15.
-
 use torsten_primitives::hash::blake2b_256;
 
 /// VRF key pair (placeholder - full implementation requires libsodium bindings)
@@ -50,11 +49,7 @@ impl VrfKeyPair {
 /// where phi_f(sigma) = 1 - (1 - f)^sigma
 ///   f = active slot coefficient
 ///   sigma = relative stake of the pool
-pub fn check_leader_value(
-    vrf_output: &[u8],
-    relative_stake: f64,
-    active_slot_coeff: f64,
-) -> bool {
+pub fn check_leader_value(vrf_output: &[u8], relative_stake: f64, active_slot_coeff: f64) -> bool {
     // Convert VRF output to a value in [0, 1)
     let vrf_value = vrf_output_to_fraction(vrf_output);
 

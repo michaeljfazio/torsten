@@ -95,17 +95,13 @@ impl Default for Topology {
         Topology {
             producers: vec![],
             local_roots: vec![],
-            public_roots: vec![
-                PublicRoot {
-                    access_points: vec![
-                        AccessPoint {
-                            address: "relays-new.cardano-mainnet.iohk.io".to_string(),
-                            port: 3001,
-                        },
-                    ],
-                    advertise: false,
-                },
-            ],
+            public_roots: vec![PublicRoot {
+                access_points: vec![AccessPoint {
+                    address: "relays-new.cardano-mainnet.iohk.io".to_string(),
+                    port: 3001,
+                }],
+                advertise: false,
+            }],
             use_ledger_after_slot: Some(0),
         }
     }

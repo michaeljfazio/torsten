@@ -219,11 +219,11 @@ pub struct MempoolSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use torsten_primitives::address::{Address, ByronAddress};
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::transaction::*;
     use torsten_primitives::value::Value;
-    use std::collections::BTreeMap;
 
     fn make_dummy_tx() -> Transaction {
         Transaction {
@@ -234,7 +234,9 @@ mod tests {
                     index: 0,
                 }],
                 outputs: vec![TransactionOutput {
-                    address: Address::Byron(ByronAddress { payload: vec![0; 32] }),
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0; 32],
+                    }),
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
@@ -321,8 +323,12 @@ mod tests {
         };
         let mempool = Mempool::new(config);
 
-        mempool.add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 100).unwrap();
-        mempool.add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 100).unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 100)
+            .unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 100)
+            .unwrap();
         let result = mempool.add_tx(Hash32::from_bytes([3u8; 32]), make_dummy_tx(), 100);
         assert!(result.is_err());
     }
@@ -344,8 +350,12 @@ mod tests {
     #[test]
     fn test_snapshot() {
         let mempool = Mempool::new(MempoolConfig::default());
-        mempool.add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500).unwrap();
-        mempool.add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 300).unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500)
+            .unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 300)
+            .unwrap();
 
         let snap = mempool.snapshot();
         assert_eq!(snap.tx_count, 2);
@@ -356,8 +366,12 @@ mod tests {
     #[test]
     fn test_clear() {
         let mempool = Mempool::new(MempoolConfig::default());
-        mempool.add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500).unwrap();
-        mempool.add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 300).unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500)
+            .unwrap();
+        mempool
+            .add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 300)
+            .unwrap();
 
         mempool.clear();
         assert!(mempool.is_empty());

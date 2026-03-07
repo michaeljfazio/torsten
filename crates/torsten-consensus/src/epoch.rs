@@ -1,19 +1,19 @@
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{EpochLength, SlotNo};
 
-/// Epoch transition handling
-///
-/// At each epoch boundary, the following happens:
-/// 1. Stake snapshot is taken (mark snapshot)
-/// 2. Rewards are calculated and distributed
-/// 3. Protocol parameters may be updated
-/// 4. New nonce is computed from VRF outputs
-/// 5. Leader schedule is derived for next epoch
+// Epoch transition handling
+//
+// At each epoch boundary, the following happens:
+// 1. Stake snapshot is taken (mark snapshot)
+// 2. Rewards are calculated and distributed
+// 3. Protocol parameters may be updated
+// 4. New nonce is computed from VRF outputs
+// 5. Leader schedule is derived for next epoch
 
-/// Compute the epoch nonce from the previous nonce and VRF contributions
+/// Compute the epoch nonce from the previous nonce and VRF contributions.
 ///
-/// The epoch nonce is: hash(prev_nonce || eta_v)
-/// where eta_v is the hash of all VRF outputs from the first 2/3 of the epoch
+/// The epoch nonce is: `hash(prev_nonce || eta_v)`
+/// where eta_v is the hash of all VRF outputs from the first 2/3 of the epoch.
 pub fn compute_epoch_nonce(prev_nonce: &Hash32, eta_v: &Hash32) -> Hash32 {
     let mut data = Vec::with_capacity(64);
     data.extend_from_slice(prev_nonce.as_bytes());

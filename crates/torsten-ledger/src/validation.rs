@@ -1,10 +1,10 @@
+use crate::utxo::UtxoSet;
+use std::collections::HashSet;
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::{NativeScript, Transaction};
 use torsten_primitives::value::Lovelace;
-use crate::utxo::UtxoSet;
-use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
@@ -13,11 +13,7 @@ pub enum ValidationError {
     #[error("Input not found in UTxO set: {0}")]
     InputNotFound(String),
     #[error("Value not conserved: inputs={inputs}, outputs={outputs}, fee={fee}")]
-    ValueNotConserved {
-        inputs: u64,
-        outputs: u64,
-        fee: u64,
-    },
+    ValueNotConserved { inputs: u64, outputs: u64, fee: u64 },
     #[error("Fee too small: minimum={minimum}, actual={actual}")]
     FeeTooSmall { minimum: u64, actual: u64 },
     #[error("Output too small: minimum={minimum}, actual={actual}")]
@@ -146,8 +142,7 @@ pub fn validate_transaction(
                     collateral_value += output.value.coin.0;
                 }
             }
-            let required_collateral =
-                body.fee.0 * params.collateral_percentage / 100;
+            let required_collateral = body.fee.0 * params.collateral_percentage / 100;
             if collateral_value < required_collateral {
                 errors.push(ValidationError::InsufficientCollateral);
             }
@@ -198,11 +193,11 @@ pub fn evaluate_native_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use torsten_primitives::address::{Address, ByronAddress};
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::transaction::*;
     use torsten_primitives::value::Value;
-    use std::collections::BTreeMap;
 
     fn make_simple_utxo_set() -> (UtxoSet, TransactionInput) {
         let mut utxo_set = UtxoSet::new();
@@ -297,7 +292,9 @@ mod tests {
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::NoInputs)));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NoInputs)));
     }
 
     #[test]

@@ -40,7 +40,11 @@ impl SlotNo {
         self.0 % epoch_length.0
     }
 
-    pub fn to_posix_time(self, system_start: &SystemStart, slot_length: SlotLength) -> PosixTimeMillis {
+    pub fn to_posix_time(
+        self,
+        system_start: &SystemStart,
+        slot_length: SlotLength,
+    ) -> PosixTimeMillis {
         let elapsed_ms = (self.0 as f64 * slot_length.0 * 1000.0) as i64;
         PosixTimeMillis(system_start.utc_time.timestamp_millis() + elapsed_ms)
     }

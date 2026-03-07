@@ -56,7 +56,10 @@ impl KeyCmd {
                 std::fs::write(&signing_key_file, sk_json)?;
                 std::fs::write(&verification_key_file, vk_json)?;
 
-                println!("Payment signing key written to: {}", signing_key_file.display());
+                println!(
+                    "Payment signing key written to: {}",
+                    signing_key_file.display()
+                );
                 println!(
                     "Payment verification key written to: {}",
                     verification_key_file.display()
@@ -79,7 +82,10 @@ impl KeyCmd {
                 std::fs::write(&signing_key_file, sk_json)?;
                 std::fs::write(&verification_key_file, vk_json)?;
 
-                println!("Stake signing key written to: {}", signing_key_file.display());
+                println!(
+                    "Stake signing key written to: {}",
+                    signing_key_file.display()
+                );
                 println!(
                     "Stake verification key written to: {}",
                     verification_key_file.display()

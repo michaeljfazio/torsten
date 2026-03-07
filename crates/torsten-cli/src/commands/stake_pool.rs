@@ -80,9 +80,18 @@ impl StakePoolCmd {
                     "cborHex": "820058200000000000000000000000000000000000000000000000000000000000000000"
                 });
 
-                std::fs::write(&cold_signing_key_file, serde_json::to_string_pretty(&sk_env)?)?;
-                std::fs::write(&cold_verification_key_file, serde_json::to_string_pretty(&vk_env)?)?;
-                std::fs::write(&operational_certificate_counter_file, serde_json::to_string_pretty(&counter)?)?;
+                std::fs::write(
+                    &cold_signing_key_file,
+                    serde_json::to_string_pretty(&sk_env)?,
+                )?;
+                std::fs::write(
+                    &cold_verification_key_file,
+                    serde_json::to_string_pretty(&vk_env)?,
+                )?;
+                std::fs::write(
+                    &operational_certificate_counter_file,
+                    serde_json::to_string_pretty(&counter)?,
+                )?;
 
                 println!("Pool cold keys generated.");
                 Ok(())
@@ -100,10 +109,8 @@ impl StakePoolCmd {
                     &cbor_bytes
                 };
                 let hash = torsten_primitives::hash::blake2b_224(key_bytes);
-                let pool_id = bech32::encode::<bech32::Bech32>(
-                    bech32::Hrp::parse("pool")?,
-                    hash.as_bytes(),
-                )?;
+                let pool_id =
+                    bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("pool")?, hash.as_bytes())?;
                 println!("{}", pool_id);
                 Ok(())
             }

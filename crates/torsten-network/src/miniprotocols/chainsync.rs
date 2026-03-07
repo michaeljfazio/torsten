@@ -49,6 +49,12 @@ pub struct ChainSyncClient {
     pub tip: Option<Tip>,
 }
 
+impl Default for ChainSyncClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChainSyncClient {
     pub fn new() -> Self {
         ChainSyncClient {

@@ -25,10 +25,7 @@ impl Era {
     }
 
     pub fn supports_native_assets(&self) -> bool {
-        matches!(
-            self,
-            Era::Mary | Era::Alonzo | Era::Babbage | Era::Conway
-        )
+        matches!(self, Era::Mary | Era::Alonzo | Era::Babbage | Era::Conway)
     }
 
     pub fn supports_plutus(&self) -> bool {

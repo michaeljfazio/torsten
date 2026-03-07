@@ -31,7 +31,7 @@ pub enum ClientError {
 #[derive(Debug)]
 pub enum ChainSyncEvent {
     /// A new block was received (roll forward)
-    RollForward(Block, Tip),
+    RollForward(Box<Block>, Tip),
     /// Chain rollback to a previous point
     RollBackward(Point, Tip),
     /// Caught up to tip, awaiting new blocks
@@ -72,10 +72,7 @@ impl NodeToNodeClient {
         &mut self,
         points: Vec<Point>,
     ) -> Result<(Option<Point>, Tip), ClientError> {
-        let pallas_points: Vec<PallasPoint> = points
-            .iter()
-            .map(torsten_point_to_pallas)
-            .collect();
+        let pallas_points: Vec<PallasPoint> = points.iter().map(torsten_point_to_pallas).collect();
 
         let (intersect, tip) = self
             .peer
@@ -120,7 +117,7 @@ impl NodeToNodeClient {
                     txs = block.tx_count(),
                     "roll forward"
                 );
-                Ok(ChainSyncEvent::RollForward(block, torsten_tip))
+                Ok(ChainSyncEvent::RollForward(Box::new(block), torsten_tip))
             }
             NextResponse::RollBackward(point, tip) => {
                 let torsten_point = pallas_point_to_torsten(&point);
@@ -153,8 +150,8 @@ impl NodeToNodeClient {
 
         let mut blocks = Vec::with_capacity(bodies.len());
         for body in bodies {
-            let block = decode_block(&body)
-                .map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+            let block =
+                decode_block(&body).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
             blocks.push(block);
         }
 
@@ -179,9 +176,7 @@ impl NodeToNodeClient {
 fn torsten_point_to_pallas(point: &Point) -> PallasPoint {
     match point {
         Point::Origin => PallasPoint::Origin,
-        Point::Specific(slot, hash) => {
-            PallasPoint::Specific(slot.0, hash.to_vec())
-        }
+        Point::Specific(slot, hash) => PallasPoint::Specific(slot.0, hash.to_vec()),
     }
 }
 

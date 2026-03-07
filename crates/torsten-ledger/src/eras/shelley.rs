@@ -5,7 +5,7 @@
 /// - Staking and delegation
 /// - Reward distribution
 /// - Multi-signature scripts
-
+#[derive(Default)]
 pub struct ShelleyLedger;
 
 impl ShelleyLedger {

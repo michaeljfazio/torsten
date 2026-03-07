@@ -7,9 +7,7 @@ use pallas_traverse::MultiEraTx as PallasTx;
 use pallas_traverse::MultiEraWithdrawals;
 use std::collections::BTreeMap;
 use torsten_primitives::address::Address;
-use torsten_primitives::block::{
-    Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput,
-};
+use torsten_primitives::block::{Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
 use torsten_primitives::hash::{Hash, Hash28, Hash32};
@@ -73,8 +71,7 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
     let body_size = block.body_size().unwrap_or(0) as u64;
 
     // Extract era-specific header body fields
-    let (body_hash, op_cert, protocol_version) = if let Some(babbage) = pallas_header.as_babbage()
-    {
+    let (body_hash, op_cert, protocol_version) = if let Some(babbage) = pallas_header.as_babbage() {
         let hb = &babbage.header_body;
         (
             pallas_hash_to_torsten32(&hb.block_body_hash),
@@ -85,8 +82,8 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
                 sigma: hb.operational_cert.operational_cert_sigma.to_vec(),
             },
             ProtocolVersion {
-                major: hb.protocol_version.0 as u64,
-                minor: hb.protocol_version.1 as u64,
+                major: hb.protocol_version.0,
+                minor: hb.protocol_version.1,
             },
         )
     } else if let Some(alonzo) = pallas_header.as_alonzo() {
@@ -148,8 +145,7 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
 
     let mint = convert_mint(tx);
 
-    let collateral: Vec<TransactionInput> =
-        tx.collateral().iter().map(convert_input).collect();
+    let collateral: Vec<TransactionInput> = tx.collateral().iter().map(convert_input).collect();
 
     let required_signers = convert_required_signers(tx);
 
@@ -232,7 +228,7 @@ fn convert_required_signers(tx: &PallasTx) -> Vec<Hash32> {
 
 fn convert_input(input: &PallasInput) -> TransactionInput {
     TransactionInput {
-        transaction_id: pallas_hash_to_torsten32(&input.hash()),
+        transaction_id: pallas_hash_to_torsten32(input.hash()),
         index: input.index() as u32,
     }
 }
@@ -348,7 +344,7 @@ fn convert_plutus_data(data: &pallas_primitives::conway::PlutusData) -> PlutusDa
         }
         PD::BoundedBytes(b) => PlutusData::Bytes(b.to_vec()),
         PD::Constr(constr) => {
-            let tag = constr.tag as u64;
+            let tag = constr.tag;
             let constructor = if (121..=127).contains(&tag) {
                 tag - 121
             } else if (1280..=1400).contains(&tag) {
@@ -356,8 +352,7 @@ fn convert_plutus_data(data: &pallas_primitives::conway::PlutusData) -> PlutusDa
             } else {
                 tag
             };
-            let fields: Vec<PlutusData> =
-                constr.fields.iter().map(convert_plutus_data).collect();
+            let fields: Vec<PlutusData> = constr.fields.iter().map(convert_plutus_data).collect();
             PlutusData::Constr(constructor, fields)
         }
         PD::Map(entries) => {
@@ -396,9 +391,7 @@ pub fn torsten_hash_to_pallas28(hash: &Hash28) -> pallas_crypto::hash::Hash<28> 
     pallas_crypto::hash::Hash::from(*hash.as_bytes())
 }
 
-fn convert_pallas_stake_credential(
-    cred: &pallas_primitives::StakeCredential,
-) -> Credential {
+fn convert_pallas_stake_credential(cred: &pallas_primitives::StakeCredential) -> Credential {
     match cred {
         pallas_primitives::StakeCredential::AddrKeyhash(h) => {
             Credential::VerificationKey(pallas_hash_to_torsten28(h))
@@ -419,18 +412,22 @@ fn convert_certificate(cert: &MultiEraCert) -> Option<Certificate> {
     None
 }
 
-fn convert_alonzo_certificate(cert: &pallas_primitives::alonzo::Certificate) -> Option<Certificate> {
+fn convert_alonzo_certificate(
+    cert: &pallas_primitives::alonzo::Certificate,
+) -> Option<Certificate> {
     use pallas_primitives::alonzo::Certificate as AC;
     match cert {
-        AC::StakeRegistration(cred) => {
-            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
-        }
-        AC::StakeDeregistration(cred) => {
-            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
-        }
+        AC::StakeRegistration(cred) => Some(Certificate::StakeRegistration(
+            convert_pallas_stake_credential(cred),
+        )),
+        AC::StakeDeregistration(cred) => Some(Certificate::StakeDeregistration(
+            convert_pallas_stake_credential(cred),
+        )),
         AC::StakeDelegation(cred, pool_hash) => Some(Certificate::StakeDelegation {
             credential: convert_pallas_stake_credential(cred),
-            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                pool_hash.as_ref(),
+            )),
         }),
         AC::PoolRegistration {
             operator,
@@ -448,18 +445,19 @@ fn convert_alonzo_certificate(cert: &pallas_primitives::alonzo::Certificate) -> 
                 .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
                 .collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
-            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata
-                .clone()
-                .into();
-            let metadata = metadata
-                .map(|m| PoolMetadata {
-                    url: m.url.clone(),
-                    hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
-                });
+            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata.clone().into();
+            let metadata = metadata.map(|m| PoolMetadata {
+                url: m.url.clone(),
+                hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+            });
 
             Some(Certificate::PoolRegistration(PoolParams {
-                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(operator.as_ref())),
-                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(vrf_keyhash.as_ref())),
+                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                    operator.as_ref(),
+                )),
+                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                    vrf_keyhash.as_ref(),
+                )),
                 pledge: Lovelace(*pledge),
                 cost: Lovelace(*cost),
                 margin: Rational {
@@ -473,25 +471,31 @@ fn convert_alonzo_certificate(cert: &pallas_primitives::alonzo::Certificate) -> 
             }))
         }
         AC::PoolRetirement(pool_hash, epoch) => Some(Certificate::PoolRetirement {
-            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                pool_hash.as_ref(),
+            )),
             epoch: *epoch,
         }),
         _ => None, // GenesisKeyDelegation, MoveInstantaneousRewards
     }
 }
 
-fn convert_conway_certificate(cert: &pallas_primitives::conway::Certificate) -> Option<Certificate> {
+fn convert_conway_certificate(
+    cert: &pallas_primitives::conway::Certificate,
+) -> Option<Certificate> {
     use pallas_primitives::conway::Certificate as CC;
     match cert {
-        CC::StakeRegistration(cred) => {
-            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
-        }
-        CC::StakeDeregistration(cred) => {
-            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
-        }
+        CC::StakeRegistration(cred) => Some(Certificate::StakeRegistration(
+            convert_pallas_stake_credential(cred),
+        )),
+        CC::StakeDeregistration(cred) => Some(Certificate::StakeDeregistration(
+            convert_pallas_stake_credential(cred),
+        )),
         CC::StakeDelegation(cred, pool_hash) => Some(Certificate::StakeDelegation {
             credential: convert_pallas_stake_credential(cred),
-            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                pool_hash.as_ref(),
+            )),
         }),
         CC::PoolRegistration {
             operator,
@@ -509,18 +513,19 @@ fn convert_conway_certificate(cert: &pallas_primitives::conway::Certificate) -> 
                 .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
                 .collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
-            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata
-                .clone()
-                .into();
-            let metadata = metadata
-                .map(|m| PoolMetadata {
-                    url: m.url.clone(),
-                    hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
-                });
+            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata.clone().into();
+            let metadata = metadata.map(|m| PoolMetadata {
+                url: m.url.clone(),
+                hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+            });
 
             Some(Certificate::PoolRegistration(PoolParams {
-                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(operator.as_ref())),
-                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(vrf_keyhash.as_ref())),
+                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                    operator.as_ref(),
+                )),
+                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                    vrf_keyhash.as_ref(),
+                )),
                 pledge: Lovelace(*pledge),
                 cost: Lovelace(*cost),
                 margin: Rational {
@@ -534,20 +539,24 @@ fn convert_conway_certificate(cert: &pallas_primitives::conway::Certificate) -> 
             }))
         }
         CC::PoolRetirement(pool_hash, epoch) => Some(Certificate::PoolRetirement {
-            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                pool_hash.as_ref(),
+            )),
             epoch: *epoch,
         }),
         CC::StakeRegDeleg(cred, pool_hash, deposit) => Some(Certificate::RegStakeDeleg {
             credential: convert_pallas_stake_credential(cred),
-            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
+                pool_hash.as_ref(),
+            )),
             deposit: Lovelace(*deposit),
         }),
-        CC::Reg(cred, _deposit) => {
-            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
-        }
-        CC::UnReg(cred, _refund) => {
-            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
-        }
+        CC::Reg(cred, _deposit) => Some(Certificate::StakeRegistration(
+            convert_pallas_stake_credential(cred),
+        )),
+        CC::UnReg(cred, _refund) => Some(Certificate::StakeDeregistration(
+            convert_pallas_stake_credential(cred),
+        )),
         _ => None, // Other Conway governance certs handled later
     }
 }
@@ -664,8 +673,8 @@ mod tests {
 
     #[test]
     fn test_convert_plutus_data_bytes() {
-        use pallas_primitives::BoundedBytes;
         use pallas_primitives::conway::PlutusData as PD;
+        use pallas_primitives::BoundedBytes;
         let pd = PD::BoundedBytes(BoundedBytes::from(vec![0xde, 0xad]));
         let converted = convert_plutus_data(&pd);
         assert_eq!(converted, PlutusData::Bytes(vec![0xde, 0xad]));
@@ -688,8 +697,8 @@ mod tests {
 
     #[test]
     fn test_convert_plutus_data_map() {
-        use pallas_primitives::BoundedBytes;
         use pallas_primitives::conway::{BigInt, PlutusData as PD};
+        use pallas_primitives::BoundedBytes;
         let pd = PD::Map(pallas_codec::utils::KeyValuePairs::from(vec![(
             PD::BigInt(BigInt::Int(1.into())),
             PD::BoundedBytes(BoundedBytes::from(vec![0xff])),
