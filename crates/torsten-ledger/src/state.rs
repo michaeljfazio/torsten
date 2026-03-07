@@ -50,6 +50,13 @@ pub struct LedgerState {
     pub epoch_blocks_by_pool: BTreeMap<Hash28, u64>,
     /// Total blocks in the current epoch
     pub epoch_block_count: u64,
+    /// Rolling nonce (eta_v): accumulated hash of VRF outputs in the nonce contribution window
+    pub rolling_nonce: Hash32,
+    /// Current epoch nonce
+    pub epoch_nonce: Hash32,
+    /// Nonce contribution window: first stability_window slots of each epoch
+    /// (3k/f = 129600 slots on mainnet)
+    pub stability_window: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +120,9 @@ impl LedgerState {
             epoch_fees: Lovelace(0),
             epoch_blocks_by_pool: BTreeMap::new(),
             epoch_block_count: 0,
+            rolling_nonce: Hash32::ZERO,
+            epoch_nonce: Hash32::ZERO,
+            stability_window: 129600, // 3k/f on mainnet
         }
     }
 
@@ -167,6 +177,12 @@ impl LedgerState {
             *self.epoch_blocks_by_pool.entry(pool_id).or_insert(0) += 1;
         }
         self.epoch_block_count += 1;
+
+        // Accumulate VRF output into rolling nonce (only in nonce contribution window)
+        let slot_in_epoch = block.slot().0 % self.epoch_length;
+        if slot_in_epoch < self.stability_window && !block.header.vrf_result.output.is_empty() {
+            self.update_rolling_nonce(&block.header.vrf_result.output);
+        }
 
         // Update tip
         self.tip = block.tip();
@@ -307,10 +323,25 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
+        // Compute new epoch nonce: hash(prev_nonce || rolling_nonce)
+        let prev_nonce = self.epoch_nonce;
+        let mut nonce_input = Vec::with_capacity(64);
+        nonce_input.extend_from_slice(prev_nonce.as_bytes());
+        nonce_input.extend_from_slice(self.rolling_nonce.as_bytes());
+        self.epoch_nonce = torsten_primitives::hash::blake2b_256(&nonce_input);
+
+        info!(
+            "New epoch nonce: {} (from prev {} + eta_v {})",
+            self.epoch_nonce.to_hex(),
+            prev_nonce.to_hex(),
+            self.rolling_nonce.to_hex()
+        );
+
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
         self.epoch_blocks_by_pool.clear();
         self.epoch_block_count = 0;
+        self.rolling_nonce = Hash32::ZERO;
 
         self.epoch = new_epoch;
     }
@@ -458,6 +489,17 @@ impl LedgerState {
             "Rewards distributed: {} lovelace to accounts, {} to treasury (expansion: {}, fees: {})",
             total_distributed, treasury_cut + undistributed, expansion, self.epoch_fees.0
         );
+    }
+
+    /// Update the rolling nonce with a new VRF output.
+    ///
+    /// rolling_nonce = hash(rolling_nonce || hash(vrf_output))
+    fn update_rolling_nonce(&mut self, vrf_output: &[u8]) {
+        let vrf_hash = torsten_primitives::hash::blake2b_256(vrf_output);
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(self.rolling_nonce.as_bytes());
+        data.extend_from_slice(vrf_hash.as_bytes());
+        self.rolling_nonce = torsten_primitives::hash::blake2b_256(&data);
     }
 
     /// Process a withdrawal from a reward account
@@ -1138,6 +1180,45 @@ mod tests {
         assert_eq!(state.epoch_fees, Lovelace(0));
         assert_eq!(state.epoch_block_count, 0);
         assert!(state.epoch_blocks_by_pool.is_empty());
+    }
+
+    #[test]
+    fn test_epoch_nonce_computation() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.stability_window = 60; // First 60 slots contribute to nonce
+
+        // The initial nonce is ZERO
+        assert_eq!(state.epoch_nonce, Hash32::ZERO);
+
+        // Apply a block with a VRF output in the nonce window
+        let mut block = make_test_block(10, 1, Hash32::ZERO, vec![]);
+        block.header.vrf_result.output = vec![42u8; 32];
+        block.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block).unwrap();
+
+        // Rolling nonce should have been updated
+        assert_ne!(state.rolling_nonce, Hash32::ZERO);
+
+        // Apply a block outside the nonce window (slot 70 % 100 = 70 > 60)
+        let rolling_before = state.rolling_nonce;
+        let mut block2 = make_test_block(70, 2, *block.hash(), vec![]);
+        block2.header.vrf_result.output = vec![99u8; 32];
+        block2.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block2).unwrap();
+
+        // Rolling nonce should NOT have changed (outside window)
+        assert_eq!(state.rolling_nonce, rolling_before);
+
+        // Trigger epoch transition
+        let nonce_before_transition = state.epoch_nonce;
+        state.process_epoch_transition(EpochNo(1));
+
+        // Epoch nonce should have been updated
+        assert_ne!(state.epoch_nonce, nonce_before_transition);
+        // Rolling nonce should be reset
+        assert_eq!(state.rolling_nonce, Hash32::ZERO);
     }
 
     #[test]
