@@ -1,0 +1,9 @@
+{
+  "Network": "Testnet",
+  "NetworkMagic": 2,
+  "EnableP2P": true,
+  "TargetNumberOfActivePeers": 20,
+  "TargetNumberOfEstablishedPeers": 40,
+  "TargetNumberOfKnownPeers": 100,
+  "MinSeverity": "Info"
+}
