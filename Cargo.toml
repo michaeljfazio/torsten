@@ -54,12 +54,12 @@ async-trait = "0.1"
 
 # Networking
 tokio-tungstenite = "0.24"
-pallas-network = "0.31"
-pallas-codec = "0.31"
-pallas-primitives = "0.31"
-pallas-traverse = "0.31"
-pallas-crypto = "0.31"
-pallas-addresses = "0.31"
+pallas-network = "1.0.0-alpha.5"
+pallas-codec = "1.0.0-alpha.5"
+pallas-primitives = "1.0.0-alpha.5"
+pallas-traverse = "1.0.0-alpha.5"
+pallas-crypto = "1.0.0-alpha.5"
+pallas-addresses = "1.0.0-alpha.5"
 
 # Storage
 rocksdb = "0.22"

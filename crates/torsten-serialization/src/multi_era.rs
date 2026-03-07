@@ -250,10 +250,10 @@ fn convert_output(output: &PallasOutput) -> Result<TransactionOutput, Serializat
     };
 
     let datum = match output.datum() {
-        Some(pallas_primitives::conway::PseudoDatumOption::Hash(h)) => {
+        Some(pallas_primitives::conway::DatumOption::Hash(h)) => {
             OutputDatum::DatumHash(pallas_hash_to_torsten32(&h))
         }
-        Some(pallas_primitives::conway::PseudoDatumOption::Data(d)) => {
+        Some(pallas_primitives::conway::DatumOption::Data(d)) => {
             OutputDatum::InlineDatum(convert_plutus_data(&d.0))
         }
         None => OutputDatum::None,
@@ -445,7 +445,7 @@ fn convert_alonzo_certificate(
                 .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
                 .collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
-            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata.clone().into();
+            let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {
                 url: m.url.clone(),
                 hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
@@ -513,7 +513,7 @@ fn convert_conway_certificate(
                 .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
                 .collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
-            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata.clone().into();
+            let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {
                 url: m.url.clone(),
                 hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
@@ -565,15 +565,15 @@ fn convert_relay(relay: &pallas_primitives::Relay) -> Option<Relay> {
     use pallas_primitives::Relay as PR;
     match relay {
         PR::SingleHostAddr(port, ipv4, ipv6) => Some(Relay::SingleHostAddr {
-            port: Option::from(port.clone()).map(|p: u32| p as u16),
-            ipv4: Option::from(ipv4.clone()).map(|v: pallas_primitives::Bytes| {
+            port: port.map(|p| p as u16),
+            ipv4: ipv4.clone().map(|v| {
                 let bytes = v.to_vec();
                 let mut arr = [0u8; 4];
                 let len = bytes.len().min(4);
                 arr[..len].copy_from_slice(&bytes[..len]);
                 arr
             }),
-            ipv6: Option::from(ipv6.clone()).map(|v: pallas_primitives::Bytes| {
+            ipv6: ipv6.clone().map(|v| {
                 let bytes = v.to_vec();
                 let mut arr = [0u8; 16];
                 let len = bytes.len().min(16);
@@ -582,7 +582,7 @@ fn convert_relay(relay: &pallas_primitives::Relay) -> Option<Relay> {
             }),
         }),
         PR::SingleHostName(port, dns) => Some(Relay::SingleHostName {
-            port: Option::<u32>::from(port.clone()).map(|p| p as u16),
+            port: port.map(|p| p as u16),
             dns_name: dns.clone(),
         }),
         PR::MultiHostName(dns) => Some(Relay::MultiHostName {
