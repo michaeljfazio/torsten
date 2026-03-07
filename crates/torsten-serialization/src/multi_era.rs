@@ -438,10 +438,7 @@ fn convert_alonzo_certificate(
             relays,
             pool_metadata,
         } => {
-            let owners = pool_owners
-                .iter()
-                .map(pallas_hash_to_torsten28)
-                .collect();
+            let owners = pool_owners.iter().map(pallas_hash_to_torsten28).collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
             let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {
@@ -498,10 +495,7 @@ fn convert_conway_certificate(
             relays,
             pool_metadata,
         } => {
-            let owners = pool_owners
-                .iter()
-                .map(pallas_hash_to_torsten28)
-                .collect();
+            let owners = pool_owners.iter().map(pallas_hash_to_torsten28).collect();
             let pool_relays = relays.iter().filter_map(convert_relay).collect();
             let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {

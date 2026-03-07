@@ -74,7 +74,10 @@ impl ChainDB {
 
     /// Rollback to a given point by removing blocks from the volatile DB.
     /// Returns the hashes of the removed blocks (most recent first).
-    pub fn rollback_to_point(&mut self, point: &Point) -> Result<Vec<BlockHeaderHash>, ChainDBError> {
+    pub fn rollback_to_point(
+        &mut self,
+        point: &Point,
+    ) -> Result<Vec<BlockHeaderHash>, ChainDBError> {
         let target_hash = match point {
             Point::Origin => {
                 // Rolling back to origin: clear all volatile blocks
@@ -134,7 +137,12 @@ impl ChainDB {
     /// Check if a block exists in the chain DB
     pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
         self.volatile.get_block(hash).is_some()
-            || self.immutable.get_block_by_hash(hash).ok().flatten().is_some()
+            || self
+                .immutable
+                .get_block_by_hash(hash)
+                .ok()
+                .flatten()
+                .is_some()
     }
 
     /// Flush old blocks from volatile to immutable when chain is long enough

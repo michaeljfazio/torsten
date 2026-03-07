@@ -112,9 +112,8 @@ impl NodeToNodeClient {
 
                 // Parse the header to extract slot + hash for blockfetch
                 let subtag = header.byron_prefix.map(|(st, _)| st);
-                let multi_era_header =
-                    MultiEraHeader::decode(header.variant, subtag, &header.cbor)
-                        .map_err(|e| ClientError::BlockDecode(format!("header decode: {e}")))?;
+                let multi_era_header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)
+                    .map_err(|e| ClientError::BlockDecode(format!("header decode: {e}")))?;
 
                 let slot = multi_era_header.slot();
                 let block_no = multi_era_header.number();
@@ -138,12 +137,7 @@ impl NodeToNodeClient {
                 let block =
                     decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
 
-                debug!(
-                    slot,
-                    block_no,
-                    txs = block.tx_count(),
-                    "roll forward"
-                );
+                debug!(slot, block_no, txs = block.tx_count(), "roll forward");
                 Ok(ChainSyncEvent::RollForward(Box::new(block), torsten_tip))
             }
             NextResponse::RollBackward(point, tip) => {
@@ -185,9 +179,7 @@ impl NodeToNodeClient {
                     let subtag = header.byron_prefix.map(|(st, _)| st);
                     let multi_era_header =
                         MultiEraHeader::decode(header.variant, subtag, &header.cbor)
-                            .map_err(|e| {
-                                ClientError::BlockDecode(format!("header decode: {e}"))
-                            })?;
+                            .map_err(|e| ClientError::BlockDecode(format!("header decode: {e}")))?;
 
                     let slot = multi_era_header.slot();
                     let hash = multi_era_header.hash();
@@ -197,8 +189,9 @@ impl NodeToNodeClient {
                     // Flush any pending blocks before the rollback
                     if !pending_points.is_empty() {
                         let tip_ref = latest_tip.as_ref().unwrap();
-                        let fetched =
-                            self.fetch_and_decode_range(&pending_points, tip_ref).await?;
+                        let fetched = self
+                            .fetch_and_decode_range(&pending_points, tip_ref)
+                            .await?;
                         events.extend(fetched);
                         pending_points.clear();
                     }
@@ -212,8 +205,9 @@ impl NodeToNodeClient {
                     // Flush pending blocks, then signal await
                     if !pending_points.is_empty() {
                         let tip_ref = latest_tip.as_ref().unwrap();
-                        let fetched =
-                            self.fetch_and_decode_range(&pending_points, tip_ref).await?;
+                        let fetched = self
+                            .fetch_and_decode_range(&pending_points, tip_ref)
+                            .await?;
                         events.extend(fetched);
                         pending_points.clear();
                     }
@@ -226,7 +220,9 @@ impl NodeToNodeClient {
         // Fetch all pending blocks in one range
         if !pending_points.is_empty() {
             let tip_ref = latest_tip.as_ref().unwrap();
-            let fetched = self.fetch_and_decode_range(&pending_points, tip_ref).await?;
+            let fetched = self
+                .fetch_and_decode_range(&pending_points, tip_ref)
+                .await?;
             events.extend(fetched);
         }
 
@@ -254,7 +250,10 @@ impl NodeToNodeClient {
         for cbor in bodies {
             let block =
                 decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
-            events.push(ChainSyncEvent::RollForward(Box::new(block), torsten_tip.clone()));
+            events.push(ChainSyncEvent::RollForward(
+                Box::new(block),
+                torsten_tip.clone(),
+            ));
         }
         Ok(events)
     }
