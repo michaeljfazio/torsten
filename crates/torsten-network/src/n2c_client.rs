@@ -255,6 +255,37 @@ impl N2CClient {
         parse_u64_result(&result)
     }
 
+    /// Query protocol parameters (GetCurrentPParams - Shelley query tag 7)
+    pub async fn query_protocol_params(&mut self) -> Result<String, N2CClientError> {
+        let result = self.send_query(7).await?;
+        parse_string_result(&result)
+    }
+
+    /// Query stake distribution (GetStakeDistribution - Shelley query tag 5)
+    pub async fn query_stake_distribution(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(5).await?;
+        // Return raw CBOR for the CLI to parse
+        Ok(result)
+    }
+
+    /// Query governance state (GetGovState - query tag 20)
+    pub async fn query_gov_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(20).await?;
+        Ok(result)
+    }
+
+    /// Query DRep state (GetDRepState - query tag 21)
+    pub async fn query_drep_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(21).await?;
+        Ok(result)
+    }
+
+    /// Query committee state (GetCommitteeState - query tag 22)
+    pub async fn query_committee_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(22).await?;
+        Ok(result)
+    }
+
     /// Submit a transaction via LocalTxSubmission
     ///
     /// The tx_cbor should be the raw CBOR bytes of the signed transaction.
@@ -450,6 +481,22 @@ fn parse_epoch_result(payload: &[u8]) -> Result<u64, N2CClientError> {
         .map_err(|e| N2CClientError::Protocol(format!("bad epoch: {e}")))
 }
 
+/// Parse a string from MsgResult CBOR
+fn parse_string_result(payload: &[u8]) -> Result<String, N2CClientError> {
+    let mut decoder = minicbor::Decoder::new(payload);
+    let _ = decoder.array();
+    let tag = decoder.u32().unwrap_or(999);
+    if tag != 4 {
+        return Err(N2CClientError::Protocol(format!(
+            "expected MsgResult(4), got {tag}"
+        )));
+    }
+    decoder
+        .str()
+        .map(|s| s.to_string())
+        .map_err(|e| N2CClientError::Protocol(format!("bad string: {e}")))
+}
+
 /// Parse a u64 from MsgResult CBOR
 fn parse_u64_result(payload: &[u8]) -> Result<u64, N2CClientError> {
     let mut decoder = minicbor::Decoder::new(payload);
@@ -519,6 +566,19 @@ mod tests {
         enc.u64(100).unwrap();
 
         assert!(parse_u64_result(&buf).is_err());
+    }
+
+    #[test]
+    fn test_parse_string_result() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap();
+        enc.str("{\"min_fee_a\": 44}").unwrap();
+
+        let result = parse_string_result(&buf).unwrap();
+        assert!(result.contains("min_fee_a"));
+        assert!(result.contains("44"));
     }
 
     #[test]

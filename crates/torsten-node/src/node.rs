@@ -282,6 +282,113 @@ impl Node {
 
     /// Update the query handler with the current ledger state
     async fn update_query_state(&self) {
+        use torsten_network::query_handler::{
+            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, ProposalSnapshot,
+            StakePoolSnapshot,
+        };
+
+        // Build stake pool snapshots
+        let stake_pools: Vec<StakePoolSnapshot> = self
+            .ledger_state
+            .pool_params
+            .iter()
+            .map(|(pool_id, reg)| StakePoolSnapshot {
+                pool_id: pool_id.as_ref().to_vec(),
+                stake: self
+                    .ledger_state
+                    .stake_distribution
+                    .stake_map
+                    .values()
+                    .map(|l| l.0)
+                    .sum::<u64>()
+                    / self.ledger_state.pool_params.len().max(1) as u64, // approximate per-pool
+                pledge: reg.pledge.0,
+                cost: reg.cost.0,
+                margin_num: reg.margin_numerator,
+                margin_den: reg.margin_denominator,
+            })
+            .collect();
+
+        // Build DRep snapshots
+        let drep_entries: Vec<DRepSnapshot> = self
+            .ledger_state
+            .governance
+            .dreps
+            .iter()
+            .map(|(hash, drep)| DRepSnapshot {
+                credential_hash: hash.as_ref().to_vec(),
+                deposit: drep.deposit.0,
+                anchor_url: drep.anchor.as_ref().map(|a| a.url.clone()),
+                registered_epoch: drep.registered_epoch.0,
+            })
+            .collect();
+
+        // Build governance proposal snapshots
+        let governance_proposals: Vec<ProposalSnapshot> = self
+            .ledger_state
+            .governance
+            .proposals
+            .iter()
+            .map(|(action_id, state)| {
+                let action_type = match &state.procedure.gov_action {
+                    torsten_primitives::transaction::GovAction::ParameterChange { .. } => {
+                        "ParameterChange"
+                    }
+                    torsten_primitives::transaction::GovAction::HardForkInitiation { .. } => {
+                        "HardForkInitiation"
+                    }
+                    torsten_primitives::transaction::GovAction::TreasuryWithdrawals { .. } => {
+                        "TreasuryWithdrawals"
+                    }
+                    torsten_primitives::transaction::GovAction::NoConfidence { .. } => {
+                        "NoConfidence"
+                    }
+                    torsten_primitives::transaction::GovAction::UpdateCommittee { .. } => {
+                        "UpdateCommittee"
+                    }
+                    torsten_primitives::transaction::GovAction::NewConstitution { .. } => {
+                        "NewConstitution"
+                    }
+                    torsten_primitives::transaction::GovAction::InfoAction => "InfoAction",
+                };
+                ProposalSnapshot {
+                    tx_id: action_id.transaction_id.as_ref().to_vec(),
+                    action_index: action_id.action_index,
+                    action_type: action_type.to_string(),
+                    proposed_epoch: state.proposed_epoch.0,
+                    expires_epoch: state.expires_epoch.0,
+                    yes_votes: state.yes_votes,
+                    no_votes: state.no_votes,
+                    abstain_votes: state.abstain_votes,
+                }
+            })
+            .collect();
+
+        // Build committee snapshot
+        let committee = CommitteeSnapshot {
+            members: self
+                .ledger_state
+                .governance
+                .committee_hot_keys
+                .iter()
+                .map(|(cold, hot)| CommitteeMemberSnapshot {
+                    cold_credential: cold.as_ref().to_vec(),
+                    hot_credential: hot.as_ref().to_vec(),
+                })
+                .collect(),
+            resigned: self
+                .ledger_state
+                .governance
+                .committee_resigned
+                .keys()
+                .map(|k| k.as_ref().to_vec())
+                .collect(),
+        };
+
+        // Serialize protocol params
+        let protocol_params_json = serde_json::to_string_pretty(&self.ledger_state.protocol_params)
+            .unwrap_or_default();
+
         let snapshot = NodeStateSnapshot {
             tip: self.ledger_state.tip.clone(),
             epoch: self.ledger_state.epoch,
@@ -295,6 +402,11 @@ impl Node {
             reserves: self.ledger_state.reserves.0,
             drep_count: self.ledger_state.governance.dreps.len(),
             proposal_count: self.ledger_state.governance.proposals.len(),
+            protocol_params_json,
+            stake_pools,
+            drep_entries,
+            governance_proposals,
+            committee,
         };
         let mut handler = self.query_handler.write().await;
         handler.update_state(snapshot);

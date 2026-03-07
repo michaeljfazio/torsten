@@ -11,5 +11,5 @@ pub use client::{ChainSyncEvent, NodeToNodeClient};
 pub use n2c_client::N2CClient;
 pub use n2c_server::N2CServer;
 pub use peer::PeerConnection;
-pub use query_handler::{NodeStateSnapshot, QueryHandler};
+pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};
 pub use server::NodeServer;

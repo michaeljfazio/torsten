@@ -1690,6 +1690,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "torsten-crypto",
+ "torsten-network",
  "torsten-primitives",
  "torsten-serialization",
 ]
@@ -1701,6 +1702,7 @@ dependencies = [
  "async-trait",
  "blake2",
  "futures",
+ "minicbor 0.25.1",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1784,6 +1786,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "torsten-crypto",
+ "torsten-mempool",
  "torsten-primitives",
  "torsten-serialization",
  "tracing",

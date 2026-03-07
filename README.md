@@ -122,6 +122,9 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 - [x] Governance action ratification and enactment (CIP-1694 voting thresholds)
 - [x] Operational certificate Ed25519 signature verification
 - [x] VRF leader eligibility check (phi_f threshold)
+- [x] N2C governance state queries (GovState, DRepState, CommitteeState, StakeDistribution)
+- [x] CLI: governance and stake distribution queries via N2C
+- [x] Protocol parameters query (live from node state)
 
 ### In Progress
 

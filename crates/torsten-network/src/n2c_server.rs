@@ -493,14 +493,78 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
         QueryResult::ChainBlockNo(block_no) => {
             enc.u64(*block_no).ok();
         }
-        QueryResult::ProtocolParams(cbor) => {
-            enc.bytes(cbor).ok();
+        QueryResult::ProtocolParams(json) => {
+            enc.str(json).ok();
         }
         QueryResult::StakeDistribution(pools) => {
             enc.map(pools.len() as u64).ok();
-            for (pool_id, stake) in pools {
-                enc.bytes(pool_id).ok();
-                enc.u64(*stake).ok();
+            for pool in pools {
+                enc.bytes(&pool.pool_id).ok();
+                enc.array(3).ok();
+                enc.u64(pool.stake).ok();
+                enc.u64(pool.pledge).ok();
+                enc.u64(pool.cost).ok();
+            }
+        }
+        QueryResult::GovState(gov) => {
+            enc.map(4).ok();
+            enc.str("drep_count").ok();
+            enc.u64(gov.drep_count as u64).ok();
+            enc.str("committee_member_count").ok();
+            enc.u64(gov.committee_member_count as u64).ok();
+            enc.str("treasury").ok();
+            enc.u64(gov.treasury).ok();
+            enc.str("proposals").ok();
+            enc.array(gov.proposals.len() as u64).ok();
+            for p in &gov.proposals {
+                enc.map(6).ok();
+                enc.str("tx_id").ok();
+                enc.bytes(&p.tx_id).ok();
+                enc.str("action_index").ok();
+                enc.u32(p.action_index).ok();
+                enc.str("action_type").ok();
+                enc.str(&p.action_type).ok();
+                enc.str("yes_votes").ok();
+                enc.u64(p.yes_votes).ok();
+                enc.str("no_votes").ok();
+                enc.u64(p.no_votes).ok();
+                enc.str("abstain_votes").ok();
+                enc.u64(p.abstain_votes).ok();
+            }
+        }
+        QueryResult::DRepState(dreps) => {
+            enc.array(dreps.len() as u64).ok();
+            for drep in dreps {
+                enc.map(4).ok();
+                enc.str("credential").ok();
+                enc.bytes(&drep.credential_hash).ok();
+                enc.str("deposit").ok();
+                enc.u64(drep.deposit).ok();
+                enc.str("anchor_url").ok();
+                if let Some(url) = &drep.anchor_url {
+                    enc.str(url).ok();
+                } else {
+                    enc.null().ok();
+                }
+                enc.str("registered_epoch").ok();
+                enc.u64(drep.registered_epoch).ok();
+            }
+        }
+        QueryResult::CommitteeState(committee) => {
+            enc.map(2).ok();
+            enc.str("members").ok();
+            enc.array(committee.members.len() as u64).ok();
+            for member in &committee.members {
+                enc.map(2).ok();
+                enc.str("cold").ok();
+                enc.bytes(&member.cold_credential).ok();
+                enc.str("hot").ok();
+                enc.bytes(&member.hot_credential).ok();
+            }
+            enc.str("resigned").ok();
+            enc.array(committee.resigned.len() as u64).ok();
+            for cred in &committee.resigned {
+                enc.bytes(cred).ok();
             }
         }
         QueryResult::Error(msg) => {
@@ -660,6 +724,105 @@ mod tests {
         let mut decoder = minicbor::Decoder::new(&segment.payload);
         let _ = decoder.array();
         assert_eq!(decoder.u32().unwrap(), 2); // MsgRejectTx
+    }
+
+    #[test]
+    fn test_encode_query_result_protocol_params() {
+        let result = QueryResult::ProtocolParams("{\"min_fee_a\": 44}".to_string());
+        let cbor = encode_query_result(&result);
+        assert!(!cbor.is_empty());
+
+        // Verify we can decode the string back
+        let mut decoder = minicbor::Decoder::new(&cbor);
+        let _ = decoder.array();
+        assert_eq!(decoder.u32().unwrap(), 4); // MsgResult
+        let json = decoder.str().unwrap();
+        assert!(json.contains("min_fee_a"));
+    }
+
+    #[test]
+    fn test_encode_query_result_gov_state() {
+        use crate::query_handler::{GovStateSnapshot, ProposalSnapshot};
+
+        let result = QueryResult::GovState(GovStateSnapshot {
+            proposals: vec![ProposalSnapshot {
+                tx_id: vec![0xaa; 32],
+                action_index: 0,
+                action_type: "InfoAction".to_string(),
+                proposed_epoch: 100,
+                expires_epoch: 106,
+                yes_votes: 5,
+                no_votes: 2,
+                abstain_votes: 1,
+            }],
+            drep_count: 10,
+            committee_member_count: 3,
+            treasury: 5_000_000_000_000,
+        });
+        let cbor = encode_query_result(&result);
+        assert!(!cbor.is_empty());
+
+        // Verify the outer structure
+        let mut decoder = minicbor::Decoder::new(&cbor);
+        let _ = decoder.array();
+        assert_eq!(decoder.u32().unwrap(), 4); // MsgResult
+    }
+
+    #[test]
+    fn test_encode_query_result_drep_state() {
+        use crate::query_handler::DRepSnapshot;
+
+        let result = QueryResult::DRepState(vec![DRepSnapshot {
+            credential_hash: vec![0xdd; 32],
+            deposit: 500_000_000,
+            anchor_url: Some("https://example.com".to_string()),
+            registered_epoch: 42,
+        }]);
+        let cbor = encode_query_result(&result);
+        assert!(!cbor.is_empty());
+    }
+
+    #[test]
+    fn test_encode_query_result_committee_state() {
+        use crate::query_handler::{CommitteeMemberSnapshot, CommitteeSnapshot};
+
+        let result = QueryResult::CommitteeState(CommitteeSnapshot {
+            members: vec![CommitteeMemberSnapshot {
+                cold_credential: vec![0x01; 32],
+                hot_credential: vec![0x02; 32],
+            }],
+            resigned: vec![vec![0x03; 32]],
+        });
+        let cbor = encode_query_result(&result);
+        assert!(!cbor.is_empty());
+    }
+
+    #[test]
+    fn test_encode_query_result_stake_distribution() {
+        use crate::query_handler::StakePoolSnapshot;
+
+        let result = QueryResult::StakeDistribution(vec![StakePoolSnapshot {
+            pool_id: vec![0xaa; 28],
+            stake: 1_000_000_000,
+            pledge: 500_000_000,
+            cost: 340_000_000,
+            margin_num: 1,
+            margin_den: 100,
+        }]);
+        let cbor = encode_query_result(&result);
+
+        // Verify encoding: [4, map{pool_id => [stake, pledge, cost]}]
+        let mut decoder = minicbor::Decoder::new(&cbor);
+        let _ = decoder.array();
+        assert_eq!(decoder.u32().unwrap(), 4);
+        let map_len = decoder.map().unwrap().unwrap();
+        assert_eq!(map_len, 1);
+        let pool_id = decoder.bytes().unwrap();
+        assert_eq!(pool_id, vec![0xaa; 28]);
+        let _ = decoder.array();
+        assert_eq!(decoder.u64().unwrap(), 1_000_000_000); // stake
+        assert_eq!(decoder.u64().unwrap(), 500_000_000); // pledge
+        assert_eq!(decoder.u64().unwrap(), 340_000_000); // cost
     }
 
     #[test]

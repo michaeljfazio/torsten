@@ -14,9 +14,68 @@ pub enum QueryResult {
     CurrentEra(u32),
     SystemStart(String),
     ChainBlockNo(u64),
-    ProtocolParams(Vec<u8>),
-    StakeDistribution(Vec<(Vec<u8>, u64)>),
+    ProtocolParams(String),
+    StakeDistribution(Vec<StakePoolSnapshot>),
+    GovState(GovStateSnapshot),
+    DRepState(Vec<DRepSnapshot>),
+    CommitteeState(CommitteeSnapshot),
     Error(String),
+}
+
+/// Snapshot of a stake pool for query results
+#[derive(Debug, Clone)]
+pub struct StakePoolSnapshot {
+    pub pool_id: Vec<u8>,
+    pub stake: u64,
+    pub pledge: u64,
+    pub cost: u64,
+    pub margin_num: u64,
+    pub margin_den: u64,
+}
+
+/// Snapshot of a DRep for query results
+#[derive(Debug, Clone)]
+pub struct DRepSnapshot {
+    pub credential_hash: Vec<u8>,
+    pub deposit: u64,
+    pub anchor_url: Option<String>,
+    pub registered_epoch: u64,
+}
+
+/// Snapshot of governance state
+#[derive(Debug, Clone, Default)]
+pub struct GovStateSnapshot {
+    pub proposals: Vec<ProposalSnapshot>,
+    pub drep_count: usize,
+    pub committee_member_count: usize,
+    pub treasury: u64,
+}
+
+/// Snapshot of a governance proposal
+#[derive(Debug, Clone)]
+pub struct ProposalSnapshot {
+    pub tx_id: Vec<u8>,
+    pub action_index: u32,
+    pub action_type: String,
+    pub proposed_epoch: u64,
+    pub expires_epoch: u64,
+    pub yes_votes: u64,
+    pub no_votes: u64,
+    pub abstain_votes: u64,
+}
+
+/// Snapshot of the constitutional committee
+#[derive(Debug, Clone, Default)]
+pub struct CommitteeSnapshot {
+    pub members: Vec<CommitteeMemberSnapshot>,
+    pub resigned: Vec<Vec<u8>>,
+}
+
+/// Snapshot of a committee member
+#[derive(Debug, Clone)]
+pub struct CommitteeMemberSnapshot {
+    pub cold_credential: Vec<u8>,
+    pub hot_credential: Vec<u8>,
 }
 
 /// Snapshot of the node state used for answering queries.
@@ -35,6 +94,16 @@ pub struct NodeStateSnapshot {
     pub reserves: u64,
     pub drep_count: usize,
     pub proposal_count: usize,
+    /// Serialized protocol parameters as JSON
+    pub protocol_params_json: String,
+    /// Stake pool distribution data
+    pub stake_pools: Vec<StakePoolSnapshot>,
+    /// DRep registration data
+    pub drep_entries: Vec<DRepSnapshot>,
+    /// Governance proposals
+    pub governance_proposals: Vec<ProposalSnapshot>,
+    /// Committee members
+    pub committee: CommitteeSnapshot,
 }
 
 impl Default for NodeStateSnapshot {
@@ -52,6 +121,11 @@ impl Default for NodeStateSnapshot {
             reserves: 0,
             drep_count: 0,
             proposal_count: 0,
+            protocol_params_json: String::new(),
+            stake_pools: Vec::new(),
+            drep_entries: Vec::new(),
+            governance_proposals: Vec::new(),
+            committee: CommitteeSnapshot::default(),
         }
     }
 }
@@ -196,11 +270,15 @@ impl QueryHandler {
                 debug!("Query: GetEpochNo (alt)");
                 QueryResult::EpochNo(self.state.epoch.0)
             }
+            5 => {
+                // GetStakeDistribution
+                debug!("Query: GetStakeDistribution");
+                QueryResult::StakeDistribution(self.state.stake_pools.clone())
+            }
             7 => {
                 // GetCurrentPParams
                 debug!("Query: GetCurrentPParams");
-                // TODO: encode actual protocol params as CBOR
-                QueryResult::ProtocolParams(vec![])
+                QueryResult::ProtocolParams(self.state.protocol_params_json.clone())
             }
             10 => {
                 // GetChainBlockNo
@@ -219,6 +297,26 @@ impl QueryHandler {
                     hash,
                     block_no: self.state.block_number.0,
                 }
+            }
+            20 => {
+                // GetGovState (Conway governance)
+                debug!("Query: GetGovState");
+                QueryResult::GovState(GovStateSnapshot {
+                    proposals: self.state.governance_proposals.clone(),
+                    drep_count: self.state.drep_count,
+                    committee_member_count: self.state.committee.members.len(),
+                    treasury: self.state.treasury,
+                })
+            }
+            21 => {
+                // GetDRepState
+                debug!("Query: GetDRepState");
+                QueryResult::DRepState(self.state.drep_entries.clone())
+            }
+            22 => {
+                // GetCommitteeState
+                debug!("Query: GetCommitteeState");
+                QueryResult::CommitteeState(self.state.committee.clone())
             }
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");
@@ -339,6 +437,171 @@ mod tests {
         match result {
             QueryResult::EpochNo(e) => assert_eq!(e, 0),
             other => panic!("Expected EpochNo from CBOR query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_stake_distribution() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            stake_pools: vec![
+                StakePoolSnapshot {
+                    pool_id: vec![0xaa; 28],
+                    stake: 1_000_000_000,
+                    pledge: 500_000_000,
+                    cost: 340_000_000,
+                    margin_num: 1,
+                    margin_den: 100,
+                },
+                StakePoolSnapshot {
+                    pool_id: vec![0xbb; 28],
+                    stake: 2_000_000_000,
+                    pledge: 1_000_000_000,
+                    cost: 340_000_000,
+                    margin_num: 5,
+                    margin_den: 100,
+                },
+            ],
+            ..Default::default()
+        });
+
+        match handler.handle_shelley_query(5) {
+            QueryResult::StakeDistribution(pools) => {
+                assert_eq!(pools.len(), 2);
+                assert_eq!(pools[0].pool_id, vec![0xaa; 28]);
+                assert_eq!(pools[0].stake, 1_000_000_000);
+                assert_eq!(pools[1].pool_id, vec![0xbb; 28]);
+            }
+            other => panic!("Expected StakeDistribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_protocol_params() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            protocol_params_json: "{\"min_fee_a\": 44}".to_string(),
+            ..Default::default()
+        });
+
+        match handler.handle_shelley_query(7) {
+            QueryResult::ProtocolParams(json) => {
+                assert!(json.contains("min_fee_a"));
+                assert!(json.contains("44"));
+            }
+            other => panic!("Expected ProtocolParams, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_gov_state() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            drep_count: 5,
+            treasury: 1_000_000_000_000,
+            committee: CommitteeSnapshot {
+                members: vec![CommitteeMemberSnapshot {
+                    cold_credential: vec![0x01; 32],
+                    hot_credential: vec![0x02; 32],
+                }],
+                resigned: vec![],
+            },
+            governance_proposals: vec![ProposalSnapshot {
+                tx_id: vec![0xcc; 32],
+                action_index: 0,
+                action_type: "InfoAction".to_string(),
+                proposed_epoch: 100,
+                expires_epoch: 106,
+                yes_votes: 3,
+                no_votes: 1,
+                abstain_votes: 0,
+            }],
+            ..Default::default()
+        });
+
+        match handler.handle_shelley_query(20) {
+            QueryResult::GovState(gov) => {
+                assert_eq!(gov.drep_count, 5);
+                assert_eq!(gov.committee_member_count, 1);
+                assert_eq!(gov.treasury, 1_000_000_000_000);
+                assert_eq!(gov.proposals.len(), 1);
+                assert_eq!(gov.proposals[0].action_type, "InfoAction");
+                assert_eq!(gov.proposals[0].yes_votes, 3);
+            }
+            other => panic!("Expected GovState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_drep_state() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            drep_entries: vec![DRepSnapshot {
+                credential_hash: vec![0xdd; 32],
+                deposit: 500_000_000,
+                anchor_url: Some("https://example.com/drep".to_string()),
+                registered_epoch: 42,
+            }],
+            ..Default::default()
+        });
+
+        match handler.handle_shelley_query(21) {
+            QueryResult::DRepState(dreps) => {
+                assert_eq!(dreps.len(), 1);
+                assert_eq!(dreps[0].credential_hash, vec![0xdd; 32]);
+                assert_eq!(dreps[0].deposit, 500_000_000);
+                assert_eq!(
+                    dreps[0].anchor_url,
+                    Some("https://example.com/drep".to_string())
+                );
+                assert_eq!(dreps[0].registered_epoch, 42);
+            }
+            other => panic!("Expected DRepState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_committee_state() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            committee: CommitteeSnapshot {
+                members: vec![
+                    CommitteeMemberSnapshot {
+                        cold_credential: vec![0x01; 32],
+                        hot_credential: vec![0x02; 32],
+                    },
+                    CommitteeMemberSnapshot {
+                        cold_credential: vec![0x03; 32],
+                        hot_credential: vec![0x04; 32],
+                    },
+                ],
+                resigned: vec![vec![0x05; 32]],
+            },
+            ..Default::default()
+        });
+
+        match handler.handle_shelley_query(22) {
+            QueryResult::CommitteeState(committee) => {
+                assert_eq!(committee.members.len(), 2);
+                assert_eq!(committee.resigned.len(), 1);
+                assert_eq!(committee.members[0].cold_credential, vec![0x01; 32]);
+                assert_eq!(committee.members[0].hot_credential, vec![0x02; 32]);
+                assert_eq!(committee.resigned[0], vec![0x05; 32]);
+            }
+            other => panic!("Expected CommitteeState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_gov_state_empty() {
+        let handler = QueryHandler::new();
+        match handler.handle_shelley_query(20) {
+            QueryResult::GovState(gov) => {
+                assert_eq!(gov.drep_count, 0);
+                assert_eq!(gov.proposals.len(), 0);
+                assert_eq!(gov.treasury, 0);
+            }
+            other => panic!("Expected GovState, got {other:?}"),
         }
     }
 }
