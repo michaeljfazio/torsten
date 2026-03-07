@@ -1,13 +1,16 @@
 use crate::error::SerializationError;
 use pallas_traverse::MultiEraBlock as PallasBlock;
+use pallas_traverse::MultiEraCert;
 use pallas_traverse::MultiEraInput as PallasInput;
 use pallas_traverse::MultiEraOutput as PallasOutput;
 use pallas_traverse::MultiEraTx as PallasTx;
+use pallas_traverse::MultiEraWithdrawals;
 use std::collections::BTreeMap;
 use torsten_primitives::address::Address;
 use torsten_primitives::block::{
     Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput,
 };
+use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
 use torsten_primitives::hash::{Hash, Hash28, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
@@ -153,15 +156,26 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
     let reference_inputs: Vec<TransactionInput> =
         tx.reference_inputs().iter().map(convert_input).collect();
 
+    let ttl = tx.ttl().map(SlotNo);
+    let validity_interval_start = tx.validity_start().map(SlotNo);
+
+    let certificates = tx
+        .certs()
+        .iter()
+        .filter_map(|c| convert_certificate(c))
+        .collect();
+
+    let withdrawals = convert_withdrawals(tx);
+
     let body = TransactionBody {
         inputs,
         outputs,
         fee,
-        ttl: None,
-        certificates: Vec::new(),
-        withdrawals: BTreeMap::new(),
+        ttl,
+        certificates,
+        withdrawals,
         auxiliary_data_hash: None,
-        validity_interval_start: None,
+        validity_interval_start,
         mint,
         script_data_hash: None,
         collateral,
@@ -380,6 +394,211 @@ pub fn torsten_hash_to_pallas32(hash: &Hash32) -> pallas_crypto::hash::Hash<32> 
 /// Convert a torsten Hash28 to a pallas Hash<28>
 pub fn torsten_hash_to_pallas28(hash: &Hash28) -> pallas_crypto::hash::Hash<28> {
     pallas_crypto::hash::Hash::from(*hash.as_bytes())
+}
+
+fn convert_pallas_stake_credential(
+    cred: &pallas_primitives::StakeCredential,
+) -> Credential {
+    match cred {
+        pallas_primitives::StakeCredential::AddrKeyhash(h) => {
+            Credential::VerificationKey(pallas_hash_to_torsten28(h))
+        }
+        pallas_primitives::StakeCredential::ScriptHash(h) => {
+            Credential::Script(pallas_hash_to_torsten28(h))
+        }
+    }
+}
+
+fn convert_certificate(cert: &MultiEraCert) -> Option<Certificate> {
+    if let Some(alonzo_cert) = cert.as_alonzo() {
+        return convert_alonzo_certificate(alonzo_cert);
+    }
+    if let Some(conway_cert) = cert.as_conway() {
+        return convert_conway_certificate(conway_cert);
+    }
+    None
+}
+
+fn convert_alonzo_certificate(cert: &pallas_primitives::alonzo::Certificate) -> Option<Certificate> {
+    use pallas_primitives::alonzo::Certificate as AC;
+    match cert {
+        AC::StakeRegistration(cred) => {
+            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
+        }
+        AC::StakeDeregistration(cred) => {
+            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
+        }
+        AC::StakeDelegation(cred, pool_hash) => Some(Certificate::StakeDelegation {
+            credential: convert_pallas_stake_credential(cred),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+        }),
+        AC::PoolRegistration {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners,
+            relays,
+            pool_metadata,
+        } => {
+            let owners: Vec<Hash32> = pool_owners
+                .iter()
+                .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
+                .collect();
+            let pool_relays = relays.iter().filter_map(convert_relay).collect();
+            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata
+                .clone()
+                .into();
+            let metadata = metadata
+                .map(|m| PoolMetadata {
+                    url: m.url.clone(),
+                    hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+                });
+
+            Some(Certificate::PoolRegistration(PoolParams {
+                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(operator.as_ref())),
+                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(vrf_keyhash.as_ref())),
+                pledge: Lovelace(*pledge),
+                cost: Lovelace(*cost),
+                margin: Rational {
+                    numerator: margin.numerator,
+                    denominator: margin.denominator,
+                },
+                reward_account: reward_account.to_vec(),
+                pool_owners: owners,
+                relays: pool_relays,
+                pool_metadata: metadata,
+            }))
+        }
+        AC::PoolRetirement(pool_hash, epoch) => Some(Certificate::PoolRetirement {
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            epoch: *epoch,
+        }),
+        _ => None, // GenesisKeyDelegation, MoveInstantaneousRewards
+    }
+}
+
+fn convert_conway_certificate(cert: &pallas_primitives::conway::Certificate) -> Option<Certificate> {
+    use pallas_primitives::conway::Certificate as CC;
+    match cert {
+        CC::StakeRegistration(cred) => {
+            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
+        }
+        CC::StakeDeregistration(cred) => {
+            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
+        }
+        CC::StakeDelegation(cred, pool_hash) => Some(Certificate::StakeDelegation {
+            credential: convert_pallas_stake_credential(cred),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+        }),
+        CC::PoolRegistration {
+            operator,
+            vrf_keyhash,
+            pledge,
+            cost,
+            margin,
+            reward_account,
+            pool_owners,
+            relays,
+            pool_metadata,
+        } => {
+            let owners: Vec<Hash32> = pool_owners
+                .iter()
+                .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
+                .collect();
+            let pool_relays = relays.iter().filter_map(convert_relay).collect();
+            let metadata: Option<pallas_primitives::PoolMetadata> = pool_metadata
+                .clone()
+                .into();
+            let metadata = metadata
+                .map(|m| PoolMetadata {
+                    url: m.url.clone(),
+                    hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+                });
+
+            Some(Certificate::PoolRegistration(PoolParams {
+                operator: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(operator.as_ref())),
+                vrf_keyhash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(vrf_keyhash.as_ref())),
+                pledge: Lovelace(*pledge),
+                cost: Lovelace(*cost),
+                margin: Rational {
+                    numerator: margin.numerator,
+                    denominator: margin.denominator,
+                },
+                reward_account: reward_account.to_vec(),
+                pool_owners: owners,
+                relays: pool_relays,
+                pool_metadata: metadata,
+            }))
+        }
+        CC::PoolRetirement(pool_hash, epoch) => Some(Certificate::PoolRetirement {
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            epoch: *epoch,
+        }),
+        CC::StakeRegDeleg(cred, pool_hash, deposit) => Some(Certificate::RegStakeDeleg {
+            credential: convert_pallas_stake_credential(cred),
+            pool_hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(pool_hash.as_ref())),
+            deposit: Lovelace(*deposit),
+        }),
+        CC::Reg(cred, _deposit) => {
+            Some(Certificate::StakeRegistration(convert_pallas_stake_credential(cred)))
+        }
+        CC::UnReg(cred, _refund) => {
+            Some(Certificate::StakeDeregistration(convert_pallas_stake_credential(cred)))
+        }
+        _ => None, // Other Conway governance certs handled later
+    }
+}
+
+fn convert_relay(relay: &pallas_primitives::Relay) -> Option<Relay> {
+    use pallas_primitives::Relay as PR;
+    match relay {
+        PR::SingleHostAddr(port, ipv4, ipv6) => Some(Relay::SingleHostAddr {
+            port: Option::from(port.clone()).map(|p: u32| p as u16),
+            ipv4: Option::from(ipv4.clone()).map(|v: pallas_primitives::Bytes| {
+                let bytes = v.to_vec();
+                let mut arr = [0u8; 4];
+                let len = bytes.len().min(4);
+                arr[..len].copy_from_slice(&bytes[..len]);
+                arr
+            }),
+            ipv6: Option::from(ipv6.clone()).map(|v: pallas_primitives::Bytes| {
+                let bytes = v.to_vec();
+                let mut arr = [0u8; 16];
+                let len = bytes.len().min(16);
+                arr[..len].copy_from_slice(&bytes[..len]);
+                arr
+            }),
+        }),
+        PR::SingleHostName(port, dns) => Some(Relay::SingleHostName {
+            port: Option::<u32>::from(port.clone()).map(|p| p as u16),
+            dns_name: dns.clone(),
+        }),
+        PR::MultiHostName(dns) => Some(Relay::MultiHostName {
+            dns_name: dns.clone(),
+        }),
+    }
+}
+
+fn convert_withdrawals(tx: &PallasTx) -> BTreeMap<Vec<u8>, Lovelace> {
+    let mut result = BTreeMap::new();
+    match tx.withdrawals() {
+        MultiEraWithdrawals::NotApplicable | MultiEraWithdrawals::Empty => {}
+        MultiEraWithdrawals::AlonzoCompatible(w) => {
+            for (account, amount) in w.iter() {
+                result.insert(account.to_vec(), Lovelace(*amount));
+            }
+        }
+        MultiEraWithdrawals::Conway(w) => {
+            for (account, amount) in w.iter() {
+                result.insert(account.to_vec(), Lovelace(*amount));
+            }
+        }
+        _ => {}
+    }
+    result
 }
 
 fn convert_era(era: pallas_traverse::Era) -> Era {
