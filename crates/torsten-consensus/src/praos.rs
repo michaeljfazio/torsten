@@ -2,6 +2,12 @@ use thiserror::Error;
 use torsten_primitives::block::{BlockHeader, Tip};
 use torsten_primitives::time::{EpochLength, EpochNo, SlotNo};
 
+/// KES period length in slots (each period is 129600 slots = 36 hours on mainnet)
+pub const KES_PERIOD_SLOTS: u64 = 129600;
+
+/// Maximum number of KES evolutions (mainnet: 62)
+pub const MAX_KES_EVOLUTIONS: u64 = 62;
+
 #[derive(Error, Debug)]
 pub enum ConsensusError {
     #[error("Invalid block: {0}")]
@@ -18,6 +24,24 @@ pub enum ConsensusError {
     InvalidOperationalCert,
     #[error("Block does not extend chain")]
     DoesNotExtendChain,
+    #[error("KES period expired: current_period={current}, cert_start={cert_start}, max_evolutions={max_evolutions}")]
+    KesExpired {
+        current: u64,
+        cert_start: u64,
+        max_evolutions: u64,
+    },
+    #[error(
+        "KES period mismatch: block is in period {block_period}, but cert starts at {cert_start}"
+    )]
+    KesPeriodBeforeCert { block_period: u64, cert_start: u64 },
+    #[error("Empty issuer VRF key")]
+    EmptyVrfKey,
+    #[error("Empty issuer verification key")]
+    EmptyIssuerVkey,
+    #[error("Invalid VRF output size: expected 32 or 64 bytes, got {0}")]
+    InvalidVrfOutputSize(usize),
+    #[error("Operational cert sequence number regression: got {got}, expected > {expected}")]
+    OpcertSequenceRegression { got: u64, expected: u64 },
 }
 
 /// Active slot coefficient (f) - probability that a slot has a block
@@ -62,7 +86,17 @@ impl OuroborosPraos {
         }
     }
 
-    /// Validate a block header against consensus rules
+    /// Validate a block header against consensus rules.
+    ///
+    /// This checks:
+    /// 1. Block is not from the future
+    /// 2. Issuer VRF key is present
+    /// 3. VRF output has valid size
+    /// 4. KES period is valid (not expired, not before cert start)
+    /// 5. Operational certificate has required fields
+    ///
+    /// Note: Cryptographic VRF proof and KES signature verification require
+    /// external VRF/KES libraries and are not yet implemented.
     pub fn validate_header(
         &self,
         header: &BlockHeader,
@@ -76,19 +110,79 @@ impl OuroborosPraos {
             });
         }
 
-        // Block number must be sequential
-        if self.tip.block_number.0 > 0 && header.block_number.0 != self.tip.block_number.0 + 1 {
-            // Allow for chain selection to handle forks
+        // Issuer verification key must be present (32 bytes for Ed25519)
+        if header.issuer_vkey.is_empty() {
+            return Err(ConsensusError::EmptyIssuerVkey);
         }
 
-        // Verify VRF proof (placeholder - needs real VRF verification)
-        // In production: verify that the VRF output proves the pool is the slot leader
+        // VRF key must be present
+        if header.vrf_vkey.is_empty() {
+            return Err(ConsensusError::EmptyVrfKey);
+        }
 
-        // Verify KES signature (placeholder - needs real KES verification)
-        // In production: verify the block signature with the KES key
+        // VRF output must be valid size (32 bytes for Praos, 64 for TPraos compatibility)
+        let vrf_output_len = header.vrf_result.output.len();
+        if vrf_output_len != 32 && vrf_output_len != 64 {
+            return Err(ConsensusError::InvalidVrfOutputSize(vrf_output_len));
+        }
 
-        // Verify operational certificate (placeholder)
-        // In production: verify the opcert chain to the cold key
+        // Validate KES period
+        self.validate_kes_period(header)?;
+
+        // Validate operational certificate structure
+        self.validate_operational_cert(header)?;
+
+        // TODO: Cryptographic verification (requires VRF and KES libraries):
+        // 1. Verify VRF proof against the VRF key and slot input
+        // 2. Verify the VRF output certifies leader election (phi_f check)
+        // 3. Verify KES signature on the block header
+        // 4. Verify operational cert signature (cold key signs hot key)
+
+        Ok(())
+    }
+
+    /// Validate the KES period for a block header.
+    ///
+    /// The KES key must not have expired: the block's KES period must be
+    /// >= the cert's start period and < start + max_evolutions.
+    fn validate_kes_period(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
+        let block_kes_period = header.slot.0 / KES_PERIOD_SLOTS;
+        let cert_kes_period = header.operational_cert.kes_period;
+
+        // Block's KES period must be >= the operational cert's KES period
+        if block_kes_period < cert_kes_period {
+            return Err(ConsensusError::KesPeriodBeforeCert {
+                block_period: block_kes_period,
+                cert_start: cert_kes_period,
+            });
+        }
+
+        // KES key must not have expired
+        let kes_evolutions = block_kes_period - cert_kes_period;
+        if kes_evolutions >= MAX_KES_EVOLUTIONS {
+            return Err(ConsensusError::KesExpired {
+                current: block_kes_period,
+                cert_start: cert_kes_period,
+                max_evolutions: MAX_KES_EVOLUTIONS,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate the operational certificate structure.
+    fn validate_operational_cert(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
+        let opcert = &header.operational_cert;
+
+        // Hot VKey must be present
+        if opcert.hot_vkey.is_empty() {
+            return Err(ConsensusError::InvalidOperationalCert);
+        }
+
+        // Sigma (signature) must be present
+        if opcert.sigma.is_empty() {
+            return Err(ConsensusError::InvalidOperationalCert);
+        }
 
         Ok(())
     }
@@ -144,6 +238,32 @@ mod tests {
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::time::{BlockNo, SlotNo};
 
+    /// Create a valid test header at the given slot
+    fn make_valid_header(slot: u64) -> BlockHeader {
+        BlockHeader {
+            header_hash: Hash32::ZERO,
+            prev_hash: Hash32::ZERO,
+            issuer_vkey: vec![1u8; 32],
+            vrf_vkey: vec![2u8; 32],
+            vrf_result: torsten_primitives::block::VrfOutput {
+                output: vec![0u8; 32],
+                proof: vec![0u8; 80],
+            },
+            block_number: BlockNo(1),
+            slot: SlotNo(slot),
+            epoch_nonce: Hash32::ZERO,
+            body_size: 0,
+            body_hash: Hash32::ZERO,
+            operational_cert: torsten_primitives::block::OperationalCert {
+                hot_vkey: vec![3u8; 32],
+                sequence_number: 0,
+                kes_period: slot / KES_PERIOD_SLOTS,
+                sigma: vec![4u8; 64],
+            },
+            protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
+        }
+    }
+
     #[test]
     fn test_new_praos() {
         let praos = OuroborosPraos::new();
@@ -192,29 +312,7 @@ mod tests {
     #[test]
     fn test_future_block_rejected() {
         let praos = OuroborosPraos::new();
-        let header = BlockHeader {
-            header_hash: Hash32::ZERO,
-            prev_hash: Hash32::ZERO,
-            issuer_vkey: vec![],
-            vrf_vkey: vec![],
-            vrf_result: torsten_primitives::block::VrfOutput {
-                output: vec![],
-                proof: vec![],
-            },
-            block_number: BlockNo(1),
-            slot: SlotNo(200),
-            epoch_nonce: Hash32::ZERO,
-            body_size: 0,
-            body_hash: Hash32::ZERO,
-            operational_cert: torsten_primitives::block::OperationalCert {
-                hot_vkey: vec![],
-                sequence_number: 0,
-                kes_period: 0,
-                sigma: vec![],
-            },
-            protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
-        };
-
+        let header = make_valid_header(200);
         let result = praos.validate_header(&header, SlotNo(100));
         assert!(matches!(result, Err(ConsensusError::FutureBlock { .. })));
     }
@@ -222,30 +320,115 @@ mod tests {
     #[test]
     fn test_valid_header() {
         let praos = OuroborosPraos::new();
-        let header = BlockHeader {
-            header_hash: Hash32::ZERO,
-            prev_hash: Hash32::ZERO,
-            issuer_vkey: vec![],
-            vrf_vkey: vec![],
-            vrf_result: torsten_primitives::block::VrfOutput {
-                output: vec![],
-                proof: vec![],
-            },
-            block_number: BlockNo(1),
-            slot: SlotNo(100),
-            epoch_nonce: Hash32::ZERO,
-            body_size: 0,
-            body_hash: Hash32::ZERO,
-            operational_cert: torsten_primitives::block::OperationalCert {
-                hot_vkey: vec![],
-                sequence_number: 0,
-                kes_period: 0,
-                sigma: vec![],
-            },
-            protocol_version: torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 },
-        };
-
+        let header = make_valid_header(100);
         let result = praos.validate_header(&header, SlotNo(200));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_empty_issuer_vkey_rejected() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.issuer_vkey = vec![];
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(result, Err(ConsensusError::EmptyIssuerVkey)));
+    }
+
+    #[test]
+    fn test_empty_vrf_key_rejected() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.vrf_vkey = vec![];
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(result, Err(ConsensusError::EmptyVrfKey)));
+    }
+
+    #[test]
+    fn test_invalid_vrf_output_size() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.vrf_result.output = vec![0u8; 16]; // Wrong size
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::InvalidVrfOutputSize(16))
+        ));
+    }
+
+    #[test]
+    fn test_kes_period_validation() {
+        let praos = OuroborosPraos::new();
+        // Block at slot 200,000 is in KES period 1 (200000 / 129600 = 1)
+        let mut header = make_valid_header(200_000);
+        // Set cert KES period to 1 (matches)
+        header.operational_cert.kes_period = 1;
+        assert!(praos.validate_header(&header, SlotNo(300_000)).is_ok());
+    }
+
+    #[test]
+    fn test_kes_period_before_cert_rejected() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        // Block at slot 100 is in KES period 0, but cert says period 5
+        header.operational_cert.kes_period = 5;
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::KesPeriodBeforeCert { .. })
+        ));
+    }
+
+    #[test]
+    fn test_kes_expired_rejected() {
+        let praos = OuroborosPraos::new();
+        // Block at slot 129600 * 63 = 8,164,800 (KES period 63)
+        let slot = KES_PERIOD_SLOTS * 63;
+        let mut header = make_valid_header(slot);
+        // Cert started at period 0, so 63 evolutions > max 62
+        header.operational_cert.kes_period = 0;
+        let result = praos.validate_header(&header, SlotNo(slot + 1000));
+        assert!(matches!(result, Err(ConsensusError::KesExpired { .. })));
+    }
+
+    #[test]
+    fn test_kes_at_max_evolution_ok() {
+        let praos = OuroborosPraos::new();
+        // 61 evolutions (0..61) should be OK (< MAX_KES_EVOLUTIONS which is 62)
+        let slot = KES_PERIOD_SLOTS * 61;
+        let mut header = make_valid_header(slot);
+        header.operational_cert.kes_period = 0;
+        assert!(praos.validate_header(&header, SlotNo(slot + 1000)).is_ok());
+    }
+
+    #[test]
+    fn test_empty_opcert_hot_vkey_rejected() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.operational_cert.hot_vkey = vec![];
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::InvalidOperationalCert)
+        ));
+    }
+
+    #[test]
+    fn test_empty_opcert_sigma_rejected() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.operational_cert.sigma = vec![];
+        let result = praos.validate_header(&header, SlotNo(200));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::InvalidOperationalCert)
+        ));
+    }
+
+    #[test]
+    fn test_64_byte_vrf_output_valid() {
+        let praos = OuroborosPraos::new();
+        let mut header = make_valid_header(100);
+        header.vrf_result.output = vec![0u8; 64]; // TPraos compatibility
+        assert!(praos.validate_header(&header, SlotNo(200)).is_ok());
     }
 }

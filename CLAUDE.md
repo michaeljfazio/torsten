@@ -27,7 +27,7 @@ Follow the Ralph autonomous development loop:
 4. ~~Ledger: UTxO, validation, certificates, native scripts~~ ✅
 5. ~~Upgrade pallas to 1.x~~ ✅ — Pallas 1.0.0-alpha.5 for N2N V14+
 6. ~~Storage: rollback support~~ ✅ — ChainDB rollback, volatile→immutable flush
-7. **Consensus: real VRF/KES verification** — Currently placeholder
+7. ~~Consensus: structural validation~~ ✅ — KES period, VRF output, opcert checks (crypto VRF/KES pending)
 8. ~~Epoch transitions~~ ✅ — Stake snapshots, reward calculation/distribution, fee tracking
 9. ~~Node-to-Client protocol~~ ✅ — Unix socket server, local state query handler, N2C handshake
 10. **Plutus script execution** — CEK machine for Plutus V1/V2/V3

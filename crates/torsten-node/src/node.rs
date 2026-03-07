@@ -202,6 +202,17 @@ impl Node {
                                             error!("Failed to store block: {e}");
                                         }
 
+                                        // Validate block header against consensus rules
+                                        // (skip for Byron-era blocks which have different structure)
+                                        if block.era.is_shelley_based() {
+                                            if let Err(e) = self.consensus.validate_header(
+                                                &block.header,
+                                                block.slot(), // accept the block's own slot during sync
+                                            ) {
+                                                warn!(slot, "Consensus validation warning: {e}");
+                                            }
+                                        }
+
                                         // Apply block to ledger state
                                         if let Err(e) = self.ledger_state.apply_block(&block) {
                                             error!("Failed to apply block to ledger: {e}");
