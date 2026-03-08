@@ -1,3 +1,4 @@
+use crate::plutus::SlotConfig;
 use crate::utxo::UtxoSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -70,6 +71,8 @@ pub struct LedgerState {
     pub genesis_hash: Hash32,
     /// Conway governance state
     pub governance: GovernanceState,
+    /// Slot configuration for Plutus time conversion
+    pub slot_config: SlotConfig,
 }
 
 /// Conway-era governance state (CIP-1694)
@@ -181,7 +184,19 @@ impl LedgerState {
             prev_epoch_first_block_hash: None,
             genesis_hash: Hash32::ZERO,
             governance: GovernanceState::default(),
+            slot_config: SlotConfig::default(),
         }
+    }
+
+    /// Set the slot configuration for Plutus time conversion
+    pub fn set_slot_config(&mut self, slot_config: SlotConfig) {
+        self.slot_config = slot_config;
+        info!(
+            zero_time = slot_config.zero_time,
+            zero_slot = slot_config.zero_slot,
+            slot_length = slot_config.slot_length,
+            "Ledger: slot config set for Plutus evaluation"
+        );
     }
 
     /// Configure the epoch length (from Shelley genesis)

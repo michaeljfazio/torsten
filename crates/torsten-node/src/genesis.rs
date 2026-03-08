@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use torsten_ledger::SlotConfig;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::Rational;
 use torsten_primitives::value::Lovelace;
@@ -233,6 +234,21 @@ impl ShelleyGenesis {
         params.protocol_version_minor = gp.protocol_version.minor;
         params.active_slots_coeff = self.active_slots_coeff;
     }
+
+    /// Derive the SlotConfig for Plutus time conversion from Shelley genesis.
+    ///
+    /// system_start is an ISO-8601 timestamp (e.g. "2022-10-25T00:00:00Z").
+    /// On mainnet, Shelley started at a later slot; for testnets zero_slot is typically 0.
+    pub fn slot_config(&self) -> SlotConfig {
+        let zero_time = chrono::DateTime::parse_from_rfc3339(&self.system_start)
+            .map(|dt| dt.timestamp_millis() as u64)
+            .unwrap_or(0);
+        SlotConfig {
+            zero_time,
+            zero_slot: 0,
+            slot_length: self.slot_length as u32,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -321,6 +337,61 @@ impl AlonzoGenesis {
             // But Babbage uses adaPerUTxOByte directly; for Alonzo era we approximate
             params.ada_per_utxo_byte = Lovelace(lovelace_per_word / 8);
         }
+
+        // Cost models
+        if let Some(v1_value) = self.cost_models.get("PlutusV1") {
+            if let Some(costs) = parse_cost_model(v1_value) {
+                info!(count = costs.len(), "Loaded PlutusV1 cost model");
+                params.cost_models.plutus_v1 = Some(costs);
+            }
+        }
+        if let Some(v2_value) = self.cost_models.get("PlutusV2") {
+            if let Some(costs) = parse_cost_model(v2_value) {
+                info!(count = costs.len(), "Loaded PlutusV2 cost model");
+                params.cost_models.plutus_v2 = Some(costs);
+            }
+        }
+        // PlutusV3 may also appear in Alonzo genesis on newer testnets
+        if let Some(v3_value) = self.cost_models.get("PlutusV3") {
+            if let Some(costs) = parse_cost_model(v3_value) {
+                info!(
+                    count = costs.len(),
+                    "Loaded PlutusV3 cost model from Alonzo genesis"
+                );
+                params.cost_models.plutus_v3 = Some(costs);
+            }
+        }
+    }
+}
+
+/// Parse a cost model from JSON (either an array of ints, or a map of string->int)
+fn parse_cost_model(value: &serde_json::Value) -> Option<Vec<i64>> {
+    match value {
+        serde_json::Value::Array(arr) => {
+            let costs: Vec<i64> = arr.iter().filter_map(|v| v.as_i64()).collect();
+            if costs.len() == arr.len() {
+                Some(costs)
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Cost models may be encoded as {"key-0": val, "key-1": val, ...}
+            let mut indexed: Vec<(usize, i64)> = Vec::new();
+            for (k, v) in map {
+                if let Some(idx) = k.strip_prefix("key-").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(val) = v.as_i64() {
+                        indexed.push((idx, val));
+                    }
+                }
+            }
+            if indexed.is_empty() {
+                return None;
+            }
+            indexed.sort_by_key(|(idx, _)| *idx);
+            Some(indexed.into_iter().map(|(_, v)| v).collect())
+        }
+        _ => None,
     }
 }
 
@@ -424,6 +495,15 @@ impl ConwayGenesis {
         // ppParamChange uses the average of network/economic/technical/gov group thresholds
         // In practice, the protocol uses the most restrictive of the group thresholds
         params.dvt_p_param_change = float_to_rational(dvt.pp_gov_group);
+
+        // PlutusV3 cost model from Conway genesis
+        if let Some(v3) = &self.plutus_v3_cost_model {
+            info!(
+                count = v3.len(),
+                "Loaded PlutusV3 cost model from Conway genesis"
+            );
+            params.cost_models.plutus_v3 = Some(v3.clone());
+        }
 
         // Pool voting thresholds
         let pvt = &self.pool_voting_thresholds;

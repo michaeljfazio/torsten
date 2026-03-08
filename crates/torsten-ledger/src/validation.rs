@@ -1,3 +1,4 @@
+use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoSet;
 use std::collections::{BTreeMap, HashSet};
 use torsten_primitives::hash::{Hash32, PolicyId};
@@ -62,6 +63,7 @@ pub fn validate_transaction(
     params: &ProtocolParameters,
     current_slot: u64,
     tx_size: u64,
+    slot_config: Option<&SlotConfig>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -315,6 +317,19 @@ pub fn validate_transaction(
         if total_mem > params.max_tx_ex_units.mem || total_steps > params.max_tx_ex_units.steps {
             errors.push(ValidationError::ExUnitsExceeded);
         }
+
+        // Phase-2: Execute Plutus scripts if we have raw CBOR and a slot config
+        if errors.is_empty() && tx.raw_cbor.is_some() {
+            if let Some(sc) = slot_config {
+                let cost_models_cbor = params.cost_models.to_cbor();
+                let max_ex = (params.max_tx_ex_units.mem, params.max_tx_ex_units.steps);
+                if let Err(e) =
+                    evaluate_plutus_scripts(tx, utxo_set, cost_models_cbor.as_deref(), max_ex, sc)
+                {
+                    errors.push(ValidationError::ScriptFailed(e.to_string()));
+                }
+            }
+        }
     }
 
     if errors.is_empty() {
@@ -513,7 +528,7 @@ mod tests {
         // fee (200000) + output (9800000) = 10000000 = input value
         let tx = make_simple_tx(input, 9_800_000, 200_000);
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -531,7 +546,7 @@ mod tests {
         );
         tx.body.inputs.clear();
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -549,7 +564,7 @@ mod tests {
         };
         let tx = make_simple_tx(missing_input, 9_800_000, 200_000);
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -560,7 +575,7 @@ mod tests {
         // output + fee > input value
         let tx = make_simple_tx(input, 10_000_000, 200_000);
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -571,7 +586,7 @@ mod tests {
         // Fee of 100 is way below minimum
         let tx = make_simple_tx(input, 9_999_900, 100);
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -582,7 +597,7 @@ mod tests {
         // Output of 1000 lovelace is below minimum UTxO
         let tx = make_simple_tx(input, 1000, 9_999_000);
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -593,7 +608,7 @@ mod tests {
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
         tx.body.ttl = Some(SlotNo(50)); // TTL in the past
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -604,7 +619,7 @@ mod tests {
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
         tx.body.validity_interval_start = Some(SlotNo(200)); // Not valid yet
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -615,7 +630,7 @@ mod tests {
         let tx = make_simple_tx(input, 9_800_000, 200_000);
 
         // Pass a tx_size larger than max
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 20000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 20000, None);
         assert!(result.is_err());
     }
 
@@ -747,7 +762,7 @@ mod tests {
             ),
         ));
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -765,7 +780,7 @@ mod tests {
             ),
         ));
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -782,7 +797,7 @@ mod tests {
             ),
         ));
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
     }
 
@@ -890,7 +905,7 @@ mod tests {
             raw_cbor: None,
         };
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -979,7 +994,7 @@ mod tests {
             raw_cbor: None,
         };
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1010,7 +1025,7 @@ mod tests {
         tx.body.outputs[0].value = output_value;
         tx.body.mint = mint;
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -1059,7 +1074,7 @@ mod tests {
         tx.body.outputs[0].value = output_value;
         tx.body.mint = mint;
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -1123,7 +1138,7 @@ mod tests {
 
         let params = ProtocolParameters::mainnet_defaults();
         let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -1137,7 +1152,7 @@ mod tests {
             index: 0,
         };
         let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![missing_col]);
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1194,7 +1209,7 @@ mod tests {
 
         let params = ProtocolParameters::mainnet_defaults();
         let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1246,7 +1261,7 @@ mod tests {
 
         let params = ProtocolParameters::mainnet_defaults();
         let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, collateral);
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1298,7 +1313,7 @@ mod tests {
             steps: u64::MAX,
         };
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1345,7 +1360,7 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
         tx.body.reference_inputs = vec![ref_input];
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 
@@ -1361,7 +1376,7 @@ mod tests {
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
         tx.body.reference_inputs = vec![missing_ref];
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1378,7 +1393,7 @@ mod tests {
         let mut tx = make_simple_tx(input.clone(), 9_800_000, 200_000);
         tx.body.reference_inputs = vec![input];
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors
@@ -1395,7 +1410,7 @@ mod tests {
         // Require a signer that doesn't exist in witnesses
         tx.body.required_signers = vec![Hash32::from_bytes([0xAA; 32])];
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors

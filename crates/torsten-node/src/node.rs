@@ -221,6 +221,7 @@ impl Node {
                     // Re-apply genesis config in case it changed
                     if let Some(ref genesis) = shelley_genesis {
                         state.epoch_length = genesis.epoch_length;
+                        state.set_slot_config(genesis.slot_config());
                     }
                     if let Some(hash) = shelley_genesis_hash {
                         state.genesis_hash = hash;
@@ -238,6 +239,7 @@ impl Node {
                     let mut ledger = LedgerState::new(protocol_params.clone());
                     if let Some(ref genesis) = shelley_genesis {
                         ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+                        ledger.set_slot_config(genesis.slot_config());
                     }
                     if let Some(hash) = shelley_genesis_hash {
                         ledger.set_genesis_hash(hash);
@@ -250,6 +252,7 @@ impl Node {
             // Apply epoch length and genesis hash from Shelley genesis
             if let Some(ref genesis) = shelley_genesis {
                 ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+                ledger.set_slot_config(genesis.slot_config());
             }
             if let Some(hash) = shelley_genesis_hash {
                 ledger.set_genesis_hash(hash);

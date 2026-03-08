@@ -13,7 +13,7 @@ pub enum PlutusError {
 }
 
 /// Slot configuration for Plutus time conversion
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct SlotConfig {
     /// POSIX time of slot 0 in milliseconds
     pub zero_time: u64,
