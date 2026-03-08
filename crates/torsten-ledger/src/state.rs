@@ -607,17 +607,19 @@ impl LedgerState {
             .filter(|(_, state)| state.expires_epoch <= new_epoch)
             .map(|(id, _)| id.clone())
             .collect();
-        for action_id in &expired {
-            // Return deposit for expired proposals
-            debug!(
-                "Governance proposal expired: {:?} (deposit returned)",
-                action_id
-            );
-            self.governance.proposals.remove(action_id);
-            // Remove associated votes
-            self.governance.votes.retain(|(_, id), _| id != action_id);
-        }
         if !expired.is_empty() {
+            for action_id in &expired {
+                debug!(
+                    "Governance proposal expired: {:?} (deposit returned)",
+                    action_id
+                );
+                self.governance.proposals.remove(action_id);
+            }
+            // Remove all votes for expired proposals in a single pass
+            let expired_set: std::collections::HashSet<&GovActionId> = expired.iter().collect();
+            self.governance
+                .votes
+                .retain(|(_, id), _| !expired_set.contains(id));
             debug!(
                 "Expired {} governance proposals at epoch {}",
                 expired.len(),
@@ -898,15 +900,18 @@ impl LedgerState {
             .collect();
 
         // Enact ratified proposals
-        for (action_id, action) in &ratified {
-            info!("Governance proposal ratified: {:?}", action_id);
-            self.enact_gov_action(action);
-            // Remove the proposal and its votes
-            self.governance.proposals.remove(action_id);
-            self.governance.votes.retain(|(_, id), _| id != action_id);
-        }
-
         if !ratified.is_empty() {
+            for (action_id, action) in &ratified {
+                info!("Governance proposal ratified: {:?}", action_id);
+                self.enact_gov_action(action);
+                self.governance.proposals.remove(action_id);
+            }
+            // Remove all votes for ratified proposals in a single pass
+            let ratified_set: std::collections::HashSet<&GovActionId> =
+                ratified.iter().map(|(id, _)| id).collect();
+            self.governance
+                .votes
+                .retain(|(_, id), _| !ratified_set.contains(id));
             info!(
                 "{} governance proposal(s) ratified and enacted",
                 ratified.len()
@@ -1068,23 +1073,15 @@ impl LedgerState {
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
+    /// All vote delegation types (KeyHash, ScriptHash, Abstain, NoConfidence) count.
     fn compute_total_drep_stake(&self) -> u64 {
-        let mut total = 0u64;
-        for (stake_cred, drep) in &self.governance.vote_delegations {
-            match drep {
-                DRep::KeyHash(_) | DRep::ScriptHash(_) => {
-                    if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
-                        total += stake.0;
-                    }
-                }
-                // Abstain and NoConfidence delegations count toward total active voting stake
-                DRep::Abstain | DRep::NoConfidence => {
-                    if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
-                        total += stake.0;
-                    }
-                }
-            }
-        }
+        let total: u64 = self
+            .governance
+            .vote_delegations
+            .keys()
+            .filter_map(|stake_cred| self.stake_distribution.stake_map.get(stake_cred))
+            .map(|stake| stake.0)
+            .sum();
         total.max(1) // Ensure non-zero to avoid division by zero
     }
 
