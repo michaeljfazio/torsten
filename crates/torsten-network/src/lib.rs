@@ -15,6 +15,6 @@ pub use n2c_client::N2CClient;
 pub use n2c_server::{N2CServer, TxValidator};
 pub use n2n_server::{BlockProvider, N2NServer};
 pub use peer::PeerConnection;
-pub use peer_manager::{DiffusionMode, PeerManager, PeerManagerConfig};
+pub use peer_manager::{DiffusionMode, PeerManager, PeerManagerConfig, PeerPerformance};
 pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};
 pub use server::NodeServer;

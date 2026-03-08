@@ -173,6 +173,7 @@ pub struct Node {
     #[allow(dead_code)]
     server: NodeServer,
     query_handler: Arc<RwLock<QueryHandler>>,
+    peer_manager: Arc<RwLock<PeerManager>>,
     socket_path: PathBuf,
     database_path: PathBuf,
     listen_addr: std::net::SocketAddr,
@@ -399,6 +400,7 @@ impl Node {
             mempool,
             server,
             query_handler,
+            peer_manager: Arc::new(RwLock::new(PeerManager::new(PeerManagerConfig::default()))),
             socket_path,
             database_path: args.database_path,
             listen_addr,
@@ -453,12 +455,15 @@ impl Node {
         });
 
         // Initialize peer manager
-        let pm_config = PeerManagerConfig {
-            diffusion_mode: DiffusionMode::InitiatorAndResponder,
-            peer_sharing_enabled: true,
-            ..PeerManagerConfig::default()
-        };
-        let peer_manager = Arc::new(RwLock::new(PeerManager::new(pm_config.clone())));
+        {
+            let pm_config = PeerManagerConfig {
+                diffusion_mode: DiffusionMode::InitiatorAndResponder,
+                peer_sharing_enabled: true,
+                ..PeerManagerConfig::default()
+            };
+            *self.peer_manager.write().await = PeerManager::new(pm_config);
+        }
+        let peer_manager = self.peer_manager.clone();
 
         // Register topology peers in the peer manager with full metadata
         let detailed_peers = self.topology.detailed_peers();
@@ -544,13 +549,13 @@ impl Node {
                 chain_db: self.chain_db.clone(),
             }),
             200,
-            pm_config.diffusion_mode == DiffusionMode::InitiatorAndResponder,
+            self.peer_manager.read().await.diffusion_mode() == DiffusionMode::InitiatorAndResponder,
             torsten_network::n2n_server::PeerSharingMode::PeerSharingEnabled,
         );
         n2n_server.set_mempool(self.mempool.clone());
         info!(
             "N2N server: diffusion_mode={:?}, peer_sharing=enabled",
-            pm_config.diffusion_mode
+            self.peer_manager.read().await.diffusion_mode()
         );
         tokio::spawn(async move {
             if let Err(e) = n2n_server.listen().await {
@@ -687,11 +692,16 @@ impl Node {
                 for addr in &targets {
                     let target = addr.to_string();
                     info!("Connecting to peer {target}...");
+                    let connect_start = std::time::Instant::now();
                     match NodeToNodeClient::connect(&*target, network_magic).await {
                         Ok(c) => {
-                            peer_manager.write().await.peer_connected(addr, 14, true);
-                            peer_manager.write().await.promote_to_hot(addr);
-                            info!("Connected to {target}");
+                            let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+                            let mut pm = peer_manager.write().await;
+                            pm.peer_connected(addr, 14, true);
+                            pm.record_handshake_rtt(addr, rtt_ms);
+                            pm.promote_to_hot(addr);
+                            drop(pm);
+                            info!("Connected to {target} (handshake {rtt_ms:.0}ms)");
                             client = Some((c, *addr));
                             break;
                         }
@@ -763,10 +773,15 @@ impl Node {
 
                 for addr in &additional_peers {
                     let target = addr.to_string();
+                    let connect_start = std::time::Instant::now();
                     match NodeToNodeClient::connect(&*target, network_magic).await {
                         Ok(c) => {
-                            info!("Connected block fetcher to {target}");
-                            peer_manager.write().await.peer_connected(addr, 14, true);
+                            let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+                            let mut pm = peer_manager.write().await;
+                            pm.peer_connected(addr, 14, true);
+                            pm.record_handshake_rtt(addr, rtt_ms);
+                            drop(pm);
+                            info!("Connected block fetcher to {target} (handshake {rtt_ms:.0}ms)");
                             fetch_pool.add_fetcher(c);
                         }
                         Err(e) => {
@@ -785,7 +800,7 @@ impl Node {
             // Run chain sync with connected peer + fetch pool
             let sync_shutdown = shutdown_rx.clone();
             match self
-                .chain_sync_loop(&mut active_client, fetch_pool, sync_shutdown)
+                .chain_sync_loop(&mut active_client, fetch_pool, sync_shutdown, peer_addr)
                 .await
             {
                 Ok(()) => {
@@ -829,6 +844,7 @@ impl Node {
         client: &mut NodeToNodeClient,
         fetch_pool: BlockFetchPool,
         mut shutdown_rx: watch::Receiver<bool>,
+        peer_addr: std::net::SocketAddr,
     ) -> Result<()> {
         // Find intersection with our current chain
         let chain_tip = self.chain_db.read().await.get_tip().point;
@@ -878,8 +894,14 @@ impl Node {
                             Ok(batch_result) => {
                                 match batch_result {
                                     HeaderBatchResult::Headers(headers, tip) => {
+                                        let fetch_start = std::time::Instant::now();
+                                        let header_count = headers.len() as u64;
                                         match fetch_pool.fetch_blocks_concurrent(&headers).await {
                                             Ok(blocks) => {
+                                                let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                                self.peer_manager.write().await.record_block_fetch(
+                                                    &peer_addr, fetch_ms, header_count, 0,
+                                                );
                                                 self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                             }
                                             Err(e) => {
@@ -1112,6 +1134,8 @@ impl Node {
             *blocks_since_last_log = 0;
             if last_query_update.elapsed().as_secs() >= 30 {
                 self.update_query_state().await;
+                // Recompute peer reputations periodically
+                self.peer_manager.write().await.recompute_reputations();
                 *last_query_update = std::time::Instant::now();
             }
         }

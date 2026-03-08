@@ -60,6 +60,113 @@ pub struct PeerInfo {
     pub remote_tip_slot: Option<u64>,
     /// Connection direction
     pub is_initiator: Option<bool>,
+    /// Performance metrics for adaptive peer selection
+    pub performance: PeerPerformance,
+}
+
+/// Performance metrics tracked per peer for adaptive selection
+#[derive(Debug, Clone)]
+pub struct PeerPerformance {
+    /// Exponentially weighted moving average of handshake RTT in milliseconds
+    pub avg_handshake_rtt_ms: Option<f64>,
+    /// Exponentially weighted moving average of block fetch time in milliseconds
+    pub avg_block_fetch_ms: Option<f64>,
+    /// Total bytes received from this peer
+    pub bytes_received: u64,
+    /// Total blocks successfully fetched from this peer
+    pub blocks_fetched: u64,
+    /// Number of successful interactions (connects, fetches)
+    pub success_count: u64,
+    /// Timestamp of last successful block fetch
+    pub last_good_fetch: Option<Instant>,
+    /// Computed reputation score (0.0 = worst, 1.0 = best)
+    pub reputation: f64,
+}
+
+impl Default for PeerPerformance {
+    fn default() -> Self {
+        PeerPerformance {
+            avg_handshake_rtt_ms: None,
+            avg_block_fetch_ms: None,
+            bytes_received: 0,
+            blocks_fetched: 0,
+            success_count: 0,
+            last_good_fetch: None,
+            reputation: 0.5, // Neutral starting reputation
+        }
+    }
+}
+
+/// EWMA smoothing factor (higher = more weight on recent observations)
+const EWMA_ALPHA: f64 = 0.3;
+
+impl PeerPerformance {
+    /// Record a handshake latency measurement
+    pub fn record_handshake_rtt(&mut self, rtt_ms: f64) {
+        self.avg_handshake_rtt_ms = Some(match self.avg_handshake_rtt_ms {
+            Some(avg) => avg * (1.0 - EWMA_ALPHA) + rtt_ms * EWMA_ALPHA,
+            None => rtt_ms,
+        });
+        self.success_count += 1;
+    }
+
+    /// Record a block fetch latency measurement (per block)
+    pub fn record_block_fetch(&mut self, fetch_ms: f64, block_count: u64, bytes: u64) {
+        let per_block_ms = if block_count > 0 {
+            fetch_ms / block_count as f64
+        } else {
+            fetch_ms
+        };
+        self.avg_block_fetch_ms = Some(match self.avg_block_fetch_ms {
+            Some(avg) => avg * (1.0 - EWMA_ALPHA) + per_block_ms * EWMA_ALPHA,
+            None => per_block_ms,
+        });
+        self.blocks_fetched += block_count;
+        self.bytes_received += bytes;
+        self.success_count += 1;
+        self.last_good_fetch = Some(Instant::now());
+    }
+
+    /// Compute the reputation score based on all metrics.
+    /// Returns a value in [0.0, 1.0] where higher is better.
+    pub fn compute_reputation(&mut self, failure_count: u32) -> f64 {
+        let mut score = 0.5_f64;
+
+        // Latency component: lower handshake RTT is better
+        // Baseline: 200ms is average, <50ms is excellent, >1000ms is poor
+        if let Some(rtt) = self.avg_handshake_rtt_ms {
+            let latency_score = (1.0 - (rtt / 2000.0).min(1.0)).max(0.0);
+            score += 0.15 * (latency_score - 0.5);
+        }
+
+        // Block fetch speed: lower per-block time is better
+        // Baseline: 50ms/block is average
+        if let Some(fetch_ms) = self.avg_block_fetch_ms {
+            let fetch_score = (1.0 - (fetch_ms / 200.0).min(1.0)).max(0.0);
+            score += 0.2 * (fetch_score - 0.5);
+        }
+
+        // Volume component: peers that have served more blocks are more reliable
+        let volume_score = (self.blocks_fetched as f64 / 10000.0).min(1.0);
+        score += 0.1 * (volume_score - 0.5);
+
+        // Reliability: ratio of successes vs failures
+        let total = self.success_count + failure_count as u64;
+        if total > 0 {
+            let reliability = self.success_count as f64 / total as f64;
+            score += 0.15 * (reliability - 0.5);
+        }
+
+        // Recency: peers with recent activity are preferred
+        if let Some(last_fetch) = self.last_good_fetch {
+            let minutes_ago = last_fetch.elapsed().as_secs_f64() / 60.0;
+            let recency_score = (1.0 - (minutes_ago / 60.0).min(1.0)).max(0.0);
+            score += 0.1 * (recency_score - 0.5);
+        }
+
+        self.reputation = score.clamp(0.0, 1.0);
+        self.reputation
+    }
 }
 
 impl PeerInfo {
@@ -76,6 +183,7 @@ impl PeerInfo {
             version: None,
             remote_tip_slot: None,
             is_initiator: None,
+            performance: PeerPerformance::default(),
         }
     }
 
@@ -92,6 +200,38 @@ impl PeerInfo {
                 t.elapsed() >= delay
             }
         }
+    }
+
+    /// Compute a selection score for ranking peers.
+    /// Higher score = more preferred for connection.
+    pub fn selection_score(&self) -> f64 {
+        let mut score = self.performance.reputation;
+
+        // Bonus for trustable peers (from topology)
+        if self.is_trustable {
+            score += 0.2;
+        }
+
+        // Bonus for config-sourced peers (most reliable)
+        match self.source {
+            PeerSource::Config => score += 0.1,
+            PeerSource::PeerSharing => {}
+            PeerSource::Ledger => score += 0.05,
+        }
+
+        // Penalty for failure history
+        if self.failure_count > 0 {
+            score -= (self.failure_count as f64 * 0.05).min(0.3);
+        }
+
+        // Bonus for peers with known recent tip
+        if let Some(tip_slot) = self.remote_tip_slot {
+            if tip_slot > 0 {
+                score += 0.05;
+            }
+        }
+
+        score
     }
 }
 
@@ -283,7 +423,8 @@ impl PeerManager {
             && self.inbound_count < self.config.max_inbound_peers
     }
 
-    /// Get peers that should be connected to (cold peers that need promotion)
+    /// Get peers that should be connected to (cold peers that need promotion),
+    /// ranked by selection score (highest first).
     pub fn peers_to_connect(&self) -> Vec<SocketAddr> {
         let connected = self.hot_peers.len() + self.warm_peers.len();
         let target = self.config.target_hot_peers + self.config.target_warm_peers;
@@ -292,26 +433,108 @@ impl PeerManager {
         }
 
         let needed = target - connected;
-        self.cold_peers
+        let mut candidates: Vec<_> = self
+            .cold_peers
             .iter()
-            .filter(|addr| {
-                self.peers
-                    .get(addr)
-                    .map(|p| p.should_retry())
-                    .unwrap_or(false)
+            .filter_map(|addr| {
+                self.peers.get(addr).and_then(|p| {
+                    if p.should_retry() {
+                        Some((*addr, p.selection_score()))
+                    } else {
+                        None
+                    }
+                })
             })
+            .collect();
+
+        // Sort by score descending (best peers first)
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates
+            .into_iter()
+            .map(|(addr, _)| addr)
             .take(needed)
-            .copied()
             .collect()
     }
 
-    /// Get warm peers that should be promoted to hot
+    /// Get warm peers that should be promoted to hot, ranked by selection score.
     pub fn peers_to_promote(&self) -> Vec<SocketAddr> {
         if self.hot_peers.len() >= self.config.target_hot_peers {
             return vec![];
         }
         let needed = self.config.target_hot_peers - self.hot_peers.len();
-        self.warm_peers.iter().take(needed).copied().collect()
+        let mut candidates: Vec<_> = self
+            .warm_peers
+            .iter()
+            .filter_map(|addr| self.peers.get(addr).map(|p| (*addr, p.selection_score())))
+            .collect();
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates
+            .into_iter()
+            .map(|(addr, _)| addr)
+            .take(needed)
+            .collect()
+    }
+
+    /// Record a handshake latency measurement for a peer
+    pub fn record_handshake_rtt(&mut self, addr: &SocketAddr, rtt_ms: f64) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            info.performance.record_handshake_rtt(rtt_ms);
+            debug!(%addr, rtt_ms, "Recorded handshake RTT");
+        }
+    }
+
+    /// Record a block fetch performance measurement for a peer
+    pub fn record_block_fetch(
+        &mut self,
+        addr: &SocketAddr,
+        fetch_ms: f64,
+        block_count: u64,
+        bytes: u64,
+    ) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            info.performance
+                .record_block_fetch(fetch_ms, block_count, bytes);
+        }
+    }
+
+    /// Recompute reputation scores for all peers
+    pub fn recompute_reputations(&mut self) {
+        for info in self.peers.values_mut() {
+            info.performance.compute_reputation(info.failure_count);
+        }
+    }
+
+    /// Get the best N peers by reputation for block fetching.
+    /// Returns addresses of hot peers sorted by reputation (best first).
+    pub fn best_peers_for_fetch(&self, count: usize) -> Vec<SocketAddr> {
+        let mut candidates: Vec<_> = self
+            .hot_peers
+            .iter()
+            .filter_map(|addr| self.peers.get(addr).map(|p| (*addr, p.selection_score())))
+            .collect();
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates
+            .into_iter()
+            .map(|(addr, _)| addr)
+            .take(count)
+            .collect()
+    }
+
+    /// Get the peer with the worst reputation among hot peers,
+    /// used for demotion during churn.
+    pub fn worst_hot_peer(&self) -> Option<SocketAddr> {
+        self.hot_peers
+            .iter()
+            .filter_map(|addr| self.peers.get(addr).map(|p| (*addr, p.selection_score())))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(addr, _)| addr)
+    }
+
+    /// Get performance info for a peer (for display/metrics)
+    pub fn peer_performance(&self, addr: &SocketAddr) -> Option<&PeerPerformance> {
+        self.peers.get(addr).map(|p| &p.performance)
     }
 
     /// Get the list of hot peer addresses
@@ -348,12 +571,34 @@ impl PeerManager {
 
     /// Get statistics
     pub fn stats(&self) -> PeerManagerStats {
+        let hot_reputations: Vec<f64> = self
+            .hot_peers
+            .iter()
+            .filter_map(|addr| self.peers.get(addr))
+            .map(|p| p.performance.reputation)
+            .collect();
+
+        let avg_hot_reputation = if hot_reputations.is_empty() {
+            0.0
+        } else {
+            hot_reputations.iter().sum::<f64>() / hot_reputations.len() as f64
+        };
+
+        let best_fetch_latency_ms = self
+            .hot_peers
+            .iter()
+            .filter_map(|addr| self.peers.get(addr))
+            .filter_map(|p| p.performance.avg_block_fetch_ms)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
         PeerManagerStats {
             known_peers: self.peers.len(),
             cold_peers: self.cold_peers.len(),
             warm_peers: self.warm_peers.len(),
             hot_peers: self.hot_peers.len(),
             inbound_count: self.inbound_count,
+            avg_hot_reputation,
+            best_fetch_latency_ms,
         }
     }
 }
@@ -366,15 +611,28 @@ pub struct PeerManagerStats {
     pub warm_peers: usize,
     pub hot_peers: usize,
     pub inbound_count: usize,
+    /// Average reputation of hot peers
+    pub avg_hot_reputation: f64,
+    /// Best block fetch latency across hot peers (ms)
+    pub best_fetch_latency_ms: Option<f64>,
 }
 
 impl std::fmt::Display for PeerManagerStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "peers: {} known ({} cold, {} warm, {} hot), {} inbound",
-            self.known_peers, self.cold_peers, self.warm_peers, self.hot_peers, self.inbound_count
-        )
+            "peers: {} known ({} cold, {} warm, {} hot), {} inbound, avg_rep={:.2}",
+            self.known_peers,
+            self.cold_peers,
+            self.warm_peers,
+            self.hot_peers,
+            self.inbound_count,
+            self.avg_hot_reputation
+        )?;
+        if let Some(lat) = self.best_fetch_latency_ms {
+            write!(f, ", best_fetch={lat:.0}ms")?;
+        }
+        Ok(())
     }
 }
 
@@ -594,5 +852,170 @@ mod tests {
         pm.add_ledger_peer(test_addr(3002));
         pm.add_ledger_peer(test_addr(3003)); // At capacity
         assert_eq!(pm.peers.len(), 2);
+    }
+
+    #[test]
+    fn test_peer_performance_handshake_rtt() {
+        let mut perf = PeerPerformance::default();
+        perf.record_handshake_rtt(100.0);
+        assert_eq!(perf.avg_handshake_rtt_ms, Some(100.0));
+        assert_eq!(perf.success_count, 1);
+
+        // EWMA: new avg = 100 * 0.7 + 50 * 0.3 = 85.0
+        perf.record_handshake_rtt(50.0);
+        assert!((perf.avg_handshake_rtt_ms.unwrap() - 85.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_peer_performance_block_fetch() {
+        let mut perf = PeerPerformance::default();
+        perf.record_block_fetch(500.0, 10, 1024 * 100);
+        // 500ms / 10 blocks = 50ms per block
+        assert!((perf.avg_block_fetch_ms.unwrap() - 50.0).abs() < 0.1);
+        assert_eq!(perf.blocks_fetched, 10);
+        assert_eq!(perf.bytes_received, 102400);
+        assert!(perf.last_good_fetch.is_some());
+    }
+
+    #[test]
+    fn test_reputation_scoring() {
+        let mut perf = PeerPerformance::default();
+        // Low latency, fast fetches, lots of blocks
+        perf.record_handshake_rtt(30.0);
+        perf.record_block_fetch(200.0, 100, 1024 * 1024);
+        perf.record_block_fetch(180.0, 100, 1024 * 1024);
+        let score = perf.compute_reputation(0);
+        assert!(
+            score > 0.5,
+            "Good peer should have above-average reputation: {score}"
+        );
+
+        // Poor peer: high latency, slow fetches, failures
+        let mut bad_perf = PeerPerformance::default();
+        bad_perf.record_handshake_rtt(1500.0);
+        bad_perf.record_block_fetch(5000.0, 10, 1024);
+        let bad_score = bad_perf.compute_reputation(5);
+        assert!(
+            bad_score < score,
+            "Bad peer should have lower reputation: {bad_score} < {score}"
+        );
+    }
+
+    #[test]
+    fn test_selection_score_trustable_bonus() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let trusted = test_addr(3001);
+        let untrusted = test_addr(3002);
+        pm.add_config_peer(trusted, true, false);
+        pm.add_config_peer(untrusted, false, false);
+
+        let trusted_score = pm.peers[&trusted].selection_score();
+        let untrusted_score = pm.peers[&untrusted].selection_score();
+        assert!(
+            trusted_score > untrusted_score,
+            "Trustable peer should rank higher: {trusted_score} > {untrusted_score}"
+        );
+    }
+
+    #[test]
+    fn test_ranked_peer_selection() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            target_warm_peers: 1,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        // Add a trustable config peer and a regular peer
+        let trustable = test_addr(3001);
+        let regular = test_addr(3002);
+        pm.add_config_peer(trustable, true, false);
+        pm.add_config_peer(regular, false, false);
+
+        let to_connect = pm.peers_to_connect();
+        assert_eq!(to_connect.len(), 2);
+        // Trustable peer should be first (higher score)
+        assert_eq!(to_connect[0], trustable);
+    }
+
+    #[test]
+    fn test_ranked_promotion() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        let fast_peer = test_addr(3001);
+        let slow_peer = test_addr(3002);
+        pm.add_config_peer(fast_peer, true, false);
+        pm.add_config_peer(slow_peer, false, false);
+        pm.peer_connected(&fast_peer, 14, true);
+        pm.peer_connected(&slow_peer, 14, true);
+
+        // Give fast peer better latency
+        pm.record_handshake_rtt(&fast_peer, 20.0);
+        pm.record_handshake_rtt(&slow_peer, 800.0);
+        pm.recompute_reputations();
+
+        let to_promote = pm.peers_to_promote();
+        assert_eq!(to_promote.len(), 1);
+        assert_eq!(to_promote[0], fast_peer);
+    }
+
+    #[test]
+    fn test_best_peers_for_fetch() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let fast = test_addr(3001);
+        let slow = test_addr(3002);
+        pm.add_config_peer(fast, true, false);
+        pm.add_config_peer(slow, false, false);
+        pm.peer_connected(&fast, 14, true);
+        pm.peer_connected(&slow, 14, true);
+        pm.promote_to_hot(&fast);
+        pm.promote_to_hot(&slow);
+
+        pm.record_block_fetch(&fast, 100.0, 50, 50000);
+        pm.record_block_fetch(&slow, 2000.0, 50, 50000);
+        pm.recompute_reputations();
+
+        let best = pm.best_peers_for_fetch(2);
+        assert_eq!(best.len(), 2);
+        assert_eq!(best[0], fast);
+    }
+
+    #[test]
+    fn test_worst_hot_peer() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let good = test_addr(3001);
+        let bad = test_addr(3002);
+        pm.add_config_peer(good, true, false);
+        pm.add_config_peer(bad, false, false);
+        pm.peer_connected(&good, 14, true);
+        pm.peer_connected(&bad, 14, true);
+        pm.promote_to_hot(&good);
+        pm.promote_to_hot(&bad);
+
+        pm.record_handshake_rtt(&good, 20.0);
+        pm.record_handshake_rtt(&bad, 1500.0);
+        pm.recompute_reputations();
+
+        let worst = pm.worst_hot_peer();
+        assert_eq!(worst, Some(bad));
+    }
+
+    #[test]
+    fn test_stats_includes_performance() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, true);
+        pm.promote_to_hot(&addr);
+        pm.record_block_fetch(&addr, 100.0, 10, 10000);
+        pm.recompute_reputations();
+
+        let stats = pm.stats();
+        assert!(stats.avg_hot_reputation > 0.0);
+        assert!(stats.best_fetch_latency_ms.is_some());
     }
 }
