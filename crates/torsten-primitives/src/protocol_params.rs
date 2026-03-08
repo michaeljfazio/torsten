@@ -67,6 +67,15 @@ pub struct ProtocolParameters {
     // Protocol version
     pub protocol_version_major: u64,
     pub protocol_version_minor: u64,
+
+    // Consensus
+    /// Active slot coefficient (probability of a slot having a block)
+    #[serde(default = "default_active_slot_coeff")]
+    pub active_slots_coeff: f64,
+}
+
+fn default_active_slot_coeff() -> f64 {
+    0.05
 }
 
 impl ProtocolParameters {
@@ -77,7 +86,7 @@ impl ProtocolParameters {
 
     /// Active slot coefficient (1/20 = 0.05 on mainnet)
     pub fn active_slot_coeff(&self) -> f64 {
-        0.05 // TODO: make configurable per-network
+        self.active_slots_coeff
     }
 
     /// Calculate minimum UTxO value (ada-only)
@@ -182,6 +191,7 @@ impl ProtocolParameters {
             },
             protocol_version_major: 9,
             protocol_version_minor: 0,
+            active_slots_coeff: 0.05,
         }
     }
 }

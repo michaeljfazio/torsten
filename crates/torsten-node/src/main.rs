@@ -1,4 +1,5 @@
 mod config;
+mod genesis;
 mod metrics;
 mod node;
 mod topology;

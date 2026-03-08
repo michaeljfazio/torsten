@@ -18,6 +18,7 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_storage::ChainDB;
 
 use crate::config::NodeConfig;
+use crate::genesis::ShelleyGenesis;
 use crate::topology::Topology;
 
 pub struct NodeArgs {
@@ -73,6 +74,7 @@ pub struct Node {
     server: NodeServer,
     query_handler: Arc<RwLock<QueryHandler>>,
     socket_path: PathBuf,
+    shelley_genesis: Option<ShelleyGenesis>,
 }
 
 impl Node {
@@ -80,7 +82,29 @@ impl Node {
         let chain_db = ChainDB::open(&args.database_path)?;
         info!("ChainDB opened at {}", args.database_path.display());
 
-        let protocol_params = ProtocolParameters::mainnet_defaults();
+        let mut protocol_params = ProtocolParameters::mainnet_defaults();
+
+        // Load Shelley genesis if configured
+        let shelley_genesis = if let Some(ref genesis_path) = args.config.shelley_genesis_file {
+            let genesis_path = std::path::Path::new(genesis_path);
+            match ShelleyGenesis::load(genesis_path) {
+                Ok(genesis) => {
+                    info!(
+                        "Shelley genesis loaded: magic={}, system_start={}, epoch_length={}",
+                        genesis.network_magic, genesis.system_start, genesis.epoch_length
+                    );
+                    genesis.apply_to_protocol_params(&mut protocol_params);
+                    Some(genesis)
+                }
+                Err(e) => {
+                    warn!("Failed to load Shelley genesis: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let ledger_state = Arc::new(RwLock::new(LedgerState::new(protocol_params)));
         info!("Ledger state initialized");
 
@@ -115,6 +139,7 @@ impl Node {
             server,
             query_handler,
             socket_path,
+            shelley_genesis,
         })
     }
 
@@ -452,7 +477,11 @@ impl Node {
             epoch: ls.epoch,
             era: ls.era.to_era_index(),
             block_number: ls.current_block_number(),
-            system_start: self.config.network.system_start().to_string(),
+            system_start: self
+                .shelley_genesis
+                .as_ref()
+                .map(|g| g.system_start.clone())
+                .unwrap_or_else(|| self.config.network.system_start().to_string()),
             utxo_count: ls.utxo_set.len(),
             delegations_count: ls.delegations.len(),
             pool_count: ls.pool_params.len(),
