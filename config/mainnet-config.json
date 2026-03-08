@@ -8,6 +8,9 @@
   "TargetNumberOfActivePeers": 20,
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
+  "ShelleyGenesisFile": "config/mainnet-shelley-genesis.json",
+  "AlonzoGenesisFile": "config/mainnet-alonzo-genesis.json",
+  "ConwayGenesisFile": "config/mainnet-conway-genesis.json",
   "TraceOptions": {
     "TraceBlockFetchClient": false,
     "TraceBlockFetchServer": false,
