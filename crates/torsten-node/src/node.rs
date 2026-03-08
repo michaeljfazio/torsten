@@ -97,15 +97,13 @@ impl Node {
             max_connections: 200,
         };
         let server = NodeServer::new(server_config);
-        let query_handler = Arc::new(RwLock::new(QueryHandler::new()));
 
-        // Wire up live UTxO provider
-        {
-            let mut qh = query_handler.blocking_write();
-            qh.set_utxo_provider(Arc::new(LedgerUtxoProvider {
-                ledger: ledger_state.clone(),
-            }));
-        }
+        // Wire up live UTxO provider before wrapping in lock
+        let mut qh = QueryHandler::new();
+        qh.set_utxo_provider(Arc::new(LedgerUtxoProvider {
+            ledger: ledger_state.clone(),
+        }));
+        let query_handler = Arc::new(RwLock::new(qh));
 
         Ok(Node {
             config: args.config,
