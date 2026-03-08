@@ -491,11 +491,13 @@ impl Node {
         }
         info!("Remote tip: {remote_tip}");
 
-        // Main sync loop — fetch blocks in batches for faster sync
+        // Main sync loop — fetch blocks in large batches for fast sync
         let mut blocks_received: u64 = 0;
-        let mut last_log_slot: u64 = 0;
         let mut last_snapshot_epoch: u64 = self.ledger_state.read().await.epoch.0;
-        let batch_size = 100;
+        let mut last_log_time = std::time::Instant::now();
+        let mut last_query_update = std::time::Instant::now();
+        let mut blocks_since_last_log: u64 = 0;
+        let batch_size = 500; // Large batches for fast initial sync
 
         loop {
             // Check for shutdown
@@ -508,89 +510,109 @@ impl Node {
                 result = client.request_next_batch(batch_size) => {
                     match result {
                         Ok(events) => {
+                            // Separate RollForward blocks from other events
+                            let mut forward_blocks = Vec::new();
+                            let mut other_events = Vec::new();
+
                             for event in events {
                                 match event {
                                     ChainSyncEvent::RollForward(block, tip) => {
-                                        let slot = block.slot().0;
-                                        let block_no = block.block_number().0;
-                                        let tx_count = block.tx_count();
+                                        forward_blocks.push((block, tip));
+                                    }
+                                    other => other_events.push(other),
+                                }
+                            }
 
-                                        // Store the block
-                                        {
-                                            let mut db = self.chain_db.write().await;
-                                            if let Err(e) = db.add_block(
-                                                *block.hash(),
-                                                block.slot(),
-                                                block.block_number(),
-                                                *block.prev_hash(),
-                                                block.raw_cbor.clone().unwrap_or_default(),
-                                            ) {
-                                                error!("Failed to store block: {e}");
-                                            }
-                                        }
+                            // Process all forward blocks with batched lock acquisition
+                            if !forward_blocks.is_empty() {
+                                let batch_count = forward_blocks.len() as u64;
 
-                                        // Validate block header against consensus rules
-                                        // (skip for Byron-era blocks which have different structure)
-                                        if block.era.is_shelley_based() {
-                                            if let Err(e) = self.consensus.validate_header(
-                                                &block.header,
-                                                block.slot(), // accept the block's own slot during sync
-                                            ) {
-                                                warn!(slot, "Consensus validation warning: {e}");
-                                            }
-                                        }
-
-                                        // Apply block to ledger state
-                                        {
-                                            let mut ls = self.ledger_state.write().await;
-                                            if let Err(e) = ls.apply_block(&block) {
-                                                error!("Failed to apply block to ledger: {e}");
-                                            }
-                                        }
-
-                                        // Update consensus tip
-                                        self.consensus.update_tip(block.tip());
-
-                                        blocks_received += 1;
-
-                                        // Save snapshot on epoch transitions
-                                        {
-                                            let current_epoch = self.ledger_state.read().await.epoch.0;
-                                            if current_epoch > last_snapshot_epoch {
-                                                info!(epoch = current_epoch, "Epoch transition — saving ledger snapshot");
-                                                self.save_ledger_snapshot().await;
-                                                last_snapshot_epoch = current_epoch;
-                                            }
-                                        }
-
-                                        // Log progress periodically
-                                        if slot - last_log_slot >= 10000 || blocks_received <= 5 {
-                                            let tip_slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
-                                            let progress = if tip_slot > 0 {
-                                                (slot as f64 / tip_slot as f64 * 100.0).min(100.0)
-                                            } else {
-                                                0.0
-                                            };
-                                            {
-                                                let ls = self.ledger_state.read().await;
-                                                let utxo_count = ls.utxo_set.len();
-                                                let epoch = ls.epoch.0;
-                                                info!(
-                                                    slot,
-                                                    block_no,
-                                                    tx_count,
-                                                    blocks_received,
-                                                    utxo_count,
-                                                    epoch,
-                                                    progress = format!("{progress:.2}%"),
-                                                    "sync progress"
-                                                );
-                                            }
-                                            last_log_slot = slot;
-                                            // Update N2C query handler with latest state
-                                            self.update_query_state().await;
+                                // Batch write to ChainDB — single lock for entire batch
+                                {
+                                    let mut db = self.chain_db.write().await;
+                                    for (block, _) in &forward_blocks {
+                                        if let Err(e) = db.add_block(
+                                            *block.hash(),
+                                            block.slot(),
+                                            block.block_number(),
+                                            *block.prev_hash(),
+                                            block.raw_cbor.clone().unwrap_or_default(),
+                                        ) {
+                                            error!("Failed to store block: {e}");
                                         }
                                     }
+                                }
+
+                                // Batch apply to ledger — single lock for entire batch
+                                {
+                                    let mut ls = self.ledger_state.write().await;
+                                    for (block, _) in &forward_blocks {
+                                        if let Err(e) = ls.apply_block(block) {
+                                            error!("Failed to apply block to ledger: {e}");
+                                        }
+                                    }
+                                }
+
+                                // Update consensus tip to last block
+                                if let Some((last_block, _)) = forward_blocks.last() {
+                                    self.consensus.update_tip(last_block.tip());
+                                }
+
+                                blocks_received += batch_count;
+                                blocks_since_last_log += batch_count;
+
+                                // Get last block info for logging
+                                let (last_block, last_tip) = forward_blocks.last().unwrap();
+                                let slot = last_block.slot().0;
+                                let block_no = last_block.block_number().0;
+
+                                // Check for epoch transitions — once per batch
+                                {
+                                    let current_epoch = self.ledger_state.read().await.epoch.0;
+                                    if current_epoch > last_snapshot_epoch {
+                                        info!(epoch = current_epoch, "Epoch transition — saving ledger snapshot");
+                                        self.save_ledger_snapshot().await;
+                                        last_snapshot_epoch = current_epoch;
+                                    }
+                                }
+
+                                // Log progress every 5 seconds so user can see sync is active
+                                let elapsed = last_log_time.elapsed();
+                                if elapsed.as_secs() >= 5 || blocks_received <= 5 {
+                                    let tip_slot = last_tip.point.slot().map(|s| s.0).unwrap_or(0);
+                                    let tip_block = last_tip.block_number.0;
+                                    let progress = if tip_slot > 0 {
+                                        (slot as f64 / tip_slot as f64 * 100.0).min(100.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let blocks_per_sec = if elapsed.as_secs_f64() > 0.0 {
+                                        blocks_since_last_log as f64 / elapsed.as_secs_f64()
+                                    } else {
+                                        0.0
+                                    };
+                                    let blocks_remaining = tip_block.saturating_sub(block_no);
+                                    {
+                                        let ls = self.ledger_state.read().await;
+                                        let utxo_count = ls.utxo_set.len();
+                                        let epoch = ls.epoch.0;
+                                        info!(
+                                            "Syncing {progress:.2}% | slot {slot}/{tip_slot} | block {block_no}/{tip_block} | epoch {epoch} | {blocks_per_sec:.0} blocks/s | {utxo_count} UTxOs | {blocks_remaining} blocks remaining"
+                                        );
+                                    }
+                                    last_log_time = std::time::Instant::now();
+                                    blocks_since_last_log = 0;
+                                    // Update N2C query handler every 30 seconds
+                                    if last_query_update.elapsed().as_secs() >= 30 {
+                                        self.update_query_state().await;
+                                        last_query_update = std::time::Instant::now();
+                                    }
+                                }
+                            }
+
+                            // Handle rollbacks and await events
+                            for event in other_events {
+                                match event {
                                     ChainSyncEvent::RollBackward(point, tip) => {
                                         warn!("Rollback to {point}, tip: {tip}");
                                         {
@@ -605,7 +627,10 @@ impl Node {
                                             blocks_received,
                                             "Caught up to chain tip, awaiting new blocks"
                                         );
+                                        // Update query state when caught up
+                                        self.update_query_state().await;
                                     }
+                                    ChainSyncEvent::RollForward(..) => unreachable!(),
                                 }
                             }
                         }

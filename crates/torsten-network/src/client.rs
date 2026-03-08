@@ -155,18 +155,26 @@ impl NodeToNodeClient {
 
     /// Request a batch of blocks from chain sync.
     ///
-    /// Collects headers sequentially, then fetches all blocks in a single
-    /// blockfetch range request, reducing overhead per block.
-    /// Returns a vec of events (RollForward/RollBackward) or Await if caught up.
+    /// Uses sub-batching: collects headers in groups of `sub_batch_size`,
+    /// then immediately fetches and decodes those blocks before collecting
+    /// the next group. This reduces memory pressure and returns events
+    /// incrementally. Block decoding happens on blocking threads.
     pub async fn request_next_batch(
         &mut self,
         batch_size: usize,
     ) -> Result<Vec<ChainSyncEvent>, ClientError> {
-        let mut events = Vec::new();
+        let sub_batch_size = 100; // Fetch blocks every 100 headers
+        let mut events = Vec::with_capacity(batch_size);
         let mut pending_points: Vec<PallasPoint> = Vec::new();
         let mut latest_tip = None;
+        let mut headers_collected = 0;
+        let mut done = false;
 
         for _ in 0..batch_size {
+            if done {
+                break;
+            }
+
             let response = self
                 .peer
                 .chainsync()
@@ -185,6 +193,17 @@ impl NodeToNodeClient {
                     let slot = multi_era_header.slot();
                     let hash = multi_era_header.hash();
                     pending_points.push(PallasPoint::Specific(slot, hash.to_vec()));
+                    headers_collected += 1;
+
+                    // Flush sub-batch when we hit the threshold
+                    if headers_collected % sub_batch_size == 0 && !pending_points.is_empty() {
+                        let tip_ref = latest_tip.as_ref().unwrap();
+                        let fetched = self
+                            .fetch_and_decode_range(&pending_points, tip_ref)
+                            .await?;
+                        events.extend(fetched);
+                        pending_points.clear();
+                    }
                 }
                 NextResponse::RollBackward(point, tip) => {
                     // Flush any pending blocks before the rollback
@@ -200,7 +219,7 @@ impl NodeToNodeClient {
                     let torsten_tip = pallas_tip_to_torsten(&tip);
                     warn!("rollback to {torsten_point}");
                     events.push(ChainSyncEvent::RollBackward(torsten_point, torsten_tip));
-                    break;
+                    done = true;
                 }
                 NextResponse::Await => {
                     // Flush pending blocks, then signal await
@@ -213,12 +232,12 @@ impl NodeToNodeClient {
                         pending_points.clear();
                     }
                     events.push(ChainSyncEvent::Await);
-                    break;
+                    done = true;
                 }
             }
         }
 
-        // Fetch all pending blocks in one range
+        // Flush remaining pending blocks
         if !pending_points.is_empty() {
             let tip_ref = latest_tip.as_ref().unwrap();
             let fetched = self
@@ -230,7 +249,9 @@ impl NodeToNodeClient {
         Ok(events)
     }
 
-    /// Fetch a range of blocks and decode them into ChainSyncEvents
+    /// Fetch a range of blocks and decode them into ChainSyncEvents.
+    /// Block decoding is performed on a blocking thread pool to avoid
+    /// stalling the async runtime with CPU-intensive CBOR parsing.
     async fn fetch_and_decode_range(
         &mut self,
         points: &[PallasPoint],
@@ -247,16 +268,24 @@ impl NodeToNodeClient {
             .map_err(|e| ClientError::BlockFetch(format!("fetch range: {e}")))?;
 
         let torsten_tip = pallas_tip_to_torsten(tip);
-        let mut events = Vec::with_capacity(bodies.len());
-        for cbor in bodies {
-            let block =
-                decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
-            events.push(ChainSyncEvent::RollForward(
-                Box::new(block),
-                torsten_tip.clone(),
-            ));
-        }
-        Ok(events)
+
+        // Decode blocks on a blocking thread to avoid stalling the async runtime
+        let decoded = tokio::task::spawn_blocking(move || {
+            let mut events = Vec::with_capacity(bodies.len());
+            for cbor in bodies {
+                let block =
+                    decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+                events.push(ChainSyncEvent::RollForward(
+                    Box::new(block),
+                    torsten_tip.clone(),
+                ));
+            }
+            Ok::<_, ClientError>(events)
+        })
+        .await
+        .map_err(|e| ClientError::BlockDecode(format!("decode task failed: {e}")))??;
+
+        Ok(decoded)
     }
 
     /// Fetch a range of blocks from the peer using the block-fetch protocol.
