@@ -1,0 +1,386 @@
+//! Pipelined ChainSync client for high-throughput header fetching.
+//!
+//! The standard pallas ChainSync client sends one MsgRequestNext and waits
+//! for the response before sending the next (~300ms RTT per header). This
+//! module implements Ouroboros ChainSync pipelining: sending N MsgRequestNext
+//! messages at once, then batch-reading N responses. This eliminates the
+//! per-header round-trip latency and can improve header throughput by 10-50x.
+
+use pallas_network::facades::{KeepAliveHandle, KeepAliveLoop};
+use pallas_network::miniprotocols::chainsync::{HeaderContent, Message, Tip};
+use pallas_network::miniprotocols::handshake;
+use pallas_network::miniprotocols::keepalive;
+use pallas_network::miniprotocols::Point as PallasPoint;
+use pallas_network::miniprotocols::{
+    PROTOCOL_N2N_BLOCK_FETCH, PROTOCOL_N2N_CHAIN_SYNC, PROTOCOL_N2N_HANDSHAKE,
+    PROTOCOL_N2N_KEEP_ALIVE, PROTOCOL_N2N_PEER_SHARING, PROTOCOL_N2N_TX_SUBMISSION,
+};
+use pallas_network::multiplexer::{Bearer, ChannelBuffer, Plexer, RunningPlexer};
+use pallas_traverse::MultiEraHeader;
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::net::ToSocketAddrs;
+use tracing::{debug, info, trace, warn};
+
+use crate::client::{ClientError, HeaderBatchResult, HeaderInfo};
+use torsten_primitives::block::{Point, Tip as TorstenTip};
+use torsten_primitives::hash::Hash32;
+use torsten_primitives::time::SlotNo;
+
+/// Pipeline depth: how many MsgRequestNext to send before reading responses.
+/// Higher values reduce RTT impact but use more server-side buffering.
+/// Cardano-node uses a pipeline depth of ~100.
+const DEFAULT_PIPELINE_DEPTH: usize = 100;
+
+/// A ChainSync client that pipelines MsgRequestNext for high throughput.
+///
+/// Instead of the serial send-wait-receive pattern (1 header per RTT),
+/// this client sends multiple MsgRequestNext messages before reading any
+/// responses, achieving near line-rate header throughput.
+pub struct PipelinedPeerClient {
+    cs_buf: ChannelBuffer,
+    bf_client: pallas_network::miniprotocols::blockfetch::Client,
+    _keepalive: KeepAliveHandle,
+    _plexer: RunningPlexer,
+    remote_addr: SocketAddr,
+    /// Number of outstanding (sent but not yet received) pipelined requests.
+    in_flight: usize,
+}
+
+impl PipelinedPeerClient {
+    /// Connect to a remote Cardano node and set up a pipelined ChainSync channel.
+    pub async fn connect(
+        addr: impl ToSocketAddrs + std::fmt::Display + Copy,
+        network_magic: u64,
+    ) -> Result<Self, ClientError> {
+        info!("pipelined client: connecting to {addr}");
+
+        let bearer = Bearer::connect_tcp(addr)
+            .await
+            .map_err(|e| ClientError::Connection(format!("pipelined connect: {e}")))?;
+
+        let mut plexer = Plexer::new(bearer);
+
+        let hs_channel = plexer.subscribe_client(PROTOCOL_N2N_HANDSHAKE);
+        let cs_channel = plexer.subscribe_client(PROTOCOL_N2N_CHAIN_SYNC);
+        let bf_channel = plexer.subscribe_client(PROTOCOL_N2N_BLOCK_FETCH);
+        let _txsub_channel = plexer.subscribe_client(PROTOCOL_N2N_TX_SUBMISSION);
+        let _peersharing_channel = plexer.subscribe_client(PROTOCOL_N2N_PEER_SHARING);
+        let ka_channel = plexer.subscribe_client(PROTOCOL_N2N_KEEP_ALIVE);
+
+        let plexer = plexer.spawn();
+
+        // Handshake
+        let mut hs_client = handshake::Client::new(hs_channel);
+        let versions = handshake::n2n::VersionTable::v7_and_above(network_magic);
+        let handshake_result = hs_client
+            .handshake(versions)
+            .await
+            .map_err(|e| ClientError::Handshake(format!("pipelined handshake: {e}")))?;
+
+        if let handshake::Confirmation::Rejected(reason) = handshake_result {
+            return Err(ClientError::Handshake(format!(
+                "pipelined handshake rejected: {reason:?}"
+            )));
+        }
+
+        // Keepalive
+        let ka_client = keepalive::Client::new(ka_channel);
+        let keepalive = KeepAliveLoop::client(ka_client, Duration::from_secs(16)).spawn();
+
+        // Use raw ChannelBuffer for ChainSync (bypass state machine)
+        let cs_buf = ChannelBuffer::new(cs_channel);
+        let bf_client = pallas_network::miniprotocols::blockfetch::Client::new(bf_channel);
+
+        let remote_addr = format!("{addr}")
+            .parse()
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+
+        info!("pipelined client: connected to {remote_addr}");
+
+        Ok(PipelinedPeerClient {
+            cs_buf,
+            bf_client,
+            _keepalive: keepalive,
+            _plexer: plexer,
+            remote_addr,
+            in_flight: 0,
+        })
+    }
+
+    /// Find intersection with the remote chain.
+    pub async fn find_intersect(
+        &mut self,
+        points: Vec<Point>,
+    ) -> Result<(Option<Point>, TorstenTip), ClientError> {
+        let pallas_points: Vec<PallasPoint> = points.iter().map(torsten_to_pallas_point).collect();
+
+        // Send MsgFindIntersect
+        let msg = Message::<HeaderContent>::FindIntersect(pallas_points);
+        self.cs_buf
+            .send_msg_chunks(&msg)
+            .await
+            .map_err(|e| ClientError::ChainSync(format!("send FindIntersect: {e}")))?;
+
+        // Receive response
+        let response: Message<HeaderContent> = self
+            .cs_buf
+            .recv_full_msg()
+            .await
+            .map_err(|e| ClientError::ChainSync(format!("recv intersect: {e}")))?;
+
+        match response {
+            Message::IntersectFound(point, tip) => {
+                let t_point = pallas_to_torsten_point(&point);
+                let t_tip = pallas_to_torsten_tip(&tip);
+                debug!("pipelined: intersected at {t_point}");
+                Ok((Some(t_point), t_tip))
+            }
+            Message::IntersectNotFound(tip) => {
+                warn!("pipelined: no intersection found");
+                Ok((None, pallas_to_torsten_tip(&tip)))
+            }
+            _ => Err(ClientError::ChainSync(
+                "unexpected response to FindIntersect".into(),
+            )),
+        }
+    }
+
+    /// Request headers using pipelined MsgRequestNext messages.
+    ///
+    /// Sends `pipeline_depth` MsgRequestNext messages at once, then reads
+    /// responses. This eliminates the per-header RTT latency. Returns up to
+    /// `batch_size` headers (may send more requests than batch_size to keep
+    /// the pipeline full).
+    pub async fn request_headers_pipelined(
+        &mut self,
+        batch_size: usize,
+    ) -> Result<HeaderBatchResult, ClientError> {
+        self.request_headers_pipelined_with_depth(batch_size, DEFAULT_PIPELINE_DEPTH)
+            .await
+    }
+
+    /// Request headers with a configurable pipeline depth.
+    pub async fn request_headers_pipelined_with_depth(
+        &mut self,
+        batch_size: usize,
+        pipeline_depth: usize,
+    ) -> Result<HeaderBatchResult, ClientError> {
+        let mut headers = Vec::with_capacity(batch_size);
+        let mut latest_tip = None;
+
+        // Send initial pipeline of MsgRequestNext messages
+        let initial_send = pipeline_depth.min(batch_size);
+        for _ in self.in_flight..initial_send {
+            self.send_request_next().await?;
+        }
+
+        // Read responses and refill the pipeline
+        while headers.len() < batch_size {
+            if self.in_flight == 0 {
+                break;
+            }
+
+            let response: Message<HeaderContent> = self
+                .cs_buf
+                .recv_full_msg()
+                .await
+                .map_err(|e| ClientError::ChainSync(format!("recv pipelined: {e}")))?;
+            self.in_flight -= 1;
+
+            match response {
+                Message::RollForward(header, tip) => {
+                    latest_tip = Some(pallas_to_torsten_tip(&tip));
+
+                    match decode_header_info(&header) {
+                        Ok(info) => {
+                            trace!(
+                                slot = info.slot,
+                                block_no = info.block_no,
+                                "pipelined header received"
+                            );
+                            headers.push(info);
+                        }
+                        Err(e) => {
+                            return Err(ClientError::BlockDecode(format!(
+                                "pipelined header decode: {e}"
+                            )));
+                        }
+                    }
+
+                    // Refill pipeline: send another MsgRequestNext if we need more
+                    let remaining = batch_size - headers.len();
+                    if remaining > 0 && self.in_flight < pipeline_depth {
+                        self.send_request_next().await?;
+                    }
+                }
+                Message::RollBackward(point, tip) => {
+                    let torsten_tip = pallas_to_torsten_tip(&tip);
+                    let rollback_point = pallas_to_torsten_point(&point);
+                    // Drain remaining in-flight responses before returning
+                    self.drain_in_flight().await;
+                    if !headers.is_empty() {
+                        return Ok(HeaderBatchResult::HeadersAndRollback {
+                            headers,
+                            tip: torsten_tip.clone(),
+                            rollback_point,
+                            rollback_tip: torsten_tip,
+                        });
+                    }
+                    return Ok(HeaderBatchResult::RollBackward(rollback_point, torsten_tip));
+                }
+                Message::AwaitReply => {
+                    // Server is at tip, no more blocks available right now.
+                    // Drain remaining in-flight (they'll also be AwaitReply or
+                    // actual responses if blocks arrived while we were reading).
+                    // After AwaitReply, the server enters MustReply state and
+                    // will send RollForward/RollBackward when a block arrives.
+                    // We need to wait for that response.
+                    let wait_response: Message<HeaderContent> =
+                        self.cs_buf
+                            .recv_full_msg()
+                            .await
+                            .map_err(|e| ClientError::ChainSync(format!("recv must-reply: {e}")))?;
+                    // This response consumed one more in-flight
+                    // (the MustReply is implicit, not counted separately)
+
+                    match wait_response {
+                        Message::RollForward(header, tip) => {
+                            latest_tip = Some(pallas_to_torsten_tip(&tip));
+                            if let Ok(info) = decode_header_info(&header) {
+                                headers.push(info);
+                            }
+                            // Drain remaining in-flight
+                            self.drain_in_flight().await;
+                        }
+                        Message::RollBackward(point, tip) => {
+                            self.drain_in_flight().await;
+                            let torsten_tip = pallas_to_torsten_tip(&tip);
+                            if !headers.is_empty() {
+                                return Ok(HeaderBatchResult::HeadersAndRollback {
+                                    headers,
+                                    tip: torsten_tip.clone(),
+                                    rollback_point: pallas_to_torsten_point(&point),
+                                    rollback_tip: torsten_tip,
+                                });
+                            }
+                            return Ok(HeaderBatchResult::RollBackward(
+                                pallas_to_torsten_point(&point),
+                                torsten_tip,
+                            ));
+                        }
+                        _ => {}
+                    }
+
+                    if headers.is_empty() {
+                        return Ok(HeaderBatchResult::Await);
+                    }
+                    break;
+                }
+                _ => {
+                    return Err(ClientError::ChainSync(format!(
+                        "unexpected message in pipelined response: {response:?}"
+                    )));
+                }
+            }
+        }
+
+        match latest_tip {
+            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip)),
+            None if headers.is_empty() => Ok(HeaderBatchResult::Await),
+            None => Err(ClientError::ChainSync("got headers but no tip".into())),
+        }
+    }
+
+    /// Send a single MsgRequestNext and increment in-flight counter.
+    async fn send_request_next(&mut self) -> Result<(), ClientError> {
+        let msg = Message::<HeaderContent>::RequestNext;
+        self.cs_buf
+            .send_msg_chunks(&msg)
+            .await
+            .map_err(|e| ClientError::ChainSync(format!("send RequestNext: {e}")))?;
+        self.in_flight += 1;
+        Ok(())
+    }
+
+    /// Drain all in-flight responses (used after rollback/await).
+    async fn drain_in_flight(&mut self) {
+        while self.in_flight > 0 {
+            match self.cs_buf.recv_full_msg::<Message<HeaderContent>>().await {
+                Ok(_) => {
+                    self.in_flight -= 1;
+                }
+                Err(e) => {
+                    debug!("drain in-flight error (expected): {e}");
+                    self.in_flight = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Access the blockfetch client for fetching full blocks.
+    pub fn blockfetch(&mut self) -> &mut pallas_network::miniprotocols::blockfetch::Client {
+        &mut self.bf_client
+    }
+
+    /// Remote address of this connection.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// Abort the connection.
+    pub async fn abort(self) {
+        self._plexer.abort().await;
+    }
+}
+
+/// Decode header metadata from a ChainSync HeaderContent.
+fn decode_header_info(header: &HeaderContent) -> Result<HeaderInfo, String> {
+    let subtag = header.byron_prefix.map(|(st, _)| st);
+    let multi_era_header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)
+        .map_err(|e| format!("header decode: {e}"))?;
+
+    let slot = multi_era_header.slot();
+    let hash = multi_era_header.hash();
+    let block_no = multi_era_header.number();
+
+    let mut hash_bytes = [0u8; 32];
+    let hash_vec = hash.to_vec();
+    hash_bytes.copy_from_slice(&hash_vec);
+
+    Ok(HeaderInfo {
+        slot,
+        hash: hash_bytes,
+        block_no,
+    })
+}
+
+// Point/Tip conversion utilities
+
+fn torsten_to_pallas_point(point: &Point) -> PallasPoint {
+    match point {
+        Point::Origin => PallasPoint::Origin,
+        Point::Specific(slot, hash) => PallasPoint::Specific(slot.0, hash.as_bytes().to_vec()),
+    }
+}
+
+fn pallas_to_torsten_point(point: &PallasPoint) -> Point {
+    match point {
+        PallasPoint::Origin => Point::Origin,
+        PallasPoint::Specific(slot, hash) => {
+            let mut hash_bytes = [0u8; 32];
+            if hash.len() == 32 {
+                hash_bytes.copy_from_slice(hash);
+            }
+            Point::Specific(SlotNo(*slot), Hash32::from_bytes(hash_bytes))
+        }
+    }
+}
+
+fn pallas_to_torsten_tip(tip: &Tip) -> TorstenTip {
+    TorstenTip {
+        point: pallas_to_torsten_point(&tip.0),
+        block_number: torsten_primitives::time::BlockNo(tip.1),
+    }
+}

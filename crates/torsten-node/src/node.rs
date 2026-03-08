@@ -12,8 +12,8 @@ use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
     BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, HeaderBatchResult, N2CServer,
-    NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager, PeerManagerConfig, QueryHandler,
-    TxValidator,
+    NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager, PeerManagerConfig,
+    PipelinedPeerClient, QueryHandler, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -803,10 +803,31 @@ impl Node {
                 }
             }
 
+            // Create pipelined ChainSync connection to same peer for high-throughput headers
+            let pipelined_client = {
+                let target = peer_addr.to_string();
+                match PipelinedPeerClient::connect(&*target, network_magic).await {
+                    Ok(pc) => {
+                        info!("Pipelined ChainSync client connected to {target}");
+                        Some(pc)
+                    }
+                    Err(e) => {
+                        warn!("Pipelined client failed, using serial headers: {e}");
+                        None
+                    }
+                }
+            };
+
             // Run chain sync with connected peer + fetch pool
             let sync_shutdown = shutdown_rx.clone();
             match self
-                .chain_sync_loop(&mut active_client, fetch_pool, sync_shutdown, peer_addr)
+                .chain_sync_loop(
+                    &mut active_client,
+                    pipelined_client,
+                    fetch_pool,
+                    sync_shutdown,
+                    peer_addr,
+                )
                 .await
             {
                 Ok(()) => {
@@ -848,10 +869,12 @@ impl Node {
     async fn chain_sync_loop(
         &mut self,
         client: &mut NodeToNodeClient,
+        pipelined_client: Option<PipelinedPeerClient>,
         fetch_pool: BlockFetchPool,
         mut shutdown_rx: watch::Receiver<bool>,
         peer_addr: std::net::SocketAddr,
     ) -> Result<()> {
+        let mut pipelined = pipelined_client;
         // Find intersection with our current chain
         // Use the LEDGER tip as the intersection point, not the ChainDB tip.
         // After a Mithril import, ChainDB may be far ahead of the ledger.
@@ -877,7 +900,12 @@ impl Node {
                 ledger_tip, chain_tip
             );
         }
-        let (intersect, remote_tip) = client.find_intersect(known_points).await?;
+        // Find intersection: use pipelined client if available, otherwise serial client
+        let (intersect, remote_tip) = if let Some(ref mut pc) = pipelined {
+            pc.find_intersect(known_points.clone()).await?
+        } else {
+            client.find_intersect(known_points).await?
+        };
 
         match &intersect {
             Some(point) => info!("Chain intersection found at {point}"),
@@ -886,7 +914,13 @@ impl Node {
         info!("Remote tip: {remote_tip}");
 
         let use_pool = !fetch_pool.is_empty();
-        if use_pool {
+        let use_pipelined = pipelined.is_some();
+        if use_pipelined {
+            info!(
+                "Pipelined ChainSync enabled (pipeline depth 100), blocks from {} fetcher(s)",
+                fetch_pool.len()
+            );
+        } else if use_pool {
             info!(
                 "Multi-peer sync: headers from primary peer, blocks from {} fetcher(s)",
                 fetch_pool.len()
@@ -898,7 +932,7 @@ impl Node {
         let mut last_log_time = std::time::Instant::now();
         let mut last_query_update = std::time::Instant::now();
         let mut blocks_since_last_log: u64 = 0;
-        let header_batch_size = if use_pool { 500 } else { 100 };
+        let header_batch_size = if use_pipelined || use_pool { 500 } else { 100 };
 
         loop {
             if *shutdown_rx.borrow() {
@@ -906,17 +940,36 @@ impl Node {
                 break;
             }
 
-            if use_pool {
-                // Multi-peer mode: collect headers from primary, fetch blocks from pool
+            if use_pipelined || use_pool {
+                // Pipelined/multi-peer mode: collect headers, fetch blocks from pool
+                let header_future = async {
+                    if let Some(ref mut pc) = pipelined {
+                        pc.request_headers_pipelined(header_batch_size).await
+                    } else {
+                        client.request_headers_batch(header_batch_size).await
+                    }
+                };
                 tokio::select! {
-                    result = client.request_headers_batch(header_batch_size) => {
+                    result = header_future => {
                         match result {
                             Ok(batch_result) => {
                                 match batch_result {
                                     HeaderBatchResult::Headers(headers, tip) => {
                                         let fetch_start = std::time::Instant::now();
                                         let header_count = headers.len() as u64;
-                                        match fetch_pool.fetch_blocks_concurrent(&headers).await {
+                                        // Use fetch pool if available, otherwise primary peer
+                                        let blocks_result = if fetch_pool.is_empty() {
+                                            client.fetch_blocks_by_points(&headers).await
+                                        } else {
+                                            match fetch_pool.fetch_blocks_concurrent(&headers).await {
+                                                Ok(blocks) => Ok(blocks),
+                                                Err(e) => {
+                                                    warn!("Pool fetch failed, falling back to primary peer: {e}");
+                                                    client.fetch_blocks_by_points(&headers).await
+                                                }
+                                            }
+                                        };
+                                        match blocks_result {
                                             Ok(blocks) => {
                                                 let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
                                                 self.peer_manager.write().await.record_block_fetch(
@@ -924,15 +977,7 @@ impl Node {
                                                 );
                                                 self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                             }
-                                            Err(e) => {
-                                                warn!("Pool fetch failed, falling back to primary peer: {e}");
-                                                match client.fetch_blocks_by_points(&headers).await {
-                                                    Ok(blocks) => {
-                                                        self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
-                                                    }
-                                                    Err(e2) => { error!("Primary peer fetch also failed: {e2}"); break; }
-                                                }
-                                            }
+                                            Err(e) => { error!("Block fetch failed: {e}"); break; }
                                         }
                                     }
                                     HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, .. } => {
