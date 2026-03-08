@@ -7,6 +7,8 @@ Built by [Sandstone Pool](https://www.sandstone.io/)
 [![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
 [![Docs](https://github.com/michaeljfazio/torsten/actions/workflows/docs.yml/badge.svg)](https://michaeljfazio.github.io/torsten/)
 
+> **Warning:** Torsten is in early development and is **not recommended for production use**. APIs, storage formats, and behavior may change without notice. Use at your own risk on testnets only.
+
 ## Quick Start
 
 ```bash
