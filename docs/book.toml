@@ -1,0 +1,27 @@
+[book]
+title = "Torsten Documentation"
+authors = ["Sandstone Pool"]
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/torsten/"
+git-repository-url = "https://github.com/michaeljfazio/torsten"
+edit-url-template = "https://github.com/michaeljfazio/torsten/edit/main/docs/{path}"
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-hierarchical-headings = true
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html.playground]
+editable = false
