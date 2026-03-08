@@ -178,12 +178,12 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         auxiliary_data_hash: None,
         validity_interval_start,
         mint,
-        script_data_hash: None,
+        script_data_hash: extract_script_data_hash(tx),
         collateral,
         required_signers,
         network_id: None,
         collateral_return: tx.collateral_return().and_then(|o| convert_output(&o).ok()),
-        total_collateral: None,
+        total_collateral: tx.total_collateral().map(Lovelace),
         reference_inputs,
         voting_procedures: convert_voting_procedures(tx),
         proposal_procedures: convert_proposal_procedures(tx),
@@ -205,15 +205,58 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         })
         .collect();
 
+    let native_scripts = tx
+        .native_scripts()
+        .iter()
+        .map(|s| convert_native_script(s))
+        .collect();
+
+    let bootstrap_witnesses = tx
+        .bootstrap_witnesses()
+        .iter()
+        .map(|bw| BootstrapWitness {
+            vkey: bw.public_key.to_vec(),
+            signature: bw.signature.to_vec(),
+            chain_code: bw.chain_code.to_vec(),
+            attributes: bw.attributes.to_vec(),
+        })
+        .collect();
+
+    let plutus_v1_scripts = tx
+        .plutus_v1_scripts()
+        .iter()
+        .map(|s| s.0.to_vec())
+        .collect();
+
+    let plutus_v2_scripts = tx
+        .plutus_v2_scripts()
+        .iter()
+        .map(|s| s.0.to_vec())
+        .collect();
+
+    let plutus_v3_scripts = tx
+        .plutus_v3_scripts()
+        .iter()
+        .map(|s| s.0.to_vec())
+        .collect();
+
+    let plutus_data = tx
+        .plutus_data()
+        .iter()
+        .map(|d| convert_plutus_data(d))
+        .collect();
+
+    let redeemers = tx.redeemers().iter().map(|r| convert_redeemer(r)).collect();
+
     let witness_set = TransactionWitnessSet {
         vkey_witnesses,
-        native_scripts: Vec::new(),
-        bootstrap_witnesses: Vec::new(),
-        plutus_v1_scripts: Vec::new(),
-        plutus_v2_scripts: Vec::new(),
-        plutus_v3_scripts: Vec::new(),
-        plutus_data: Vec::new(),
-        redeemers: Vec::new(),
+        native_scripts,
+        bootstrap_witnesses,
+        plutus_v1_scripts,
+        plutus_v2_scripts,
+        plutus_v3_scripts,
+        plutus_data,
+        redeemers,
     };
 
     Ok(Transaction {
@@ -325,6 +368,79 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
     }
 
     result
+}
+
+fn extract_script_data_hash(tx: &PallasTx) -> Option<Hash32> {
+    if let Some(babbage) = tx.as_babbage() {
+        babbage
+            .transaction_body
+            .script_data_hash
+            .as_ref()
+            .map(pallas_hash_to_torsten32)
+    } else if let Some(conway) = tx.as_conway() {
+        conway
+            .transaction_body
+            .script_data_hash
+            .as_ref()
+            .map(pallas_hash_to_torsten32)
+    } else if let Some(alonzo) = tx.as_alonzo() {
+        alonzo
+            .transaction_body
+            .script_data_hash
+            .as_ref()
+            .map(pallas_hash_to_torsten32)
+    } else {
+        None
+    }
+}
+
+fn convert_native_script(
+    script: &pallas_codec::utils::KeepRaw<pallas_primitives::alonzo::NativeScript>,
+) -> NativeScript {
+    convert_native_script_inner(script)
+}
+
+fn convert_native_script_inner(script: &pallas_primitives::alonzo::NativeScript) -> NativeScript {
+    use pallas_primitives::alonzo::NativeScript as PNS;
+    match script {
+        PNS::ScriptPubkey(h) => NativeScript::ScriptPubkey(pallas_hash_to_torsten32(
+            &pallas_crypto::hash::Hash::from(h.as_ref()),
+        )),
+        PNS::ScriptAll(scripts) => {
+            NativeScript::ScriptAll(scripts.iter().map(convert_native_script_inner).collect())
+        }
+        PNS::ScriptAny(scripts) => {
+            NativeScript::ScriptAny(scripts.iter().map(convert_native_script_inner).collect())
+        }
+        PNS::ScriptNOfK(n, scripts) => NativeScript::ScriptNOfK(
+            *n,
+            scripts.iter().map(convert_native_script_inner).collect(),
+        ),
+        PNS::InvalidBefore(slot) => NativeScript::InvalidBefore(SlotNo(*slot)),
+        PNS::InvalidHereafter(slot) => NativeScript::InvalidHereafter(SlotNo(*slot)),
+    }
+}
+
+fn convert_redeemer(r: &pallas_traverse::MultiEraRedeemer) -> Redeemer {
+    use pallas_primitives::conway::RedeemerTag as PRT;
+    let tag = match r.tag() {
+        PRT::Spend => RedeemerTag::Spend,
+        PRT::Mint => RedeemerTag::Mint,
+        PRT::Cert => RedeemerTag::Cert,
+        PRT::Reward => RedeemerTag::Reward,
+        PRT::Vote => RedeemerTag::Vote,
+        PRT::Propose => RedeemerTag::Propose,
+    };
+    let ex = r.ex_units();
+    Redeemer {
+        tag,
+        index: r.index(),
+        data: convert_plutus_data(r.data()),
+        ex_units: ExUnits {
+            mem: ex.mem,
+            steps: ex.steps,
+        },
+    }
 }
 
 fn convert_plutus_data(data: &pallas_primitives::conway::PlutusData) -> PlutusData {
