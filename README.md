@@ -348,6 +348,9 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 - [x] Multi-era block decoding (Byron–Conway) via pallas
 - [x] CBOR encoding for Cardano wire format
 - [x] Byron address detection (CBOR 0x82/0x83 headers)
+- [x] Full block/transaction CBOR encoding (encode_block, encode_transaction, encode_block_header)
+- [x] Transaction body encoding (all 22 fields including Conway governance)
+- [x] Witness set, certificate, auxiliary data encoding
 
 ### Not Yet Implemented
 
@@ -359,8 +362,9 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 #### Block Producer
 - [ ] KES key management (generation, rotation, period tracking)
 - [x] VRF key generation and proof signing (ECVRF-ED25519-SHA512-Elligator2)
-- [ ] Block forging (create blocks from mempool transactions)
+- [x] Block forging (create blocks from mempool transactions, VRF proof, header hash computation)
 - [x] Operational certificate generation and rotation
+- [x] Block producer CLI args (--shelley-kes-key, --shelley-vrf-key, --shelley-operational-certificate)
 - [ ] Block announcement (propagate forged blocks to peers)
 - [x] Leader schedule calculation
 
