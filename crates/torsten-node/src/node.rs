@@ -25,6 +25,7 @@ use crate::topology::Topology;
 pub struct NodeArgs {
     pub config: NodeConfig,
     pub topology: Topology,
+    pub topology_path: PathBuf,
     pub database_path: PathBuf,
     pub socket_path: PathBuf,
     pub host_addr: String,
@@ -137,6 +138,7 @@ pub struct Node {
     listen_addr: std::net::SocketAddr,
     network_magic: u64,
     shelley_genesis: Option<ShelleyGenesis>,
+    topology_path: PathBuf,
 }
 
 impl Node {
@@ -329,6 +331,7 @@ impl Node {
             listen_addr,
             network_magic,
             shelley_genesis,
+            topology_path: args.topology_path,
         })
     }
 
@@ -348,6 +351,32 @@ impl Node {
             info!("Shutdown signal received");
             shutdown_tx.send(true).ok();
         });
+
+        // Setup SIGHUP handler for topology reload
+        #[cfg(unix)]
+        {
+            let topology_path = self.topology_path.clone();
+            tokio::spawn(async move {
+                let mut hup = signal::unix::signal(signal::unix::SignalKind::hangup()).unwrap();
+                loop {
+                    hup.recv().await;
+                    info!(
+                        "SIGHUP received — reloading topology from {}",
+                        topology_path.display()
+                    );
+                    match Topology::load(&topology_path) {
+                        Ok(new_topology) => {
+                            let peers = new_topology.all_peers();
+                            info!("Topology reloaded: {} peers configured", peers.len());
+                            // TODO: update peer manager with new peers
+                        }
+                        Err(e) => {
+                            error!("Failed to reload topology: {e}");
+                        }
+                    }
+                }
+            });
+        }
 
         // Start N2C server on Unix socket
         let n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());

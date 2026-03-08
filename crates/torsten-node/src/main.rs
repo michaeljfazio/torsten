@@ -104,6 +104,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
     let mut node = node::Node::new(node::NodeArgs {
         config: node_config,
         topology,
+        topology_path: args.topology.clone(),
         database_path: args.database_path,
         socket_path: args.socket_path,
         host_addr: args.host_addr,

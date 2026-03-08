@@ -1,5 +1,7 @@
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -50,6 +52,57 @@ pub enum PeerSharingMode {
     NoPeerSharing = 0,
     /// Peer sharing enabled
     PeerSharingEnabled = 1,
+}
+
+/// Per-IP connection rate limiter to prevent DoS attacks.
+/// Tracks connection timestamps per IP and enforces:
+/// - Max connections per IP within a time window
+/// - Cleanup of stale entries
+struct ConnectionRateLimiter {
+    /// Map of IP → list of connection timestamps
+    attempts: std::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    /// Max connections allowed per IP within the window
+    max_per_ip: usize,
+    /// Time window for rate limiting
+    window: std::time::Duration,
+}
+
+impl ConnectionRateLimiter {
+    fn new(max_per_ip: usize, window: std::time::Duration) -> Self {
+        ConnectionRateLimiter {
+            attempts: std::sync::Mutex::new(HashMap::new()),
+            max_per_ip,
+            window,
+        }
+    }
+
+    /// Check if a connection from this IP should be allowed.
+    /// Returns true if allowed, false if rate-limited.
+    fn check_and_record(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut attempts = self.attempts.lock().unwrap();
+        let timestamps = attempts.entry(ip).or_default();
+
+        // Remove timestamps outside the window
+        timestamps.retain(|t| now.duration_since(*t) < self.window);
+
+        if timestamps.len() >= self.max_per_ip {
+            false
+        } else {
+            timestamps.push(now);
+            true
+        }
+    }
+
+    /// Remove stale entries to prevent memory growth
+    fn cleanup(&self) {
+        let now = Instant::now();
+        let mut attempts = self.attempts.lock().unwrap();
+        attempts.retain(|_, timestamps| {
+            timestamps.retain(|t| now.duration_since(*t) < self.window);
+            !timestamps.is_empty()
+        });
+    }
 }
 
 /// Node-to-Node server that accepts inbound TCP connections from remote peers.
@@ -129,10 +182,35 @@ impl N2NServer {
         info!("N2N server listening on {}", self.listen_addr);
 
         let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Rate limiter: max 10 connections per IP per 60 seconds
+        let rate_limiter = Arc::new(ConnectionRateLimiter::new(
+            10,
+            std::time::Duration::from_secs(60),
+        ));
+
+        // Periodic cleanup of stale rate limiter entries
+        let rl_cleanup = rate_limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                rl_cleanup.cleanup();
+            }
+        });
 
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
+                    // Rate limiting check
+                    if !rate_limiter.check_and_record(peer_addr.ip()) {
+                        warn!(
+                            peer = %peer_addr,
+                            "Rejecting connection: rate limit exceeded"
+                        );
+                        drop(stream);
+                        continue;
+                    }
+
                     let active = active_connections.load(std::sync::atomic::Ordering::Relaxed);
                     if active >= self.max_connections {
                         warn!(
@@ -1267,5 +1345,44 @@ mod tests {
         let mut dec = minicbor::Decoder::new(&seg.payload);
         dec.array().unwrap();
         assert_eq!(dec.u32().unwrap(), 1); // MsgReplyTxIds
+    }
+
+    #[test]
+    fn test_rate_limiter_allows_within_limit() {
+        let limiter = ConnectionRateLimiter::new(3, std::time::Duration::from_secs(60));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        assert!(limiter.check_and_record(ip));
+        assert!(limiter.check_and_record(ip));
+        assert!(limiter.check_and_record(ip));
+        // 4th should be rejected
+        assert!(!limiter.check_and_record(ip));
+    }
+
+    #[test]
+    fn test_rate_limiter_different_ips() {
+        let limiter = ConnectionRateLimiter::new(1, std::time::Duration::from_secs(60));
+        let ip1: IpAddr = "127.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "127.0.0.2".parse().unwrap();
+
+        assert!(limiter.check_and_record(ip1));
+        assert!(!limiter.check_and_record(ip1)); // second from same IP rejected
+        assert!(limiter.check_and_record(ip2)); // different IP allowed
+    }
+
+    #[test]
+    fn test_rate_limiter_cleanup() {
+        let limiter = ConnectionRateLimiter::new(1, std::time::Duration::from_millis(1));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        assert!(limiter.check_and_record(ip));
+        assert!(!limiter.check_and_record(ip));
+
+        // Wait for window to expire
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        limiter.cleanup();
+        // Should allow again after window expires
+        assert!(limiter.check_and_record(ip));
     }
 }

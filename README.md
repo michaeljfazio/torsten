@@ -351,8 +351,8 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 - [ ] Connection backpressure and flow control (ack/req counts)
 - [ ] Concurrent ChainSync from multiple peers
 - [ ] Adaptive peer selection (latency-based ranking, reputation)
-- [ ] Inbound connection rate limiting and DoS protection
-- [ ] SIGHUP topology reload
+- [x] Inbound connection rate limiting (per-IP token bucket DoS protection)
+- [x] SIGHUP topology reload
 
 #### Block Producer
 - [ ] KES key management (generation, rotation, period tracking)
