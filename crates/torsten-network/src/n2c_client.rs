@@ -24,6 +24,7 @@ pub enum N2CClientError {
 const MINI_PROTOCOL_HANDSHAKE: u16 = 0;
 const MINI_PROTOCOL_TX_SUBMISSION: u16 = 6;
 const MINI_PROTOCOL_STATE_QUERY: u16 = 7;
+const MINI_PROTOCOL_TX_MONITOR: u16 = 12;
 
 /// Node-to-Client client for connecting to a Cardano node via Unix socket.
 pub struct N2CClient {
@@ -404,6 +405,147 @@ impl N2CClient {
         let segment = Segment {
             transmission_time: 0,
             protocol_id: MINI_PROTOCOL_TX_SUBMISSION,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+        Ok(())
+    }
+
+    // --- LocalTxMonitor protocol methods ---
+
+    /// Acquire a mempool snapshot. Returns the slot number.
+    pub async fn monitor_acquire(&mut self) -> Result<u64, N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(0)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgAcquire
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        let mut decoder = minicbor::Decoder::new(&resp.payload);
+        let _ = decoder.array();
+        let tag = decoder
+            .u32()
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        if tag != 1 {
+            return Err(N2CClientError::Protocol(format!(
+                "expected MsgAcquired(1), got {tag}"
+            )));
+        }
+        let slot = decoder.u64().unwrap_or(0);
+        Ok(slot)
+    }
+
+    /// Check if a transaction is in the mempool
+    pub async fn monitor_has_tx(&mut self, tx_hash: &[u8; 32]) -> Result<bool, N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(4)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgHasTx
+        enc.bytes(tx_hash)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        let mut decoder = minicbor::Decoder::new(&resp.payload);
+        let _ = decoder.array();
+        let tag = decoder
+            .u32()
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        if tag != 5 {
+            return Err(N2CClientError::Protocol(format!(
+                "expected MsgHasTxReply(5), got {tag}"
+            )));
+        }
+        let has_tx = decoder.bool().unwrap_or(false);
+        Ok(has_tx)
+    }
+
+    /// Get mempool sizes (capacity, size, num_txs)
+    pub async fn monitor_get_sizes(&mut self) -> Result<(u32, u32, u32), N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(8)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgGetSizes
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        let mut decoder = minicbor::Decoder::new(&resp.payload);
+        let _ = decoder.array();
+        let tag = decoder
+            .u32()
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        if tag != 9 {
+            return Err(N2CClientError::Protocol(format!(
+                "expected MsgGetSizesReply(9), got {tag}"
+            )));
+        }
+        let _ = decoder.array();
+        let capacity = decoder.u32().unwrap_or(0);
+        let size = decoder.u32().unwrap_or(0);
+        let num_txs = decoder.u32().unwrap_or(0);
+        Ok((capacity, size, num_txs))
+    }
+
+    /// Release the mempool snapshot
+    pub async fn monitor_release(&mut self) -> Result<(), N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgRelease
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+        Ok(())
+    }
+
+    /// Send MsgDone for the LocalTxMonitor protocol
+    pub async fn monitor_done(&mut self) -> Result<(), N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgDone
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
             is_responder: false,
             payload,
         };
