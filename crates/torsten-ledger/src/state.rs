@@ -880,14 +880,16 @@ impl LedgerState {
     /// Thresholds vary by action type and involve DRep, SPO, and/or CC votes.
     /// Ratified proposals are enacted (their effects applied) and removed.
     fn ratify_proposals(&mut self) {
-        let total_dreps = self.governance.dreps.len() as u64;
+        let total_drep_stake = self.compute_total_drep_stake();
 
         // Collect ratified proposal IDs and their actions
         let ratified: Vec<(GovActionId, GovAction)> = self
             .governance
             .proposals
             .iter()
-            .filter(|(action_id, state)| self.check_ratification(action_id, state, total_dreps))
+            .filter(|(action_id, state)| {
+                self.check_ratification(action_id, state, total_drep_stake)
+            })
             .map(|(id, state)| (id.clone(), state.procedure.gov_action.clone()))
             .collect();
 
@@ -910,7 +912,7 @@ impl LedgerState {
 
     /// Check whether a proposal has met its voting thresholds for ratification.
     ///
-    /// CIP-1694 voting thresholds:
+    /// CIP-1694 voting thresholds (stake-weighted):
     /// - InfoAction: always ratified (no thresholds)
     /// - ParameterChange: requires DRep vote ≥ dvt_p_param_change AND CC approval
     /// - HardForkInitiation: requires DRep ≥ dvt_hard_fork AND SPO ≥ pvt_hard_fork
@@ -922,7 +924,7 @@ impl LedgerState {
         &self,
         action_id: &GovActionId,
         state: &ProposalState,
-        total_dreps: u64,
+        total_drep_stake: u64,
     ) -> bool {
         // Count votes by voter type
         let (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total) =
@@ -936,7 +938,7 @@ impl LedgerState {
             GovAction::ParameterChange { .. } => {
                 let drep_threshold = self.protocol_params.dvt_p_param_change.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance);
                 drep_met && cc_met
             }
@@ -944,7 +946,7 @@ impl LedgerState {
                 let drep_threshold = self.protocol_params.dvt_hard_fork.as_f64();
                 let spo_threshold = self.protocol_params.pvt_hard_fork.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
                 drep_met && spo_met
             }
@@ -952,7 +954,7 @@ impl LedgerState {
                 let drep_threshold = self.protocol_params.dvt_no_confidence.as_f64();
                 let spo_threshold = self.protocol_params.pvt_committee.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
                 drep_met && spo_met
             }
@@ -960,28 +962,33 @@ impl LedgerState {
                 let drep_threshold = self.protocol_params.dvt_committee_normal.as_f64();
                 let spo_threshold = self.protocol_params.pvt_committee.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
                 drep_met && spo_met
             }
             GovAction::NewConstitution { .. } => {
                 let drep_threshold = self.protocol_params.dvt_constitution.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance);
                 drep_met && cc_met
             }
             GovAction::TreasuryWithdrawals { .. } => {
                 let drep_threshold = self.protocol_params.dvt_treasury_withdrawal.as_f64();
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_dreps), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance);
                 drep_met && cc_met
             }
         }
     }
 
-    /// Count votes by voter type for a specific governance action
+    /// Count stake-weighted votes by voter type for a specific governance action.
+    ///
+    /// Per CIP-1694, DRep and SPO votes are weighted by delegated stake:
+    /// - DRep voting power = sum of stake delegated to that DRep via VoteDelegation
+    /// - SPO voting power = pool's total active stake
+    /// - CC votes are unweighted (1 per member)
     fn count_votes_by_type(&self, action_id: &GovActionId) -> (u64, u64, u64, u64, u64, u64) {
         let mut drep_yes = 0u64;
         let mut drep_total = 0u64;
@@ -995,16 +1002,25 @@ impl LedgerState {
                 continue;
             }
             match voter {
-                Voter::DRep(_) => {
-                    drep_total += 1;
+                Voter::DRep(cred) => {
+                    let drep_hash = credential_to_hash(cred);
+                    let voting_power = self.compute_drep_voting_power(&drep_hash);
+                    drep_total += voting_power;
                     if procedure.vote == Vote::Yes {
-                        drep_yes += 1;
+                        drep_yes += voting_power;
                     }
                 }
-                Voter::StakePool(_) => {
-                    spo_total += 1;
+                Voter::StakePool(pool_hash) => {
+                    // Pool IDs are Hash28 (Blake2b-224); convert from Hash32
+                    let pool_id = Hash28::from_bytes({
+                        let mut b = [0u8; 28];
+                        b.copy_from_slice(&pool_hash.as_bytes()[..28]);
+                        b
+                    });
+                    let pool_stake = self.compute_spo_voting_power(&pool_id);
+                    spo_total += pool_stake;
                     if procedure.vote == Vote::Yes {
-                        spo_yes += 1;
+                        spo_yes += pool_stake;
                     }
                 }
                 Voter::ConstitutionalCommittee(_) => {
@@ -1017,6 +1033,79 @@ impl LedgerState {
         }
 
         (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total)
+    }
+
+    /// Compute the voting power of a DRep: sum of stake delegated to them.
+    fn compute_drep_voting_power(&self, drep_hash: &Hash32) -> u64 {
+        let mut power = 0u64;
+        for (stake_cred, drep) in &self.governance.vote_delegations {
+            let matches = match drep {
+                DRep::KeyHash(h) => h == drep_hash,
+                DRep::ScriptHash(h) => {
+                    // ScriptHash is Hash28 — pad to Hash32 for comparison
+                    let mut padded = [0u8; 32];
+                    padded[..28].copy_from_slice(h.as_bytes());
+                    Hash32::from_bytes(padded) == *drep_hash
+                }
+                DRep::Abstain | DRep::NoConfidence => false,
+            };
+            if matches {
+                if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
+                    power += stake.0;
+                }
+            }
+        }
+        // Minimum voting power of 1 for registered DReps with no delegated stake
+        if power == 0 && self.governance.dreps.contains_key(drep_hash) {
+            1
+        } else {
+            power
+        }
+    }
+
+    /// Compute total active DRep-delegated stake across all DReps.
+    fn compute_total_drep_stake(&self) -> u64 {
+        let mut total = 0u64;
+        for (stake_cred, drep) in &self.governance.vote_delegations {
+            match drep {
+                DRep::KeyHash(_) | DRep::ScriptHash(_) => {
+                    if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
+                        total += stake.0;
+                    }
+                }
+                // Abstain and NoConfidence delegations count toward total active voting stake
+                DRep::Abstain | DRep::NoConfidence => {
+                    if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
+                        total += stake.0;
+                    }
+                }
+            }
+        }
+        total.max(1) // Ensure non-zero to avoid division by zero
+    }
+
+    /// Compute the voting power of a stake pool: total delegated stake.
+    fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
+        // Use the "set" snapshot (previous epoch) for voting power, falling back to current
+        if let Some(ref snapshot) = self.snapshots.set {
+            if let Some(stake) = snapshot.pool_stake.get(pool_id) {
+                return stake.0;
+            }
+        }
+        // Fallback: compute from current delegations
+        let mut total = 0u64;
+        for (stake_cred, delegated_pool) in &self.delegations {
+            if delegated_pool == pool_id {
+                if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
+                    total += stake.0;
+                }
+            }
+        }
+        if total == 0 {
+            1
+        } else {
+            total
+        }
     }
 
     /// Enact a ratified governance action by applying its effects
@@ -2361,19 +2450,31 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
 
-        // Register 10 DReps
+        // Register 10 DReps with equal stake-weighted voting power
         for i in 0..10 {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
             state.governance.dreps.insert(
                 key,
                 DRepRegistration {
-                    credential: cred,
+                    credential: cred.clone(),
                     deposit: Lovelace(500_000_000),
                     anchor: None,
                     registered_epoch: EpochNo(0),
                 },
             );
+            // Set up vote delegation and stake for each DRep
+            let stake_key = Hash32::from_bytes([100 + i as u8; 32]);
+            let mut drep_bytes = [0u8; 32];
+            drep_bytes[..28].copy_from_slice(&[i as u8; 28]);
+            state
+                .governance
+                .vote_delegations
+                .insert(stake_key, DRep::KeyHash(Hash32::from_bytes(drep_bytes)));
+            state
+                .stake_distribution
+                .stake_map
+                .insert(stake_key, Lovelace(1_000_000_000));
         }
 
         let update = torsten_primitives::transaction::ProtocolParamUpdate {

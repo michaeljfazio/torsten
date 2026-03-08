@@ -312,7 +312,13 @@ fn convert_required_signers(tx: &PallasTx) -> Vec<Hash32> {
     match tx.required_signers() {
         MultiEraSigners::AlonzoCompatible(signers) => signers
             .iter()
-            .map(|h| pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(h.as_ref())))
+            .map(|h| {
+                // Required signers are AddrKeyhash (28 bytes); pad to Hash32
+                let mut bytes = [0u8; 32];
+                let slice = h.as_ref();
+                bytes[..slice.len()].copy_from_slice(slice);
+                Hash32::from_bytes(bytes)
+            })
             .collect(),
         _ => Vec::new(),
     }
@@ -544,9 +550,12 @@ fn convert_native_script(
 fn convert_native_script_inner(script: &pallas_primitives::alonzo::NativeScript) -> NativeScript {
     use pallas_primitives::alonzo::NativeScript as PNS;
     match script {
-        PNS::ScriptPubkey(h) => NativeScript::ScriptPubkey(pallas_hash_to_torsten32(
-            &pallas_crypto::hash::Hash::from(h.as_ref()),
-        )),
+        PNS::ScriptPubkey(h) => {
+            // ScriptPubkey contains AddrKeyhash (28 bytes); pad to Hash32
+            let mut bytes = [0u8; 32];
+            bytes[..28].copy_from_slice(h.as_ref());
+            NativeScript::ScriptPubkey(Hash32::from_bytes(bytes))
+        }
         PNS::ScriptAll(scripts) => {
             NativeScript::ScriptAll(scripts.iter().map(convert_native_script_inner).collect())
         }
@@ -636,6 +645,14 @@ fn convert_plutus_data(data: &pallas_primitives::conway::PlutusData) -> PlutusDa
     }
 }
 
+/// Safely convert a byte slice to Hash32, padding with zeros if shorter than 32 bytes.
+fn bytes_to_hash32(bytes: &[u8]) -> Hash32 {
+    let mut buf = [0u8; 32];
+    let len = bytes.len().min(32);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    Hash32::from_bytes(buf)
+}
+
 /// Convert a pallas Hash<32> to a torsten Hash32
 pub fn pallas_hash_to_torsten32(hash: &pallas_crypto::hash::Hash<32>) -> Hash32 {
     let bytes: &[u8; 32] = hash;
@@ -710,7 +727,7 @@ fn convert_alonzo_certificate(
             let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {
                 url: m.url.clone(),
-                hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+                hash: bytes_to_hash32(m.hash.as_ref()),
             });
 
             Some(Certificate::PoolRegistration(PoolParams {
@@ -767,7 +784,7 @@ fn convert_conway_certificate(
             let metadata = pool_metadata.clone();
             let metadata = metadata.map(|m| PoolMetadata {
                 url: m.url.clone(),
-                hash: pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(m.hash.as_ref())),
+                hash: bytes_to_hash32(m.hash.as_ref()),
             });
 
             Some(Certificate::PoolRegistration(PoolParams {
@@ -849,9 +866,12 @@ fn convert_conway_certificate(
 fn convert_pallas_drep(drep: &pallas_primitives::conway::DRep) -> DRep {
     use pallas_primitives::conway::DRep as PD;
     match drep {
-        PD::Key(h) => DRep::KeyHash(pallas_hash_to_torsten32(&pallas_crypto::hash::Hash::from(
-            h.as_ref(),
-        ))),
+        PD::Key(h) => {
+            // DRep key hash is 28 bytes; pad to Hash32
+            let mut bytes = [0u8; 32];
+            bytes[..28].copy_from_slice(h.as_ref());
+            DRep::KeyHash(Hash32::from_bytes(bytes))
+        }
         PD::Script(h) => DRep::ScriptHash(pallas_hash_to_torsten28(h)),
         PD::Abstain => DRep::Abstain,
         PD::NoConfidence => DRep::NoConfidence,
@@ -969,9 +989,12 @@ fn convert_pallas_voter(voter: &pallas_primitives::conway::Voter) -> Voter {
         }
         PV::DRepKey(h) => Voter::DRep(Credential::VerificationKey(pallas_hash_to_torsten28(h))),
         PV::DRepScript(h) => Voter::DRep(Credential::Script(pallas_hash_to_torsten28(h))),
-        PV::StakePoolKey(h) => Voter::StakePool(pallas_hash_to_torsten32(
-            &pallas_crypto::hash::Hash::from(h.as_ref()),
-        )),
+        PV::StakePoolKey(h) => {
+            // Pool key hash is 28 bytes; pad to Hash32
+            let mut bytes = [0u8; 32];
+            bytes[..28].copy_from_slice(h.as_ref());
+            Voter::StakePool(Hash32::from_bytes(bytes))
+        }
     }
 }
 
