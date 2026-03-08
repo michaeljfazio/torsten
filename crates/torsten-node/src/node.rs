@@ -11,8 +11,8 @@ use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
-    BlockProvider, ChainSyncEvent, N2CServer, N2NServer, NodeServer, NodeStateSnapshot,
-    NodeToNodeClient, QueryHandler,
+    BlockProvider, ChainSyncEvent, DiffusionMode, N2CServer, NodeServer, NodeStateSnapshot,
+    NodeToNodeClient, PeerManager, PeerManagerConfig, QueryHandler,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -345,8 +345,40 @@ impl Node {
             }
         });
 
-        // Start N2N server for inbound peer connections
-        let n2n_server = N2NServer::new(
+        // Initialize peer manager
+        let pm_config = PeerManagerConfig {
+            diffusion_mode: DiffusionMode::InitiatorAndResponder,
+            peer_sharing_enabled: true,
+            ..PeerManagerConfig::default()
+        };
+        let peer_manager = Arc::new(RwLock::new(PeerManager::new(pm_config.clone())));
+
+        // Register topology peers in the peer manager
+        let peers = self.topology.all_peers();
+        if peers.is_empty() {
+            warn!("No peers configured in topology");
+            return Ok(());
+        }
+        {
+            let mut pm = peer_manager.write().await;
+            for (addr, port) in &peers {
+                // Resolve address to SocketAddr
+                if let Ok(mut addrs) = tokio::net::lookup_host(format!("{addr}:{port}")).await {
+                    if let Some(socket_addr) = addrs.next() {
+                        pm.add_config_peer(socket_addr, false, false);
+                    }
+                }
+            }
+            let stats = pm.stats();
+            info!(
+                "Peer manager initialized: {} known peers, mode={:?}",
+                stats.known_peers,
+                pm.diffusion_mode()
+            );
+        }
+
+        // Start N2N server for inbound peer connections (bidirectional mode)
+        let n2n_server = torsten_network::n2n_server::N2NServer::with_config(
             self.listen_addr,
             self.network_magic,
             self.query_handler.clone(),
@@ -354,6 +386,12 @@ impl Node {
                 chain_db: self.chain_db.clone(),
             }),
             200,
+            pm_config.diffusion_mode == DiffusionMode::InitiatorAndResponder,
+            torsten_network::n2n_server::PeerSharingMode::PeerSharingEnabled,
+        );
+        info!(
+            "N2N server: diffusion_mode={:?}, peer_sharing=enabled",
+            pm_config.diffusion_mode
         );
         tokio::spawn(async move {
             if let Err(e) = n2n_server.listen().await {
@@ -361,18 +399,10 @@ impl Node {
             }
         });
 
-        // Get all peers from topology
-        let peers = self.topology.all_peers();
-        if peers.is_empty() {
-            warn!("No peers configured in topology");
-            return Ok(());
-        }
-
         let network_magic = self.network_magic;
 
-        // Main connection loop with reconnection support
+        // Main connection loop — connect to peers and sync
         let mut retry_count = 0u32;
-        let max_retries = 100; // effectively unlimited retries
         let base_delay_secs = 5u64;
         let max_delay_secs = 60u64;
 
@@ -381,36 +411,58 @@ impl Node {
                 break;
             }
 
-            // Try each peer until we connect successfully
-            let mut client = None;
-            for (addr, port) in &peers {
-                let target = format!("{addr}:{port}");
-                info!("Attempting connection to {target}...");
+            // Get peers to connect to from the peer manager
+            let targets: Vec<std::net::SocketAddr> = {
+                let pm = peer_manager.read().await;
+                pm.peers_to_connect()
+            };
 
-                match NodeToNodeClient::connect(&*target, network_magic).await {
-                    Ok(c) => {
-                        info!("Connected to {target}");
-                        client = Some(c);
-                        break;
+            // If peer manager has no targets, fall back to topology list
+            let mut client = None;
+            if !targets.is_empty() {
+                for addr in &targets {
+                    let target = addr.to_string();
+                    info!("Connecting to peer {target}...");
+                    match NodeToNodeClient::connect(&*target, network_magic).await {
+                        Ok(c) => {
+                            peer_manager.write().await.peer_connected(addr, 14, true);
+                            peer_manager.write().await.promote_to_hot(addr);
+                            info!("Connected to {target}");
+                            client = Some((c, *addr));
+                            break;
+                        }
+                        Err(e) => {
+                            peer_manager.write().await.peer_failed(addr);
+                            warn!("Failed to connect to {target}: {e}");
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to connect to {target}: {e}");
-                        continue;
+                }
+            } else {
+                // Fallback: try topology peers directly
+                for (addr, port) in &peers {
+                    let target = format!("{addr}:{port}");
+                    info!("Connecting to peer {target}...");
+                    match NodeToNodeClient::connect(&*target, network_magic).await {
+                        Ok(c) => {
+                            info!("Connected to {target}");
+                            let sock_addr = c.remote_addr().to_owned();
+                            client = Some((c, sock_addr));
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Failed to connect to {target}: {e}");
+                        }
                     }
                 }
             }
 
-            let mut client = match client {
+            let (mut active_client, peer_addr) = match client {
                 Some(c) => {
-                    retry_count = 0; // Reset on successful connection
+                    retry_count = 0;
                     c
                 }
                 None => {
                     retry_count += 1;
-                    if retry_count > max_retries {
-                        error!("Exhausted connection retries");
-                        break;
-                    }
                     let delay = base_delay_secs
                         .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
                         .min(max_delay_secs);
@@ -427,18 +479,28 @@ impl Node {
                 }
             };
 
-            // Run chain sync — returns when disconnected or error
+            // Log peer manager state
+            {
+                let pm = peer_manager.read().await;
+                info!("P2P: {}", pm.stats());
+            }
+
+            // Run chain sync with connected peer
             let sync_shutdown = shutdown_rx.clone();
-            match self.chain_sync_loop(&mut client, sync_shutdown).await {
+            match self
+                .chain_sync_loop(&mut active_client, sync_shutdown)
+                .await
+            {
                 Ok(()) => {
-                    client.disconnect().await;
+                    active_client.disconnect().await;
+                    peer_manager.write().await.peer_disconnected(&peer_addr);
                     if *shutdown_rx.borrow() {
-                        break; // Clean shutdown
+                        break;
                     }
-                    // Sync ended without shutdown — likely peer disconnected
                     info!("Sync ended, will reconnect...");
                 }
                 Err(e) => {
+                    peer_manager.write().await.peer_disconnected(&peer_addr);
                     warn!("Sync error: {e}, will reconnect...");
                 }
             }
