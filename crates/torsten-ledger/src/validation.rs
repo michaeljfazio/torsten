@@ -451,6 +451,7 @@ mod tests {
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            raw_cbor: None,
         };
         utxo_set.insert(input.clone(), output);
         (utxo_set, input)
@@ -468,6 +469,7 @@ mod tests {
                     value: Value::lovelace(output_value),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(fee),
                 ttl: None,
@@ -500,6 +502,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         }
     }
 
@@ -828,6 +831,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -850,6 +854,7 @@ mod tests {
                     value: output_value,
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
                 ttl: None,
@@ -882,6 +887,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
@@ -914,6 +920,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -936,6 +943,7 @@ mod tests {
                     value: output_value,
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
                 ttl: None,
@@ -968,6 +976,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300);
@@ -1031,6 +1040,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1091,6 +1101,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
         let col_input = TransactionInput {
@@ -1106,6 +1117,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1152,6 +1164,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1175,6 +1188,7 @@ mod tests {
                 value: col_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1204,6 +1218,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1223,6 +1238,7 @@ mod tests {
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 },
             );
             collateral.push(col);
@@ -1254,6 +1270,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
         let col_input = TransactionInput {
@@ -1269,6 +1286,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1304,6 +1322,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
         let ref_input = TransactionInput {
@@ -1319,6 +1338,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 

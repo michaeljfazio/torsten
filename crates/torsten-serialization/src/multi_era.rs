@@ -138,12 +138,13 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
 
 fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, SerializationError> {
     let tx_hash = pallas_hash_to_torsten32(&tx.hash());
+    let raw_cbor = Some(tx.encode());
     let inputs = tx.inputs().iter().map(convert_input).collect();
 
     let outputs = tx
         .outputs()
         .iter()
-        .map(convert_output)
+        .map(|o| convert_output_with_cbor(o))
         .collect::<Result<Vec<_>, _>>()?;
 
     let fee = Lovelace(tx.fee().unwrap_or(0));
@@ -270,6 +271,7 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         witness_set,
         is_valid: tx.is_valid(),
         auxiliary_data,
+        raw_cbor,
     })
 }
 
@@ -292,6 +294,20 @@ fn convert_input(input: &PallasInput) -> TransactionInput {
 }
 
 fn convert_output(output: &PallasOutput) -> Result<TransactionOutput, SerializationError> {
+    convert_output_inner(output, None)
+}
+
+fn convert_output_with_cbor(
+    output: &PallasOutput,
+) -> Result<TransactionOutput, SerializationError> {
+    let raw_cbor = Some(output.encode());
+    convert_output_inner(output, raw_cbor)
+}
+
+fn convert_output_inner(
+    output: &PallasOutput,
+    raw_cbor: Option<Vec<u8>>,
+) -> Result<TransactionOutput, SerializationError> {
     let address = convert_address(output)?;
 
     let multi_era_value = output.value();
@@ -324,6 +340,7 @@ fn convert_output(output: &PallasOutput) -> Result<TransactionOutput, Serializat
         value,
         datum,
         script_ref,
+        raw_cbor,
     })
 }
 

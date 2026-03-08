@@ -1271,6 +1271,7 @@ mod tests {
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            raw_cbor: None,
         };
         state.utxo_set.insert(genesis_input.clone(), genesis_output);
 
@@ -1286,6 +1287,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
                 ttl: None,
@@ -1318,6 +1320,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -1351,6 +1354,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1391,6 +1395,7 @@ mod tests {
             },
             is_valid: false,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -1626,6 +1631,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                raw_cbor: None,
             },
         );
 
@@ -1640,6 +1646,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
                 ttl: None,
@@ -1672,6 +1679,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -2192,6 +2200,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -2696,6 +2705,7 @@ mod tests {
             value: Value::lovelace(1_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            raw_cbor: None,
         };
         state.utxo_set.insert(input, output);
 

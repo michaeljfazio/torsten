@@ -197,6 +197,7 @@ mod tests {
             value: Value::lovelace(lovelace),
             datum: OutputDatum::None,
             script_ref: None,
+            raw_cbor: None,
         }
     }
 

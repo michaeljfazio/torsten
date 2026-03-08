@@ -28,6 +28,9 @@ pub struct TransactionOutput {
     pub value: Value,
     pub datum: OutputDatum,
     pub script_ref: Option<ScriptRef>,
+    /// Raw CBOR encoding of this output (for Plutus script evaluation)
+    #[serde(skip)]
+    pub raw_cbor: Option<Vec<u8>>,
 }
 
 /// How datum is attached to a UTxO
@@ -370,6 +373,9 @@ pub struct Transaction {
     pub witness_set: TransactionWitnessSet,
     pub is_valid: bool,
     pub auxiliary_data: Option<AuxiliaryData>,
+    /// Raw CBOR encoding of this transaction (for Plutus script evaluation)
+    #[serde(skip)]
+    pub raw_cbor: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -411,6 +417,7 @@ impl Transaction {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         }
     }
 }

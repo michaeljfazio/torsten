@@ -280,6 +280,7 @@ mod tests {
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
                 ttl: None,
@@ -312,6 +313,7 @@ mod tests {
             },
             is_valid: true,
             auxiliary_data: None,
+            raw_cbor: None,
         }
     }
 
