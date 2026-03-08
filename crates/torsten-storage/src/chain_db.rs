@@ -88,12 +88,7 @@ impl ChainDB {
         let batch: Vec<_> = blocks
             .into_iter()
             .filter(|(hash, slot, _, _, _)| {
-                let exists = self
-                    .immutable
-                    .get_block_by_hash(hash)
-                    .ok()
-                    .flatten()
-                    .is_some();
+                let exists = self.immutable.has_block(hash);
                 if exists {
                     trace!(
                         hash = %hash.to_hex(),
@@ -263,15 +258,9 @@ impl ChainDB {
         }
     }
 
-    /// Check if a block exists in the chain DB
+    /// Check if a block exists in the chain DB (uses hash index only, no block data read)
     pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
-        self.volatile.get_block(hash).is_some()
-            || self
-                .immutable
-                .get_block_by_hash(hash)
-                .ok()
-                .flatten()
-                .is_some()
+        self.volatile.has_block(hash) || self.immutable.has_block(hash)
     }
 
     /// Flush old blocks from volatile to immutable when chain is long enough.

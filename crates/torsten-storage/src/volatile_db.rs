@@ -110,6 +110,11 @@ impl VolatileDB {
         Ok(())
     }
 
+    /// Check if a block exists by hash (no data copy)
+    pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
+        self.blocks.read().contains_key(hash)
+    }
+
     /// Get block CBOR by hash
     pub fn get_block(&self, hash: &BlockHeaderHash) -> Option<Vec<u8>> {
         self.blocks.read().get(hash).map(|e| e.cbor.clone())

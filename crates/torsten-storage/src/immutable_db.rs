@@ -185,6 +185,15 @@ impl ImmutableDB {
             .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))
     }
 
+    /// Check if a block exists by hash (only checks hash index, does not read block data)
+    pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
+        let Some(db) = self.db.as_ref() else {
+            return false;
+        };
+        let hash_key = [b"hash:", hash.as_bytes().as_slice()].concat();
+        db.get(hash_key).ok().flatten().is_some()
+    }
+
     /// Get a block's raw CBOR by hash
     pub fn get_block_by_hash(
         &self,
