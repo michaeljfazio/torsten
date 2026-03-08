@@ -452,7 +452,7 @@ impl Node {
             epoch: ls.epoch,
             era: ls.era.to_era_index(),
             block_number: ls.current_block_number(),
-            system_start: "2017-09-23T21:44:51Z".to_string(),
+            system_start: self.config.network.system_start().to_string(),
             utxo_count: ls.utxo_set.len(),
             delegations_count: ls.delegations.len(),
             pool_count: ls.pool_params.len(),

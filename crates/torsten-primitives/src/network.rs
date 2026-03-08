@@ -44,4 +44,13 @@ impl NetworkId {
             NetworkId::Testnet => "stake_test",
         }
     }
+
+    /// Default system start time for the network.
+    /// For testnets, this returns the preprod start; use Shelley genesis for exact value.
+    pub fn system_start(self) -> &'static str {
+        match self {
+            NetworkId::Mainnet => "2017-09-23T21:44:51Z",
+            NetworkId::Testnet => "2022-06-01T00:00:00Z",
+        }
+    }
 }

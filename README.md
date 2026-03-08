@@ -59,15 +59,19 @@ To sync against the Cardano preview testnet:
 
 ```json
 {
-  "producers": [
+  "bootstrapPeers": [
     {
-      "addr": "preview-node.play.dev.cardano.org",
-      "port": 3001,
-      "valency": 1
+      "address": "preview-node.play.dev.cardano.org",
+      "port": 3001
     }
-  ]
+  ],
+  "localRoots": [{ "accessPoints": [], "advertise": false, "valency": 1 }],
+  "publicRoots": [{ "accessPoints": [], "advertise": false }],
+  "useLedgerAfterSlot": 102729600
 }
 ```
+
+> **Tip:** You can also download the official topology directly from the [Cardano Operations Book](https://book.world.dev.cardano.org/environments/preview/topology.json).
 
 3. Run the node:
 
