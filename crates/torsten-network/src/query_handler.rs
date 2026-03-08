@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use torsten_primitives::block::{Point, Tip};
 use torsten_primitives::time::{BlockNo, EpochNo};
 use tracing::debug;
@@ -20,6 +21,7 @@ pub enum QueryResult {
     DRepState(Vec<DRepSnapshot>),
     CommitteeState(CommitteeSnapshot),
     StakeAddressInfo(Vec<StakeAddressSnapshot>),
+    UtxoByAddress(Vec<UtxoSnapshot>),
     Error(String),
 }
 
@@ -142,19 +144,45 @@ impl Default for NodeStateSnapshot {
     }
 }
 
+/// Snapshot of a UTxO entry for query results
+#[derive(Debug, Clone)]
+pub struct UtxoSnapshot {
+    pub tx_hash: Vec<u8>,
+    pub output_index: u32,
+    pub address: String,
+    pub lovelace: u64,
+    pub has_datum: bool,
+    pub has_script_ref: bool,
+}
+
+/// Trait for providing UTxO query access to the query handler.
+/// Implemented by the node to give the query handler on-demand access
+/// to the UTxO set without coupling to the ledger crate.
+pub trait UtxoQueryProvider: Send + Sync {
+    /// Look up UTxOs at a specific address (raw bytes)
+    fn utxos_at_address_bytes(&self, addr_bytes: &[u8]) -> Vec<UtxoSnapshot>;
+}
+
 /// Handler for local state queries.
 ///
 /// This provides a clean interface for answering LocalStateQuery protocol
 /// queries from the current ledger state.
 pub struct QueryHandler {
     state: NodeStateSnapshot,
+    utxo_provider: Option<Arc<dyn UtxoQueryProvider>>,
 }
 
 impl QueryHandler {
     pub fn new() -> Self {
         QueryHandler {
             state: NodeStateSnapshot::default(),
+            utxo_provider: None,
         }
+    }
+
+    /// Set the UTxO query provider for on-demand UTxO lookups
+    pub fn set_utxo_provider(&mut self, provider: Arc<dyn UtxoQueryProvider>) {
+        self.utxo_provider = Some(provider);
     }
 
     /// Update the snapshot from the current node state
@@ -259,18 +287,22 @@ impl QueryHandler {
         match decoder.array() {
             Ok(_) => {
                 let query_tag = decoder.u32().unwrap_or(999);
-                self.handle_shelley_query(query_tag)
+                self.handle_shelley_query(query_tag, decoder)
             }
             Err(_) => {
                 // Try as a simple integer tag
                 let query_tag = decoder.u32().unwrap_or(999);
-                self.handle_shelley_query(query_tag)
+                self.handle_shelley_query(query_tag, decoder)
             }
         }
     }
 
     /// Handle Shelley-era queries by tag
-    fn handle_shelley_query(&self, query_tag: u32) -> QueryResult {
+    fn handle_shelley_query(
+        &self,
+        query_tag: u32,
+        decoder: &mut minicbor::Decoder<'_>,
+    ) -> QueryResult {
         match query_tag {
             0 => {
                 // GetLedgerTip / GetEpochNo
@@ -281,6 +313,18 @@ impl QueryHandler {
                 // GetEpochNo (alternate)
                 debug!("Query: GetEpochNo (alt)");
                 QueryResult::EpochNo(self.state.epoch.0)
+            }
+            4 => {
+                // GetUTxOByAddress
+                debug!("Query: GetUTxOByAddress");
+                // Try to read address bytes from the query payload
+                let addr_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                if let Some(provider) = &self.utxo_provider {
+                    let utxos = provider.utxos_at_address_bytes(&addr_bytes);
+                    QueryResult::UtxoByAddress(utxos)
+                } else {
+                    QueryResult::UtxoByAddress(vec![])
+                }
             }
             5 => {
                 // GetStakeDistribution
@@ -355,10 +399,17 @@ mod tests {
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::time::SlotNo;
 
+    /// Helper to call handle_shelley_query with an empty decoder
+    fn query(handler: &QueryHandler, tag: u32) -> QueryResult {
+        let empty = [0u8; 0];
+        let mut decoder = minicbor::Decoder::new(&empty);
+        handler.handle_shelley_query(tag, &mut decoder)
+    }
+
     #[test]
     fn test_query_handler_default_state() {
         let handler = QueryHandler::new();
-        match handler.handle_shelley_query(0) {
+        match query(&handler, 0) {
             QueryResult::EpochNo(e) => assert_eq!(e, 0),
             other => panic!("Expected EpochNo, got {other:?}"),
         }
@@ -372,7 +423,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(0) {
+        match query(&handler, 0) {
             QueryResult::EpochNo(e) => assert_eq!(e, 500),
             other => panic!("Expected EpochNo, got {other:?}"),
         }
@@ -391,7 +442,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(11) {
+        match query(&handler, 11) {
             QueryResult::ChainTip {
                 slot,
                 hash: h,
@@ -408,7 +459,7 @@ mod tests {
     #[test]
     fn test_query_handler_current_era() {
         let handler = QueryHandler::new();
-        match handler.handle_shelley_query(999) {
+        match query(&handler, 999) {
             QueryResult::Error(_) => {} // Expected for unknown query
             other => panic!("Expected Error, got {other:?}"),
         }
@@ -422,7 +473,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(10) {
+        match query(&handler, 10) {
             QueryResult::ChainBlockNo(n) => assert_eq!(n, 42000),
             other => panic!("Expected ChainBlockNo, got {other:?}"),
         }
@@ -431,7 +482,7 @@ mod tests {
     #[test]
     fn test_query_handler_system_start() {
         let handler = QueryHandler::new();
-        match handler.handle_shelley_query(999) {
+        match query(&handler, 999) {
             QueryResult::Error(_) => {}
             _ => panic!("Expected error for unknown query"),
         }
@@ -482,7 +533,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(5) {
+        match query(&handler, 5) {
             QueryResult::StakeDistribution(pools) => {
                 assert_eq!(pools.len(), 2);
                 assert_eq!(pools[0].pool_id, vec![0xaa; 28]);
@@ -501,7 +552,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(7) {
+        match query(&handler, 7) {
             QueryResult::ProtocolParams(json) => {
                 assert!(json.contains("min_fee_a"));
                 assert!(json.contains("44"));
@@ -536,7 +587,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(20) {
+        match query(&handler, 20) {
             QueryResult::GovState(gov) => {
                 assert_eq!(gov.drep_count, 5);
                 assert_eq!(gov.committee_member_count, 1);
@@ -562,7 +613,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(21) {
+        match query(&handler, 21) {
             QueryResult::DRepState(dreps) => {
                 assert_eq!(dreps.len(), 1);
                 assert_eq!(dreps[0].credential_hash, vec![0xdd; 32]);
@@ -597,7 +648,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(22) {
+        match query(&handler, 22) {
             QueryResult::CommitteeState(committee) => {
                 assert_eq!(committee.members.len(), 2);
                 assert_eq!(committee.resigned.len(), 1);
@@ -628,7 +679,7 @@ mod tests {
             ..Default::default()
         });
 
-        match handler.handle_shelley_query(23) {
+        match query(&handler, 23) {
             QueryResult::StakeAddressInfo(addrs) => {
                 assert_eq!(addrs.len(), 2);
                 assert_eq!(addrs[0].credential_hash, vec![0xaa; 28]);
@@ -641,9 +692,54 @@ mod tests {
     }
 
     #[test]
+    fn test_query_handler_utxo_by_address_no_provider() {
+        let handler = QueryHandler::new();
+        // Without a UtxoQueryProvider, should return empty
+        let addr_bytes = vec![0x01; 57]; // fake address bytes
+        let mut decoder = minicbor::Decoder::new(&addr_bytes);
+        match handler.handle_shelley_query(4, &mut decoder) {
+            QueryResult::UtxoByAddress(utxos) => {
+                assert!(utxos.is_empty());
+            }
+            other => panic!("Expected UtxoByAddress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_utxo_by_address_with_provider() {
+        struct MockProvider;
+        impl UtxoQueryProvider for MockProvider {
+            fn utxos_at_address_bytes(&self, _addr_bytes: &[u8]) -> Vec<UtxoSnapshot> {
+                vec![UtxoSnapshot {
+                    tx_hash: vec![0xaa; 32],
+                    output_index: 0,
+                    address: "addr_test1qz...".to_string(),
+                    lovelace: 5_000_000,
+                    has_datum: false,
+                    has_script_ref: false,
+                }]
+            }
+        }
+
+        let mut handler = QueryHandler::new();
+        handler.set_utxo_provider(Arc::new(MockProvider));
+
+        let addr_bytes = vec![0x01; 57];
+        let mut decoder = minicbor::Decoder::new(&addr_bytes);
+        match handler.handle_shelley_query(4, &mut decoder) {
+            QueryResult::UtxoByAddress(utxos) => {
+                assert_eq!(utxos.len(), 1);
+                assert_eq!(utxos[0].lovelace, 5_000_000);
+                assert_eq!(utxos[0].tx_hash, vec![0xaa; 32]);
+            }
+            other => panic!("Expected UtxoByAddress, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_query_handler_gov_state_empty() {
         let handler = QueryHandler::new();
-        match handler.handle_shelley_query(20) {
+        match query(&handler, 20) {
             QueryResult::GovState(gov) => {
                 assert_eq!(gov.drep_count, 0);
                 assert_eq!(gov.proposals.len(), 0);

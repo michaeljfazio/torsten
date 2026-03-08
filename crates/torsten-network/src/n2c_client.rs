@@ -292,6 +292,41 @@ impl N2CClient {
         Ok(result)
     }
 
+    /// Query UTxOs at a specific address (GetUTxOByAddress - query tag 4)
+    pub async fn query_utxo_by_address(
+        &mut self,
+        addr_bytes: &[u8],
+    ) -> Result<Vec<u8>, N2CClientError> {
+        // Build MsgQuery with address parameter: [3, [era, [4, addr_bytes]]]
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgQuery
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(0)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // era tag (Shelley+)
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(4)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetUTxOByAddress
+        enc.bytes(addr_bytes)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_STATE_QUERY,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        Ok(resp.payload)
+    }
+
     /// Submit a transaction via LocalTxSubmission
     ///
     /// The tx_cbor should be the raw CBOR bytes of the signed transaction.

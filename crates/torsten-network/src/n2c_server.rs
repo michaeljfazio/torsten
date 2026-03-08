@@ -566,6 +566,22 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.bytes(cred).ok();
             }
         }
+        QueryResult::UtxoByAddress(utxos) => {
+            enc.array(utxos.len() as u64).ok();
+            for utxo in utxos {
+                enc.map(5).ok();
+                enc.str("tx_hash").ok();
+                enc.bytes(&utxo.tx_hash).ok();
+                enc.str("output_index").ok();
+                enc.u32(utxo.output_index).ok();
+                enc.str("address").ok();
+                enc.str(&utxo.address).ok();
+                enc.str("lovelace").ok();
+                enc.u64(utxo.lovelace).ok();
+                enc.str("has_datum").ok();
+                enc.bool(utxo.has_datum).ok();
+            }
+        }
         QueryResult::StakeAddressInfo(addrs) => {
             enc.array(addrs.len() as u64).ok();
             for addr in addrs {

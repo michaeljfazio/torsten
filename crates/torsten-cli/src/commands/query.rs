@@ -140,10 +140,65 @@ impl QueryCmd {
             }
             QuerySubcommand::Utxo {
                 address,
-                socket_path: _,
+                socket_path,
             } => {
-                println!("Querying UTxOs for {address}...");
-                println!("(UTxO query not yet implemented - requires UTxO by address index)");
+                // Decode bech32 address to raw bytes
+                let (_, addr_bytes) = bech32::decode(&address)
+                    .map_err(|e| anyhow::anyhow!("Invalid bech32 address: {e}"))?;
+
+                let mut client = connect_and_acquire(&socket_path).await?;
+
+                let raw = client
+                    .query_utxo_by_address(&addr_bytes)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query UTxOs: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // Parse MsgResult [4, array[map{...}]]
+                let mut decoder = minicbor::Decoder::new(&raw);
+                let _ = decoder.array();
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+
+                if arr_len == 0 {
+                    println!("No UTxOs found at {address}");
+                    return Ok(());
+                }
+
+                println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
+                println!("{}", "-".repeat(96));
+
+                for _ in 0..arr_len {
+                    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                    let mut tx_hash = String::new();
+                    let mut output_index = 0u32;
+                    let mut lovelace = 0u64;
+                    let mut has_datum = false;
+
+                    for _ in 0..map_len {
+                        let key = decoder.str().unwrap_or("");
+                        match key {
+                            "tx_hash" => tx_hash = hex::encode(decoder.bytes().unwrap_or(&[])),
+                            "output_index" => output_index = decoder.u32().unwrap_or(0),
+                            "lovelace" => lovelace = decoder.u64().unwrap_or(0),
+                            "has_datum" => has_datum = decoder.bool().unwrap_or(false),
+                            _ => {
+                                decoder.skip().ok();
+                            }
+                        }
+                    }
+
+                    let utxo_ref = format!("{tx_hash}#{output_index}");
+                    let datum_str = if has_datum { "yes" } else { "no" };
+                    println!("{utxo_ref:<68} {datum_str:>6} {lovelace:>20}");
+                }
+
+                println!("\nTotal UTxOs: {arr_len}");
                 Ok(())
             }
             QuerySubcommand::ProtocolParameters {
