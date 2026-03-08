@@ -11,6 +11,13 @@ use tracing::{debug, error, info, warn};
 use crate::multiplexer::Segment;
 use crate::query_handler::{QueryHandler, QueryResult};
 
+/// Trait for validating transactions before mempool admission.
+/// Implementors should perform full Phase-1 and Phase-2 (Plutus) validation.
+pub trait TxValidator: Send + Sync + 'static {
+    /// Validate a transaction. Returns Ok(()) if valid, or an error string.
+    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), String>;
+}
+
 #[derive(Error, Debug)]
 pub enum N2CServerError {
     #[error("IO error: {0}")]
@@ -32,6 +39,7 @@ const MINI_PROTOCOL_TX_MONITOR: u16 = 12;
 pub struct N2CServer {
     query_handler: Arc<RwLock<QueryHandler>>,
     mempool: Arc<Mempool>,
+    tx_validator: Option<Arc<dyn TxValidator>>,
 }
 
 impl N2CServer {
@@ -39,7 +47,13 @@ impl N2CServer {
         N2CServer {
             query_handler,
             mempool,
+            tx_validator: None,
         }
+    }
+
+    /// Set a transaction validator for Phase-1/Phase-2 validation before mempool admission
+    pub fn set_tx_validator(&mut self, validator: Arc<dyn TxValidator>) {
+        self.tx_validator = Some(validator);
     }
 
     /// Start listening on the given Unix socket path.
@@ -59,8 +73,11 @@ impl N2CServer {
                     info!("N2C client connected");
                     let handler = self.query_handler.clone();
                     let mempool = self.mempool.clone();
+                    let validator = self.tx_validator.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_n2c_connection(stream, handler, mempool).await {
+                        if let Err(e) =
+                            handle_n2c_connection(stream, handler, mempool, validator).await
+                        {
                             warn!("N2C connection error: {e}");
                         }
                         debug!("N2C client disconnected");
@@ -79,6 +96,7 @@ async fn handle_n2c_connection(
     mut stream: tokio::net::UnixStream,
     query_handler: Arc<RwLock<QueryHandler>>,
     mempool: Arc<Mempool>,
+    tx_validator: Option<Arc<dyn TxValidator>>,
 ) -> Result<(), N2CServerError> {
     let mut buf = vec![0u8; 65536];
 
@@ -101,7 +119,8 @@ async fn handle_n2c_connection(
                     offset += consumed;
 
                     // Process the segment
-                    let response = process_segment(&segment, &query_handler, &mempool).await?;
+                    let response =
+                        process_segment(&segment, &query_handler, &mempool, &tx_validator).await?;
                     if let Some(resp_segment) = response {
                         let encoded = resp_segment.encode();
                         stream.write_all(&encoded).await?;
@@ -120,11 +139,14 @@ async fn process_segment(
     segment: &Segment,
     query_handler: &Arc<RwLock<QueryHandler>>,
     mempool: &Arc<Mempool>,
+    tx_validator: &Option<Arc<dyn TxValidator>>,
 ) -> Result<Option<Segment>, N2CServerError> {
     match segment.protocol_id {
         MINI_PROTOCOL_HANDSHAKE => handle_handshake(&segment.payload),
         MINI_PROTOCOL_STATE_QUERY => handle_state_query(&segment.payload, query_handler).await,
-        MINI_PROTOCOL_TX_SUBMISSION => handle_tx_submission(&segment.payload, mempool),
+        MINI_PROTOCOL_TX_SUBMISSION => {
+            handle_tx_submission(&segment.payload, mempool, tx_validator)
+        }
         MINI_PROTOCOL_TX_MONITOR => handle_tx_monitor(&segment.payload, mempool),
         MINI_PROTOCOL_CHAINSYNC => handle_local_chainsync(&segment.payload, query_handler).await,
         other => {
@@ -240,6 +262,7 @@ fn parse_highest_version(payload: &[u8]) -> Option<u16> {
 fn handle_tx_submission(
     payload: &[u8],
     mempool: &Arc<Mempool>,
+    tx_validator: &Option<Arc<dyn TxValidator>>,
 ) -> Result<Option<Segment>, N2CServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
 
@@ -269,6 +292,14 @@ fn handle_tx_submission(
             match tx_data {
                 Some((era_id, tx_bytes)) => {
                     let tx_size = tx_bytes.len();
+
+                    // Run Phase-1/Phase-2 validation if a validator is available
+                    if let Some(validator) = tx_validator {
+                        if let Err(e) = validator.validate_tx(era_id, &tx_bytes) {
+                            warn!("Transaction validation failed: {e}");
+                            return encode_tx_reject(&e);
+                        }
+                    }
 
                     // Parse the full transaction
                     match torsten_serialization::decode_transaction(era_id, &tx_bytes) {
@@ -1031,11 +1062,12 @@ mod tests {
     #[test]
     fn test_handle_tx_submission_accept() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
+        let no_validator: Option<Arc<dyn TxValidator>> = None;
 
         let tx_bytes = build_test_tx_cbor(200_000);
         let payload = build_submit_payload(6, &tx_bytes); // Conway era
 
-        let result = handle_tx_submission(&payload, &mempool).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1055,13 +1087,14 @@ mod tests {
     #[test]
     fn test_handle_tx_submission_duplicate() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
+        let no_validator: Option<Arc<dyn TxValidator>> = None;
 
         let tx_bytes = build_test_tx_cbor(200_000);
         let payload = build_submit_payload(6, &tx_bytes);
 
         // Submit twice - both should accept
-        let _ = handle_tx_submission(&payload, &mempool).unwrap();
-        let result = handle_tx_submission(&payload, &mempool).unwrap();
+        let _ = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1074,11 +1107,12 @@ mod tests {
     #[test]
     fn test_handle_tx_submission_invalid_cbor() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
+        let no_validator: Option<Arc<dyn TxValidator>> = None;
 
         let tx_bytes = vec![0xa0u8]; // not a valid transaction
         let payload = build_submit_payload(6, &tx_bytes);
 
-        let result = handle_tx_submission(&payload, &mempool).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1095,17 +1129,18 @@ mod tests {
             max_bytes: 1024 * 1024,
         };
         let mempool = Arc::new(Mempool::new(config));
+        let no_validator: Option<Arc<dyn TxValidator>> = None;
 
         // Fill the mempool
         let tx_bytes_1 = build_test_tx_cbor(100_000);
         let payload1 = build_submit_payload(6, &tx_bytes_1);
-        let _ = handle_tx_submission(&payload1, &mempool).unwrap();
+        let _ = handle_tx_submission(&payload1, &mempool, &no_validator).unwrap();
 
         // Submit a different tx - should be rejected (full)
         let tx_bytes_2 = build_test_tx_cbor(200_000);
         let payload2 = build_submit_payload(6, &tx_bytes_2);
 
-        let result = handle_tx_submission(&payload2, &mempool).unwrap();
+        let result = handle_tx_submission(&payload2, &mempool, &no_validator).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1216,6 +1251,7 @@ mod tests {
     #[test]
     fn test_handle_tx_submission_done() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
+        let no_validator: Option<Arc<dyn TxValidator>> = None;
 
         // Build MsgDone: [3]
         let mut payload = Vec::new();
@@ -1223,7 +1259,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(3).unwrap();
 
-        let result = handle_tx_submission(&payload, &mempool).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
         assert!(result.is_none());
     }
 

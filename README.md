@@ -368,7 +368,7 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 #### Plutus Smart Contracts
 - [x] Plutus V1/V2/V3 script evaluation via uplc CEK machine
 - [x] Phase-2 validation (eval_phase_two_raw)
-- [ ] Plutus evaluation in LocalTxSubmission (currently trusts block producer's is_valid flag)
+- [x] Plutus evaluation in LocalTxSubmission (Phase-1 + Phase-2 validation before mempool admission)
 - [ ] Script context construction for CLI transaction building
 
 #### Performance

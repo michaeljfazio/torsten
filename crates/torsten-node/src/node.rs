@@ -12,7 +12,7 @@ use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
     BlockProvider, ChainSyncEvent, DiffusionMode, N2CServer, NodeServer, NodeStateSnapshot,
-    NodeToNodeClient, PeerManager, PeerManagerConfig, QueryHandler,
+    NodeToNodeClient, PeerManager, PeerManagerConfig, QueryHandler, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -119,6 +119,39 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
                 has_script_ref: output.script_ref.is_some(),
             })
             .collect()
+    }
+}
+
+/// Validates transactions against the live ledger state (Phase-1 + Phase-2 Plutus)
+struct LedgerTxValidator {
+    ledger: Arc<RwLock<LedgerState>>,
+    slot_config: torsten_ledger::plutus::SlotConfig,
+}
+
+impl TxValidator for LedgerTxValidator {
+    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), String> {
+        let tx = torsten_serialization::decode_transaction(era_id, tx_bytes)
+            .map_err(|e| format!("Failed to decode transaction: {e}"))?;
+
+        let ledger = self.ledger.try_read().map_err(|_| "Ledger state busy")?;
+        let tx_size = tx_bytes.len() as u64;
+        let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+        torsten_ledger::validation::validate_transaction(
+            &tx,
+            &ledger.utxo_set,
+            &ledger.protocol_params,
+            current_slot,
+            tx_size,
+            Some(&self.slot_config),
+        )
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
     }
 }
 
@@ -379,7 +412,13 @@ impl Node {
         }
 
         // Start N2C server on Unix socket
-        let n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());
+        let mut n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());
+        let slot_config = self.ledger_state.read().await.slot_config;
+        n2c_server.set_tx_validator(Arc::new(LedgerTxValidator {
+            ledger: self.ledger_state.clone(),
+            slot_config,
+        }));
+        info!("N2C server: Plutus tx validation enabled");
         let n2c_socket_path = self.socket_path.clone();
         tokio::spawn(async move {
             if let Err(e) = n2c_server.listen(&n2c_socket_path).await {
