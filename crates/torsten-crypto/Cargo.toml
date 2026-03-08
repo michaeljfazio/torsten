@@ -16,6 +16,7 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 minicbor = { workspace = true }
 vrf_dalek = { workspace = true }
+curve25519-dalek-fork = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

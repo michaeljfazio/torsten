@@ -6,8 +6,9 @@
 ///
 /// The VRF implementation uses ECVRF-ED25519-SHA512-Elligator2
 /// (IETF draft-irtf-cfrg-vrf-03) as used by the Cardano reference node.
+use curve25519_dalek_fork::constants::ED25519_BASEPOINT_POINT;
 use thiserror::Error;
-use vrf_dalek::vrf03::{PublicKey03, VrfProof03};
+use vrf_dalek::vrf03::{PublicKey03, SecretKey03, VrfProof03};
 
 #[derive(Error, Debug)]
 pub enum VrfError {
@@ -90,6 +91,51 @@ pub fn check_leader_value(vrf_output: &[u8], relative_stake: f64, active_slot_co
     let threshold = 1.0 - (1.0 - active_slot_coeff).powf(relative_stake);
 
     vrf_value < threshold
+}
+
+/// A VRF key pair for proof generation
+pub struct VrfKeyPair {
+    pub secret_key: [u8; 32],
+    pub public_key: [u8; 32],
+}
+
+/// Generate a new VRF key pair using a cryptographically secure RNG.
+pub fn generate_vrf_keypair() -> VrfKeyPair {
+    let mut seed = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    let sk = SecretKey03::from_bytes(&seed);
+    let secret_bytes = sk.to_bytes();
+
+    // Derive public key: extend secret to get scalar, then scalar * basepoint
+    let (scalar, _) = sk.extend();
+    let point = scalar * ED25519_BASEPOINT_POINT;
+    let pk_bytes = point.compress().to_bytes();
+
+    VrfKeyPair {
+        secret_key: secret_bytes,
+        public_key: pk_bytes,
+    }
+}
+
+/// Generate a VRF proof for the given seed using a secret key.
+///
+/// Returns the 80-byte proof and 64-byte output.
+pub fn generate_vrf_proof(
+    secret_key: &[u8; 32],
+    seed: &[u8],
+) -> Result<([u8; 80], [u8; 64]), VrfError> {
+    let sk = SecretKey03::from_bytes(secret_key);
+
+    // Derive the public key from the secret key
+    let (scalar, _) = sk.extend();
+    let point = scalar * ED25519_BASEPOINT_POINT;
+    let pk = PublicKey03::from_bytes(&point.compress().to_bytes());
+
+    let proof = VrfProof03::generate(&pk, &sk, seed);
+    let proof_bytes = proof.to_bytes();
+    let output = proof.proof_to_hash();
+
+    Ok((proof_bytes, output))
 }
 
 fn vrf_output_to_fraction(output: &[u8]) -> f64 {
@@ -193,6 +239,50 @@ mod tests {
 
         let output = vrf_proof_to_hash(&proof).unwrap();
         assert_eq!(&output[..], &expected[..]);
+    }
+
+    #[test]
+    fn test_vrf_keygen_and_sign() {
+        let kp = generate_vrf_keypair();
+        assert_eq!(kp.secret_key.len(), 32);
+        assert_eq!(kp.public_key.len(), 32);
+
+        // Generate a proof and verify it
+        let seed = b"test_seed_data_for_vrf";
+        let (proof, output) = generate_vrf_proof(&kp.secret_key, seed).unwrap();
+        assert_eq!(proof.len(), 80);
+        assert_eq!(output.len(), 64);
+
+        // Verify the proof with the public key
+        let verified_output = verify_vrf_proof(&kp.public_key, &proof, seed).unwrap();
+        assert_eq!(verified_output, output);
+    }
+
+    #[test]
+    fn test_vrf_keygen_unique() {
+        let kp1 = generate_vrf_keypair();
+        let kp2 = generate_vrf_keypair();
+        assert_ne!(kp1.secret_key, kp2.secret_key);
+        assert_ne!(kp1.public_key, kp2.public_key);
+    }
+
+    #[test]
+    fn test_vrf_sign_leader_check() {
+        let kp = generate_vrf_keypair();
+        // Generate proofs for many slots — with 100% stake and f=0.05,
+        // a pool is elected ~5% of slots, so check at least some pass
+        let mut elected = 0;
+        for slot in 0..200u64 {
+            let mut seed = vec![0u8; 32]; // epoch nonce
+            seed.extend_from_slice(&slot.to_be_bytes());
+            let (_, output) = generate_vrf_proof(&kp.secret_key, &seed).unwrap();
+            if check_leader_value(&output, 1.0, 0.05) {
+                elected += 1;
+            }
+        }
+        // With f=0.05 and 100% stake, expect ~10 out of 200 slots (5%)
+        assert!(elected > 0, "Should win at least some slots");
+        assert!(elected < 100, "Should not win most slots with f=0.05");
     }
 
     #[test]

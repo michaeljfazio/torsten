@@ -166,19 +166,17 @@ impl NodeCmd {
                 verification_key_file,
                 signing_key_file,
             } => {
-                // VRF keys - use ed25519 as placeholder
-                let sk = torsten_crypto::keys::PaymentSigningKey::generate();
-                let vk = sk.verification_key();
+                let kp = torsten_crypto::vrf::generate_vrf_keypair();
 
                 let sk_env = serde_json::json!({
                     "type": "VrfSigningKey_PraosVRF",
                     "description": "VRF Signing Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&sk.to_bytes()))
+                    "cborHex": hex::encode(simple_cbor_wrap(&kp.secret_key))
                 });
                 let vk_env = serde_json::json!({
                     "type": "VrfVerificationKey_PraosVRF",
                     "description": "VRF Verification Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&vk.to_bytes()))
+                    "cborHex": hex::encode(simple_cbor_wrap(&kp.public_key))
                 });
 
                 std::fs::write(&signing_key_file, serde_json::to_string_pretty(&sk_env)?)?;
