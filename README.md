@@ -33,7 +33,7 @@ cargo build --release
 
 ```bash
 # Run with default settings (mainnet)
-cargo run --release --bin torsten-node -- \
+cargo run --release --bin torsten-node -- run \
   --config config.json \
   --topology topology.json \
   --database-path ./db \
@@ -50,8 +50,8 @@ To sync against the Cardano preview testnet:
 
 ```json
 {
-  "network": "preview",
-  "network_magic": 2
+  "Network": "Testnet",
+  "NetworkMagic": 2
 }
 ```
 
@@ -72,7 +72,7 @@ To sync against the Cardano preview testnet:
 3. Run the node:
 
 ```bash
-cargo run --release --bin torsten-node -- \
+cargo run --release --bin torsten-node -- run \
   --config config-preview.json \
   --topology topology-preview.json \
   --database-path ./db-preview \
