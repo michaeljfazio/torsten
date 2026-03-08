@@ -77,6 +77,21 @@ enum StakePoolSubcommand {
         reward_account_verification_key_file: PathBuf,
         #[arg(long)]
         pool_owner_verification_key_file: Vec<PathBuf>,
+        /// Pool relay: IP address (e.g., "1.2.3.4:3001")
+        #[arg(long)]
+        pool_relay_ipv4: Vec<String>,
+        /// Pool relay: DNS hostname with port (e.g., "relay.example.com:3001")
+        #[arg(long)]
+        single_host_pool_relay: Vec<String>,
+        /// Pool relay: DNS SRV record name (e.g., "_cardano._tcp.example.com")
+        #[arg(long)]
+        multi_host_pool_relay: Vec<String>,
+        /// Pool metadata URL
+        #[arg(long)]
+        metadata_url: Option<String>,
+        /// Pool metadata hash (hex)
+        #[arg(long)]
+        metadata_hash: Option<String>,
         #[arg(long)]
         out_file: PathBuf,
     },
@@ -272,6 +287,11 @@ impl StakePoolCmd {
                 margin,
                 reward_account_verification_key_file,
                 pool_owner_verification_key_file,
+                pool_relay_ipv4,
+                single_host_pool_relay,
+                multi_host_pool_relay,
+                metadata_url,
+                metadata_hash,
                 out_file,
             } => {
                 // Read pool operator (cold) vkey
@@ -289,6 +309,41 @@ impl StakePoolCmd {
                 // Convert margin to rational (find close fraction)
                 let margin_num = (margin * 1_000_000.0) as u64;
                 let margin_den = 1_000_000u64;
+
+                // Build relay list
+                let mut relays: Vec<RelaySpec> = Vec::new();
+                for ipv4_str in &pool_relay_ipv4 {
+                    let parts: Vec<&str> = ipv4_str.rsplitn(2, ':').collect();
+                    let (port, ip) = if parts.len() == 2 {
+                        (parts[0].parse::<u16>().unwrap_or(3001), parts[1])
+                    } else {
+                        (3001, ipv4_str.as_str())
+                    };
+                    let octets: Vec<u8> = ip.split('.').filter_map(|s| s.parse().ok()).collect();
+                    if octets.len() == 4 {
+                        relays.push(RelaySpec::SingleHostAddr {
+                            port,
+                            ipv4: [octets[0], octets[1], octets[2], octets[3]],
+                        });
+                    }
+                }
+                for dns_str in &single_host_pool_relay {
+                    let parts: Vec<&str> = dns_str.rsplitn(2, ':').collect();
+                    let (port, host) = if parts.len() == 2 {
+                        (parts[0].parse::<u16>().unwrap_or(3001), parts[1])
+                    } else {
+                        (3001, dns_str.as_str())
+                    };
+                    relays.push(RelaySpec::SingleHostName {
+                        port,
+                        dns_name: host.to_string(),
+                    });
+                }
+                for dns_name in &multi_host_pool_relay {
+                    relays.push(RelaySpec::MultiHostName {
+                        dns_name: dns_name.clone(),
+                    });
+                }
 
                 // Build registration certificate CBOR
                 // Certificate type 3 = PoolRegistration
@@ -316,10 +371,23 @@ impl StakePoolCmd {
                 for owner in &owners {
                     enc.bytes(owner)?;
                 }
-                // relays (empty for now)
-                enc.array(0)?;
-                // pool metadata (null)
-                enc.null()?;
+                // relays
+                enc.array(relays.len() as u64)?;
+                for relay in &relays {
+                    encode_relay(&mut enc, relay)?;
+                }
+                // pool metadata
+                match (&metadata_url, &metadata_hash) {
+                    (Some(url), Some(hash_hex)) => {
+                        let hash_bytes = hex::decode(hash_hex)?;
+                        enc.array(2)?;
+                        enc.str(url)?;
+                        enc.bytes(&hash_bytes)?;
+                    }
+                    _ => {
+                        enc.null()?;
+                    }
+                }
 
                 let cert_env = serde_json::json!({
                     "type": "CertificateShelley",
@@ -332,10 +400,51 @@ impl StakePoolCmd {
                     "Pool registration certificate written to: {}",
                     out_file.display()
                 );
+                if !relays.is_empty() {
+                    println!("  Relays: {}", relays.len());
+                }
+                if metadata_url.is_some() {
+                    println!("  Metadata URL: {}", metadata_url.as_deref().unwrap_or(""));
+                }
                 Ok(())
             }
         }
     }
+}
+
+/// Relay specification for pool registration
+enum RelaySpec {
+    SingleHostAddr { port: u16, ipv4: [u8; 4] },
+    SingleHostName { port: u16, dns_name: String },
+    MultiHostName { dns_name: String },
+}
+
+/// Encode a relay as CBOR for the pool registration certificate
+fn encode_relay(enc: &mut minicbor::Encoder<&mut Vec<u8>>, relay: &RelaySpec) -> Result<()> {
+    match relay {
+        RelaySpec::SingleHostAddr { port, ipv4 } => {
+            // [0, port, ipv4, null(ipv6)]
+            enc.array(4)?;
+            enc.u32(0)?;
+            enc.u16(*port)?;
+            enc.bytes(ipv4)?;
+            enc.null()?;
+        }
+        RelaySpec::SingleHostName { port, dns_name } => {
+            // [1, port, dns_name]
+            enc.array(3)?;
+            enc.u32(1)?;
+            enc.u16(*port)?;
+            enc.str(dns_name)?;
+        }
+        RelaySpec::MultiHostName { dns_name } => {
+            // [2, dns_name]
+            enc.array(2)?;
+            enc.u32(2)?;
+            enc.str(dns_name)?;
+        }
+    }
+    Ok(())
 }
 
 /// Load a verification key file and return the blake2b-224 hash of the raw key bytes

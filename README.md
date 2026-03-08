@@ -379,7 +379,7 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 #### Full CLI Parity
 - [ ] Node operational certificate commands
 - [ ] KES key generation and rotation
-- [ ] Pool registration certificate
+- [x] Pool registration certificate (with relay and metadata support)
 - [ ] Metadata submission
 - [ ] Full query command set
 
