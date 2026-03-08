@@ -5,8 +5,8 @@
   "TargetNumberOfActivePeers": 20,
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
-  "ShelleyGenesisFile": "config/preview-shelley-genesis.json",
-  "AlonzoGenesisFile": "config/preview-alonzo-genesis.json",
-  "ConwayGenesisFile": "config/preview-conway-genesis.json",
+  "ShelleyGenesisFile": "preview-shelley-genesis.json",
+  "AlonzoGenesisFile": "preview-alonzo-genesis.json",
+  "ConwayGenesisFile": "preview-conway-genesis.json",
   "MinSeverity": "Info"
 }
