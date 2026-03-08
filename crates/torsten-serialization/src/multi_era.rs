@@ -57,63 +57,68 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
         .map(|v| v.to_vec())
         .unwrap_or_default();
 
-    let vrf_result = pallas_header
-        .nonce_vrf_output()
-        .map(|output| VrfOutput {
-            output: output.to_vec(),
-            proof: Vec::new(),
-        })
-        .unwrap_or(VrfOutput {
-            output: Vec::new(),
-            proof: Vec::new(),
-        });
-
     let body_size = block.body_size().unwrap_or(0) as u64;
 
     // Extract era-specific header body fields
-    let (body_hash, op_cert, protocol_version) = if let Some(babbage) = pallas_header.as_babbage() {
-        let hb = &babbage.header_body;
-        (
-            pallas_hash_to_torsten32(&hb.block_body_hash),
-            OperationalCert {
-                hot_vkey: hb.operational_cert.operational_cert_hot_vkey.to_vec(),
-                sequence_number: hb.operational_cert.operational_cert_sequence_number,
-                kes_period: hb.operational_cert.operational_cert_kes_period,
-                sigma: hb.operational_cert.operational_cert_sigma.to_vec(),
-            },
-            ProtocolVersion {
-                major: hb.protocol_version.0,
-                minor: hb.protocol_version.1,
-            },
-        )
-    } else if let Some(alonzo) = pallas_header.as_alonzo() {
-        let hb = &alonzo.header_body;
-        (
-            pallas_hash_to_torsten32(&hb.block_body_hash),
-            OperationalCert {
-                hot_vkey: hb.operational_cert_hot_vkey.to_vec(),
-                sequence_number: hb.operational_cert_sequence_number,
-                kes_period: hb.operational_cert_kes_period,
-                sigma: hb.operational_cert_sigma.to_vec(),
-            },
-            ProtocolVersion {
-                major: hb.protocol_major,
-                minor: hb.protocol_minor,
-            },
-        )
-    } else {
-        // Byron
-        (
-            Hash32::ZERO,
-            OperationalCert {
-                hot_vkey: Vec::new(),
-                sequence_number: 0,
-                kes_period: 0,
-                sigma: Vec::new(),
-            },
-            ProtocolVersion { major: 1, minor: 0 },
-        )
-    };
+    let (vrf_result, body_hash, op_cert, protocol_version) =
+        if let Some(babbage) = pallas_header.as_babbage() {
+            let hb = &babbage.header_body;
+            (
+                VrfOutput {
+                    output: hb.vrf_result.0.to_vec(),
+                    proof: hb.vrf_result.1.to_vec(),
+                },
+                pallas_hash_to_torsten32(&hb.block_body_hash),
+                OperationalCert {
+                    hot_vkey: hb.operational_cert.operational_cert_hot_vkey.to_vec(),
+                    sequence_number: hb.operational_cert.operational_cert_sequence_number,
+                    kes_period: hb.operational_cert.operational_cert_kes_period,
+                    sigma: hb.operational_cert.operational_cert_sigma.to_vec(),
+                },
+                ProtocolVersion {
+                    major: hb.protocol_version.0,
+                    minor: hb.protocol_version.1,
+                },
+            )
+        } else if let Some(alonzo) = pallas_header.as_alonzo() {
+            let hb = &alonzo.header_body;
+            (
+                VrfOutput {
+                    output: hb.nonce_vrf.0.to_vec(),
+                    proof: hb.nonce_vrf.1.to_vec(),
+                },
+                pallas_hash_to_torsten32(&hb.block_body_hash),
+                OperationalCert {
+                    hot_vkey: hb.operational_cert_hot_vkey.to_vec(),
+                    sequence_number: hb.operational_cert_sequence_number,
+                    kes_period: hb.operational_cert_kes_period,
+                    sigma: hb.operational_cert_sigma.to_vec(),
+                },
+                ProtocolVersion {
+                    major: hb.protocol_major,
+                    minor: hb.protocol_minor,
+                },
+            )
+        } else {
+            // Byron
+            (
+                VrfOutput {
+                    output: pallas_header
+                        .nonce_vrf_output()
+                        .map(|o| o.to_vec())
+                        .unwrap_or_default(),
+                    proof: Vec::new(),
+                },
+                Hash32::ZERO,
+                OperationalCert {
+                    hot_vkey: Vec::new(),
+                    sequence_number: 0,
+                    kes_period: 0,
+                    sigma: Vec::new(),
+                },
+                ProtocolVersion { major: 1, minor: 0 },
+            )
+        };
 
     Ok(BlockHeader {
         header_hash,
