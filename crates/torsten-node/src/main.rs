@@ -90,7 +90,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         "Topology: {} peers configured (producers={}, bootstrap={}, local_roots={}, public_roots={})",
         all_peers.len(),
         topology.producers.len(),
-        topology.bootstrap_peers.len(),
+        topology.bootstrap_peers.as_ref().map_or(0, |v| v.len()),
         topology.local_roots.iter().map(|g| g.access_points.len()).sum::<usize>(),
         topology.public_roots.iter().map(|r| r.access_points.len()).sum::<usize>(),
     );

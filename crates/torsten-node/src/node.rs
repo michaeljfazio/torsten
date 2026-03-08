@@ -353,19 +353,21 @@ impl Node {
         };
         let peer_manager = Arc::new(RwLock::new(PeerManager::new(pm_config.clone())));
 
-        // Register topology peers in the peer manager
-        let peers = self.topology.all_peers();
-        if peers.is_empty() {
+        // Register topology peers in the peer manager with full metadata
+        let detailed_peers = self.topology.detailed_peers();
+        if detailed_peers.is_empty() {
             warn!("No peers configured in topology");
             return Ok(());
         }
         {
             let mut pm = peer_manager.write().await;
-            for (addr, port) in &peers {
+            for peer in &detailed_peers {
                 // Resolve address to SocketAddr
-                if let Ok(mut addrs) = tokio::net::lookup_host(format!("{addr}:{port}")).await {
+                if let Ok(mut addrs) =
+                    tokio::net::lookup_host(format!("{}:{}", peer.address, peer.port)).await
+                {
                     if let Some(socket_addr) = addrs.next() {
-                        pm.add_config_peer(socket_addr, false, false);
+                        pm.add_config_peer(socket_addr, peer.trustable, peer.advertise);
                     }
                 }
             }
@@ -376,6 +378,7 @@ impl Node {
                 pm.diffusion_mode()
             );
         }
+        let peers = self.topology.all_peers();
 
         // Start N2N server for inbound peer connections (bidirectional mode)
         let n2n_server = torsten_network::n2n_server::N2NServer::with_config(
