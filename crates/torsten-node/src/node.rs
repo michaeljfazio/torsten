@@ -1091,33 +1091,39 @@ impl Node {
         }
         let batch_count = blocks.len() as u64;
 
-        {
-            let batch: Vec<_> = blocks
-                .iter()
-                .map(|block| {
-                    (
-                        *block.hash(),
-                        block.slot(),
-                        block.block_number(),
-                        *block.prev_hash(),
-                        block.raw_cbor.clone().unwrap_or_default(),
-                    )
-                })
-                .collect();
-            let mut db = self.chain_db.write().await;
-            if let Err(e) = db.add_blocks_batch(&batch) {
-                error!("Failed to store block batch: {e}");
-            }
-        }
+        // Build ChainDB batch data upfront
+        let db_batch: Vec<_> = blocks
+            .iter()
+            .map(|block| {
+                (
+                    *block.hash(),
+                    block.slot(),
+                    block.block_number(),
+                    *block.prev_hash(),
+                    block.raw_cbor.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
 
-        {
-            let mut ls = self.ledger_state.write().await;
-            for block in &blocks {
-                if let Err(e) = ls.apply_block(block) {
-                    error!("Failed to apply block to ledger: {e}");
+        // Run ChainDB write and ledger apply concurrently — they are independent
+        let chain_db = self.chain_db.clone();
+        let ledger_state = self.ledger_state.clone();
+        tokio::join!(
+            async {
+                let mut db = chain_db.write().await;
+                if let Err(e) = db.add_blocks_batch(&db_batch) {
+                    error!("Failed to store block batch: {e}");
+                }
+            },
+            async {
+                let mut ls = ledger_state.write().await;
+                for block in &blocks {
+                    if let Err(e) = ls.apply_block(block) {
+                        error!("Failed to apply block to ledger: {e}");
+                    }
                 }
             }
-        }
+        );
 
         // Remove confirmed transactions from mempool
         if !self.mempool.is_empty() {
