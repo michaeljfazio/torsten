@@ -1,6 +1,6 @@
 use crate::error::SerializationError;
 use torsten_primitives::block::Point;
-use torsten_primitives::hash::Hash32;
+use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::transaction::{PlutusData, TransactionInput, TransactionMetadatum};
 
 /// Encode a Hash32 to CBOR bytes
@@ -256,6 +256,43 @@ pub fn encode_tx_input(input: &TransactionInput) -> Vec<u8> {
     buf.extend(encode_hash32(&input.transaction_id));
     buf.extend(encode_uint(input.index as u64));
     buf
+}
+
+/// Encode a Hash28 to CBOR bytes
+pub fn encode_hash28(hash: &Hash28) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(0x58); // byte string, 1-byte length
+    buf.push(28);
+    buf.extend_from_slice(hash.as_bytes());
+    buf
+}
+
+/// Encode a CBOR tag
+pub fn encode_tag(tag: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if tag < 24 {
+        buf.push(0xc0 | tag as u8);
+    } else if tag < 256 {
+        buf.push(0xd8);
+        buf.push(tag as u8);
+    } else if tag < 65536 {
+        buf.push(0xd9);
+        buf.extend_from_slice(&(tag as u16).to_be_bytes());
+    } else {
+        buf.push(0xda);
+        buf.extend_from_slice(&(tag as u32).to_be_bytes());
+    }
+    buf
+}
+
+/// Encode a CBOR bool
+pub fn encode_bool(value: bool) -> Vec<u8> {
+    vec![if value { 0xf5 } else { 0xf4 }]
+}
+
+/// Encode CBOR null
+pub fn encode_null() -> Vec<u8> {
+    vec![0xf6]
 }
 
 /// Encode transaction metadata to CBOR
