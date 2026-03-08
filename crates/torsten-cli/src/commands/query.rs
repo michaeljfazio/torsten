@@ -111,7 +111,7 @@ fn era_name(era: u32) -> &'static str {
 }
 
 /// Connect to the node, perform handshake, and acquire state
-async fn connect_and_acquire(
+async fn connect_and_handshake(
     socket_path: &std::path::Path,
     testnet_magic: Option<u64>,
 ) -> Result<torsten_network::N2CClient> {
@@ -124,13 +124,21 @@ async fn connect_and_acquire(
             )
         })?;
 
-    // Use testnet magic if provided, otherwise use mainnet magic
     let magic = testnet_magic.unwrap_or(764824073);
 
     client
         .handshake(magic)
         .await
         .map_err(|e| anyhow::anyhow!("Handshake failed: {e}"))?;
+
+    Ok(client)
+}
+
+async fn connect_and_acquire(
+    socket_path: &std::path::Path,
+    testnet_magic: Option<u64>,
+) -> Result<torsten_network::N2CClient> {
+    let mut client = connect_and_handshake(socket_path, testnet_magic).await?;
 
     client
         .acquire()
@@ -677,28 +685,64 @@ impl QueryCmd {
                 Ok(())
             }
             QuerySubcommand::TxMempool {
-                socket_path: _,
+                socket_path,
                 subcmd,
                 tx_id,
-                testnet_magic: _,
+                testnet_magic,
             } => {
-                // LocalTxMonitor protocol (mini-protocol 10) is used for mempool queries
-                // This requires a separate protocol handler from LocalStateQuery
+                let mut client = connect_and_handshake(&socket_path, testnet_magic).await?;
+
                 match subcmd.as_str() {
                     "info" => {
-                        println!("Mempool info query uses the LocalTxMonitor protocol.");
-                        println!(
-                            "Use the node's monitoring endpoint or connect via LocalTxMonitor."
-                        );
+                        let slot = client
+                            .monitor_acquire()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Monitor acquire failed: {e}"))?;
+                        let (capacity, size, num_txs) = client
+                            .monitor_get_sizes()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Monitor get sizes failed: {e}"))?;
+
+                        println!("Mempool snapshot at slot {slot}:");
+                        println!("  Capacity:     {capacity} bytes");
+                        println!("  Size:         {size} bytes");
+                        println!("  Transactions: {num_txs}");
+
+                        let _ = client.monitor_done().await;
                     }
                     "has-tx" => {
-                        if let Some(id) = tx_id {
-                            println!("Checking mempool for tx: {id}");
+                        let id = tx_id.ok_or_else(|| {
+                            anyhow::anyhow!("--tx-id is required for has-tx subcommand")
+                        })?;
+                        let hash_bytes = hex::decode(&id)
+                            .map_err(|e| anyhow::anyhow!("Invalid tx ID hex: {e}"))?;
+                        if hash_bytes.len() != 32 {
+                            return Err(anyhow::anyhow!(
+                                "Transaction ID must be 32 bytes (64 hex chars)"
+                            ));
                         }
-                        println!("has-tx query uses the LocalTxMonitor protocol (MsgHasTx).");
+                        let mut tx_hash = [0u8; 32];
+                        tx_hash.copy_from_slice(&hash_bytes);
+
+                        let _slot = client
+                            .monitor_acquire()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Monitor acquire failed: {e}"))?;
+                        let has_tx = client
+                            .monitor_has_tx(&tx_hash)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Monitor has-tx failed: {e}"))?;
+
+                        if has_tx {
+                            println!("Transaction {id} is in the mempool");
+                        } else {
+                            println!("Transaction {id} is NOT in the mempool");
+                        }
+
+                        let _ = client.monitor_done().await;
                     }
                     _ => {
-                        println!("Available subcommands: info, has-tx, next-tx");
+                        println!("Available subcommands: info, has-tx");
                     }
                 }
                 Ok(())
