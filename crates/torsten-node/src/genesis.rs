@@ -7,6 +7,143 @@ use torsten_primitives::transaction::Rational;
 use torsten_primitives::value::Lovelace;
 use tracing::info;
 
+// ──────────────────────────────────────────────────────────────────────────
+// Byron genesis
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Byron genesis configuration (compatible with cardano-node byron-genesis.json)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ByronGenesis {
+    /// AVVM (Ada Voucher Vending Machine) distribution: base64 pubkey → lovelace
+    #[serde(default)]
+    pub avvm_distr: HashMap<String, String>,
+    /// Non-AVVM initial balances: base58 Byron address → lovelace
+    #[serde(default)]
+    pub non_avvm_balances: HashMap<String, String>,
+    /// Bootstrap stakeholders: stakeholder ID → weight
+    #[serde(default)]
+    pub boot_stakeholders: HashMap<String, serde_json::Value>,
+    /// Heavy delegation certificates
+    #[serde(default)]
+    pub heavy_delegation: HashMap<String, serde_json::Value>,
+    /// System start time (POSIX timestamp)
+    pub start_time: u64,
+    /// Block version data (fee policy, slot duration, etc.)
+    #[serde(default)]
+    pub block_version_data: ByronBlockVersionData,
+    /// Protocol constants (k, protocol magic)
+    #[serde(default)]
+    pub protocol_consts: ByronProtocolConsts,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ByronBlockVersionData {
+    #[serde(default)]
+    pub slot_duration: String,
+    #[serde(default)]
+    pub max_block_size: String,
+    #[serde(default)]
+    pub max_tx_size: String,
+    #[serde(default)]
+    pub tx_fee_policy: ByronTxFeePolicy,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ByronTxFeePolicy {
+    /// Fee = summand + multiplier * tx_size (both values are ×1e12)
+    #[serde(default)]
+    pub summand: String,
+    #[serde(default)]
+    pub multiplier: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct ByronProtocolConsts {
+    pub k: u64,
+    pub protocol_magic: u64,
+}
+
+/// A genesis UTxO entry (address bytes + lovelace amount)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct GenesisUtxoEntry {
+    pub address: Vec<u8>,
+    pub lovelace: u64,
+}
+
+impl ByronGenesis {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read Byron genesis: {}", path.display()))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Byron genesis: {}", path.display()))
+    }
+
+    /// Get the protocol magic from the genesis config
+    pub fn protocol_magic(&self) -> u64 {
+        self.protocol_consts.protocol_magic
+    }
+
+    /// Get the security parameter k
+    pub fn security_param(&self) -> u64 {
+        self.protocol_consts.k
+    }
+
+    /// Extract the initial UTxO set from nonAvvmBalances.
+    ///
+    /// Returns decoded address bytes and lovelace amounts for all non-zero balances.
+    pub fn initial_utxos(&self) -> Vec<GenesisUtxoEntry> {
+        let mut entries = Vec::new();
+
+        for (addr_str, lovelace_str) in &self.non_avvm_balances {
+            let lovelace: u64 = match lovelace_str.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if lovelace == 0 {
+                continue;
+            }
+
+            // Decode base58 Byron address
+            match bs58::decode(addr_str).into_vec() {
+                Ok(addr_bytes) => {
+                    entries.push(GenesisUtxoEntry {
+                        address: addr_bytes,
+                        lovelace,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to decode Byron genesis address: {}: {}",
+                        &addr_str[..40.min(addr_str.len())],
+                        e
+                    );
+                }
+            }
+        }
+
+        info!(
+            count = entries.len(),
+            total_lovelace = entries.iter().map(|e| e.lovelace).sum::<u64>(),
+            "Byron genesis: extracted initial UTxOs"
+        );
+
+        entries
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Shelley genesis
+// ──────────────────────────────────────────────────────────────────────────
+
 /// Shelley genesis configuration (compatible with cardano-node shelley-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,6 +560,51 @@ mod tests {
         // DRep voting thresholds
         assert_eq!(pp.dvt_constitution.numerator, 3);
         assert_eq!(pp.dvt_constitution.denominator, 4); // 0.75
+    }
+
+    #[test]
+    fn test_parse_byron_genesis() {
+        let json = r#"{
+            "avvmDistr": {
+                "Y2FyZGFubyBpcyBhd2Vzb21l": "1000000"
+            },
+            "nonAvvmBalances": {
+                "37btjrVyb4KEB2STADSsj3MYSAdj52X9FgGzKZEiHbsyZH1r39ZZRH6FvkSRMxaVBMPKknvEPYhHPV1Qgr6FSNLF1sfhaMQ4bDYB2Y3FNkPZCz": "3333000000",
+                "2cWKMJemoBajcwN6kT4oHXBH5JTwHtCFhVYKDRAS1QbjKZJj8GUZPF7v9G5DxaJfmUqidz": "999000000"
+            },
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1654041600,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": {
+                    "summand": "155381000000000",
+                    "multiplier": "43946000000"
+                }
+            },
+            "protocolConsts": {
+                "k": 2160,
+                "protocolMagic": 764824073
+            }
+        }"#;
+
+        let genesis: ByronGenesis = serde_json::from_str(json).unwrap();
+        assert_eq!(genesis.protocol_magic(), 764824073);
+        assert_eq!(genesis.security_param(), 2160);
+        assert_eq!(genesis.start_time, 1654041600);
+        assert_eq!(genesis.non_avvm_balances.len(), 2);
+        assert_eq!(genesis.avvm_distr.len(), 1);
+        assert_eq!(genesis.block_version_data.slot_duration, "20000");
+        assert_eq!(genesis.block_version_data.max_block_size, "2000000");
+
+        // Test initial_utxos extraction
+        let utxos = genesis.initial_utxos();
+        assert_eq!(utxos.len(), 2);
+        // Verify lovelace amounts
+        let total: u64 = utxos.iter().map(|e| e.lovelace).sum();
+        assert_eq!(total, 3333000000 + 999000000);
     }
 
     #[test]

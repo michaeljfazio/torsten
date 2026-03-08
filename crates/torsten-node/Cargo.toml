@@ -28,3 +28,4 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 hex.workspace = true
+bs58.workspace = true

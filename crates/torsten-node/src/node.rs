@@ -18,7 +18,7 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_storage::ChainDB;
 
 use crate::config::NodeConfig;
-use crate::genesis::{AlonzoGenesis, ConwayGenesis, ShelleyGenesis};
+use crate::genesis::{AlonzoGenesis, ByronGenesis, ConwayGenesis, ShelleyGenesis};
 use crate::topology::Topology;
 
 pub struct NodeArgs {
@@ -86,8 +86,27 @@ impl Node {
 
         let mut protocol_params = ProtocolParameters::mainnet_defaults();
 
-        // Load Shelley genesis if configured (with hash for nonce initialization)
+        // Load Byron genesis if configured
         let config_dir = args.config_dir.clone();
+        if let Some(ref genesis_path) = args.config.byron_genesis_file {
+            let genesis_path = config_dir.join(genesis_path);
+            match ByronGenesis::load(&genesis_path) {
+                Ok(genesis) => {
+                    let utxos = genesis.initial_utxos();
+                    info!(
+                        protocol_magic = genesis.protocol_magic(),
+                        security_param = genesis.security_param(),
+                        initial_utxos = utxos.len(),
+                        "Byron genesis loaded"
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to load Byron genesis: {e}");
+                }
+            }
+        }
+
+        // Load Shelley genesis if configured (with hash for nonce initialization)
         let (shelley_genesis, shelley_genesis_hash) =
             if let Some(ref genesis_path) = args.config.shelley_genesis_file {
                 let genesis_path = config_dir.join(genesis_path);
