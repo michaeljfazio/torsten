@@ -446,11 +446,9 @@ fn parse_chunk_with_index(chunk_path: &Path, secondary_path: &Path) -> Result<Ve
     let secondary_data = fs::read(secondary_path).context("Failed to read secondary index file")?;
     let chunk_data = fs::read(chunk_path).context("Failed to read chunk file")?;
 
-    // Parse secondary index entries (56 bytes each, first 8 bytes are header)
+    // Parse secondary index entries (56 bytes each, no header)
     let mut entries = Vec::new();
-    // The secondary index starts with an 8-byte header (number of entries or version)
-    let index_start = if secondary_data.len() >= 8 { 8 } else { 0 };
-    let mut offset = index_start;
+    let mut offset = 0;
     while offset + 56 <= secondary_data.len() {
         if let Some(entry) = SecondaryIndexEntry::from_bytes(&secondary_data[offset..]) {
             entries.push(entry);
