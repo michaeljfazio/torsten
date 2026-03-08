@@ -2,6 +2,7 @@ mod config;
 mod forge;
 mod genesis;
 mod metrics;
+mod mithril;
 mod node;
 mod topology;
 
@@ -23,6 +24,8 @@ struct Cli {
 enum Command {
     /// Run the node
     Run(RunArgs),
+    /// Import a Mithril snapshot for fast initial sync
+    MithrilImport(MithrilImportArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -80,7 +83,36 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Run(args) => run_node(args).await,
+        Command::MithrilImport(args) => run_mithril_import(args).await,
     }
+}
+
+#[derive(clap::Args, Debug)]
+struct MithrilImportArgs {
+    /// Network magic value (764824073=mainnet, 2=preview, 1=preprod)
+    #[arg(long, default_value = "764824073")]
+    network_magic: u64,
+
+    /// Path to the database directory
+    #[arg(long, default_value = "db")]
+    database_path: PathBuf,
+
+    /// Temporary directory for download and extraction
+    #[arg(long)]
+    temp_dir: Option<PathBuf>,
+}
+
+async fn run_mithril_import(args: MithrilImportArgs) -> Result<()> {
+    info!(
+        "Starting Mithril snapshot import for network magic {}",
+        args.network_magic
+    );
+    mithril::import_snapshot(
+        args.network_magic,
+        &args.database_path,
+        args.temp_dir.as_deref(),
+    )
+    .await
 }
 
 async fn run_node(args: RunArgs) -> Result<()> {

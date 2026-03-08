@@ -32,3 +32,12 @@ bs58.workspace = true
 chrono = { workspace = true }
 minicbor = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
+indicatif = { workspace = true }
+futures-util = { workspace = true }
+pallas-traverse = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
