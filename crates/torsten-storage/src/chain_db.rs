@@ -5,6 +5,7 @@ use thiserror::Error;
 use torsten_primitives::block::{Point, Tip};
 use torsten_primitives::hash::{BlockHeaderHash, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Error, Debug)]
 pub enum ChainDBError {
@@ -30,9 +31,11 @@ pub struct ChainDB {
 
 impl ChainDB {
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
+        info!(path = %db_path.display(), k = SECURITY_PARAM_K, "Opening ChainDB");
         let immutable_path = db_path.join("immutable");
         let immutable = ImmutableDB::open(&immutable_path)?;
         let volatile = VolatileDB::new(SECURITY_PARAM_K * 2);
+        info!("ChainDB opened successfully");
 
         Ok(ChainDB {
             immutable,
@@ -49,6 +52,16 @@ impl ChainDB {
         prev_hash: BlockHeaderHash,
         cbor: Vec<u8>,
     ) -> Result<(), ChainDBError> {
+        let cbor_len = cbor.len();
+        trace!(
+            hash = %hash.to_hex(),
+            slot = slot.0,
+            block_no = block_no.0,
+            prev_hash = %prev_hash.to_hex(),
+            cbor_bytes = cbor_len,
+            "ChainDB: adding block"
+        );
+
         // Store in volatile DB first
         self.volatile
             .put_block(hash, slot, block_no, prev_hash, cbor)?;
@@ -78,14 +91,21 @@ impl ChainDB {
         &mut self,
         point: &Point,
     ) -> Result<Vec<BlockHeaderHash>, ChainDBError> {
+        warn!(point = ?point, "ChainDB: rollback requested");
+
         let target_hash = match point {
             Point::Origin => {
+                warn!("ChainDB: rolling back to origin — clearing all volatile blocks");
                 // Rolling back to origin: clear all volatile blocks
                 let tip = self.volatile.get_tip();
                 if let Some(tip) = tip {
                     if let Some(tip_hash) = tip.point.hash() {
                         let chain = self.volatile.get_chain_back_to(tip_hash, &Hash32::ZERO);
                         if let Some(hashes) = chain {
+                            warn!(
+                                blocks_removed = hashes.len(),
+                                "ChainDB: rollback to origin complete"
+                            );
                             for hash in &hashes {
                                 self.volatile.remove_block(hash);
                             }
@@ -124,12 +144,23 @@ impl ChainDB {
             })?;
 
         // Remove blocks from volatile DB
+        warn!(
+            blocks_to_remove = chain.len(),
+            target = %target_hash.to_hex(),
+            "ChainDB: removing rolled-back blocks"
+        );
         for hash in &chain {
             self.volatile.remove_block(hash);
         }
 
         // Update the tip to the rollback point
         self.volatile.update_tip_to(&target_hash);
+
+        info!(
+            blocks_removed = chain.len(),
+            new_tip = %target_hash.to_hex(),
+            "ChainDB: rollback complete"
+        );
 
         Ok(chain)
     }
@@ -154,11 +185,26 @@ impl ChainDB {
 
         // Get oldest blocks that are beyond k-deep and flush them
         let to_flush = volatile_count - SECURITY_PARAM_K;
+        info!(
+            volatile_count,
+            to_flush, "ChainDB: flushing volatile blocks to immutable DB"
+        );
         let flushed = self.volatile.drain_oldest(to_flush);
 
-        for (hash, slot, _block_no, cbor) in flushed {
-            self.immutable.put_block(slot, &hash, &cbor)?;
+        for (hash, slot, _block_no, cbor) in &flushed {
+            debug!(
+                hash = %hash.to_hex(),
+                slot = slot.0,
+                cbor_bytes = cbor.len(),
+                "ChainDB: flushing block to immutable"
+            );
+            self.immutable.put_block(*slot, hash, cbor)?;
         }
+
+        info!(
+            flushed = flushed.len(),
+            "ChainDB: flush to immutable complete"
+        );
 
         Ok(())
     }

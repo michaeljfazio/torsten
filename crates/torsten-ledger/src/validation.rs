@@ -5,6 +5,7 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::{NativeScript, Transaction};
 use torsten_primitives::value::Lovelace;
+use tracing::{debug, trace, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
@@ -46,6 +47,15 @@ pub fn validate_transaction(
     current_slot: u64,
     tx_size: u64,
 ) -> Result<(), Vec<ValidationError>> {
+    trace!(
+        tx_hash = %tx.hash.to_hex(),
+        inputs = tx.body.inputs.len(),
+        outputs = tx.body.outputs.len(),
+        fee = tx.body.fee.0,
+        tx_size,
+        current_slot,
+        "Validation: validating transaction"
+    );
     let mut errors = Vec::new();
     let body = &tx.body;
 
@@ -150,8 +160,15 @@ pub fn validate_transaction(
     }
 
     if errors.is_empty() {
+        debug!(tx_hash = %tx.hash.to_hex(), "Validation: transaction valid");
         Ok(())
     } else {
+        warn!(
+            tx_hash = %tx.hash.to_hex(),
+            error_count = errors.len(),
+            errors = ?errors,
+            "Validation: transaction rejected"
+        );
         Err(errors)
     }
 }

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use torsten_primitives::hash::BlockHeaderHash;
 use torsten_primitives::time::SlotNo;
+use tracing::{debug, info, trace};
 
 #[derive(Error, Debug)]
 pub enum ImmutableDBError {
@@ -30,6 +31,7 @@ pub struct ImmutableDB {
 
 impl ImmutableDB {
     pub fn open(path: &Path) -> Result<Self, ImmutableDBError> {
+        info!(path = %path.display(), "Opening ImmutableDB (RocksDB)");
         std::fs::create_dir_all(path)?;
 
         let mut opts = rocksdb::Options::default();
@@ -39,6 +41,7 @@ impl ImmutableDB {
         let db =
             rocksdb::DB::open(&opts, path).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
+        info!("ImmutableDB opened successfully");
         Ok(ImmutableDB {
             db_path: path.to_path_buf(),
             db: Some(db),
@@ -53,6 +56,12 @@ impl ImmutableDB {
         hash: &BlockHeaderHash,
         cbor: &[u8],
     ) -> Result<(), ImmutableDBError> {
+        trace!(
+            slot = slot.0,
+            hash = %hash.to_hex(),
+            cbor_bytes = cbor.len(),
+            "ImmutableDB: storing block"
+        );
         let db = self
             .db
             .as_ref()
@@ -69,6 +78,7 @@ impl ImmutableDB {
             .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
         if slot > self.tip_slot {
+            debug!(slot = slot.0, "ImmutableDB: new tip slot");
             self.tip_slot = slot;
         }
 

@@ -11,7 +11,7 @@ use torsten_primitives::transaction::{
     VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Total ADA supply (45 billion ADA = 45 * 10^15 lovelace)
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
@@ -175,6 +175,15 @@ impl LedgerState {
 
     /// Apply a block to the ledger state
     pub fn apply_block(&mut self, block: &Block) -> Result<(), LedgerError> {
+        trace!(
+            slot = block.slot().0,
+            block_no = block.block_number().0,
+            era = ?block.era,
+            txs = block.transactions.len(),
+            hash = %block.header.header_hash.to_hex(),
+            "Ledger: applying block"
+        );
+
         // Verify block connects to current tip
         if self.tip.point != Point::Origin {
             if let Some(tip_hash) = self.tip.point.hash() {
@@ -190,6 +199,12 @@ impl LedgerState {
         // Check for epoch transition before processing the block
         let block_epoch = EpochNo(block.slot().0 / self.epoch_length);
         if block_epoch > self.epoch {
+            info!(
+                prev_epoch = self.epoch.0,
+                new_epoch = block_epoch.0,
+                slot = block.slot().0,
+                "Ledger: epoch transition detected"
+            );
             self.process_epoch_transition(block_epoch);
         }
 
@@ -265,6 +280,15 @@ impl LedgerState {
         // Update tip
         self.tip = block.tip();
         self.era = block.era;
+
+        trace!(
+            slot = block.slot().0,
+            block_no = block.block_number().0,
+            utxo_count = self.utxo_set.len(),
+            epoch = self.epoch.0,
+            era = ?self.era,
+            "Ledger: block applied successfully"
+        );
 
         Ok(())
     }

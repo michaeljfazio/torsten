@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::Transaction;
 use torsten_primitives::value::Lovelace;
+use tracing::{debug, info, trace, warn};
 
 /// Configuration for the mempool
 #[derive(Debug, Clone)]
@@ -91,11 +92,16 @@ impl Mempool {
     ) -> Result<MempoolAddResult, MempoolError> {
         // Check if already exists
         if self.txs.contains_key(&tx_hash) {
+            trace!(hash = %tx_hash.to_hex(), "Mempool: tx already exists");
             return Ok(MempoolAddResult::AlreadyExists);
         }
 
         // Check capacity
         if self.txs.len() >= self.config.max_transactions {
+            warn!(
+                max = self.config.max_transactions,
+                "Mempool: full, rejecting tx"
+            );
             return Err(MempoolError::Full {
                 max: self.config.max_transactions,
             });
@@ -103,6 +109,12 @@ impl Mempool {
 
         let total = *self.total_bytes.read();
         if total + size_bytes > self.config.max_bytes {
+            warn!(
+                size_bytes,
+                total,
+                max = self.config.max_bytes,
+                "Mempool: tx too large, rejecting"
+            );
             return Err(MempoolError::TooLarge { size: size_bytes });
         }
 
@@ -124,6 +136,13 @@ impl Mempool {
         self.order.write().push_back(tx_hash);
         *self.total_bytes.write() += size_bytes;
 
+        debug!(
+            hash = %tx_hash.to_hex(),
+            size_bytes,
+            total_txs = self.txs.len(),
+            "Mempool: transaction added"
+        );
+
         Ok(MempoolAddResult::Added)
     }
 
@@ -132,14 +151,26 @@ impl Mempool {
         if let Some((_, entry)) = self.txs.remove(tx_hash) {
             self.order.write().retain(|h| h != tx_hash);
             *self.total_bytes.write() -= entry.size_bytes;
+            debug!(
+                hash = %tx_hash.to_hex(),
+                remaining = self.txs.len(),
+                "Mempool: transaction removed"
+            );
             Some(entry.tx)
         } else {
+            trace!(hash = %tx_hash.to_hex(), "Mempool: tx not found for removal");
             None
         }
     }
 
     /// Remove multiple transactions (batch removal after block)
     pub fn remove_txs(&self, tx_hashes: &[TransactionHash]) {
+        if !tx_hashes.is_empty() {
+            debug!(
+                count = tx_hashes.len(),
+                "Mempool: batch removing transactions"
+            );
+        }
         for hash in tx_hashes {
             self.remove_tx(hash);
         }
@@ -202,9 +233,13 @@ impl Mempool {
 
     /// Clear all transactions
     pub fn clear(&self) {
+        let count = self.txs.len();
         self.txs.clear();
         self.order.write().clear();
         *self.total_bytes.write() = 0;
+        if count > 0 {
+            info!(removed = count, "Mempool: cleared all transactions");
+        }
     }
 }
 

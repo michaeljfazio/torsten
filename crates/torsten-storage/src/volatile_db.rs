@@ -4,6 +4,7 @@ use thiserror::Error;
 use torsten_primitives::block::{Point, Tip};
 use torsten_primitives::hash::BlockHeaderHash;
 use torsten_primitives::time::{BlockNo, SlotNo};
+use tracing::{debug, trace, warn};
 
 #[derive(Error, Debug)]
 pub enum VolatileDBError {
@@ -59,8 +60,10 @@ impl VolatileDB {
         prev_hash: BlockHeaderHash,
         cbor: Vec<u8>,
     ) -> Result<(), VolatileDBError> {
+        let cbor_len = cbor.len();
         let mut blocks = self.blocks.write();
         if blocks.contains_key(&hash) {
+            debug!(hash = %hash.to_hex(), "VolatileDB: block already exists, skipping");
             return Err(VolatileDBError::BlockAlreadyExists(hash.to_hex()));
         }
 
@@ -83,11 +86,24 @@ impl VolatileDB {
             Some((_, _, current_block_no)) => block_no > *current_block_no,
         };
         if should_update {
+            trace!(
+                hash = %hash.to_hex(),
+                slot = slot.0,
+                block_no = block_no.0,
+                cbor_bytes = cbor_len,
+                total_blocks = blocks.len(),
+                "VolatileDB: new tip"
+            );
             *tip = Some((hash, slot, block_no));
         }
 
         // Garbage collect old blocks if needed
         if blocks.len() > self.max_blocks {
+            debug!(
+                count = blocks.len(),
+                max = self.max_blocks,
+                "VolatileDB: garbage collecting oldest blocks"
+            );
             self.gc_oldest(&mut blocks);
         }
 
@@ -147,6 +163,12 @@ impl VolatileDB {
     pub fn remove_block(&self, hash: &BlockHeaderHash) -> Option<Vec<u8>> {
         let mut blocks = self.blocks.write();
         if let Some(entry) = blocks.remove(hash) {
+            debug!(
+                hash = %hash.to_hex(),
+                slot = entry.slot.0,
+                block_no = entry.block_no.0,
+                "VolatileDB: removing block (rollback)"
+            );
             let mut slot_index = self.slot_index.write();
             if let Some(hashes) = slot_index.get_mut(&entry.slot) {
                 hashes.retain(|h| h != hash);
@@ -156,6 +178,7 @@ impl VolatileDB {
             }
             Some(entry.cbor)
         } else {
+            warn!(hash = %hash.to_hex(), "VolatileDB: block not found for removal");
             None
         }
     }
@@ -174,6 +197,7 @@ impl VolatileDB {
     /// Drain the oldest blocks, returning their data for flushing to immutable DB.
     /// Returns Vec of (hash, slot, block_no, cbor).
     pub fn drain_oldest(&self, count: usize) -> Vec<(BlockHeaderHash, SlotNo, BlockNo, Vec<u8>)> {
+        debug!(count, "VolatileDB: draining oldest blocks");
         let mut result = Vec::new();
         let mut blocks = self.blocks.write();
         let mut slot_index = self.slot_index.write();
