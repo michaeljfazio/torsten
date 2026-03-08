@@ -317,12 +317,24 @@ fn convert_output(output: &PallasOutput) -> Result<TransactionOutput, Serializat
         None => OutputDatum::None,
     };
 
+    let script_ref = output.script_ref().map(|sr| convert_script_ref(&sr));
+
     Ok(TransactionOutput {
         address,
         value,
         datum,
-        script_ref: None,
+        script_ref,
     })
+}
+
+fn convert_script_ref(sr: &pallas_primitives::conway::ScriptRef) -> ScriptRef {
+    use pallas_primitives::conway::ScriptRef as PSR;
+    match sr {
+        PSR::NativeScript(ns) => ScriptRef::NativeScript(convert_native_script_inner(ns)),
+        PSR::PlutusV1Script(s) => ScriptRef::PlutusV1(s.0.to_vec()),
+        PSR::PlutusV2Script(s) => ScriptRef::PlutusV2(s.0.to_vec()),
+        PSR::PlutusV3Script(s) => ScriptRef::PlutusV3(s.0.to_vec()),
+    }
 }
 
 fn convert_address(output: &PallasOutput) -> Result<Address, SerializationError> {
