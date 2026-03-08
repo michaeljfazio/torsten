@@ -1120,8 +1120,9 @@ impl Node {
     /// Update the query handler with the current ledger state
     async fn update_query_state(&self) {
         use torsten_network::query_handler::{
-            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, ProposalSnapshot,
-            StakeAddressSnapshot, StakePoolSnapshot,
+            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, PoolParamsSnapshot,
+            PoolStakeSnapshotEntry, ProposalSnapshot, StakeAddressSnapshot, StakePoolSnapshot,
+            StakeSnapshotsResult,
         };
 
         let ls = self.ledger_state.read().await;
@@ -1235,6 +1236,104 @@ impl Node {
             })
             .collect();
 
+        // Build stake snapshots (mark/set/go)
+        let stake_snapshots = {
+            // Collect all unique pool IDs across all snapshots
+            let mut all_pool_ids = std::collections::BTreeSet::new();
+            if let Some(ref snap) = ls.snapshots.mark {
+                all_pool_ids.extend(snap.pool_stake.keys().cloned());
+            }
+            if let Some(ref snap) = ls.snapshots.set {
+                all_pool_ids.extend(snap.pool_stake.keys().cloned());
+            }
+            if let Some(ref snap) = ls.snapshots.go {
+                all_pool_ids.extend(snap.pool_stake.keys().cloned());
+            }
+
+            let pools: Vec<PoolStakeSnapshotEntry> = all_pool_ids
+                .iter()
+                .map(|pid| PoolStakeSnapshotEntry {
+                    pool_id: pid.as_ref().to_vec(),
+                    mark_stake: ls
+                        .snapshots
+                        .mark
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pid))
+                        .map(|l| l.0)
+                        .unwrap_or(0),
+                    set_stake: ls
+                        .snapshots
+                        .set
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pid))
+                        .map(|l| l.0)
+                        .unwrap_or(0),
+                    go_stake: ls
+                        .snapshots
+                        .go
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pid))
+                        .map(|l| l.0)
+                        .unwrap_or(0),
+                })
+                .collect();
+
+            let total_mark_stake = pools.iter().map(|p| p.mark_stake).sum();
+            let total_set_stake = pools.iter().map(|p| p.set_stake).sum();
+            let total_go_stake = pools.iter().map(|p| p.go_stake).sum();
+
+            StakeSnapshotsResult {
+                pools,
+                total_mark_stake,
+                total_set_stake,
+                total_go_stake,
+            }
+        };
+
+        // Build pool params entries
+        let pool_params_entries: Vec<PoolParamsSnapshot> = ls
+            .pool_params
+            .iter()
+            .map(|(pool_id, reg)| {
+                let relays: Vec<String> = reg
+                    .relays
+                    .iter()
+                    .map(|r| match r {
+                        torsten_primitives::transaction::Relay::SingleHostAddr {
+                            port,
+                            ipv4,
+                            ..
+                        } => {
+                            let ip = ipv4
+                                .map(|a| format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]))
+                                .unwrap_or_default();
+                            format!("{}:{}", ip, port.unwrap_or(0))
+                        }
+                        torsten_primitives::transaction::Relay::SingleHostName {
+                            port,
+                            dns_name,
+                        } => format!("{}:{}", dns_name, port.unwrap_or(0)),
+                        torsten_primitives::transaction::Relay::MultiHostName { dns_name } => {
+                            dns_name.clone()
+                        }
+                    })
+                    .collect();
+                PoolParamsSnapshot {
+                    pool_id: pool_id.as_ref().to_vec(),
+                    vrf_keyhash: reg.vrf_keyhash.as_ref().to_vec(),
+                    pledge: reg.pledge.0,
+                    cost: reg.cost.0,
+                    margin_num: reg.margin_numerator,
+                    margin_den: reg.margin_denominator,
+                    reward_account: Vec::new(), // Not tracked in PoolRegistration yet
+                    owners: Vec::new(),         // Not tracked in PoolRegistration yet
+                    relays,
+                    metadata_url: None,  // Not tracked in PoolRegistration yet
+                    metadata_hash: None, // Not tracked in PoolRegistration yet
+                }
+            })
+            .collect();
+
         // Serialize protocol params
         let protocol_params_json =
             serde_json::to_string_pretty(&ls.protocol_params).unwrap_or_default();
@@ -1262,6 +1361,8 @@ impl Node {
             governance_proposals,
             committee,
             stake_addresses,
+            stake_snapshots,
+            pool_params_entries,
         };
 
         // Drop the ledger read lock before acquiring the query handler write lock

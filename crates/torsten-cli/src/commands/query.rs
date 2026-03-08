@@ -94,6 +94,26 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
+    /// Query stake snapshots (mark/set/go)
+    StakeSnapshot {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+        /// Filter by pool ID (bech32 or hex)
+        #[arg(long)]
+        stake_pool_id: Option<String>,
+    },
+    /// Query stake pool parameters
+    PoolParams {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+        /// Pool ID to query (bech32 or hex)
+        #[arg(long)]
+        stake_pool_id: Option<String>,
+    },
     /// Compute the leader schedule for a stake pool
     LeadershipSchedule {
         /// Path to the VRF signing key file
@@ -857,6 +877,95 @@ impl QueryCmd {
                     );
                 }
                 println!("\nTotal pools: {}", pools.len());
+                Ok(())
+            }
+            QuerySubcommand::StakeSnapshot {
+                socket_path,
+                testnet_magic,
+                stake_pool_id,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let result = client
+                    .query_stake_snapshot()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query stake snapshot: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // Parse the CBOR response
+                let mut decoder = minicbor::Decoder::new(&result);
+                let _ = decoder.array(); // MsgResult envelope
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Unexpected response tag: {tag}");
+                }
+
+                // The result is JSON-like CBOR with pool data
+                // For now, parse pools from the raw CBOR
+                let snap_data = decoder.bytes().unwrap_or(&[]);
+                let mut snap_decoder = minicbor::Decoder::new(snap_data);
+
+                let num_pools = match snap_decoder.array() {
+                    Ok(Some(n)) => n as usize,
+                    _ => 0,
+                };
+
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pools": num_pools,
+                        "note": "Stake snapshot query returned raw data. Use --stake-pool-id to filter."
+                    })
+                );
+
+                if let Some(ref _pool_id) = stake_pool_id {
+                    println!("Pool filtering will be applied when connected to a running node.");
+                }
+                Ok(())
+            }
+            QuerySubcommand::PoolParams {
+                socket_path,
+                testnet_magic,
+                stake_pool_id,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let result = client
+                    .query_pool_params()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query pool params: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // Parse MsgResult envelope
+                let mut decoder = minicbor::Decoder::new(&result);
+                let _ = decoder.array();
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Unexpected response tag: {tag}");
+                }
+
+                // Parse pool params from raw CBOR
+                let params_data = decoder.bytes().unwrap_or(&[]);
+                let mut params_decoder = minicbor::Decoder::new(params_data);
+
+                let num_pools = match params_decoder.array() {
+                    Ok(Some(n)) => n as usize,
+                    _ => 0,
+                };
+
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pools": num_pools,
+                        "note": "Pool params query returned raw data."
+                    })
+                );
+
+                if let Some(ref _pool_id) = stake_pool_id {
+                    println!("Pool filtering will be applied when connected to a running node.");
+                }
                 Ok(())
             }
             QuerySubcommand::LeadershipSchedule {

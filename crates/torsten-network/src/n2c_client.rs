@@ -293,6 +293,18 @@ impl N2CClient {
         Ok(result)
     }
 
+    /// Query stake snapshots (GetStakeSnapshots - query tag 24)
+    pub async fn query_stake_snapshot(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(24).await?;
+        Ok(result)
+    }
+
+    /// Query stake pool params (GetStakePoolParams - query tag 12)
+    pub async fn query_pool_params(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(12).await?;
+        Ok(result)
+    }
+
     /// Query UTxOs at a specific address (GetUTxOByAddress - query tag 4)
     pub async fn query_utxo_by_address(
         &mut self,

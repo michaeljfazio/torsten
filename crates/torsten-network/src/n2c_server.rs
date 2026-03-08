@@ -956,6 +956,51 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u64(addr.reward_balance).ok();
             }
         }
+        QueryResult::StakeSnapshots(snapshots) => {
+            enc.map(4).ok();
+            enc.str("pools").ok();
+            enc.array(snapshots.pools.len() as u64).ok();
+            for pool in &snapshots.pools {
+                enc.map(4).ok();
+                enc.str("pool_id").ok();
+                enc.bytes(&pool.pool_id).ok();
+                enc.str("mark_stake").ok();
+                enc.u64(pool.mark_stake).ok();
+                enc.str("set_stake").ok();
+                enc.u64(pool.set_stake).ok();
+                enc.str("go_stake").ok();
+                enc.u64(pool.go_stake).ok();
+            }
+            enc.str("total_mark_stake").ok();
+            enc.u64(snapshots.total_mark_stake).ok();
+            enc.str("total_set_stake").ok();
+            enc.u64(snapshots.total_set_stake).ok();
+            enc.str("total_go_stake").ok();
+            enc.u64(snapshots.total_go_stake).ok();
+        }
+        QueryResult::PoolParams(params) => {
+            enc.array(params.len() as u64).ok();
+            for pool in params {
+                enc.map(7).ok();
+                enc.str("pool_id").ok();
+                enc.bytes(&pool.pool_id).ok();
+                enc.str("vrf_keyhash").ok();
+                enc.bytes(&pool.vrf_keyhash).ok();
+                enc.str("pledge").ok();
+                enc.u64(pool.pledge).ok();
+                enc.str("cost").ok();
+                enc.u64(pool.cost).ok();
+                enc.str("margin_num").ok();
+                enc.u64(pool.margin_num).ok();
+                enc.str("margin_den").ok();
+                enc.u64(pool.margin_den).ok();
+                enc.str("relays").ok();
+                enc.array(pool.relays.len() as u64).ok();
+                for relay in &pool.relays {
+                    enc.str(relay).ok();
+                }
+            }
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }

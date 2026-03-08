@@ -22,7 +22,43 @@ pub enum QueryResult {
     CommitteeState(CommitteeSnapshot),
     StakeAddressInfo(Vec<StakeAddressSnapshot>),
     UtxoByAddress(Vec<UtxoSnapshot>),
+    StakeSnapshots(StakeSnapshotsResult),
+    PoolParams(Vec<PoolParamsSnapshot>),
     Error(String),
+}
+
+/// Stake snapshot result (mark/set/go)
+#[derive(Debug, Clone, Default)]
+pub struct StakeSnapshotsResult {
+    pub pools: Vec<PoolStakeSnapshotEntry>,
+    pub total_mark_stake: u64,
+    pub total_set_stake: u64,
+    pub total_go_stake: u64,
+}
+
+/// Per-pool stake across mark/set/go snapshots
+#[derive(Debug, Clone)]
+pub struct PoolStakeSnapshotEntry {
+    pub pool_id: Vec<u8>,
+    pub mark_stake: u64,
+    pub set_stake: u64,
+    pub go_stake: u64,
+}
+
+/// Pool parameters snapshot
+#[derive(Debug, Clone)]
+pub struct PoolParamsSnapshot {
+    pub pool_id: Vec<u8>,
+    pub vrf_keyhash: Vec<u8>,
+    pub pledge: u64,
+    pub cost: u64,
+    pub margin_num: u64,
+    pub margin_den: u64,
+    pub reward_account: Vec<u8>,
+    pub owners: Vec<Vec<u8>>,
+    pub relays: Vec<String>,
+    pub metadata_url: Option<String>,
+    pub metadata_hash: Option<Vec<u8>>,
 }
 
 /// Snapshot of a stake pool for query results
@@ -117,6 +153,10 @@ pub struct NodeStateSnapshot {
     pub committee: CommitteeSnapshot,
     /// Stake address info (delegations + rewards)
     pub stake_addresses: Vec<StakeAddressSnapshot>,
+    /// Stake snapshots (mark/set/go) for stake-snapshot queries
+    pub stake_snapshots: StakeSnapshotsResult,
+    /// Pool parameters for pool-params queries
+    pub pool_params_entries: Vec<PoolParamsSnapshot>,
 }
 
 impl Default for NodeStateSnapshot {
@@ -140,6 +180,8 @@ impl Default for NodeStateSnapshot {
             governance_proposals: Vec::new(),
             committee: CommitteeSnapshot::default(),
             stake_addresses: Vec::new(),
+            stake_snapshots: StakeSnapshotsResult::default(),
+            pool_params_entries: Vec::new(),
         }
     }
 }
@@ -383,6 +425,16 @@ impl QueryHandler {
                 // GetStakeAddressInfo
                 debug!("Query: GetStakeAddressInfo");
                 QueryResult::StakeAddressInfo(self.state.stake_addresses.clone())
+            }
+            12 => {
+                // GetStakePoolParams
+                debug!("Query: GetStakePoolParams");
+                QueryResult::PoolParams(self.state.pool_params_entries.clone())
+            }
+            24 => {
+                // GetStakeSnapshots
+                debug!("Query: GetStakeSnapshots");
+                QueryResult::StakeSnapshots(self.state.stake_snapshots.clone())
             }
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");
@@ -751,6 +803,69 @@ mod tests {
                 assert_eq!(gov.treasury, 0);
             }
             other => panic!("Expected GovState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_stake_snapshots() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            stake_snapshots: StakeSnapshotsResult {
+                pools: vec![PoolStakeSnapshotEntry {
+                    pool_id: vec![0xaa; 28],
+                    mark_stake: 1_000_000,
+                    set_stake: 900_000,
+                    go_stake: 800_000,
+                }],
+                total_mark_stake: 1_000_000,
+                total_set_stake: 900_000,
+                total_go_stake: 800_000,
+            },
+            ..Default::default()
+        });
+
+        match query(&handler, 24) {
+            QueryResult::StakeSnapshots(snap) => {
+                assert_eq!(snap.pools.len(), 1);
+                assert_eq!(snap.pools[0].mark_stake, 1_000_000);
+                assert_eq!(snap.pools[0].set_stake, 900_000);
+                assert_eq!(snap.pools[0].go_stake, 800_000);
+                assert_eq!(snap.total_mark_stake, 1_000_000);
+            }
+            other => panic!("Expected StakeSnapshots, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_handler_pool_params() {
+        let mut handler = QueryHandler::new();
+        handler.update_state(NodeStateSnapshot {
+            pool_params_entries: vec![PoolParamsSnapshot {
+                pool_id: vec![0xbb; 28],
+                vrf_keyhash: vec![0xcc; 32],
+                pledge: 500_000_000,
+                cost: 340_000_000,
+                margin_num: 3,
+                margin_den: 100,
+                reward_account: Vec::new(),
+                owners: Vec::new(),
+                relays: vec!["relay1.example.com:3001".to_string()],
+                metadata_url: None,
+                metadata_hash: None,
+            }],
+            ..Default::default()
+        });
+
+        match query(&handler, 12) {
+            QueryResult::PoolParams(params) => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].pool_id, vec![0xbb; 28]);
+                assert_eq!(params[0].pledge, 500_000_000);
+                assert_eq!(params[0].cost, 340_000_000);
+                assert_eq!(params[0].margin_num, 3);
+                assert_eq!(params[0].relays.len(), 1);
+            }
+            other => panic!("Expected PoolParams, got {other:?}"),
         }
     }
 }
