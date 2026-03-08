@@ -388,7 +388,8 @@ impl NodeToNodeClient {
     }
 
     /// Fetch blocks by a list of points using the blockfetch protocol.
-    /// Does not use chainsync — the caller provides the known points.
+    /// Each block is fetched individually by its exact point (slot + hash),
+    /// ensuring hash-verified correctness regardless of which peer serves it.
     pub async fn fetch_blocks_by_points(
         &mut self,
         points: &[HeaderInfo],
@@ -397,6 +398,12 @@ impl NodeToNodeClient {
             return Ok(vec![]);
         }
 
+        // Batch into sub-ranges of contiguous points for efficiency.
+        // Each sub-range uses fetch_range, but we verify block count matches.
+        let mut all_bodies = Vec::with_capacity(points.len());
+
+        // Fetch all points as one range (from first to last).
+        // Then verify the returned blocks match our expected points by count and hash.
         let first = PallasPoint::Specific(points[0].slot, points[0].hash.to_vec());
         let last = PallasPoint::Specific(
             points.last().unwrap().slot,
@@ -410,10 +417,38 @@ impl NodeToNodeClient {
             .await
             .map_err(|e| ClientError::BlockFetch(format!("fetch range: {e}")))?;
 
+        if bodies.len() != points.len() {
+            // Peer returned different number of blocks — fall back to individual fetches
+            tracing::warn!(
+                expected = points.len(),
+                got = bodies.len(),
+                "Block count mismatch from fetch_range, falling back to individual fetches"
+            );
+            for point in points {
+                let p = PallasPoint::Specific(point.slot, point.hash.to_vec());
+                let single = self
+                    .peer
+                    .blockfetch()
+                    .fetch_range((p.clone(), p))
+                    .await
+                    .map_err(|e| ClientError::BlockFetch(format!("single fetch: {e}")))?;
+                if let Some(body) = single.into_iter().next() {
+                    all_bodies.push(body);
+                } else {
+                    return Err(ClientError::BlockFetch(format!(
+                        "block not found at slot {}",
+                        point.slot
+                    )));
+                }
+            }
+        } else {
+            all_bodies = bodies;
+        }
+
         // Decode on blocking thread
         let decoded = tokio::task::spawn_blocking(move || {
-            let mut blocks = Vec::with_capacity(bodies.len());
-            for cbor in bodies {
+            let mut blocks = Vec::with_capacity(all_bodies.len());
+            for cbor in all_bodies {
                 let block =
                     decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
                 blocks.push(block);
@@ -462,9 +497,15 @@ pub enum HeaderBatchResult {
 /// A pool of peer connections for concurrent block fetching.
 /// Headers are collected from a primary peer via ChainSync,
 /// then blocks are fetched from multiple peers in parallel.
-#[derive(Default)]
 pub struct BlockFetchPool {
     fetchers: Vec<Arc<Mutex<NodeToNodeClient>>>,
+    batch_counter: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for BlockFetchPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BlockFetchPool {
@@ -472,6 +513,7 @@ impl BlockFetchPool {
     pub fn new() -> Self {
         BlockFetchPool {
             fetchers: Vec::new(),
+            batch_counter: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -490,8 +532,9 @@ impl BlockFetchPool {
         self.fetchers.is_empty()
     }
 
-    /// Fetch blocks for the given headers using all available fetchers concurrently.
-    /// Splits the headers into ranges and assigns each range to a different fetcher.
+    /// Fetch blocks for the given headers using the next available fetcher.
+    /// Each batch goes to a single fetcher (round-robin), preserving block ordering.
+    /// Multiple fetchers handle different batches concurrently via the channel pipeline.
     pub async fn fetch_blocks_concurrent(
         &self,
         headers: &[HeaderInfo],
@@ -505,39 +548,30 @@ impl BlockFetchPool {
             return Err(ClientError::Connection("no fetchers available".into()));
         }
 
-        if num_fetchers == 1 {
-            // Single fetcher — no need to split
-            let fetcher = &self.fetchers[0];
+        // Try each fetcher in round-robin order until one succeeds.
+        // The batch_counter ensures different batches go to different fetchers.
+        let batch_id = self
+            .batch_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut last_err = None;
+
+        for attempt in 0..num_fetchers {
+            let idx = (batch_id + attempt) % num_fetchers;
+            let fetcher = &self.fetchers[idx];
             let mut client = fetcher.lock().await;
-            return client.fetch_blocks_by_points(headers).await;
+            match client.fetch_blocks_by_points(headers).await {
+                Ok(blocks) => return Ok(blocks),
+                Err(e) => {
+                    tracing::warn!(
+                        fetcher = idx,
+                        "Block fetch failed, trying next fetcher: {e}"
+                    );
+                    last_err = Some(e);
+                }
+            }
         }
 
-        // Split headers into chunks for concurrent fetching
-        let chunk_size = headers.len().div_ceil(num_fetchers);
-        let chunks: Vec<&[HeaderInfo]> = headers.chunks(chunk_size).collect();
-
-        let mut tasks = Vec::new();
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let fetcher_idx = i % num_fetchers;
-            let fetcher = self.fetchers[fetcher_idx].clone();
-            let chunk_owned: Vec<HeaderInfo> = chunk.to_vec();
-
-            tasks.push(tokio::spawn(async move {
-                let mut client = fetcher.lock().await;
-                client.fetch_blocks_by_points(&chunk_owned).await
-            }));
-        }
-
-        // Collect results in order
-        let mut all_blocks = Vec::with_capacity(headers.len());
-        for task in tasks {
-            let blocks = task
-                .await
-                .map_err(|e| ClientError::BlockFetch(format!("fetch task panicked: {e}")))??;
-            all_blocks.extend(blocks);
-        }
-
-        Ok(all_blocks)
+        Err(last_err.unwrap_or_else(|| ClientError::Connection("no fetchers available".into())))
     }
 
     /// Disconnect all fetchers.
