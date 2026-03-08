@@ -57,11 +57,22 @@ pub struct ProtocolVersion {
 }
 
 impl ShelleyGenesis {
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Load the Shelley genesis and compute its Blake2b-256 hash.
+    ///
+    /// The hash is computed over the raw file content (canonical JSON), matching
+    /// the Cardano reference implementation. This hash is used as the initial
+    /// value for the rolling nonce (eta_v) in consensus.
+    pub fn load_with_hash(path: &Path) -> Result<(Self, torsten_primitives::hash::Hash32)> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read Shelley genesis: {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse Shelley genesis: {}", path.display()))
+        let genesis: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Shelley genesis: {}", path.display()))?;
+        let hash = torsten_primitives::hash::blake2b_256(content.as_bytes());
+        info!(
+            genesis_hash = %hash.to_hex(),
+            "Shelley genesis hash computed"
+        );
+        Ok((genesis, hash))
     }
 
     /// Apply genesis parameters to protocol parameters, keeping Conway-era

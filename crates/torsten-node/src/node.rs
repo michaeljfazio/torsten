@@ -84,26 +84,27 @@ impl Node {
 
         let mut protocol_params = ProtocolParameters::mainnet_defaults();
 
-        // Load Shelley genesis if configured
-        let shelley_genesis = if let Some(ref genesis_path) = args.config.shelley_genesis_file {
-            let genesis_path = std::path::Path::new(genesis_path);
-            match ShelleyGenesis::load(genesis_path) {
-                Ok(genesis) => {
-                    info!(
-                        "Shelley genesis loaded: magic={}, system_start={}, epoch_length={}",
-                        genesis.network_magic, genesis.system_start, genesis.epoch_length
-                    );
-                    genesis.apply_to_protocol_params(&mut protocol_params);
-                    Some(genesis)
+        // Load Shelley genesis if configured (with hash for nonce initialization)
+        let (shelley_genesis, shelley_genesis_hash) =
+            if let Some(ref genesis_path) = args.config.shelley_genesis_file {
+                let genesis_path = std::path::Path::new(genesis_path);
+                match ShelleyGenesis::load_with_hash(genesis_path) {
+                    Ok((genesis, hash)) => {
+                        info!(
+                            "Shelley genesis loaded: magic={}, system_start={}, epoch_length={}",
+                            genesis.network_magic, genesis.system_start, genesis.epoch_length
+                        );
+                        genesis.apply_to_protocol_params(&mut protocol_params);
+                        (Some(genesis), Some(hash))
+                    }
+                    Err(e) => {
+                        warn!("Failed to load Shelley genesis: {e}");
+                        (None, None)
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to load Shelley genesis: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+            } else {
+                (None, None)
+            };
 
         // Load Alonzo genesis if configured
         if let Some(ref genesis_path) = args.config.alonzo_genesis_file {
@@ -144,9 +145,12 @@ impl Node {
         }
 
         let mut ledger = LedgerState::new(protocol_params);
-        // Apply epoch length from Shelley genesis
+        // Apply epoch length and genesis hash from Shelley genesis
         if let Some(ref genesis) = shelley_genesis {
             ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+        }
+        if let Some(hash) = shelley_genesis_hash {
+            ledger.set_genesis_hash(hash);
         }
         let ledger_state = Arc::new(RwLock::new(ledger));
         info!("Ledger state initialized");

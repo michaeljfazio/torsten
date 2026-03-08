@@ -60,6 +60,12 @@ pub struct LedgerState {
     /// Nonce contribution window: first stability_window slots of each epoch
     /// (3k/f = 129600 slots on mainnet)
     pub stability_window: u64,
+    /// Hash of the first block in the current epoch (needed for next epoch's nonce)
+    pub first_block_hash_of_epoch: Option<Hash32>,
+    /// Hash of the first block in the previous epoch (used in epoch nonce calculation)
+    pub prev_epoch_first_block_hash: Option<Hash32>,
+    /// Shelley genesis hash (used to initialize rolling nonce)
+    pub genesis_hash: Hash32,
     /// Conway governance state
     pub governance: GovernanceState,
 }
@@ -169,6 +175,9 @@ impl LedgerState {
             rolling_nonce: Hash32::ZERO,
             epoch_nonce: Hash32::ZERO,
             stability_window: 129600, // 3k/f on mainnet
+            first_block_hash_of_epoch: None,
+            prev_epoch_first_block_hash: None,
+            genesis_hash: Hash32::ZERO,
             governance: GovernanceState::default(),
         }
     }
@@ -184,6 +193,21 @@ impl LedgerState {
             stability_window = self.stability_window,
             security_param,
             "Ledger: epoch length configured"
+        );
+    }
+
+    /// Set the Shelley genesis hash.
+    ///
+    /// The rolling nonce is initialized from this hash (the Blake2b-256 hash of
+    /// the canonical Shelley genesis JSON). This matches the Cardano reference
+    /// implementation where eta_v starts from the genesis hash.
+    pub fn set_genesis_hash(&mut self, hash: Hash32) {
+        self.genesis_hash = hash;
+        // Initialize rolling nonce from genesis hash (not ZERO)
+        self.rolling_nonce = hash;
+        info!(
+            genesis_hash = %hash.to_hex(),
+            "Ledger: rolling nonce initialized from genesis hash"
         );
     }
 
@@ -284,6 +308,11 @@ impl LedgerState {
             *self.epoch_blocks_by_pool.entry(pool_id).or_insert(0) += 1;
         }
         self.epoch_block_count += 1;
+
+        // Track first block hash of the current epoch (for epoch nonce calculation)
+        if self.first_block_hash_of_epoch.is_none() {
+            self.first_block_hash_of_epoch = Some(block.header.header_hash);
+        }
 
         // Accumulate VRF output into rolling nonce (only in nonce contribution window)
         let slot_in_epoch = block.slot().0 % self.epoch_length;
@@ -538,25 +567,34 @@ impl LedgerState {
             );
         }
 
-        // Compute new epoch nonce: hash(prev_nonce || rolling_nonce)
-        let prev_nonce = self.epoch_nonce;
+        // Compute new epoch nonce per Cardano spec:
+        // epoch_nonce = hash(rolling_nonce || first_block_hash_prev_epoch [|| extra_entropy])
+        // nc = rolling nonce (eta_v accumulated through stability window)
+        // nh = hash of first block from the previous epoch
+        let nh = self
+            .prev_epoch_first_block_hash
+            .unwrap_or(self.genesis_hash);
         let mut nonce_input = Vec::with_capacity(64);
-        nonce_input.extend_from_slice(prev_nonce.as_bytes());
         nonce_input.extend_from_slice(self.rolling_nonce.as_bytes());
+        nonce_input.extend_from_slice(nh.as_bytes());
         self.epoch_nonce = torsten_primitives::hash::blake2b_256(&nonce_input);
 
         info!(
-            "New epoch nonce: {} (from prev {} + eta_v {})",
+            "New epoch nonce: {} (from eta_v {} + nh {})",
             self.epoch_nonce.to_hex(),
-            prev_nonce.to_hex(),
-            self.rolling_nonce.to_hex()
+            self.rolling_nonce.to_hex(),
+            nh.to_hex()
         );
+
+        // Rotate first block hash: current becomes previous for next transition
+        self.prev_epoch_first_block_hash = self.first_block_hash_of_epoch.take();
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
         self.epoch_blocks_by_pool.clear();
         self.epoch_block_count = 0;
-        self.rolling_nonce = Hash32::ZERO;
+        // Reset rolling nonce from genesis hash (not ZERO)
+        self.rolling_nonce = self.genesis_hash;
 
         self.epoch = new_epoch;
     }
@@ -1736,7 +1774,13 @@ mod tests {
         state.epoch_length = 100;
         state.stability_window = 60; // First 60 slots contribute to nonce
 
-        // The initial nonce is ZERO
+        // Set a genesis hash to initialize rolling nonce
+        let genesis_hash = Hash32::from_bytes([0xAB; 32]);
+        state.set_genesis_hash(genesis_hash);
+
+        // Rolling nonce starts from genesis hash
+        assert_eq!(state.rolling_nonce, genesis_hash);
+        // Epoch nonce starts at ZERO
         assert_eq!(state.epoch_nonce, Hash32::ZERO);
 
         // Apply a block with a VRF output in the nonce window
@@ -1745,8 +1789,14 @@ mod tests {
         block.header.issuer_vkey = vec![1u8; 32];
         state.apply_block(&block).unwrap();
 
-        // Rolling nonce should have been updated
-        assert_ne!(state.rolling_nonce, Hash32::ZERO);
+        // Rolling nonce should have been updated from genesis_hash
+        assert_ne!(state.rolling_nonce, genesis_hash);
+
+        // First block hash of epoch should be tracked
+        assert_eq!(
+            state.first_block_hash_of_epoch,
+            Some(block.header.header_hash)
+        );
 
         // Apply a block outside the nonce window (slot 70 % 100 = 70 > 60)
         let rolling_before = state.rolling_nonce;
@@ -1764,8 +1814,12 @@ mod tests {
 
         // Epoch nonce should have been updated
         assert_ne!(state.epoch_nonce, nonce_before_transition);
-        // Rolling nonce should be reset
-        assert_eq!(state.rolling_nonce, Hash32::ZERO);
+        // Rolling nonce should be reset to genesis hash (not ZERO)
+        assert_eq!(state.rolling_nonce, genesis_hash);
+        // Previous epoch's first block hash should be set
+        assert!(state.prev_epoch_first_block_hash.is_some());
+        // Current epoch's first block hash should be cleared
+        assert!(state.first_block_hash_of_epoch.is_none());
     }
 
     #[test]
