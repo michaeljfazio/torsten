@@ -94,6 +94,27 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
+    /// Compute the leader schedule for a stake pool
+    LeadershipSchedule {
+        /// Path to the VRF signing key file
+        #[arg(long)]
+        vrf_signing_key_file: PathBuf,
+        /// Epoch nonce (64-character hex string)
+        #[arg(long)]
+        epoch_nonce: String,
+        /// First slot of the epoch
+        #[arg(long)]
+        epoch_start_slot: u64,
+        /// Number of slots in the epoch
+        #[arg(long, default_value = "432000")]
+        epoch_length: u64,
+        /// Pool's relative stake (0.0 to 1.0)
+        #[arg(long)]
+        relative_stake: f64,
+        /// Active slot coefficient (default: 0.05)
+        #[arg(long, default_value = "0.05")]
+        active_slot_coeff: f64,
+    },
 }
 
 /// Map era index to era name
@@ -836,6 +857,80 @@ impl QueryCmd {
                     );
                 }
                 println!("\nTotal pools: {}", pools.len());
+                Ok(())
+            }
+            QuerySubcommand::LeadershipSchedule {
+                vrf_signing_key_file,
+                epoch_nonce,
+                epoch_start_slot,
+                epoch_length,
+                relative_stake,
+                active_slot_coeff,
+            } => {
+                // Load VRF signing key
+                let vrf_content = std::fs::read_to_string(&vrf_signing_key_file)?;
+                let vrf_env: serde_json::Value = serde_json::from_str(&vrf_content)?;
+                let vrf_cbor_hex = vrf_env["cborHex"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing cborHex in VRF skey file"))?;
+                let vrf_cbor = hex::decode(vrf_cbor_hex)?;
+                // Strip CBOR wrapper
+                let vrf_key_bytes = if vrf_cbor.len() > 2 && vrf_cbor[0] == 0x58 {
+                    &vrf_cbor[2..]
+                } else if vrf_cbor.len() > 1 && (vrf_cbor[0] & 0xe0) == 0x40 {
+                    &vrf_cbor[1..]
+                } else {
+                    &vrf_cbor
+                };
+                if vrf_key_bytes.len() != 32 {
+                    anyhow::bail!(
+                        "VRF secret key must be 32 bytes, got {}",
+                        vrf_key_bytes.len()
+                    );
+                }
+                let mut vrf_skey = [0u8; 32];
+                vrf_skey.copy_from_slice(vrf_key_bytes);
+
+                // Parse epoch nonce
+                let nonce = torsten_primitives::hash::Hash32::from_hex(&epoch_nonce)
+                    .map_err(|e| anyhow::anyhow!("Invalid epoch nonce hex: {e}"))?;
+
+                println!(
+                    "Computing leader schedule for epoch starting at slot {epoch_start_slot}..."
+                );
+                println!("Epoch length: {epoch_length} slots");
+                println!("Relative stake: {relative_stake:.6}");
+                println!("Active slot coefficient: {active_slot_coeff}");
+                println!();
+
+                let schedule = torsten_consensus::compute_leader_schedule(
+                    &vrf_skey,
+                    &nonce,
+                    epoch_start_slot,
+                    epoch_length,
+                    relative_stake,
+                    active_slot_coeff,
+                );
+
+                if schedule.is_empty() {
+                    println!("No leader slots found for this epoch.");
+                } else {
+                    println!("{:<12} VRF Output (first 16 bytes)", "SlotNo");
+                    println!("{}", "-".repeat(50));
+                    for leader in &schedule {
+                        println!(
+                            "{:<12} {}",
+                            leader.slot.0,
+                            hex::encode(&leader.vrf_output[..16])
+                        );
+                    }
+                    println!("\nTotal leader slots: {}", schedule.len());
+                    println!(
+                        "Expected: ~{:.0} (f={active_slot_coeff}, stake={relative_stake:.6})",
+                        epoch_length as f64
+                            * (1.0 - (1.0 - active_slot_coeff).powf(relative_stake))
+                    );
+                }
                 Ok(())
             }
         }
