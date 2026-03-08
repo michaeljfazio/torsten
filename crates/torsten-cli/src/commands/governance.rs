@@ -138,6 +138,64 @@ enum ActionSubcommand {
         #[arg(long)]
         out_file: PathBuf,
     },
+    /// Create a new constitution action
+    CreateConstitution {
+        #[arg(long)]
+        anchor_url: String,
+        #[arg(long)]
+        anchor_data_hash: String,
+        #[arg(long)]
+        deposit: u64,
+        #[arg(long)]
+        return_addr: String,
+        /// Constitution anchor URL
+        #[arg(long)]
+        constitution_url: String,
+        /// Constitution anchor data hash
+        #[arg(long)]
+        constitution_hash: String,
+        /// Optional guardrail script hash
+        #[arg(long)]
+        constitution_script_hash: Option<String>,
+        #[arg(long)]
+        prev_governance_action_tx_id: Option<String>,
+        #[arg(long)]
+        prev_governance_action_index: Option<u32>,
+        #[arg(long)]
+        out_file: PathBuf,
+    },
+    /// Create a hard fork initiation action
+    CreateHardForkInitiation {
+        #[arg(long)]
+        anchor_url: String,
+        #[arg(long)]
+        anchor_data_hash: String,
+        #[arg(long)]
+        deposit: u64,
+        #[arg(long)]
+        return_addr: String,
+        /// Major protocol version
+        #[arg(long)]
+        protocol_major_version: u64,
+        /// Minor protocol version
+        #[arg(long)]
+        protocol_minor_version: u64,
+        #[arg(long)]
+        prev_governance_action_tx_id: Option<String>,
+        #[arg(long)]
+        prev_governance_action_index: Option<u32>,
+        #[arg(long)]
+        out_file: PathBuf,
+    },
+    /// Compute the hash of anchor data
+    HashAnchorData {
+        /// Path to the anchor data file
+        #[arg(long)]
+        file_binary: Option<PathBuf>,
+        /// Anchor text to hash directly
+        #[arg(long)]
+        file_text: Option<PathBuf>,
+    },
     /// Create a treasury withdrawal action
     CreateTreasuryWithdrawal {
         #[arg(long)]
@@ -455,8 +513,8 @@ impl GovernanceCmd {
                     anchor_data_hash,
                     deposit,
                     return_addr,
-                    prev_governance_action_tx_id: _,
-                    prev_governance_action_index: _,
+                    prev_governance_action_tx_id,
+                    prev_governance_action_index,
                     out_file,
                 } => {
                     let anchor_hash = hex::decode(&anchor_data_hash)?;
@@ -470,8 +528,12 @@ impl GovernanceCmd {
                     // NoConfidence = tag 3
                     enc.array(2)?;
                     enc.u32(3)?;
-                    enc.null()?; // prev_action_id (null for first)
-                                 // Anchor
+                    encode_prev_action_id(
+                        &mut enc,
+                        &prev_governance_action_tx_id,
+                        &prev_governance_action_index,
+                    )?;
+                    // Anchor
                     enc.array(2)?;
                     enc.str(&anchor_url)?;
                     enc.bytes(&anchor_hash)?;
@@ -484,6 +546,128 @@ impl GovernanceCmd {
 
                     std::fs::write(&out_file, serde_json::to_string_pretty(&action_env)?)?;
                     println!("No-confidence action written to: {}", out_file.display());
+                    Ok(())
+                }
+                ActionSubcommand::CreateConstitution {
+                    anchor_url,
+                    anchor_data_hash,
+                    deposit,
+                    return_addr,
+                    constitution_url,
+                    constitution_hash,
+                    constitution_script_hash,
+                    prev_governance_action_tx_id,
+                    prev_governance_action_index,
+                    out_file,
+                } => {
+                    let anchor_hash = hex::decode(&anchor_data_hash)?;
+                    let (_, return_addr_bytes) = bech32::decode(&return_addr)?;
+                    let const_hash = hex::decode(&constitution_hash)?;
+
+                    let mut action_cbor = Vec::new();
+                    let mut enc = minicbor::Encoder::new(&mut action_cbor);
+                    enc.array(4)?;
+                    enc.u64(deposit)?;
+                    enc.bytes(&return_addr_bytes)?;
+                    // NewConstitution = tag 5
+                    enc.array(3)?;
+                    enc.u32(5)?;
+                    encode_prev_action_id(
+                        &mut enc,
+                        &prev_governance_action_tx_id,
+                        &prev_governance_action_index,
+                    )?;
+                    // Constitution: [anchor, script_hash]
+                    enc.array(2)?;
+                    // Constitution anchor
+                    enc.array(2)?;
+                    enc.str(&constitution_url)?;
+                    enc.bytes(&const_hash)?;
+                    // Guardrail script hash (nullable)
+                    if let Some(ref script_hash_hex) = constitution_script_hash {
+                        let script_hash = hex::decode(script_hash_hex)?;
+                        enc.bytes(&script_hash)?;
+                    } else {
+                        enc.null()?;
+                    }
+                    // Anchor
+                    enc.array(2)?;
+                    enc.str(&anchor_url)?;
+                    enc.bytes(&anchor_hash)?;
+
+                    let action_env = serde_json::json!({
+                        "type": "GovernanceActionConway",
+                        "description": "New Constitution Governance Action",
+                        "cborHex": hex::encode(&action_cbor)
+                    });
+
+                    std::fs::write(&out_file, serde_json::to_string_pretty(&action_env)?)?;
+                    println!("New constitution action written to: {}", out_file.display());
+                    Ok(())
+                }
+                ActionSubcommand::CreateHardForkInitiation {
+                    anchor_url,
+                    anchor_data_hash,
+                    deposit,
+                    return_addr,
+                    protocol_major_version,
+                    protocol_minor_version,
+                    prev_governance_action_tx_id,
+                    prev_governance_action_index,
+                    out_file,
+                } => {
+                    let anchor_hash = hex::decode(&anchor_data_hash)?;
+                    let (_, return_addr_bytes) = bech32::decode(&return_addr)?;
+
+                    let mut action_cbor = Vec::new();
+                    let mut enc = minicbor::Encoder::new(&mut action_cbor);
+                    enc.array(4)?;
+                    enc.u64(deposit)?;
+                    enc.bytes(&return_addr_bytes)?;
+                    // HardForkInitiation = tag 1
+                    enc.array(3)?;
+                    enc.u32(1)?;
+                    encode_prev_action_id(
+                        &mut enc,
+                        &prev_governance_action_tx_id,
+                        &prev_governance_action_index,
+                    )?;
+                    // Protocol version: [major, minor]
+                    enc.array(2)?;
+                    enc.u64(protocol_major_version)?;
+                    enc.u64(protocol_minor_version)?;
+                    // Anchor
+                    enc.array(2)?;
+                    enc.str(&anchor_url)?;
+                    enc.bytes(&anchor_hash)?;
+
+                    let action_env = serde_json::json!({
+                        "type": "GovernanceActionConway",
+                        "description": "Hard Fork Initiation Governance Action",
+                        "cborHex": hex::encode(&action_cbor)
+                    });
+
+                    std::fs::write(&out_file, serde_json::to_string_pretty(&action_env)?)?;
+                    println!(
+                        "Hard fork initiation action written to: {}",
+                        out_file.display()
+                    );
+                    Ok(())
+                }
+                ActionSubcommand::HashAnchorData {
+                    file_binary,
+                    file_text,
+                } => {
+                    let data = if let Some(ref path) = file_binary {
+                        std::fs::read(path)?
+                    } else if let Some(ref path) = file_text {
+                        std::fs::read(path)?
+                    } else {
+                        anyhow::bail!("Must provide either --file-binary or --file-text");
+                    };
+
+                    let hash = torsten_primitives::hash::blake2b_256(&data);
+                    println!("{}", hex::encode(hash.as_bytes()));
                     Ok(())
                 }
                 ActionSubcommand::CreateTreasuryWithdrawal {
@@ -534,6 +718,26 @@ impl GovernanceCmd {
     }
 }
 
+/// Encode a previous governance action ID as CBOR (null if not provided)
+fn encode_prev_action_id(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    tx_id: &Option<String>,
+    index: &Option<u32>,
+) -> Result<()> {
+    if let (Some(tx_id_hex), Some(idx)) = (tx_id, index) {
+        let tx_hash = hex::decode(tx_id_hex)?;
+        if tx_hash.len() != 32 {
+            anyhow::bail!("Invalid prev governance action tx id length");
+        }
+        enc.array(2)?;
+        enc.bytes(&tx_hash)?;
+        enc.u32(*idx)?;
+    } else {
+        enc.null()?;
+    }
+    Ok(())
+}
+
 /// Load a verification key file and return the blake2b-224 hash
 fn load_key_hash(path: &PathBuf) -> Result<Vec<u8>> {
     let content = std::fs::read_to_string(path)?;
@@ -549,4 +753,55 @@ fn load_key_hash(path: &PathBuf) -> Result<Vec<u8>> {
     };
     let hash = torsten_primitives::hash::blake2b_224(key_bytes);
     Ok(hash.as_bytes().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_prev_action_id_none() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        encode_prev_action_id(&mut enc, &None, &None).unwrap();
+        // Should encode as CBOR null (0xf6)
+        assert_eq!(buf, vec![0xf6]);
+    }
+
+    #[test]
+    fn test_encode_prev_action_id_some() {
+        let tx_id = Some("aa".repeat(32)); // 32-byte hex
+        let index = Some(3u32);
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        encode_prev_action_id(&mut enc, &tx_id, &index).unwrap();
+        // Should start with array(2), then bytes(32), then u32(3)
+        let mut dec = minicbor::Decoder::new(&buf);
+        assert_eq!(dec.array().unwrap(), Some(2));
+        let tx_bytes = dec.bytes().unwrap();
+        assert_eq!(tx_bytes.len(), 32);
+        assert_eq!(dec.u32().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_encode_prev_action_id_invalid_length() {
+        let tx_id = Some("aabb".to_string()); // only 2 bytes
+        let index = Some(0u32);
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        let result = encode_prev_action_id(&mut enc, &tx_id, &index);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("length"));
+    }
+
+    #[test]
+    fn test_hash_anchor_data_blake2b_256() {
+        let data = b"Hello, Cardano!";
+        let hash = torsten_primitives::hash::blake2b_256(data);
+        // Verify it produces a 32-byte hash
+        assert_eq!(hash.as_bytes().len(), 32);
+        // Same input should produce same hash
+        let hash2 = torsten_primitives::hash::blake2b_256(data);
+        assert_eq!(hash.as_bytes(), hash2.as_bytes());
+    }
 }
