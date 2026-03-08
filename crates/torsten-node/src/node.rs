@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 use torsten_consensus::OuroborosPraos;
 use torsten_ledger::LedgerState;
 use torsten_mempool::{Mempool, MempoolConfig};
+use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
     ChainSyncEvent, N2CServer, NodeServer, NodeStateSnapshot, NodeToNodeClient, QueryHandler,
@@ -28,12 +29,44 @@ pub struct NodeArgs {
     pub port: u16,
 }
 
+/// Provides UTxO lookups from the live ledger state
+struct LedgerUtxoProvider {
+    ledger: Arc<RwLock<LedgerState>>,
+}
+
+impl UtxoQueryProvider for LedgerUtxoProvider {
+    fn utxos_at_address_bytes(&self, addr_bytes: &[u8]) -> Vec<UtxoSnapshot> {
+        let addr = match torsten_primitives::address::Address::from_bytes(addr_bytes) {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+        // Use try_read to avoid blocking — return empty if locked
+        let ledger = match self.ledger.try_read() {
+            Ok(l) => l,
+            Err(_) => return vec![],
+        };
+        ledger
+            .utxo_set
+            .utxos_at_address(&addr)
+            .into_iter()
+            .map(|(input, output)| UtxoSnapshot {
+                tx_hash: input.transaction_id.as_ref().to_vec(),
+                output_index: input.index,
+                address: hex::encode(addr_bytes),
+                lovelace: output.value.coin.0,
+                has_datum: output.datum != torsten_primitives::transaction::OutputDatum::None,
+                has_script_ref: output.script_ref.is_some(),
+            })
+            .collect()
+    }
+}
+
 /// The main Torsten node
 pub struct Node {
     config: NodeConfig,
     topology: Topology,
     chain_db: ChainDB,
-    ledger_state: LedgerState,
+    ledger_state: Arc<RwLock<LedgerState>>,
     consensus: OuroborosPraos,
     mempool: Arc<Mempool>,
     #[allow(dead_code)]
@@ -48,7 +81,7 @@ impl Node {
         info!("ChainDB opened at {}", args.database_path.display());
 
         let protocol_params = ProtocolParameters::mainnet_defaults();
-        let ledger_state = LedgerState::new(protocol_params);
+        let ledger_state = Arc::new(RwLock::new(LedgerState::new(protocol_params)));
         info!("Ledger state initialized");
 
         let consensus = OuroborosPraos::new();
@@ -66,6 +99,14 @@ impl Node {
         let server = NodeServer::new(server_config);
         let query_handler = Arc::new(RwLock::new(QueryHandler::new()));
 
+        // Wire up live UTxO provider
+        {
+            let mut qh = query_handler.blocking_write();
+            qh.set_utxo_provider(Arc::new(LedgerUtxoProvider {
+                ledger: ledger_state.clone(),
+            }));
+        }
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -82,10 +123,10 @@ impl Node {
     pub async fn run(&mut self) -> Result<()> {
         let tip = self.chain_db.get_tip();
         info!("Current chain tip: {tip}");
-        info!(
-            "UTxO set size: {} entries",
-            self.ledger_state.utxo_set.len()
-        );
+        {
+            let ls = self.ledger_state.read().await;
+            info!("UTxO set size: {} entries", ls.utxo_set.len());
+        }
         info!("Mempool: {} transactions", self.mempool.len());
 
         // Setup shutdown signal
@@ -214,8 +255,11 @@ impl Node {
                                         }
 
                                         // Apply block to ledger state
-                                        if let Err(e) = self.ledger_state.apply_block(&block) {
-                                            error!("Failed to apply block to ledger: {e}");
+                                        {
+                                            let mut ls = self.ledger_state.write().await;
+                                            if let Err(e) = ls.apply_block(&block) {
+                                                error!("Failed to apply block to ledger: {e}");
+                                            }
                                         }
 
                                         // Update consensus tip
@@ -231,18 +275,21 @@ impl Node {
                                             } else {
                                                 0.0
                                             };
-                                            let utxo_count = self.ledger_state.utxo_set.len();
-                                            let epoch = self.ledger_state.epoch.0;
-                                            info!(
-                                                slot,
-                                                block_no,
-                                                tx_count,
-                                                blocks_received,
-                                                utxo_count,
-                                                epoch,
-                                                progress = format!("{progress:.2}%"),
-                                                "sync progress"
-                                            );
+                                            {
+                                                let ls = self.ledger_state.read().await;
+                                                let utxo_count = ls.utxo_set.len();
+                                                let epoch = ls.epoch.0;
+                                                info!(
+                                                    slot,
+                                                    block_no,
+                                                    tx_count,
+                                                    blocks_received,
+                                                    utxo_count,
+                                                    epoch,
+                                                    progress = format!("{progress:.2}%"),
+                                                    "sync progress"
+                                                );
+                                            }
                                             last_log_slot = slot;
                                             // Update N2C query handler with latest state
                                             self.update_query_state().await;
@@ -287,21 +334,21 @@ impl Node {
             StakeAddressSnapshot, StakePoolSnapshot,
         };
 
+        let ls = self.ledger_state.read().await;
+
         // Build stake pool snapshots
-        let stake_pools: Vec<StakePoolSnapshot> = self
-            .ledger_state
+        let stake_pools: Vec<StakePoolSnapshot> = ls
             .pool_params
             .iter()
             .map(|(pool_id, reg)| StakePoolSnapshot {
                 pool_id: pool_id.as_ref().to_vec(),
-                stake: self
-                    .ledger_state
+                stake: ls
                     .stake_distribution
                     .stake_map
                     .values()
                     .map(|l| l.0)
                     .sum::<u64>()
-                    / self.ledger_state.pool_params.len().max(1) as u64, // approximate per-pool
+                    / ls.pool_params.len().max(1) as u64, // approximate per-pool
                 pledge: reg.pledge.0,
                 cost: reg.cost.0,
                 margin_num: reg.margin_numerator,
@@ -310,8 +357,7 @@ impl Node {
             .collect();
 
         // Build DRep snapshots
-        let drep_entries: Vec<DRepSnapshot> = self
-            .ledger_state
+        let drep_entries: Vec<DRepSnapshot> = ls
             .governance
             .dreps
             .iter()
@@ -324,8 +370,7 @@ impl Node {
             .collect();
 
         // Build governance proposal snapshots
-        let governance_proposals: Vec<ProposalSnapshot> = self
-            .ledger_state
+        let governance_proposals: Vec<ProposalSnapshot> = ls
             .governance
             .proposals
             .iter()
@@ -366,8 +411,7 @@ impl Node {
 
         // Build committee snapshot
         let committee = CommitteeSnapshot {
-            members: self
-                .ledger_state
+            members: ls
                 .governance
                 .committee_hot_keys
                 .iter()
@@ -376,8 +420,7 @@ impl Node {
                     hot_credential: hot.as_ref().to_vec(),
                 })
                 .collect(),
-            resigned: self
-                .ledger_state
+            resigned: ls
                 .governance
                 .committee_resigned
                 .keys()
@@ -386,13 +429,11 @@ impl Node {
         };
 
         // Build stake address snapshots (delegations + rewards)
-        let stake_addresses: Vec<StakeAddressSnapshot> = self
-            .ledger_state
+        let stake_addresses: Vec<StakeAddressSnapshot> = ls
             .reward_accounts
             .iter()
             .map(|(cred_hash, rewards)| {
-                let delegated_pool = self
-                    .ledger_state
+                let delegated_pool = ls
                     .delegations
                     .get(cred_hash)
                     .map(|pool_id| pool_id.as_ref().to_vec());
@@ -406,21 +447,21 @@ impl Node {
 
         // Serialize protocol params
         let protocol_params_json =
-            serde_json::to_string_pretty(&self.ledger_state.protocol_params).unwrap_or_default();
+            serde_json::to_string_pretty(&ls.protocol_params).unwrap_or_default();
 
         let snapshot = NodeStateSnapshot {
-            tip: self.ledger_state.tip.clone(),
-            epoch: self.ledger_state.epoch,
-            era: self.ledger_state.era.to_era_index(),
-            block_number: self.ledger_state.current_block_number(),
+            tip: ls.tip.clone(),
+            epoch: ls.epoch,
+            era: ls.era.to_era_index(),
+            block_number: ls.current_block_number(),
             system_start: "2017-09-23T21:44:51Z".to_string(),
-            utxo_count: self.ledger_state.utxo_set.len(),
-            delegations_count: self.ledger_state.delegations.len(),
-            pool_count: self.ledger_state.pool_params.len(),
-            treasury: self.ledger_state.treasury.0,
-            reserves: self.ledger_state.reserves.0,
-            drep_count: self.ledger_state.governance.dreps.len(),
-            proposal_count: self.ledger_state.governance.proposals.len(),
+            utxo_count: ls.utxo_set.len(),
+            delegations_count: ls.delegations.len(),
+            pool_count: ls.pool_params.len(),
+            treasury: ls.treasury.0,
+            reserves: ls.reserves.0,
+            drep_count: ls.governance.dreps.len(),
+            proposal_count: ls.governance.proposals.len(),
             protocol_params_json,
             stake_pools,
             drep_entries,
@@ -428,6 +469,10 @@ impl Node {
             committee,
             stake_addresses,
         };
+
+        // Drop the ledger read lock before acquiring the query handler write lock
+        drop(ls);
+
         let mut handler = self.query_handler.write().await;
         handler.update_state(snapshot);
     }

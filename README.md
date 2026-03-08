@@ -127,6 +127,7 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 - [x] Protocol parameters query (live from node state)
 - [x] UTxO query by address (N2C + CLI, with pluggable UtxoQueryProvider trait)
 - [x] Stake address info query (delegation + reward balance)
+- [x] Live UTxO query provider wired to ledger state via Arc<RwLock>
 
 ### In Progress
 
@@ -135,7 +136,6 @@ Zero-warning policy enforced — all code must compile with `cargo clippy -- -D 
 - [ ] Full Plutus script validation (CEK machine)
 - [ ] Full cardano-cli command parity
 - [ ] Performance optimization for initial sync
-- [ ] Wire UtxoQueryProvider to live ledger state for address-filtered UTxO queries
 
 ## License
 
