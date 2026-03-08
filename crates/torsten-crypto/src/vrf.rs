@@ -99,6 +99,19 @@ pub struct VrfKeyPair {
     pub public_key: [u8; 32],
 }
 
+/// Generate a VRF key pair from an existing 32-byte secret key.
+pub fn generate_vrf_keypair_from_secret(secret: &[u8; 32]) -> VrfKeyPair {
+    let sk = SecretKey03::from_bytes(secret);
+    let (scalar, _) = sk.extend();
+    let point = scalar * ED25519_BASEPOINT_POINT;
+    let pk_bytes = point.compress().to_bytes();
+
+    VrfKeyPair {
+        secret_key: *secret,
+        public_key: pk_bytes,
+    }
+}
+
 /// Generate a new VRF key pair using a cryptographically secure RNG.
 pub fn generate_vrf_keypair() -> VrfKeyPair {
     let mut seed = [0u8; 32];

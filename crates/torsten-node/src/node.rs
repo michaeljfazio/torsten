@@ -33,6 +33,12 @@ pub struct NodeArgs {
     pub port: u16,
     /// Directory containing the config file (for resolving relative genesis paths)
     pub config_dir: PathBuf,
+    /// Path to KES signing key (enables block production)
+    pub shelley_kes_key: Option<PathBuf>,
+    /// Path to VRF signing key (enables block production)
+    pub shelley_vrf_key: Option<PathBuf>,
+    /// Path to operational certificate (enables block production)
+    pub shelley_operational_certificate: Option<PathBuf>,
 }
 
 /// Provides block data from ChainDB for the N2N server
@@ -174,6 +180,8 @@ pub struct Node {
     shelley_genesis: Option<ShelleyGenesis>,
     topology_path: PathBuf,
     metrics: Arc<crate::metrics::NodeMetrics>,
+    /// Block producer credentials (None = relay-only mode)
+    block_producer: Option<crate::forge::BlockProducerCredentials>,
 }
 
 impl Node {
@@ -352,6 +360,36 @@ impl Node {
         }));
         let query_handler = Arc::new(RwLock::new(qh));
 
+        // Load block producer credentials if all three key paths are provided
+        let block_producer = match (
+            &args.shelley_vrf_key,
+            &args.shelley_kes_key,
+            &args.shelley_operational_certificate,
+        ) {
+            (Some(vrf_path), Some(kes_path), Some(opcert_path)) => {
+                match crate::forge::BlockProducerCredentials::load(vrf_path, kes_path, opcert_path)
+                {
+                    Ok(creds) => {
+                        info!(
+                            pool_id = %creds.pool_id,
+                            opcert_seq = creds.opcert_sequence,
+                            kes_period = creds.opcert_kes_period,
+                            "Block producer mode enabled"
+                        );
+                        Some(creds)
+                    }
+                    Err(e) => {
+                        warn!("Failed to load block producer credentials: {e}");
+                        None
+                    }
+                }
+            }
+            _ => {
+                info!("Running in relay-only mode (no block producer keys configured)");
+                None
+            }
+        };
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -368,6 +406,7 @@ impl Node {
             shelley_genesis,
             topology_path: args.topology_path,
             metrics: Arc::new(crate::metrics::NodeMetrics::new()),
+            block_producer,
         })
     }
 
@@ -880,6 +919,7 @@ impl Node {
                                     HeaderBatchResult::Await => {
                                         info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
                                         self.update_query_state().await;
+                                        self.try_forge_block().await;
                                     }
                                 }
                             }
@@ -1229,5 +1269,128 @@ impl Node {
 
         let mut handler = self.query_handler.write().await;
         handler.update_state(snapshot);
+    }
+
+    /// Attempt to forge a block if we are in block producer mode and are the slot leader.
+    ///
+    /// Called when the node is caught up to the chain tip.
+    async fn try_forge_block(&mut self) {
+        let creds = match &self.block_producer {
+            Some(c) => c,
+            None => return, // relay-only mode
+        };
+
+        let ls = self.ledger_state.read().await;
+        let current_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+        let next_slot = torsten_primitives::time::SlotNo(current_slot + 1);
+        let epoch_nonce = ls.epoch_nonce;
+        let block_number = torsten_primitives::time::BlockNo(ls.current_block_number().0 + 1);
+        let prev_hash = ls
+            .tip
+            .point
+            .hash()
+            .copied()
+            .unwrap_or(torsten_primitives::hash::Hash32::ZERO);
+
+        // Calculate relative stake from the "set" snapshot (used for leader election)
+        let relative_stake = if let Some(set_snapshot) = &ls.snapshots.set {
+            let total_stake: u64 = set_snapshot.pool_stake.values().map(|s| s.0).sum();
+            let pool_stake = set_snapshot
+                .pool_stake
+                .get(&creds.pool_id)
+                .map(|s| s.0)
+                .unwrap_or(0);
+            if total_stake > 0 {
+                pool_stake as f64 / total_stake as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        drop(ls);
+
+        if relative_stake == 0.0 {
+            return; // No stake, can't be leader
+        }
+
+        // Check if we are the slot leader
+        if !crate::forge::check_slot_leadership(
+            creds,
+            next_slot,
+            &epoch_nonce,
+            relative_stake,
+            self.consensus.active_slot_coeff,
+        ) {
+            return; // Not our slot
+        }
+
+        info!(
+            slot = next_slot.0,
+            relative_stake = format!("{:.6}", relative_stake),
+            "Elected as slot leader!"
+        );
+
+        // Collect transactions from mempool (up to limits)
+        let transactions = self.mempool.get_txs_for_block(500, 90112);
+        let config = crate::forge::BlockProducerConfig::default();
+
+        match crate::forge::forge_block(
+            creds,
+            &config,
+            next_slot,
+            block_number,
+            prev_hash,
+            &epoch_nonce,
+            transactions,
+        ) {
+            Ok((block, cbor)) => {
+                // Store the forged block in ChainDB
+                {
+                    let mut db = self.chain_db.write().await;
+                    if let Err(e) = db.add_block(
+                        *block.hash(),
+                        block.slot(),
+                        block.block_number(),
+                        *block.prev_hash(),
+                        cbor,
+                    ) {
+                        error!("Failed to store forged block: {e}");
+                        return;
+                    }
+                }
+
+                // Apply to ledger
+                {
+                    let mut ls = self.ledger_state.write().await;
+                    if let Err(e) = ls.apply_block(&block) {
+                        error!("Failed to apply forged block to ledger: {e}");
+                        return;
+                    }
+                }
+
+                // Remove confirmed transactions from mempool
+                let confirmed: Vec<_> = block.transactions.iter().map(|tx| tx.hash).collect();
+                if !confirmed.is_empty() {
+                    self.mempool.remove_txs(&confirmed);
+                }
+
+                // Update consensus tip
+                self.consensus.update_tip(block.tip());
+
+                info!(
+                    slot = next_slot.0,
+                    block_number = block_number.0,
+                    tx_count = block.transactions.len(),
+                    "Forged block applied to local chain"
+                );
+
+                // Note: Block announcement to peers is not yet implemented.
+                // The N2N server will serve the block to peers that request it via BlockFetch.
+            }
+            Err(e) => {
+                error!("Block forging failed: {e}");
+            }
+        }
     }
 }

@@ -1,4 +1,5 @@
 mod config;
+mod forge;
 mod genesis;
 mod metrics;
 mod node;
@@ -49,6 +50,19 @@ struct RunArgs {
     /// Host address to bind to
     #[arg(long, default_value = "0.0.0.0")]
     host_addr: String,
+
+    // Block producer options (optional — enables block production mode)
+    /// Path to the KES signing key file
+    #[arg(long)]
+    shelley_kes_key: Option<PathBuf>,
+
+    /// Path to the VRF signing key file
+    #[arg(long)]
+    shelley_vrf_key: Option<PathBuf>,
+
+    /// Path to the operational certificate file
+    #[arg(long)]
+    shelley_operational_certificate: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -110,6 +124,9 @@ async fn run_node(args: RunArgs) -> Result<()> {
         host_addr: args.host_addr,
         port: args.port,
         config_dir,
+        shelley_kes_key: args.shelley_kes_key,
+        shelley_vrf_key: args.shelley_vrf_key,
+        shelley_operational_certificate: args.shelley_operational_certificate,
     })?;
 
     // Run the node

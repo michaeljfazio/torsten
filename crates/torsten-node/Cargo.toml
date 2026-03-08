@@ -30,3 +30,5 @@ anyhow = { workspace = true }
 hex.workspace = true
 bs58.workspace = true
 chrono = { workspace = true }
+minicbor = { workspace = true }
+rand = { workspace = true }
