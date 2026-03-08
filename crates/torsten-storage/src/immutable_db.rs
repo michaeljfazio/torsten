@@ -152,6 +152,40 @@ impl ImmutableDB {
         }
     }
 
+    /// Get blocks in a slot range [from_slot, to_slot] inclusive.
+    /// Returns raw CBOR block data in slot order.
+    pub fn get_blocks_in_slot_range(
+        &self,
+        from_slot: SlotNo,
+        to_slot: SlotNo,
+    ) -> Result<Vec<Vec<u8>>, ImmutableDBError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| ImmutableDBError::RocksDB("DB not open".into()))?;
+
+        let mut blocks = Vec::new();
+        let start_key = from_slot.0.to_be_bytes();
+        let end_key = to_slot.0.to_be_bytes();
+
+        let iter = db.iterator(rocksdb::IteratorMode::From(
+            &start_key,
+            rocksdb::Direction::Forward,
+        ));
+        for item in iter {
+            let (key, value) = item.map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
+            // Skip non-slot keys (metadata, hash index)
+            if key.len() != 8 {
+                continue;
+            }
+            if key.as_ref() > end_key.as_ref() {
+                break;
+            }
+            blocks.push(value.to_vec());
+        }
+        Ok(blocks)
+    }
+
     pub fn tip_slot(&self) -> SlotNo {
         self.tip_slot
     }

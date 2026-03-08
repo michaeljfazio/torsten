@@ -124,6 +124,23 @@ impl VolatileDB {
             .unwrap_or_default()
     }
 
+    /// Get blocks in a slot range [from_slot, to_slot] inclusive.
+    /// Returns raw CBOR block data in slot order.
+    pub fn get_blocks_in_slot_range(&self, from_slot: SlotNo, to_slot: SlotNo) -> Vec<Vec<u8>> {
+        let blocks = self.blocks.read();
+        let slot_index = self.slot_index.read();
+        let mut result = Vec::new();
+
+        for (_, hashes) in slot_index.range(from_slot..=to_slot) {
+            for hash in hashes {
+                if let Some(entry) = blocks.get(hash) {
+                    result.push(entry.cbor.clone());
+                }
+            }
+        }
+        result
+    }
+
     /// Get the current tip
     pub fn get_tip(&self) -> Option<Tip> {
         self.tip.read().map(|(hash, slot, block_no)| Tip {

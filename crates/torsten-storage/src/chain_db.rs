@@ -180,6 +180,24 @@ impl ChainDB {
         Ok(chain)
     }
 
+    /// Get blocks in a slot range [from_slot, to_slot] inclusive.
+    /// Returns raw CBOR block data in slot order.
+    /// Combines results from both immutable and volatile DBs.
+    pub fn get_blocks_in_slot_range(
+        &self,
+        from_slot: SlotNo,
+        to_slot: SlotNo,
+    ) -> Result<Vec<Vec<u8>>, ChainDBError> {
+        // Get from immutable DB first (older blocks)
+        let mut blocks = self
+            .immutable
+            .get_blocks_in_slot_range(from_slot, to_slot)?;
+        // Then append from volatile DB (newer blocks, may overlap in slot)
+        let volatile_blocks = self.volatile.get_blocks_in_slot_range(from_slot, to_slot);
+        blocks.extend(volatile_blocks);
+        Ok(blocks)
+    }
+
     /// Check if a block exists in the chain DB
     pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
         self.volatile.get_block(hash).is_some()

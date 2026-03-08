@@ -63,13 +63,26 @@ pub struct ByronAddress {
 }
 
 impl Address {
-    /// Decode an address from raw bytes (Shelley format)
+    /// Decode an address from raw bytes (Shelley or Byron format)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AddressError> {
         if bytes.is_empty() {
             return Err(AddressError::TooShort);
         }
 
         let header = bytes[0];
+
+        // Byron addresses start with CBOR encoding (0x82, 0x83, etc.)
+        // or have the Shelley-era type nibble 0b1000.
+        // Detect Byron by checking if the first byte is a CBOR array/tag marker
+        // that doesn't match Shelley header patterns.
+        // CBOR major type 4 (array) starts at 0x80, major type 6 (tag) starts at 0xC0.
+        // Byron addresses are typically CBOR arrays starting with 0x82 or 0x83.
+        if header == 0x82 || header == 0x83 {
+            return Ok(Address::Byron(ByronAddress {
+                payload: bytes.to_vec(),
+            }));
+        }
+
         let addr_type = (header >> 4) & 0x0F;
         let network_id =
             NetworkId::from_u8(header & 0x0F).ok_or(AddressError::InvalidHeader(header))?;

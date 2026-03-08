@@ -33,6 +33,7 @@ pub enum N2NServerError {
 const MINI_PROTOCOL_HANDSHAKE: u16 = 0;
 const MINI_PROTOCOL_CHAINSYNC: u16 = 2;
 const MINI_PROTOCOL_BLOCKFETCH: u16 = 3;
+const MINI_PROTOCOL_TXSUBMISSION: u16 = 4;
 const MINI_PROTOCOL_KEEPALIVE: u16 = 8;
 
 /// Peer sharing mode for N2N handshake
@@ -155,6 +156,27 @@ impl N2NServer {
     }
 }
 
+/// Per-peer state for tracking ChainSync cursor and protocol state
+struct PeerState {
+    /// The peer's ChainSync cursor — the point they've synced to.
+    /// When they call MsgFindIntersect, this gets set. On each MsgRequestNext,
+    /// we advance from this point.
+    chainsync_cursor_slot: Option<u64>,
+    chainsync_cursor_hash: Option<[u8; 32]>,
+    /// TxSubmission2 state: whether we've sent MsgInit
+    tx_submission_init_sent: bool,
+}
+
+impl PeerState {
+    fn new() -> Self {
+        PeerState {
+            chainsync_cursor_slot: None,
+            chainsync_cursor_hash: None,
+            tx_submission_init_sent: false,
+        }
+    }
+}
+
 /// Handle a single inbound N2N peer connection
 async fn handle_n2n_connection(
     mut stream: tokio::net::TcpStream,
@@ -167,6 +189,7 @@ async fn handle_n2n_connection(
 ) -> Result<(), N2NServerError> {
     let mut buf = vec![0u8; 65536];
     let mut partial = Vec::new();
+    let mut peer_state = PeerState::new();
 
     loop {
         let n = stream.read(&mut buf).await?;
@@ -196,6 +219,7 @@ async fn handle_n2n_connection(
                         &block_provider,
                         initiator_and_responder,
                         peer_sharing_mode,
+                        &mut peer_state,
                     )
                     .await?;
 
@@ -218,6 +242,7 @@ async fn handle_n2n_connection(
 }
 
 /// Process a single N2N multiplexer segment
+#[allow(clippy::too_many_arguments)]
 async fn process_n2n_segment(
     segment: &Segment,
     peer_addr: SocketAddr,
@@ -226,6 +251,7 @@ async fn process_n2n_segment(
     block_provider: &Arc<dyn BlockProvider>,
     initiator_and_responder: bool,
     peer_sharing_mode: PeerSharingMode,
+    peer_state: &mut PeerState,
 ) -> Result<Vec<Segment>, N2NServerError> {
     match segment.protocol_id {
         MINI_PROTOCOL_HANDSHAKE => {
@@ -239,12 +265,17 @@ async fn process_n2n_segment(
         }
         MINI_PROTOCOL_CHAINSYNC => {
             let resp =
-                handle_n2n_chainsync(&segment.payload, query_handler, block_provider).await?;
+                handle_n2n_chainsync(&segment.payload, query_handler, block_provider, peer_state)
+                    .await?;
             Ok(resp.into_iter().collect())
         }
         MINI_PROTOCOL_BLOCKFETCH => {
             let resp = handle_n2n_blockfetch(&segment.payload, block_provider)?;
             Ok(resp)
+        }
+        MINI_PROTOCOL_TXSUBMISSION => {
+            let resp = handle_n2n_txsubmission(&segment.payload, peer_state)?;
+            Ok(resp.into_iter().collect())
         }
         MINI_PROTOCOL_KEEPALIVE => {
             let resp = handle_keepalive(&segment.payload)?;
@@ -378,10 +409,16 @@ fn handle_n2n_handshake(
 ///   MsgRequestNext (0) → MsgRollForward (2) or MsgRollBackward (3) or MsgAwaitReply (1)
 ///   MsgFindIntersect (4) → MsgIntersectFound (5) or MsgIntersectNotFound (6)
 ///   MsgDone (7) → close protocol
+///
+/// Per-peer cursor tracking: after MsgFindIntersect sets the cursor, each
+/// MsgRequestNext checks if a new block exists beyond the cursor slot. If so,
+/// we respond with MsgRollForward carrying the raw block header; otherwise
+/// we send MsgAwaitReply.
 async fn handle_n2n_chainsync(
     payload: &[u8],
-    query_handler: &Arc<RwLock<QueryHandler>>,
-    _block_provider: &Arc<dyn BlockProvider>,
+    _query_handler: &Arc<RwLock<QueryHandler>>,
+    block_provider: &Arc<dyn BlockProvider>,
+    peer_state: &mut PeerState,
 ) -> Result<Option<Segment>, N2NServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
     let _arr_len = decoder
@@ -392,68 +429,131 @@ async fn handle_n2n_chainsync(
         .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
 
     match msg_tag {
-        // MsgRequestNext → respond with MsgAwaitReply for now
-        // (Full implementation would track per-peer cursor and deliver headers)
+        // MsgRequestNext → check if there's a block beyond the peer's cursor
         0 => {
-            let mut buf = Vec::new();
-            let mut enc = minicbor::Encoder::new(&mut buf);
-            // MsgAwaitReply: [1]
-            enc.array(1)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.u32(1)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            let (tip_slot, tip_hash, tip_block) = block_provider.get_tip();
 
-            Ok(Some(Segment {
-                transmission_time: 0,
-                protocol_id: MINI_PROTOCOL_CHAINSYNC,
-                is_responder: true,
-                payload: buf,
-            }))
+            // If no cursor set or cursor is at tip, await
+            let cursor_slot = peer_state.chainsync_cursor_slot.unwrap_or(0);
+            if cursor_slot >= tip_slot {
+                // At tip — send MsgAwaitReply
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+                return Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                    is_responder: true,
+                    payload: buf,
+                }));
+            }
+
+            // We have blocks ahead of cursor — serve the tip as a roll-forward
+            // In a full implementation we'd iterate through blocks sequentially,
+            // but for now we jump to tip since we don't have slot-based iteration
+            // in the block provider trait yet.
+            if let Some(block_cbor) = block_provider.get_block(&tip_hash) {
+                // Update cursor to tip
+                peer_state.chainsync_cursor_slot = Some(tip_slot);
+                peer_state.chainsync_cursor_hash = Some(tip_hash);
+
+                // MsgRollForward: [2, wrapped_header, tip]
+                // N2N chainsync sends headers, not full blocks.
+                // The header is wrapped: [era_tag, [variant, cbor_header]]
+                // For simplicity, we send the raw block CBOR as the header
+                // (the peer will parse it).
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(3)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+                // Wrapped header: tag(24) bytes(header_cbor)
+                // For N2N ChainSync, headers are CBOR-wrapped
+                enc.tag(minicbor::data::Tag::new(24))
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.bytes(&block_cbor)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+                // Tip: [point, block_number]
+                encode_tip(&mut enc, tip_slot, &tip_hash, tip_block)?;
+
+                Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                    is_responder: true,
+                    payload: buf,
+                }))
+            } else {
+                // Block not found, await
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+                Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                    is_responder: true,
+                    payload: buf,
+                }))
+            }
         }
-        // MsgFindIntersect → respond with our tip as the intersection
+        // MsgFindIntersect → search for an intersection point with the peer's chain
         4 => {
-            let handler = query_handler.read().await;
-            let state = handler.state();
+            // Parse the list of points the peer sends
+            let points_len = decoder
+                .array()
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?
+                .unwrap_or(0);
 
-            let tip_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
-            let tip_hash: Vec<u8> = state
-                .tip
-                .point
-                .hash()
-                .map(|h| h.as_ref().to_vec())
-                .unwrap_or_else(|| vec![0u8; 32]);
-            let tip_block = state.block_number;
+            let mut intersect_point: Option<(u64, [u8; 32])> = None;
+            for _ in 0..points_len {
+                if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
+                    // Check if we have this block
+                    if block_provider.has_block(&hash) {
+                        // Found intersection — use the highest slot
+                        if intersect_point.is_none() || slot > intersect_point.as_ref().unwrap().0 {
+                            intersect_point = Some((slot, hash));
+                        }
+                    }
+                }
+            }
 
+            let (tip_slot, tip_hash, tip_block) = block_provider.get_tip();
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
 
-            // MsgIntersectFound: [5, point, tip]
-            // point: [slot, hash]
-            // tip: [point, block_number]
-            enc.array(3)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.u32(5)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            if let Some((int_slot, int_hash)) = intersect_point {
+                // Set peer cursor to intersection
+                peer_state.chainsync_cursor_slot = Some(int_slot);
+                peer_state.chainsync_cursor_hash = Some(int_hash);
 
-            // Point
-            enc.array(2)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.u64(tip_slot)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.bytes(&tip_hash)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                // MsgIntersectFound: [5, point, tip]
+                enc.array(3)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(5)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
 
-            // Tip: [point, block_number]
-            enc.array(2)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.array(2)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.u64(tip_slot)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.bytes(&tip_hash)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-            enc.u64(tip_block.0)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                // Intersection point
+                encode_point(&mut enc, int_slot, &int_hash)?;
+                // Tip
+                encode_tip(&mut enc, tip_slot, &tip_hash, tip_block)?;
+            } else {
+                // MsgIntersectNotFound: [6, tip]
+                enc.array(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(6)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                encode_tip(&mut enc, tip_slot, &tip_hash, tip_block)?;
+            }
 
             Ok(Some(Segment {
                 transmission_time: 0,
@@ -474,9 +574,40 @@ async fn handle_n2n_chainsync(
     }
 }
 
+/// Encode a CBOR point: [slot, hash]
+fn encode_point(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    slot: u64,
+    hash: &[u8; 32],
+) -> Result<(), N2NServerError> {
+    enc.array(2)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.u64(slot)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.bytes(hash)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    Ok(())
+}
+
+/// Encode a CBOR tip: [[slot, hash], block_number]
+fn encode_tip(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    slot: u64,
+    hash: &[u8; 32],
+    block_no: u64,
+) -> Result<(), N2NServerError> {
+    enc.array(2)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    encode_point(enc, slot, hash)?;
+    enc.u64(block_no)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    Ok(())
+}
+
 /// Handle N2N BlockFetch mini-protocol messages.
 ///
 ///   MsgRequestRange (0) [from_point, to_point] → MsgStartBatch (2) + blocks + MsgBatchDone (5)
+///     or MsgNoBlocks (3) if range cannot be served
 ///   MsgClientDone (1) → close protocol
 fn handle_n2n_blockfetch(
     payload: &[u8],
@@ -494,10 +625,40 @@ fn handle_n2n_blockfetch(
         // MsgRequestRange: [0, from_point, to_point]
         0 => {
             // Parse from_point [slot, hash] and to_point [slot, hash]
-            let from_hash = parse_point_hash(&mut decoder);
-            let to_hash = parse_point_hash(&mut decoder);
+            let from = parse_point_slot_hash(&mut decoder);
+            let to = parse_point_slot_hash(&mut decoder);
 
             let mut segments = Vec::new();
+
+            // Check that we have at least the boundary blocks
+            let from_exists = from
+                .as_ref()
+                .map(|(_, h)| block_provider.has_block(h))
+                .unwrap_or(false);
+            let to_exists = to
+                .as_ref()
+                .map(|(_, h)| block_provider.has_block(h))
+                .unwrap_or(false);
+
+            if !from_exists || !to_exists {
+                // MsgNoBlocks: [2]
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                segments.push(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_BLOCKFETCH,
+                    is_responder: true,
+                    payload: buf,
+                });
+                return Ok(segments);
+            }
+
+            let (from_slot, _from_hash) = from.unwrap();
+            let (to_slot, _to_hash) = to.unwrap();
 
             // MsgStartBatch: [2]
             let mut start_buf = Vec::new();
@@ -513,25 +674,28 @@ fn handle_n2n_blockfetch(
                 payload: start_buf,
             });
 
-            // Send blocks — for now, serve the range from/to if we have them
-            // This is simplified: we just try to serve each hash
-            for hash in [from_hash, to_hash].iter().flatten() {
-                if let Some(block_data) = block_provider.get_block(hash) {
-                    // MsgBlock: [3, block_bytes]
-                    let mut block_buf = Vec::new();
-                    let mut enc = minicbor::Encoder::new(&mut block_buf);
-                    enc.array(2)
-                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                    enc.u32(3)
-                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                    enc.bytes(&block_data)
-                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                    segments.push(Segment {
-                        transmission_time: 0,
-                        protocol_id: MINI_PROTOCOL_BLOCKFETCH,
-                        is_responder: true,
-                        payload: block_buf,
-                    });
+            // Serve blocks in the slot range.
+            // Use block_provider.get_blocks_in_range if available, otherwise
+            // fall back to serving from/to hashes only.
+            // The block provider currently works by hash, so we serve
+            // all blocks we can find. For a single-block request (from == to),
+            // we just serve that one block.
+            if from_slot == to_slot {
+                // Single block request
+                if let Some(block_data) = block_provider.get_block(&_from_hash) {
+                    segments.push(make_block_segment(&block_data)?);
+                }
+            } else {
+                // Range request — try to serve known blocks
+                // First the from block, then the to block.
+                // A proper implementation would iterate the chain between these points.
+                if let Some(block_data) = block_provider.get_block(&_from_hash) {
+                    segments.push(make_block_segment(&block_data)?);
+                }
+                if _from_hash != _to_hash {
+                    if let Some(block_data) = block_provider.get_block(&_to_hash) {
+                        segments.push(make_block_segment(&block_data)?);
+                    }
                 }
             }
 
@@ -561,6 +725,24 @@ fn handle_n2n_blockfetch(
             Ok(vec![])
         }
     }
+}
+
+/// Create a MsgBlock segment: [3, block_bytes]
+fn make_block_segment(block_data: &[u8]) -> Result<Segment, N2NServerError> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+    enc.array(2)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.u32(3)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.bytes(block_data)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    Ok(Segment {
+        transmission_time: 0,
+        protocol_id: MINI_PROTOCOL_BLOCKFETCH,
+        is_responder: true,
+        payload: buf,
+    })
 }
 
 /// Handle KeepAlive mini-protocol.
@@ -610,15 +792,105 @@ fn handle_keepalive(payload: &[u8]) -> Result<Option<Segment>, N2NServerError> {
     }
 }
 
-/// Parse a point's hash from a CBOR-encoded [slot, hash] array
-fn parse_point_hash(decoder: &mut minicbor::Decoder) -> Option<[u8; 32]> {
+/// Handle N2N TxSubmission2 mini-protocol messages.
+///
+/// TxSubmission2 is the N2N transaction submission protocol.
+/// As a server (responder in N2N), we handle:
+///   MsgInit (6) → respond with MsgInit (6) to complete bidirectional init
+///   MsgRequestTxIds (0) [blocking, ack_count, req_count] → MsgReplyTxIds (1) []
+///   MsgRequestTxs (2) [tx_ids] → MsgReplyTxs (3) []
+///   MsgDone (5) → close protocol
+fn handle_n2n_txsubmission(
+    payload: &[u8],
+    peer_state: &mut PeerState,
+) -> Result<Option<Segment>, N2NServerError> {
+    let mut decoder = minicbor::Decoder::new(payload);
+    let _arr_len = decoder
+        .array()
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    let msg_tag = decoder
+        .u32()
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+    match msg_tag {
+        // MsgInit: [6] — bidirectional initialization
+        6 => {
+            if !peer_state.tx_submission_init_sent {
+                peer_state.tx_submission_init_sent = true;
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(6)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                debug!("TxSubmission2: init handshake complete");
+                Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                    is_responder: true,
+                    payload: buf,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        // MsgRequestTxIds: [0, blocking, ack_count, req_count]
+        0 => {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.u32(1)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.array(0)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            debug!("TxSubmission2: replied with empty tx ids");
+            Ok(Some(Segment {
+                transmission_time: 0,
+                protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                is_responder: true,
+                payload: buf,
+            }))
+        }
+        // MsgRequestTxs: [2, [tx_ids]]
+        2 => {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.u32(3)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.array(0)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            debug!("TxSubmission2: replied with empty txs");
+            Ok(Some(Segment {
+                transmission_time: 0,
+                protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                is_responder: true,
+                payload: buf,
+            }))
+        }
+        // MsgDone
+        5 => {
+            debug!("TxSubmission2: peer sent MsgDone");
+            Ok(None)
+        }
+        other => {
+            debug!("TxSubmission2: unknown tag {other}");
+            Ok(None)
+        }
+    }
+}
+
+/// Parse a point's (slot, hash) from a CBOR-encoded [slot, hash] array
+fn parse_point_slot_hash(decoder: &mut minicbor::Decoder) -> Option<(u64, [u8; 32])> {
     decoder.array().ok()?;
-    decoder.u64().ok()?; // slot
+    let slot = decoder.u64().ok()?;
     let hash_bytes = decoder.bytes().ok()?;
     if hash_bytes.len() == 32 {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(hash_bytes);
-        Some(hash)
+        Some((slot, hash))
     } else {
         None
     }
@@ -781,5 +1053,52 @@ mod tests {
 
         let segments = handle_n2n_blockfetch(&buf, &provider).unwrap();
         assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn test_handle_txsubmission_init() {
+        let mut peer_state = PeerState::new();
+
+        // MsgInit: [6]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(1).unwrap();
+        enc.u32(6).unwrap();
+
+        let result = handle_n2n_txsubmission(&buf, &mut peer_state).unwrap();
+        assert!(result.is_some());
+        let seg = result.unwrap();
+        assert_eq!(seg.protocol_id, MINI_PROTOCOL_TXSUBMISSION);
+
+        let mut dec = minicbor::Decoder::new(&seg.payload);
+        dec.array().unwrap();
+        assert_eq!(dec.u32().unwrap(), 6); // MsgInit response
+
+        // Second init should be no-op
+        let result2 = handle_n2n_txsubmission(&buf, &mut peer_state).unwrap();
+        assert!(result2.is_none());
+    }
+
+    #[test]
+    fn test_handle_txsubmission_request_tx_ids() {
+        let mut peer_state = PeerState::new();
+        peer_state.tx_submission_init_sent = true;
+
+        // MsgRequestTxIds: [0, false, 0, 1]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(4).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(0).unwrap();
+        enc.u32(1).unwrap();
+
+        let result = handle_n2n_txsubmission(&buf, &mut peer_state).unwrap();
+        assert!(result.is_some());
+        let seg = result.unwrap();
+
+        let mut dec = minicbor::Decoder::new(&seg.payload);
+        dec.array().unwrap();
+        assert_eq!(dec.u32().unwrap(), 1); // MsgReplyTxIds
     }
 }
