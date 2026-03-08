@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use torsten_primitives::hash::BlockHeaderHash;
-use torsten_primitives::time::SlotNo;
+use torsten_primitives::hash::{BlockHeaderHash, Hash32};
+use torsten_primitives::time::{BlockNo, SlotNo};
 use tracing::{debug, info, trace};
 
 #[derive(Error, Debug)]
@@ -41,12 +41,29 @@ impl ImmutableDB {
         let db =
             rocksdb::DB::open(&opts, path).map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
 
+        // Recover tip metadata from stored key
+        let tip_slot = Self::recover_tip(&db);
+        if tip_slot > SlotNo(0) {
+            info!(tip_slot = tip_slot.0, "ImmutableDB recovered tip from DB");
+        }
+
         info!("ImmutableDB opened successfully");
         Ok(ImmutableDB {
             db_path: path.to_path_buf(),
             db: Some(db),
-            tip_slot: SlotNo(0),
+            tip_slot,
         })
+    }
+
+    /// Store a block's raw CBOR in the immutable DB
+    pub fn put_block_with_blockno(
+        &mut self,
+        slot: SlotNo,
+        hash: &BlockHeaderHash,
+        block_no: BlockNo,
+        cbor: &[u8],
+    ) -> Result<(), ImmutableDBError> {
+        self.put_block_inner(slot, hash, Some(block_no), cbor)
     }
 
     /// Store a block's raw CBOR in the immutable DB
@@ -54,6 +71,16 @@ impl ImmutableDB {
         &mut self,
         slot: SlotNo,
         hash: &BlockHeaderHash,
+        cbor: &[u8],
+    ) -> Result<(), ImmutableDBError> {
+        self.put_block_inner(slot, hash, None, cbor)
+    }
+
+    fn put_block_inner(
+        &mut self,
+        slot: SlotNo,
+        hash: &BlockHeaderHash,
+        block_no: Option<BlockNo>,
         cbor: &[u8],
     ) -> Result<(), ImmutableDBError> {
         trace!(
@@ -80,6 +107,13 @@ impl ImmutableDB {
         if slot > self.tip_slot {
             debug!(slot = slot.0, "ImmutableDB: new tip slot");
             self.tip_slot = slot;
+            // Persist tip metadata: slot(8) + hash(32) + block_no(8)
+            let mut tip_value = Vec::with_capacity(48);
+            tip_value.extend_from_slice(&slot.0.to_be_bytes());
+            tip_value.extend_from_slice(hash.as_bytes());
+            tip_value.extend_from_slice(&block_no.map_or(0u64, |b| b.0).to_be_bytes());
+            db.put(b"meta:tip", &tip_value)
+                .map_err(|e| ImmutableDBError::RocksDB(e.to_string()))?;
         }
 
         Ok(())
@@ -124,6 +158,34 @@ impl ImmutableDB {
 
     pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Get the tip slot, hash, and block number from persisted metadata
+    pub fn get_tip_info(&self) -> Option<(SlotNo, BlockHeaderHash, BlockNo)> {
+        let db = self.db.as_ref()?;
+        let data = db.get(b"meta:tip").ok()??;
+        if data.len() < 40 {
+            return None;
+        }
+        let slot = SlotNo(u64::from_be_bytes(data[..8].try_into().ok()?));
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes.copy_from_slice(&data[8..40]);
+        let block_no = if data.len() >= 48 {
+            BlockNo(u64::from_be_bytes(data[40..48].try_into().ok()?))
+        } else {
+            BlockNo(0)
+        };
+        Some((slot, Hash32::from_bytes(hash_bytes), block_no))
+    }
+
+    /// Recover the tip slot from RocksDB on startup
+    fn recover_tip(db: &rocksdb::DB) -> SlotNo {
+        match db.get(b"meta:tip") {
+            Ok(Some(data)) if data.len() >= 8 => {
+                SlotNo(u64::from_be_bytes(data[..8].try_into().unwrap_or([0; 8])))
+            }
+            _ => SlotNo(0),
+        }
     }
 }
 
@@ -173,5 +235,29 @@ mod tests {
         db.put_block(SlotNo(100), &Hash32::from_bytes([2u8; 32]), b"block2")
             .unwrap();
         assert_eq!(db.tip_slot(), SlotNo(100));
+    }
+
+    #[test]
+    fn test_immutable_db_tip_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = Hash32::from_bytes([42u8; 32]);
+
+        // Store some blocks, then close DB
+        {
+            let mut db = ImmutableDB::open(dir.path()).unwrap();
+            db.put_block_with_blockno(SlotNo(500), &hash, BlockNo(100), b"block")
+                .unwrap();
+            assert_eq!(db.tip_slot(), SlotNo(500));
+        }
+
+        // Reopen — tip should be recovered
+        {
+            let db = ImmutableDB::open(dir.path()).unwrap();
+            assert_eq!(db.tip_slot(), SlotNo(500));
+            let tip_info = db.get_tip_info().unwrap();
+            assert_eq!(tip_info.0, SlotNo(500));
+            assert_eq!(tip_info.1, hash);
+            assert_eq!(tip_info.2, BlockNo(100));
+        }
     }
 }

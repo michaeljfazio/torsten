@@ -80,9 +80,24 @@ impl ChainDB {
         Ok(self.immutable.get_block_by_hash(hash)?)
     }
 
-    /// Get the current chain tip
+    /// Get the current chain tip (checks volatile first, then immutable)
     pub fn get_tip(&self) -> Tip {
-        self.volatile.get_tip().unwrap_or_else(Tip::origin)
+        if let Some(tip) = self.volatile.get_tip() {
+            return tip;
+        }
+        // Fall back to immutable tip
+        if let Some((slot, hash, block_no)) = self.immutable.get_tip_info() {
+            return Tip {
+                point: Point::Specific(slot, hash),
+                block_number: block_no,
+            };
+        }
+        Tip::origin()
+    }
+
+    /// Get the immutable DB tip info (slot, hash, block_no) if available
+    pub fn get_immutable_tip(&self) -> Option<(SlotNo, BlockHeaderHash, BlockNo)> {
+        self.immutable.get_tip_info()
     }
 
     /// Rollback to a given point by removing blocks from the volatile DB.
@@ -191,14 +206,16 @@ impl ChainDB {
         );
         let flushed = self.volatile.drain_oldest(to_flush);
 
-        for (hash, slot, _block_no, cbor) in &flushed {
+        for (hash, slot, block_no, cbor) in &flushed {
             debug!(
                 hash = %hash.to_hex(),
                 slot = slot.0,
+                block_no = block_no.0,
                 cbor_bytes = cbor.len(),
                 "ChainDB: flushing block to immutable"
             );
-            self.immutable.put_block(*slot, hash, cbor)?;
+            self.immutable
+                .put_block_with_blockno(*slot, hash, *block_no, cbor)?;
         }
 
         info!(

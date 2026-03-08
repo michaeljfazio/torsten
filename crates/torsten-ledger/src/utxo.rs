@@ -1,11 +1,12 @@
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
 use torsten_primitives::value::Lovelace;
 
 /// The UTxO set: maps transaction inputs to their unspent outputs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoSet {
     utxos: BTreeMap<TransactionInput, TransactionOutput>,
 }

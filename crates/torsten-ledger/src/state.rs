@@ -1,5 +1,7 @@
 use crate::utxo::UtxoSet;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
 use torsten_primitives::block::{Block, Point, Tip};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
@@ -17,7 +19,7 @@ use tracing::{debug, info, trace};
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
 
 /// The complete ledger state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerState {
     /// Current UTxO set
     pub utxo_set: UtxoSet,
@@ -71,7 +73,7 @@ pub struct LedgerState {
 }
 
 /// Conway-era governance state (CIP-1694)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceState {
     /// Registered DReps: credential -> DRepState
     pub dreps: BTreeMap<Hash32, DRepRegistration>,
@@ -92,7 +94,7 @@ pub struct GovernanceState {
 }
 
 /// Registration state for a DRep
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepRegistration {
     pub credential: Credential,
     pub deposit: Lovelace,
@@ -101,7 +103,7 @@ pub struct DRepRegistration {
 }
 
 /// State of a governance proposal
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalState {
     pub procedure: ProposalProcedure,
     pub proposed_epoch: EpochNo,
@@ -111,7 +113,7 @@ pub struct ProposalState {
     pub abstain_votes: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StakeDistributionState {
     pub stake_map: BTreeMap<Hash32, Lovelace>,
 }
@@ -120,7 +122,7 @@ pub struct StakeDistributionState {
 /// - "mark" is the snapshot taken at the current epoch boundary
 /// - "set" is the snapshot from the previous epoch (used for leader election)
 /// - "go" is the snapshot from two epochs ago (used for reward calculation)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EpochSnapshots {
     /// Snapshot from the most recent epoch boundary ("mark")
     pub mark: Option<StakeSnapshot>,
@@ -131,7 +133,7 @@ pub struct EpochSnapshots {
 }
 
 /// A snapshot of the stake distribution at an epoch boundary
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeSnapshot {
     pub epoch: EpochNo,
     /// stake credential hash -> pool_id delegation
@@ -142,7 +144,7 @@ pub struct StakeSnapshot {
     pub pool_params: BTreeMap<Hash28, PoolRegistration>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
     pub pool_id: Hash28,
     pub vrf_keyhash: Hash32,
@@ -1115,6 +1117,45 @@ impl LedgerState {
                 *balance = balance.checked_sub(amount).unwrap_or(Lovelace(0));
             }
         }
+    }
+
+    /// Save ledger state snapshot to disk using bincode serialization
+    pub fn save_snapshot(&self, path: &Path) -> Result<(), LedgerError> {
+        let tmp_path = path.with_extension("tmp");
+        let data = bincode::serialize(self).map_err(|e| {
+            LedgerError::EpochTransition(format!("Failed to serialize ledger state: {e}"))
+        })?;
+        std::fs::write(&tmp_path, &data)
+            .map_err(|e| LedgerError::EpochTransition(format!("Failed to write snapshot: {e}")))?;
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| LedgerError::EpochTransition(format!("Failed to rename snapshot: {e}")))?;
+        info!(
+            path = %path.display(),
+            bytes = data.len(),
+            utxo_count = self.utxo_set.len(),
+            epoch = self.epoch.0,
+            slot = ?self.tip.point.slot().map(|s| s.0),
+            "Ledger snapshot saved"
+        );
+        Ok(())
+    }
+
+    /// Load ledger state snapshot from disk
+    pub fn load_snapshot(path: &Path) -> Result<Self, LedgerError> {
+        let data = std::fs::read(path)
+            .map_err(|e| LedgerError::EpochTransition(format!("Failed to read snapshot: {e}")))?;
+        let state: LedgerState = bincode::deserialize(&data).map_err(|e| {
+            LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
+        })?;
+        info!(
+            path = %path.display(),
+            bytes = data.len(),
+            utxo_count = state.utxo_set.len(),
+            epoch = state.epoch.0,
+            slot = ?state.tip.point.slot().map(|s| s.0),
+            "Ledger snapshot loaded"
+        );
+        Ok(state)
     }
 }
 
@@ -2629,5 +2670,43 @@ mod tests {
         assert!(!check_cc_approval(1, 3, &governance));
         // No CC voted at all => not approved
         assert!(!check_cc_approval(0, 0, &governance));
+    }
+
+    #[test]
+    fn test_ledger_snapshot_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("ledger-snapshot.bin");
+
+        // Create a ledger state with some data
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch = EpochNo(42);
+        state.tip = Tip {
+            point: Point::Specific(SlotNo(100000), Hash32::from_bytes([7u8; 32])),
+            block_number: BlockNo(5000),
+        };
+        // Add a UTxO
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let output = TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(1_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+        };
+        state.utxo_set.insert(input, output);
+
+        // Save snapshot
+        state.save_snapshot(&snapshot_path).unwrap();
+        assert!(snapshot_path.exists());
+
+        // Load and verify
+        let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+        assert_eq!(loaded.epoch, EpochNo(42));
+        assert_eq!(loaded.tip.block_number, BlockNo(5000));
+        assert_eq!(loaded.utxo_set.len(), 1);
     }
 }

@@ -120,6 +120,7 @@ pub struct Node {
     server: NodeServer,
     query_handler: Arc<RwLock<QueryHandler>>,
     socket_path: PathBuf,
+    database_path: PathBuf,
     listen_addr: std::net::SocketAddr,
     network_magic: u64,
     shelley_genesis: Option<ShelleyGenesis>,
@@ -212,14 +213,49 @@ impl Node {
             }
         }
 
-        let mut ledger = LedgerState::new(protocol_params);
-        // Apply epoch length and genesis hash from Shelley genesis
-        if let Some(ref genesis) = shelley_genesis {
-            ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
-        }
-        if let Some(hash) = shelley_genesis_hash {
-            ledger.set_genesis_hash(hash);
-        }
+        // Try to load existing ledger snapshot
+        let snapshot_path = args.database_path.join("ledger-snapshot.bin");
+        let ledger = if snapshot_path.exists() {
+            match LedgerState::load_snapshot(&snapshot_path) {
+                Ok(mut state) => {
+                    // Re-apply genesis config in case it changed
+                    if let Some(ref genesis) = shelley_genesis {
+                        state.epoch_length = genesis.epoch_length;
+                    }
+                    if let Some(hash) = shelley_genesis_hash {
+                        state.genesis_hash = hash;
+                    }
+                    info!(
+                        epoch = state.epoch.0,
+                        utxo_count = state.utxo_set.len(),
+                        tip = %state.tip,
+                        "Ledger state restored from snapshot"
+                    );
+                    state
+                }
+                Err(e) => {
+                    warn!("Failed to load ledger snapshot, starting fresh: {e}");
+                    let mut ledger = LedgerState::new(protocol_params.clone());
+                    if let Some(ref genesis) = shelley_genesis {
+                        ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+                    }
+                    if let Some(hash) = shelley_genesis_hash {
+                        ledger.set_genesis_hash(hash);
+                    }
+                    ledger
+                }
+            }
+        } else {
+            let mut ledger = LedgerState::new(protocol_params.clone());
+            // Apply epoch length and genesis hash from Shelley genesis
+            if let Some(ref genesis) = shelley_genesis {
+                ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+            }
+            if let Some(hash) = shelley_genesis_hash {
+                ledger.set_genesis_hash(hash);
+            }
+            ledger
+        };
         let ledger_state = Arc::new(RwLock::new(ledger));
         info!("Ledger state initialized");
 
@@ -273,6 +309,7 @@ impl Node {
             server,
             query_handler,
             socket_path,
+            database_path: args.database_path,
             listen_addr,
             network_magic,
             shelley_genesis,
@@ -410,8 +447,19 @@ impl Node {
             }
         }
 
+        // Save final ledger snapshot on shutdown
+        self.save_ledger_snapshot().await;
         info!("Node shutdown complete");
         Ok(())
+    }
+
+    /// Save a ledger state snapshot to the database directory
+    async fn save_ledger_snapshot(&self) {
+        let snapshot_path = self.database_path.join("ledger-snapshot.bin");
+        let ls = self.ledger_state.read().await;
+        if let Err(e) = ls.save_snapshot(&snapshot_path) {
+            error!("Failed to save ledger snapshot: {e}");
+        }
     }
 
     async fn chain_sync_loop(
@@ -432,6 +480,7 @@ impl Node {
         // Main sync loop — fetch blocks in batches for faster sync
         let mut blocks_received: u64 = 0;
         let mut last_log_slot: u64 = 0;
+        let mut last_snapshot_epoch: u64 = self.ledger_state.read().await.epoch.0;
         let batch_size = 100;
 
         loop {
@@ -489,6 +538,16 @@ impl Node {
                                         self.consensus.update_tip(block.tip());
 
                                         blocks_received += 1;
+
+                                        // Save snapshot on epoch transitions
+                                        {
+                                            let current_epoch = self.ledger_state.read().await.epoch.0;
+                                            if current_epoch > last_snapshot_epoch {
+                                                info!(epoch = current_epoch, "Epoch transition — saving ledger snapshot");
+                                                self.save_ledger_snapshot().await;
+                                                last_snapshot_epoch = current_epoch;
+                                            }
+                                        }
 
                                         // Log progress periodically
                                         if slot - last_log_slot >= 10000 || blocks_received <= 5 {
@@ -549,6 +608,8 @@ impl Node {
             }
         }
 
+        // Save snapshot when sync stops
+        self.save_ledger_snapshot().await;
         info!("Chain sync stopped after {blocks_received} blocks");
         Ok(())
     }
