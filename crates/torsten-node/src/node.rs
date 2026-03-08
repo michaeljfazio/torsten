@@ -992,6 +992,17 @@ impl Node {
             }
         }
 
+        // Remove confirmed transactions from mempool
+        if !self.mempool.is_empty() {
+            let confirmed_hashes: Vec<_> = blocks
+                .iter()
+                .flat_map(|b| b.transactions.iter().map(|tx| tx.hash))
+                .collect();
+            if !confirmed_hashes.is_empty() {
+                self.mempool.remove_txs(&confirmed_hashes);
+            }
+        }
+
         if let Some(last_block) = blocks.last() {
             if last_block.era.is_shelley_based() {
                 if let Err(e) = self
