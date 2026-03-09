@@ -1257,6 +1257,61 @@ fn encode_tagged_rational(enc: &mut minicbor::Encoder<&mut Vec<u8>>, num: u64, d
     enc.u64(den).ok();
 }
 
+fn encode_relay_cbor(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    relay: &crate::query_handler::RelaySnapshot,
+) {
+    use crate::query_handler::RelaySnapshot;
+    match relay {
+        RelaySnapshot::SingleHostAddr { port, ipv4, ipv6 } => {
+            enc.array(4).ok();
+            enc.u32(0).ok();
+            match port {
+                Some(p) => {
+                    enc.u16(*p).ok();
+                }
+                None => {
+                    enc.null().ok();
+                }
+            }
+            match ipv4 {
+                Some(ip) => {
+                    enc.bytes(ip).ok();
+                }
+                None => {
+                    enc.null().ok();
+                }
+            }
+            match ipv6 {
+                Some(ip) => {
+                    enc.bytes(ip).ok();
+                }
+                None => {
+                    enc.null().ok();
+                }
+            }
+        }
+        RelaySnapshot::SingleHostName { port, dns_name } => {
+            enc.array(3).ok();
+            enc.u32(1).ok();
+            match port {
+                Some(p) => {
+                    enc.u16(*p).ok();
+                }
+                None => {
+                    enc.null().ok();
+                }
+            }
+            enc.str(dns_name).ok();
+        }
+        RelaySnapshot::MultiHostName { dns_name } => {
+            enc.array(2).ok();
+            enc.u32(2).ok();
+            enc.str(dns_name).ok();
+        }
+    }
+}
+
 fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
@@ -1268,11 +1323,14 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     enc.u32(4).ok(); // MsgResult tag
 
     // Determine if this is a BlockQuery result that needs HFC wrapping.
-    // QueryAnytime (CurrentEra, SystemStart) and QueryHardFork (ChainBlockNo)
-    // do NOT get the HFC wrapper. All Shelley/Conway queries DO.
+    // QueryAnytime (CurrentEra, SystemStart) and QueryHardFork (ChainBlockNo, ChainTip)
+    // do NOT get the HFC wrapper. Only BlockQuery (Shelley/Conway) results DO.
     let needs_hfc_wrapper = !matches!(
         result,
-        QueryResult::CurrentEra(_) | QueryResult::SystemStart(_) | QueryResult::ChainBlockNo(_)
+        QueryResult::CurrentEra(_)
+            | QueryResult::SystemStart(_)
+            | QueryResult::ChainBlockNo(_)
+            | QueryResult::ChainTip { .. }
     );
 
     if needs_hfc_wrapper {
@@ -1455,18 +1513,33 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             }
         }
         QueryResult::StakeAddressInfo(addrs) => {
-            enc.array(addrs.len() as u64).ok();
-            for addr in addrs {
-                enc.map(3).ok();
-                enc.str("credential").ok();
+            // Wire format: array(2) [delegations_map, rewards_map]
+            // delegations_map: Map<Credential, pool_hash(28)>
+            // rewards_map: Map<Credential, Coin>
+            // Credential: [0, hash(28)] for KeyHash
+            let delegated: Vec<_> = addrs
+                .iter()
+                .filter(|a| a.delegated_pool.is_some())
+                .collect();
+            enc.array(2).ok();
+            // Delegations map
+            enc.map(delegated.len() as u64).ok();
+            for addr in &delegated {
+                // Credential key
+                enc.array(2).ok();
+                enc.u32(0).ok(); // KeyHashObj
                 enc.bytes(&addr.credential_hash).ok();
-                enc.str("delegated_pool").ok();
-                if let Some(pool) = &addr.delegated_pool {
-                    enc.bytes(pool).ok();
-                } else {
-                    enc.null().ok();
-                }
-                enc.str("reward_balance").ok();
+                // Pool hash value
+                enc.bytes(addr.delegated_pool.as_ref().unwrap()).ok();
+            }
+            // Rewards map
+            enc.map(addrs.len() as u64).ok();
+            for addr in addrs {
+                // Credential key
+                enc.array(2).ok();
+                enc.u32(0).ok(); // KeyHashObj
+                enc.bytes(&addr.credential_hash).ok();
+                // Reward balance value
                 enc.u64(addr.reward_balance).ok();
             }
         }
@@ -1493,58 +1566,50 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.u64(snapshots.total_go_stake).ok();
         }
         QueryResult::PoolParams(params) => {
-            enc.array(params.len() as u64).ok();
+            // Wire format: Map<pool_hash(28), PoolParams>
+            // PoolParams is a CDDL record (positional fields, no array wrapper):
+            //   operator(hash28), vrf_keyhash(hash32), pledge(coin), cost(coin),
+            //   margin(unit_interval), reward_account(bytes), owners(set<hash28>),
+            //   relays([*relay]), metadata(nullable [url, hash])
+            enc.map(params.len() as u64).ok();
             for pool in params {
-                let mut field_count = 7u64; // base fields
-                if !pool.reward_account.is_empty() {
-                    field_count += 1;
-                }
-                if !pool.owners.is_empty() {
-                    field_count += 1;
-                }
-                if pool.metadata_url.is_some() {
-                    field_count += 1;
-                }
-                enc.map(field_count).ok();
-                enc.str("pool_id").ok();
+                // Key: pool hash
                 enc.bytes(&pool.pool_id).ok();
-                enc.str("vrf_keyhash").ok();
+                // Value: positional PoolParams fields (9 items, NOT wrapped in array)
+                // Per CDDL: pool_params = (operator, vrf_keyhash, pledge, cost, margin,
+                //            reward_account, pool_owners, relays, pool_metadata)
+                // When used as a map value in GetStakePoolParams result, each value
+                // is encoded as a 9-element array.
+                enc.array(9).ok();
+                enc.bytes(&pool.pool_id).ok(); // operator
                 enc.bytes(&pool.vrf_keyhash).ok();
-                enc.str("pledge").ok();
                 enc.u64(pool.pledge).ok();
-                enc.str("cost").ok();
                 enc.u64(pool.cost).ok();
-                enc.str("margin_num").ok();
-                enc.u64(pool.margin_num).ok();
-                enc.str("margin_den").ok();
-                enc.u64(pool.margin_den).ok();
-                enc.str("relays").ok();
+                // margin as tagged rational
+                encode_tagged_rational(&mut enc, pool.margin_num, pool.margin_den);
+                enc.bytes(&pool.reward_account).ok();
+                // owners as set (tag 258)
+                enc.tag(minicbor::data::Tag::new(258)).ok();
+                enc.array(pool.owners.len() as u64).ok();
+                for owner in &pool.owners {
+                    enc.bytes(owner).ok();
+                }
+                // relays
                 enc.array(pool.relays.len() as u64).ok();
                 for relay in &pool.relays {
-                    enc.str(relay).ok();
+                    encode_relay_cbor(&mut enc, relay);
                 }
-                if !pool.reward_account.is_empty() {
-                    enc.str("reward_account").ok();
-                    enc.bytes(&pool.reward_account).ok();
-                }
-                if !pool.owners.is_empty() {
-                    enc.str("owners").ok();
-                    enc.array(pool.owners.len() as u64).ok();
-                    for owner in &pool.owners {
-                        enc.bytes(owner).ok();
-                    }
-                }
+                // metadata
                 if let Some(url) = &pool.metadata_url {
-                    enc.str("metadata").ok();
-                    enc.map(2).ok();
-                    enc.str("url").ok();
+                    enc.array(2).ok();
                     enc.str(url).ok();
-                    enc.str("hash").ok();
                     if let Some(hash) = &pool.metadata_hash {
                         enc.bytes(hash).ok();
                     } else {
-                        enc.null().ok();
+                        enc.bytes(&[0u8; 32]).ok();
                     }
+                } else {
+                    enc.null().ok();
                 }
             }
         }

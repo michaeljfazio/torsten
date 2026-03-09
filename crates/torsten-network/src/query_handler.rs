@@ -60,6 +60,23 @@ pub struct PoolStakeSnapshotEntry {
     pub go_stake: u64,
 }
 
+/// Pool relay snapshot for CBOR encoding
+#[derive(Debug, Clone)]
+pub enum RelaySnapshot {
+    SingleHostAddr {
+        port: Option<u16>,
+        ipv4: Option<[u8; 4]>,
+        ipv6: Option<[u8; 16]>,
+    },
+    SingleHostName {
+        port: Option<u16>,
+        dns_name: String,
+    },
+    MultiHostName {
+        dns_name: String,
+    },
+}
+
 /// Pool parameters snapshot
 #[derive(Debug, Clone)]
 pub struct PoolParamsSnapshot {
@@ -71,7 +88,7 @@ pub struct PoolParamsSnapshot {
     pub margin_den: u64,
     pub reward_account: Vec<u8>,
     pub owners: Vec<Vec<u8>>,
-    pub relays: Vec<String>,
+    pub relays: Vec<RelaySnapshot>,
     pub metadata_url: Option<String>,
     pub metadata_hash: Option<Vec<u8>>,
 }
@@ -1299,7 +1316,10 @@ mod tests {
                 margin_den: 100,
                 reward_account: Vec::new(),
                 owners: Vec::new(),
-                relays: vec!["relay1.example.com:3001".to_string()],
+                relays: vec![RelaySnapshot::SingleHostName {
+                    port: Some(3001),
+                    dns_name: "relay1.example.com".to_string(),
+                }],
                 metadata_url: None,
                 metadata_hash: None,
             }],

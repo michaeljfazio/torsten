@@ -950,6 +950,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tip_result_no_hfc_wrapper() {
+        // Verify strip_hfc_wrapper handles responses without wrapper gracefully
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap();
+        // No HFC wrapper — directly the result
+        enc.array(2).unwrap();
+        enc.array(2).unwrap();
+        enc.u64(12345).unwrap();
+        enc.bytes(&[0xab; 32]).unwrap();
+        enc.u64(100).unwrap();
+
+        let result = parse_tip_result(&buf).unwrap();
+        assert_eq!(result.slot, 12345);
+        assert_eq!(result.hash, vec![0xab; 32]);
+        assert_eq!(result.block_no, 100);
+    }
+
+    #[test]
     fn test_parse_epoch_result() {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);

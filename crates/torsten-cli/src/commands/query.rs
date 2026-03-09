@@ -422,42 +422,52 @@ impl QueryCmd {
 
                 release_and_done(&mut client).await;
 
-                // Parse MsgResult [4, array[map{...}]]
+                // Parse MsgResult [4, [array(2) [delegations_map, rewards_map]]]
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
                 if tag != 4 {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
 
-                let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                // Result: array(2) [delegations_map, rewards_map]
+                let _ = decoder.array(); // array(2)
+
+                // Parse delegations map: Map<Credential, pool_hash>
+                let deleg_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                let mut delegations: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for _ in 0..deleg_len {
+                    // Credential: [0|1, hash(28)]
+                    let _ = decoder.array();
+                    let _ = decoder.u32(); // credential type
+                    let cred = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let pool = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    delegations.insert(cred, pool);
+                }
+
+                // Parse rewards map: Map<Credential, Coin>
+                let rewards_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
                 let mut found = false;
 
                 println!("[");
-                for i in 0..arr_len {
-                    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                    let mut cred = String::new();
-                    let mut pool = String::new();
-                    let mut rewards = 0u64;
+                for i in 0..rewards_len {
+                    let _ = decoder.array();
+                    let _ = decoder.u32(); // credential type
+                    let cred = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let rewards = decoder.u64().unwrap_or(0);
+                    let pool = delegations.get(&cred).cloned().unwrap_or_default();
 
-                    for _ in 0..map_len {
-                        let key = decoder.str().unwrap_or("");
-                        match key {
-                            "credential" => cred = hex::encode(decoder.bytes().unwrap_or(&[])),
-                            "delegated_pool" => {
-                                pool = decoder.bytes().map(hex::encode).unwrap_or_default()
-                            }
-                            "reward_balance" => rewards = decoder.u64().unwrap_or(0),
-                            _ => {
-                                decoder.skip().ok();
-                            }
-                        }
-                    }
-
-                    // Filter to match the requested address
                     if cred.contains(&credential_hex) || credential_hex.is_empty() {
                         found = true;
-                        let comma = if i + 1 < arr_len { "," } else { "" };
+                        let comma = if i + 1 < rewards_len { "," } else { "" };
                         println!("  {{");
                         println!("    \"address\": \"{address}\",");
                         if pool.is_empty() {
@@ -465,7 +475,7 @@ impl QueryCmd {
                         } else {
                             println!("    \"delegation\": \"{pool}\",");
                         }
-                        println!("    \"rewardAccountBalance\": {}", rewards);
+                        println!("    \"rewardAccountBalance\": {rewards}");
                         println!("  }}{comma}");
                     }
                 }
@@ -1012,15 +1022,22 @@ impl QueryCmd {
 
                 release_and_done(&mut client).await;
 
-                // Parse MsgResult [4, array[map{...}]]
+                // Parse MsgResult [4, [Map<pool_hash(28), PoolParams_array(9)>]]
                 let mut decoder = minicbor::Decoder::new(&result);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
                 if tag != 4 {
                     anyhow::bail!("Unexpected response tag: {tag}");
                 }
+                // Strip HFC success wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // Consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
 
-                let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
 
                 struct PoolInfo {
                     pool_id: String,
@@ -1038,73 +1055,105 @@ impl QueryCmd {
 
                 let mut pools: Vec<PoolInfo> = Vec::new();
 
-                for _ in 0..arr_len {
-                    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                    let mut info = PoolInfo {
-                        pool_id: String::new(),
-                        vrf_keyhash: String::new(),
-                        pledge: 0,
-                        cost: 0,
-                        margin_num: 0,
-                        margin_den: 1,
-                        relays: Vec::new(),
-                        reward_account: String::new(),
-                        owners: Vec::new(),
-                        metadata_url: None,
-                        metadata_hash: None,
+                for _ in 0..map_len {
+                    // Key: pool hash
+                    let pool_id = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    // Value: array(9) PoolParams
+                    let _ = decoder.array(); // consume array(9)
+                    let operator = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let _ = operator; // same as pool_id
+                    let vrf_keyhash = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let pledge = decoder.u64().unwrap_or(0);
+                    let cost = decoder.u64().unwrap_or(0);
+                    // margin: tagged rational tag(30)[num, den]
+                    let (margin_num, margin_den) = {
+                        let _ = decoder.tag(); // tag(30)
+                        let _ = decoder.array(); // [num, den]
+                        let n = decoder.u64().unwrap_or(0);
+                        let d = decoder.u64().unwrap_or(1);
+                        (n, d)
                     };
-                    for _ in 0..map_len {
-                        let key = decoder.str().unwrap_or("");
-                        match key {
-                            "pool_id" => info.pool_id = hex::encode(decoder.bytes().unwrap_or(&[])),
-                            "vrf_keyhash" => {
-                                info.vrf_keyhash = hex::encode(decoder.bytes().unwrap_or(&[]))
-                            }
-                            "pledge" => info.pledge = decoder.u64().unwrap_or(0),
-                            "cost" => info.cost = decoder.u64().unwrap_or(0),
-                            "margin_num" => info.margin_num = decoder.u64().unwrap_or(0),
-                            "margin_den" => info.margin_den = decoder.u64().unwrap_or(1),
-                            "relays" => {
-                                let relay_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
-                                for _ in 0..relay_len {
-                                    info.relays.push(decoder.str().unwrap_or("").to_string());
-                                }
-                            }
-                            "reward_account" => {
-                                info.reward_account = hex::encode(decoder.bytes().unwrap_or(&[]))
-                            }
-                            "owners" => {
-                                let owner_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
-                                for _ in 0..owner_len {
-                                    info.owners
-                                        .push(hex::encode(decoder.bytes().unwrap_or(&[])));
-                                }
-                            }
-                            "metadata" => {
-                                let mmap_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                                for _ in 0..mmap_len {
-                                    let mkey = decoder.str().unwrap_or("");
-                                    match mkey {
-                                        "url" => {
-                                            info.metadata_url =
-                                                Some(decoder.str().unwrap_or("").to_string())
-                                        }
-                                        "hash" => {
-                                            info.metadata_hash =
-                                                decoder.bytes().ok().map(hex::encode);
-                                        }
-                                        _ => {
-                                            decoder.skip().ok();
-                                        }
+                    let reward_account = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    // owners: tag(258) set
+                    let _ = decoder.tag(); // tag(258)
+                    let owner_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                    let mut owners = Vec::new();
+                    for _ in 0..owner_len {
+                        owners.push(hex::encode(decoder.bytes().unwrap_or(&[])));
+                    }
+                    // relays: array of relay structures
+                    let relay_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                    let mut relays = Vec::new();
+                    for _ in 0..relay_len {
+                        let _ = decoder.array(); // relay array
+                        let relay_tag = decoder.u32().unwrap_or(99);
+                        match relay_tag {
+                            0 => {
+                                // SingleHostAddr: port, ipv4, ipv6
+                                let port = decoder.u16().ok();
+                                if port.is_none() {
+                                    decoder.skip().ok();
+                                } // skip null
+                                let ipv4 = decoder.bytes().ok().map(|b| {
+                                    if b.len() == 4 {
+                                        format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+                                    } else {
+                                        hex::encode(b)
                                     }
+                                });
+                                if ipv4.is_none() {
+                                    decoder.skip().ok();
+                                } // skip null
+                                decoder.skip().ok(); // skip ipv6
+                                let addr = ipv4.unwrap_or_default();
+                                relays.push(format!("{}:{}", addr, port.unwrap_or(0)));
+                            }
+                            1 => {
+                                // SingleHostName: port, dns_name
+                                let port = decoder.u16().ok();
+                                if port.is_none() {
+                                    decoder.skip().ok();
                                 }
+                                let dns = decoder.str().unwrap_or("").to_string();
+                                relays.push(format!("{}:{}", dns, port.unwrap_or(0)));
+                            }
+                            2 => {
+                                // MultiHostName: dns_name
+                                relays.push(decoder.str().unwrap_or("").to_string());
                             }
                             _ => {
+                                // Skip unknown relay type fields
                                 decoder.skip().ok();
                             }
                         }
                     }
-                    pools.push(info);
+                    // metadata: nullable [url, hash]
+                    let (metadata_url, metadata_hash) = {
+                        let pos = decoder.position();
+                        if let Ok(Some(2)) = decoder.array() {
+                            let url = Some(decoder.str().unwrap_or("").to_string());
+                            let hash = decoder.bytes().ok().map(hex::encode);
+                            (url, hash)
+                        } else {
+                            decoder.set_position(pos);
+                            decoder.skip().ok(); // skip null
+                            (None, None)
+                        }
+                    };
+
+                    pools.push(PoolInfo {
+                        pool_id,
+                        vrf_keyhash,
+                        pledge,
+                        cost,
+                        margin_num,
+                        margin_den,
+                        relays,
+                        reward_account,
+                        owners,
+                        metadata_url,
+                        metadata_hash,
+                    });
                 }
 
                 // Filter by pool ID if provided

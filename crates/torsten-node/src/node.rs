@@ -1806,26 +1806,31 @@ impl Node {
             .pool_params
             .iter()
             .map(|(pool_id, reg)| {
-                let relays: Vec<String> = reg
+                use torsten_network::query_handler::RelaySnapshot;
+                let relays: Vec<RelaySnapshot> = reg
                     .relays
                     .iter()
                     .map(|r| match r {
                         torsten_primitives::transaction::Relay::SingleHostAddr {
                             port,
                             ipv4,
-                            ..
-                        } => {
-                            let ip = ipv4
-                                .map(|a| format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]))
-                                .unwrap_or_default();
-                            format!("{}:{}", ip, port.unwrap_or(0))
-                        }
+                            ipv6,
+                        } => RelaySnapshot::SingleHostAddr {
+                            port: *port,
+                            ipv4: *ipv4,
+                            ipv6: *ipv6,
+                        },
                         torsten_primitives::transaction::Relay::SingleHostName {
                             port,
                             dns_name,
-                        } => format!("{}:{}", dns_name, port.unwrap_or(0)),
+                        } => RelaySnapshot::SingleHostName {
+                            port: *port,
+                            dns_name: dns_name.clone(),
+                        },
                         torsten_primitives::transaction::Relay::MultiHostName { dns_name } => {
-                            dns_name.clone()
+                            RelaySnapshot::MultiHostName {
+                                dns_name: dns_name.clone(),
+                            }
                         }
                     })
                     .collect();
