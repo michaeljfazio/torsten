@@ -10,8 +10,8 @@ use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::{BlockNo, EpochNo, SlotNo};
 use torsten_primitives::transaction::{
-    Anchor, Certificate, Constitution, DRep, GovAction, GovActionId, ProposalProcedure, Relay,
-    Vote, Voter, VotingProcedure,
+    Anchor, Certificate, Constitution, DRep, GovAction, GovActionId, ProposalProcedure,
+    ProtocolParamUpdate, Relay, Vote, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, trace, warn};
@@ -1356,20 +1356,26 @@ impl LedgerState {
                 // InfoAction is always ratified (it's informational only)
                 true
             }
-            GovAction::ParameterChange { .. } => {
-                // Use the most restrictive (highest) PP group threshold
-                // TODO: classify by parameter group (network/economic/technical/gov)
-                let drep_threshold = self
-                    .protocol_params
-                    .dvt_pp_gov_group
-                    .as_f64()
-                    .max(self.protocol_params.dvt_pp_network_group.as_f64())
-                    .max(self.protocol_params.dvt_pp_economic_group.as_f64())
-                    .max(self.protocol_params.dvt_pp_technical_group.as_f64());
+            GovAction::ParameterChange {
+                protocol_param_update,
+                ..
+            } => {
+                // Per CIP-1694 / Haskell pparamsUpdateThreshold:
+                // DRep threshold = max of applicable DRep group thresholds
+                // SPO threshold = pvtPPSecurityGroup if any param is security-relevant, else no SPO vote
+                let drep_threshold =
+                    pp_change_drep_threshold(protocol_param_update, &self.protocol_params);
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                let spo_met = if let Some(spo_threshold) =
+                    pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
+                {
+                    check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold)
+                } else {
+                    true // No SPO vote required for non-security params
+                };
                 let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance, self.epoch);
-                drep_met && cc_met
+                drep_met && spo_met && cc_met
             }
             GovAction::HardForkInitiation { .. } => {
                 let drep_threshold = self.protocol_params.dvt_hard_fork.as_f64();
@@ -1885,7 +1891,195 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
     Hash32::from_bytes(bytes)
 }
 
-/// Check if a voting threshold is met: yes_votes / total_votes >= threshold
+/// DRep voting group for protocol parameter classification per CIP-1694.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DRepPPGroup {
+    Network,
+    Economic,
+    Technical,
+    Gov,
+}
+
+/// Whether SPOs can vote on a parameter change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StakePoolPPGroup {
+    Security,
+    NoVote,
+}
+
+/// Classification of a protocol parameter: (DRepPPGroup, StakePoolPPGroup).
+/// Matches Haskell cardano-ledger Conway `PPGroups` exactly.
+type PPGroup = (DRepPPGroup, StakePoolPPGroup);
+
+/// Determine which PP groups are modified by a ProtocolParamUpdate.
+///
+/// Each parameter belongs to exactly one (DRepPPGroup, StakePoolPPGroup) pair.
+/// Classification matches Haskell cardano-ledger Conway ConwayPParams field tags.
+fn modified_pp_groups(ppu: &ProtocolParamUpdate) -> Vec<PPGroup> {
+    use DRepPPGroup::*;
+    use StakePoolPPGroup::*;
+
+    let mut groups = Vec::new();
+
+    // Network + Security
+    if ppu.max_block_body_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_tx_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_block_header_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_block_ex_units.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_val_size.is_some() {
+        groups.push((Network, Security));
+    }
+
+    // Network + NoVote
+    if ppu.max_tx_ex_units.is_some() {
+        groups.push((Network, NoVote));
+    }
+    if ppu.max_collateral_inputs.is_some() {
+        groups.push((Network, NoVote));
+    }
+
+    // Economic + Security
+    if ppu.min_fee_a.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.min_fee_b.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.ada_per_utxo_byte.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.min_fee_ref_script_cost_per_byte.is_some() {
+        groups.push((Economic, Security));
+    }
+
+    // Economic + NoVote
+    if ppu.key_deposit.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.pool_deposit.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.rho.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.tau.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.min_pool_cost.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.execution_costs.is_some() {
+        groups.push((Economic, NoVote));
+    }
+
+    // Technical + NoVote
+    if ppu.e_max.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.n_opt.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.a0.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.cost_models.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.collateral_percentage.is_some() {
+        groups.push((Technical, NoVote));
+    }
+
+    // Gov + Security
+    if ppu.gov_action_deposit.is_some() {
+        groups.push((Gov, Security));
+    }
+
+    // Gov + NoVote
+    if ppu.dvt_pp_network_group.is_some()
+        || ppu.dvt_pp_economic_group.is_some()
+        || ppu.dvt_pp_technical_group.is_some()
+        || ppu.dvt_pp_gov_group.is_some()
+        || ppu.dvt_hard_fork.is_some()
+        || ppu.dvt_no_confidence.is_some()
+        || ppu.dvt_committee_normal.is_some()
+        || ppu.dvt_committee_no_confidence.is_some()
+        || ppu.dvt_constitution.is_some()
+        || ppu.dvt_treasury_withdrawal.is_some()
+    {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.pvt_motion_no_confidence.is_some()
+        || ppu.pvt_committee_normal.is_some()
+        || ppu.pvt_committee_no_confidence.is_some()
+        || ppu.pvt_hard_fork.is_some()
+        || ppu.pvt_pp_security_group.is_some()
+    {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.min_committee_size.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.committee_term_limit.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.gov_action_lifetime.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.drep_deposit.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.drep_activity.is_some() {
+        groups.push((Gov, NoVote));
+    }
+
+    groups
+}
+
+/// Compute the DRep voting threshold for a ParameterChange governance action.
+///
+/// Per Haskell `pparamsUpdateThreshold`: takes the maximum DRep group threshold
+/// across all modified parameter groups.
+fn pp_change_drep_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> f64 {
+    let groups = modified_pp_groups(ppu);
+    let mut max_threshold = 0.0_f64;
+    for (drep_group, _) in &groups {
+        let t = match drep_group {
+            DRepPPGroup::Network => params.dvt_pp_network_group.as_f64(),
+            DRepPPGroup::Economic => params.dvt_pp_economic_group.as_f64(),
+            DRepPPGroup::Technical => params.dvt_pp_technical_group.as_f64(),
+            DRepPPGroup::Gov => params.dvt_pp_gov_group.as_f64(),
+        };
+        if t > max_threshold {
+            max_threshold = t;
+        }
+    }
+    max_threshold
+}
+
+/// Determine if SPOs can vote on a ParameterChange, and if so, return the threshold.
+///
+/// Per Haskell `votingStakePoolThresholdInternal`: SPOs vote with pvtPPSecurityGroup
+/// if ANY modified parameter is tagged SecurityGroup. Otherwise SPOs cannot vote.
+fn pp_change_spo_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> Option<f64> {
+    let groups = modified_pp_groups(ppu);
+    let has_security = groups
+        .iter()
+        .any(|(_, spo)| *spo == StakePoolPPGroup::Security);
+    if has_security {
+        Some(params.pvt_pp_security_group.as_f64())
+    } else {
+        None
+    }
+}
+
 fn check_threshold(yes: u64, total: u64, threshold: f64) -> bool {
     if total == 0 {
         return false;
@@ -3213,17 +3407,14 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
 
-        // Use a ParameterChange proposal (requires DRep votes to ratify)
+        // Use a NoConfidence proposal (requires DRep + SPO votes to ratify)
         // so it won't be auto-ratified like InfoAction
-        let update = torsten_primitives::transaction::ProtocolParamUpdate::default();
         let tx_hash = Hash32::from_bytes([99u8; 32]);
         let proposal = ProposalProcedure {
             deposit: Lovelace(100_000_000_000),
             return_addr: vec![0u8; 29],
-            gov_action: GovAction::ParameterChange {
+            gov_action: GovAction::NoConfidence {
                 prev_action_id: None,
-                protocol_param_update: Box::new(update),
-                policy_hash: None,
             },
             anchor: Anchor {
                 url: "https://example.com".to_string(),
@@ -3373,9 +3564,9 @@ mod tests {
             );
         }
 
-        // Submit a parameter change proposal to increase max_tx_size
+        // Submit a parameter change proposal to update n_opt (TechnicalGroup, no SPO vote needed)
         let update = torsten_primitives::transaction::ProtocolParamUpdate {
-            max_tx_size: Some(32768),
+            n_opt: Some(1000),
             ..Default::default()
         };
         let tx_hash = Hash32::from_bytes([99u8; 32]);
@@ -3428,12 +3619,12 @@ mod tests {
             );
         }
 
-        assert_eq!(state.protocol_params.max_tx_size, 16384); // original value
+        assert_eq!(state.protocol_params.n_opt, 500); // original value
 
         // Epoch transition should ratify and enact
         state.process_epoch_transition(EpochNo(1));
 
-        assert_eq!(state.protocol_params.max_tx_size, 32768); // updated
+        assert_eq!(state.protocol_params.n_opt, 1000); // updated
         assert_eq!(state.governance.proposals.len(), 0); // removed after enactment
     }
 
@@ -4082,5 +4273,208 @@ mod tests {
         assert_eq!(state.protocol_params.cost_models.plutus_v1, None);
         assert_eq!(state.protocol_params.max_tx_ex_units.mem, 20_000_000);
         assert_eq!(state.protocol_params.max_tx_ex_units.steps, 10_000_000_000);
+    }
+
+    // --- PP Group Classification Tests ---
+
+    #[test]
+    fn test_pp_groups_empty_update() {
+        let ppu = ProtocolParamUpdate::default();
+        let groups = modified_pp_groups(&ppu);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_pp_groups_network_security() {
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0],
+            (DRepPPGroup::Network, StakePoolPPGroup::Security)
+        );
+    }
+
+    #[test]
+    fn test_pp_groups_network_no_spo() {
+        let ppu = ProtocolParamUpdate {
+            max_tx_ex_units: Some(ExUnits {
+                mem: 1_000_000,
+                steps: 1_000_000,
+            }),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], (DRepPPGroup::Network, StakePoolPPGroup::NoVote));
+    }
+
+    #[test]
+    fn test_pp_groups_economic_security() {
+        let ppu = ProtocolParamUpdate {
+            min_fee_a: Some(44),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0],
+            (DRepPPGroup::Economic, StakePoolPPGroup::Security)
+        );
+    }
+
+    #[test]
+    fn test_pp_groups_economic_no_spo() {
+        let ppu = ProtocolParamUpdate {
+            key_deposit: Some(Lovelace(2_000_000)),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], (DRepPPGroup::Economic, StakePoolPPGroup::NoVote));
+    }
+
+    #[test]
+    fn test_pp_groups_technical() {
+        let ppu = ProtocolParamUpdate {
+            cost_models: Some(torsten_primitives::transaction::CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1, 2, 3]),
+                plutus_v3: None,
+            }),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0],
+            (DRepPPGroup::Technical, StakePoolPPGroup::NoVote)
+        );
+    }
+
+    #[test]
+    fn test_pp_groups_gov_security() {
+        let ppu = ProtocolParamUpdate {
+            gov_action_deposit: Some(Lovelace(100_000_000_000)),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], (DRepPPGroup::Gov, StakePoolPPGroup::Security));
+    }
+
+    #[test]
+    fn test_pp_groups_gov_no_spo() {
+        let ppu = ProtocolParamUpdate {
+            drep_deposit: Some(Lovelace(500_000_000)),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], (DRepPPGroup::Gov, StakePoolPPGroup::NoVote));
+    }
+
+    #[test]
+    fn test_pp_groups_mixed_network_and_economic() {
+        let ppu = ProtocolParamUpdate {
+            max_tx_size: Some(16384),
+            key_deposit: Some(Lovelace(2_000_000)),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.contains(&(DRepPPGroup::Network, StakePoolPPGroup::Security)));
+        assert!(groups.contains(&(DRepPPGroup::Economic, StakePoolPPGroup::NoVote)));
+    }
+
+    #[test]
+    fn test_pp_drep_threshold_single_group() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        let threshold = pp_change_drep_threshold(&ppu, &params);
+        assert_eq!(threshold, params.dvt_pp_network_group.as_f64());
+    }
+
+    #[test]
+    fn test_pp_drep_threshold_max_of_multiple_groups() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            min_fee_a: Some(44),
+            cost_models: Some(torsten_primitives::transaction::CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1]),
+                plutus_v3: None,
+            }),
+            ..Default::default()
+        };
+        let threshold = pp_change_drep_threshold(&ppu, &params);
+        let expected = params
+            .dvt_pp_network_group
+            .as_f64()
+            .max(params.dvt_pp_economic_group.as_f64())
+            .max(params.dvt_pp_technical_group.as_f64());
+        assert_eq!(threshold, expected);
+    }
+
+    #[test]
+    fn test_pp_spo_threshold_security_relevant() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        let spo = pp_change_spo_threshold(&ppu, &params);
+        assert_eq!(spo, Some(params.pvt_pp_security_group.as_f64()));
+    }
+
+    #[test]
+    fn test_pp_spo_threshold_not_security_relevant() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let ppu = ProtocolParamUpdate {
+            cost_models: Some(torsten_primitives::transaction::CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1]),
+                plutus_v3: None,
+            }),
+            ..Default::default()
+        };
+        let spo = pp_change_spo_threshold(&ppu, &params);
+        assert_eq!(spo, None);
+    }
+
+    #[test]
+    fn test_pp_spo_threshold_mixed_security_and_non_security() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let ppu = ProtocolParamUpdate {
+            min_fee_a: Some(44),
+            key_deposit: Some(Lovelace(2_000_000)),
+            ..Default::default()
+        };
+        let spo = pp_change_spo_threshold(&ppu, &params);
+        assert_eq!(spo, Some(params.pvt_pp_security_group.as_f64()));
+    }
+
+    #[test]
+    fn test_pp_groups_all_network_security_params() {
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(1),
+            max_tx_size: Some(1),
+            max_block_header_size: Some(1),
+            max_block_ex_units: Some(ExUnits { mem: 1, steps: 1 }),
+            max_val_size: Some(1),
+            ..Default::default()
+        };
+        let groups = modified_pp_groups(&ppu);
+        assert_eq!(groups.len(), 5);
+        assert!(groups
+            .iter()
+            .all(|g| *g == (DRepPPGroup::Network, StakePoolPPGroup::Security)));
     }
 }
