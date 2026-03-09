@@ -1113,28 +1113,26 @@ impl Node {
         peer_addr: std::net::SocketAddr,
     ) -> Result<()> {
         let mut pipelined = pipelined_client;
-        // Find intersection with our current chain
-        // Use the LEDGER tip as the intersection point, not the ChainDB tip.
-        // After a Mithril import, ChainDB may be far ahead of the ledger.
-        // The peer's find_intersect returns the latest matching point, so if
-        // we include the ChainDB tip, blocks would start after it — but the
-        // ledger can't process those because it hasn't seen the intermediate
-        // blocks. By using only the ledger tip, we replay from where the
-        // ledger left off (ChainDB stores are idempotent for duplicates).
+        // Find intersection with our current chain.
+        // Use the furthest-ahead tip (ChainDB or ledger) as the primary
+        // intersection point. After a Mithril import, ChainDB may be far
+        // ahead of the ledger — we don't want to re-download blocks that
+        // are already stored. The ledger builds state incrementally from
+        // new blocks as they arrive.
         let chain_tip = self.chain_db.read().await.get_tip().point;
         let ledger_tip = self.ledger_state.read().await.tip.point.clone();
         let mut known_points = Vec::new();
-        if ledger_tip != Point::Origin {
-            known_points.push(ledger_tip.clone());
-        }
-        // Only include chain_tip if ledger is at or ahead of it
-        if chain_tip != Point::Origin && chain_tip < ledger_tip {
+        // Use whichever tip is further ahead as primary intersection
+        if chain_tip != Point::Origin {
             known_points.push(chain_tip.clone());
+        }
+        if ledger_tip != Point::Origin && ledger_tip != chain_tip {
+            known_points.push(ledger_tip.clone());
         }
         known_points.push(Point::Origin);
         if ledger_tip != chain_tip {
             info!(
-                "Ledger tip ({}) differs from ChainDB tip ({}), syncing from ledger tip",
+                "Ledger tip ({}) differs from ChainDB tip ({}), syncing from ChainDB tip",
                 ledger_tip, chain_tip
             );
         }
