@@ -342,17 +342,10 @@ impl LedgerState {
                 self.utxo_set
                     .apply_transaction(&tx.hash, &tx.body.inputs, &tx.body.outputs)
             {
-                // During initial sync, the UTxO set starts empty so inputs won't be found.
-                // Log the issue but continue processing certificates and fees.
-                debug!("UTxO application skipped: {e}");
-                // Still add outputs even if inputs weren't found
-                for (idx, output) in tx.body.outputs.iter().enumerate() {
-                    let new_input = torsten_primitives::transaction::TransactionInput {
-                        transaction_id: tx.hash,
-                        index: idx as u32,
-                    };
-                    self.utxo_set.insert(new_input, output.clone());
-                }
+                // During initial sync without full history, inputs won't be found.
+                // Skip UTxO changes entirely to avoid phantom outputs that inflate
+                // the UTxO set. Fees and certificates are still processed.
+                debug!("UTxO application skipped (missing inputs): {e}");
             }
 
             // Accumulate fees

@@ -54,6 +54,10 @@ struct RunArgs {
     #[arg(long, default_value = "0.0.0.0")]
     host_addr: String,
 
+    /// Prometheus metrics port (0 to disable)
+    #[arg(long, default_value = "12798")]
+    metrics_port: u16,
+
     // Block producer options (optional — enables block production mode)
     /// Path to the KES signing key file
     #[arg(long)]
@@ -163,6 +167,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_vrf_key: args.shelley_vrf_key,
         shelley_operational_certificate: args.shelley_operational_certificate,
         shelley_cold_key: args.shelley_cold_key,
+        metrics_port: args.metrics_port,
     })?;
 
     // Run the node

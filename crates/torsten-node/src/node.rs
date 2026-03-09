@@ -41,6 +41,8 @@ pub struct NodeArgs {
     pub shelley_operational_certificate: Option<PathBuf>,
     /// Path to cold signing key (required for block production)
     pub shelley_cold_key: Option<PathBuf>,
+    /// Prometheus metrics port (0 to disable)
+    pub metrics_port: u16,
 }
 
 /// Provides block data from ChainDB for the N2N server
@@ -240,6 +242,8 @@ pub struct Node {
     /// Broadcast sender for notifying connected peers of chain rollbacks
     rollback_announcement_tx:
         Option<tokio::sync::broadcast::Sender<torsten_network::RollbackAnnouncement>>,
+    /// Prometheus metrics port
+    metrics_port: u16,
 }
 
 impl Node {
@@ -480,6 +484,7 @@ impl Node {
             block_producer,
             block_announcement_tx: None,
             rollback_announcement_tx: None,
+            metrics_port: args.metrics_port,
         })
     }
 
@@ -507,11 +512,12 @@ impl Node {
 
         // SIGHUP handler is set up after peer_manager initialization below
 
-        // Start Prometheus metrics server on port 12798
-        {
+        // Start Prometheus metrics server
+        if self.metrics_port > 0 {
             let metrics = self.metrics.clone();
+            let port = self.metrics_port;
             tokio::spawn(async move {
-                crate::metrics::start_metrics_server(12798, metrics).await;
+                crate::metrics::start_metrics_server(port, metrics).await;
             });
         }
 
