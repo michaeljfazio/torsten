@@ -1,4 +1,6 @@
-# CLAUDE.md — Development Instructions for Torsten
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Goal
 Implement a 100% compatible Cardano node in Rust. Target full compatibility with cardano-node (Haskell).
@@ -12,6 +14,33 @@ Follow the Ralph autonomous development loop:
 5. **Commit** — Commit and push to remote with descriptive message
 6. **Repeat** — Continue to the next iteration
 
+## Build & Test Commands
+
+```bash
+# Build everything
+cargo build --all-targets
+
+# Run all tests
+cargo test --all
+
+# Run tests for a single crate
+cargo test -p torsten-ledger
+
+# Run a single test by name
+cargo test -p torsten-ledger -- test_name
+
+# Lint
+cargo clippy --all-targets -- -D warnings
+
+# Format check (fix with: cargo fmt --all)
+cargo fmt --all -- --check
+
+# Build release binary
+cargo build --release
+```
+
+CI requires `libclang-dev` on Ubuntu (for RocksDB). Locally on macOS this is not needed.
+
 ## Hard Requirements
 - **Zero warnings** — All code must compile with `RUSTFLAGS="-D warnings"`
 - **Clippy clean** — `cargo clippy --all-targets -- -D warnings` must pass
@@ -20,35 +49,64 @@ Follow the Ralph autonomous development loop:
 - **CI green** — GitHub Actions pipeline must be passing
 - **Commit regularly** — Push changes to remote after each successful iteration
 
-## Priority Roadmap (in order)
-1. ~~Core types and primitives~~ ✅
-2. ~~CBOR serialization via pallas~~ ✅
-3. ~~Network client (N2N chain sync)~~ ✅
-4. ~~Ledger: UTxO, validation, certificates, native scripts~~ ✅
-5. ~~Upgrade pallas to 1.x~~ ✅ — Pallas 1.0.0-alpha.5 for N2N V14+
-6. ~~Storage: rollback support~~ ✅ — ChainDB rollback, volatile→immutable flush
-7. ~~Consensus: structural validation~~ ✅ — KES period, VRF output, opcert checks (crypto VRF/KES pending)
-8. ~~Epoch transitions~~ ✅ — Stake snapshots, reward calculation/distribution, fee tracking
-9. ~~Node-to-Client protocol~~ ✅ — Unix socket server, local state query handler, N2C handshake
-10. ~~Plutus script execution~~ ✅ — uplc CEK machine for Plutus V1/V2/V3, Phase-2 validation, LocalTxSubmission validation
-11. ~~Conway governance~~ ✅ — DRep reg/vote/delegation, committee, proposals, ratification, treasury withdrawals
-12. ~~Relay node compliance~~ ✅ — Pipelined ChainSync (~40x throughput), ledger-based peer discovery, adaptive peer selection, N2N server
-13. ~~CLI parity~~ ✅ — 33+ subcommands: address, transaction, query, key, stake, pool, node, governance
-14. ~~Performance~~ ✅ — HashMap UTxO/ledger lookups, batched volatile writes, O(n) reward distribution, zero-copy block storage
-15. **Integration testing** — Run against testnet/mainnet, verify block sync to tip
-
 ## Architecture
-See README.md for the 10-crate workspace structure.
+
+10-crate Cargo workspace under `crates/`. Dependency flow:
+
+```
+torsten-node (binary: main node, config, pipelined sync, Mithril import, block forging)
+├── torsten-network (Ouroboros mini-protocols, N2N/N2C multiplexer, pipelined client)
+├── torsten-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
+├── torsten-ledger (UTxO set, tx validation, ledger state, certificates, rewards, governance)
+├── torsten-storage (ChainDB = ImmutableDB via RocksDB + VolatileDB in-memory)
+└── torsten-mempool (thread-safe tx mempool)
+
+torsten-cli (binary: cardano-cli compatible, 33+ subcommands)
+
+torsten-serialization (CBOR encode/decode via pallas)
+torsten-crypto (Ed25519, VRF, KES, text envelope)
+torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol params, all eras)
+```
+
+### Key Traits & Abstractions
+- **`BlockProvider`** (storage) — trait used by N2N server for block serving
+- **`TxValidator`** (ledger) — trait used by N2C server for Phase-1/Phase-2 tx validation before mempool admission
+- **`ChainDB`** — wraps ImmutableDB (RocksDB) + VolatileDB (BTreeMap), handles rollback and volatile→immutable flush
+
+### Wire Format
+- All Cardano wire-format compatibility via pallas crates (v1.0.0-alpha.5)
+- `Transaction.hash` field is set during deserialization from `pallas tx.hash()`
+- CBOR encoding for N2C protocol params uses integer keys 0-33 (not JSON strings)
 
 ## Key Patterns
-- Use pallas crates for Cardano wire-format compatibility
-- `Transaction.hash` field is set during deserialization from `pallas tx.hash()`
 - `ChainSyncEvent::RollForward` uses `Box<Block>` to avoid large enum variant size
 - Invalid transactions (`is_valid: false`): collateral consumed, collateral_return added, regular inputs/outputs skipped
-- N2N server uses `BlockProvider` trait for storage abstraction
-- N2C server uses `TxValidator` trait for Phase-1/Phase-2 tx validation before mempool admission
 - Batch block storage: `add_blocks_batch()` for single immutable flush per batch
-- Ledger-based peer discovery: extracts SPO relay addresses from `pool_params` when past `useLedgerAfterSlot`
-- `PoolRegistration` stores relay info (SingleHostAddr, SingleHostName, MultiHostName)
+- ChainDB write happens BEFORE ledger apply to prevent divergence on failure
 - Epoch transitions use mark/set/go snapshot model with reward distribution from "go" snapshot
 - Governance ratification: DRep/SPO/CC voting thresholds vary by action type (CIP-1694)
+- Pipelined ChainSync bypasses pallas serial state machine; default pipeline depth 150 (configurable via `TORSTEN_PIPELINE_DEPTH`)
+- Ledger-based peer discovery: extracts SPO relay addresses from `pool_params` when past `useLedgerAfterSlot`
+- Pallas 1.0: `DatumOption` (was `PseudoDatumOption`), `Option<T>` (was `Nullable<T>`)
+- Pallas 28-byte hash types (DRep keys, pool voter keys, required signers) must be padded to 32 bytes — do not use `Hash<32>::from()` directly on 28-byte hashes
+
+## Current Focus
+Integration testing — run against testnet/mainnet, verify block sync to tip.
+
+## Running the Node
+
+```bash
+# Fast sync with Mithril snapshot (preview testnet, magic=2)
+./target/release/torsten-node mithril-import \
+  --network-magic 2 --database-path ./db-preview
+
+# Run the node
+./target/release/torsten-node run \
+  --config config/preview-config.json \
+  --topology config/preview-topology.json \
+  --database-path ./db-preview \
+  --socket-path ./node.sock \
+  --host-addr 0.0.0.0 --port 3001
+```
+
+Network magic: Mainnet=764824073, Preview=2, Preprod=1
