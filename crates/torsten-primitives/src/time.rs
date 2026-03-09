@@ -93,3 +93,68 @@ pub fn mainnet_epoch_length() -> EpochLength {
 pub fn mainnet_slot_length() -> SlotLength {
     SlotLength(1.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slot_to_epoch() {
+        let epoch_len = EpochLength(432000);
+        assert_eq!(SlotNo(0).to_epoch(epoch_len), EpochNo(0));
+        assert_eq!(SlotNo(431999).to_epoch(epoch_len), EpochNo(0));
+        assert_eq!(SlotNo(432000).to_epoch(epoch_len), EpochNo(1));
+        assert_eq!(SlotNo(864000).to_epoch(epoch_len), EpochNo(2));
+    }
+
+    #[test]
+    fn test_slot_in_epoch() {
+        let epoch_len = EpochLength(86400); // Preview testnet
+        assert_eq!(SlotNo(0).slot_in_epoch(epoch_len), 0);
+        assert_eq!(SlotNo(86399).slot_in_epoch(epoch_len), 86399);
+        assert_eq!(SlotNo(86400).slot_in_epoch(epoch_len), 0);
+        assert_eq!(SlotNo(86401).slot_in_epoch(epoch_len), 1);
+    }
+
+    #[test]
+    fn test_slot_to_posix_time() {
+        let sys_start = mainnet_system_start();
+        let slot_len = mainnet_slot_length();
+        let t = SlotNo(0).to_posix_time(&sys_start, slot_len);
+        assert_eq!(t, PosixTimeMillis(sys_start.utc_time.timestamp_millis()));
+
+        let t100 = SlotNo(100).to_posix_time(&sys_start, slot_len);
+        assert_eq!(
+            t100.0 - t.0,
+            100_000 // 100 slots * 1 second * 1000 ms
+        );
+    }
+
+    #[test]
+    fn test_block_no_next() {
+        assert_eq!(BlockNo(0).next(), BlockNo(1));
+        assert_eq!(BlockNo(999).next(), BlockNo(1000));
+    }
+
+    #[test]
+    fn test_display_formats() {
+        assert_eq!(format!("{}", SlotNo(12345)), "slot:12345");
+        assert_eq!(format!("{}", EpochNo(500)), "epoch:500");
+        assert_eq!(format!("{}", BlockNo(42)), "block:42");
+    }
+
+    #[test]
+    fn test_ordering() {
+        assert!(SlotNo(1) < SlotNo(2));
+        assert!(EpochNo(0) < EpochNo(1));
+        assert!(BlockNo(100) > BlockNo(99));
+    }
+
+    #[test]
+    fn test_mainnet_constants() {
+        let sys = mainnet_system_start();
+        assert_eq!(sys.utc_time.timestamp(), 1506203091); // 2017-09-23T21:44:51Z
+        assert_eq!(mainnet_epoch_length().0, 432000);
+        assert_eq!(mainnet_slot_length().0, 1.0);
+    }
+}
