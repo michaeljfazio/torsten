@@ -287,16 +287,34 @@ pub struct DRepSnapshot {
     pub delegator_hashes: Vec<Vec<u8>>,
 }
 
-/// Snapshot of governance state
+/// Snapshot of Conway governance state for array(7) CBOR encoding.
+///
+/// ConwayGovState = array(7):
+///   [0] Proposals (roots + ordered proposals)
+///   [1] Committee (StrictMaybe)
+///   [2] Constitution (anchor + optional script hash)
+///   [3] curPParams (array(31))
+///   [4] prevPParams (array(31))
+///   [5] FuturePParams (sum type)
+///   [6] DRepPulsingState (DRComplete)
 #[derive(Debug, Clone, Default)]
 pub struct GovStateSnapshot {
     pub proposals: Vec<ProposalSnapshot>,
-    pub drep_count: usize,
-    pub committee_member_count: usize,
-    pub treasury: u64,
+    /// Committee data (reused from CommitteeSnapshot)
+    pub committee: CommitteeSnapshot,
+    /// Constitution anchor URL
+    pub constitution_url: String,
+    /// Constitution anchor data hash (32 bytes)
+    pub constitution_hash: Vec<u8>,
+    /// Constitution guardrail script hash (28 bytes), if any
+    pub constitution_script: Option<Vec<u8>>,
+    /// Current protocol parameters
+    pub cur_pparams: Box<ProtocolParamsSnapshot>,
+    /// Previous protocol parameters (defaults to current if not tracked)
+    pub prev_pparams: Box<ProtocolParamsSnapshot>,
 }
 
-/// Snapshot of a governance proposal
+/// Snapshot of a governance proposal (GovActionState)
 #[derive(Debug, Clone)]
 pub struct ProposalSnapshot {
     pub tx_id: Vec<u8>,
@@ -307,6 +325,14 @@ pub struct ProposalSnapshot {
     pub yes_votes: u64,
     pub no_votes: u64,
     pub abstain_votes: u64,
+    /// Deposit amount in lovelace
+    pub deposit: u64,
+    /// Return address (raw bytes)
+    pub return_addr: Vec<u8>,
+    /// Anchor URL for the proposal
+    pub anchor_url: String,
+    /// Anchor data hash (32 bytes)
+    pub anchor_hash: Vec<u8>,
 }
 
 /// Snapshot of a stake address for query results
@@ -372,6 +398,12 @@ pub struct NodeStateSnapshot {
     pub governance_proposals: Vec<ProposalSnapshot>,
     /// Committee members
     pub committee: CommitteeSnapshot,
+    /// Constitution anchor URL
+    pub constitution_url: String,
+    /// Constitution anchor data hash
+    pub constitution_hash: Vec<u8>,
+    /// Constitution guardrail script hash (if any)
+    pub constitution_script: Option<Vec<u8>>,
     /// Stake address info (delegations + rewards)
     pub stake_addresses: Vec<StakeAddressSnapshot>,
     /// Stake snapshots (mark/set/go) for stake-snapshot queries
@@ -408,6 +440,9 @@ impl Default for NodeStateSnapshot {
             drep_entries: Vec::new(),
             governance_proposals: Vec::new(),
             committee: CommitteeSnapshot::default(),
+            constitution_url: String::new(),
+            constitution_hash: vec![0u8; 32],
+            constitution_script: None,
             stake_addresses: Vec::new(),
             stake_snapshots: StakeSnapshotsResult::default(),
             pool_params_entries: Vec::new(),
@@ -881,9 +916,12 @@ impl QueryHandler {
                 debug!("Query: GetGovState");
                 QueryResult::GovState(GovStateSnapshot {
                     proposals: self.state.governance_proposals.clone(),
-                    drep_count: self.state.drep_count,
-                    committee_member_count: self.state.committee.members.len(),
-                    treasury: self.state.treasury,
+                    committee: self.state.committee.clone(),
+                    constitution_url: self.state.constitution_url.clone(),
+                    constitution_hash: self.state.constitution_hash.clone(),
+                    constitution_script: self.state.constitution_script.clone(),
+                    cur_pparams: Box::new(self.state.protocol_params.clone()),
+                    prev_pparams: Box::new(self.state.protocol_params.clone()),
                 })
             }
             25 => {
@@ -1137,15 +1175,17 @@ mod tests {
                 yes_votes: 3,
                 no_votes: 1,
                 abstain_votes: 0,
+                deposit: 100_000_000_000,
+                return_addr: vec![0xdd; 29],
+                anchor_url: "https://example.com/proposal".to_string(),
+                anchor_hash: vec![0xee; 32],
             }],
             ..Default::default()
         });
 
         match query(&handler, 24) {
             QueryResult::GovState(gov) => {
-                assert_eq!(gov.drep_count, 5);
-                assert_eq!(gov.committee_member_count, 1);
-                assert_eq!(gov.treasury, 1_000_000_000_000);
+                assert_eq!(gov.committee.members.len(), 1);
                 assert_eq!(gov.proposals.len(), 1);
                 assert_eq!(gov.proposals[0].action_type, "InfoAction");
                 assert_eq!(gov.proposals[0].yes_votes, 3);
@@ -1307,9 +1347,8 @@ mod tests {
         let handler = QueryHandler::new();
         match query(&handler, 24) {
             QueryResult::GovState(gov) => {
-                assert_eq!(gov.drep_count, 0);
                 assert_eq!(gov.proposals.len(), 0);
-                assert_eq!(gov.treasury, 0);
+                assert_eq!(gov.committee.members.len(), 0);
             }
             other => panic!("Expected GovState, got {other:?}"),
         }

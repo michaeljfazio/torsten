@@ -1269,6 +1269,69 @@ fn encode_tagged_rational(enc: &mut minicbor::Encoder<&mut Vec<u8>>, num: u64, d
     enc.u64(den).ok();
 }
 
+/// Encode a GovAction as a CBOR sum type tag.
+/// We encode a simplified version since we only have the action type string.
+fn encode_gov_action_tag(enc: &mut minicbor::Encoder<&mut Vec<u8>>, action_type: &str) {
+    match action_type {
+        "ParameterChange" => {
+            // [0, prev_action_id, params, policy_hash]
+            enc.array(4).ok();
+            enc.u32(0).ok();
+            enc.null().ok(); // prev action id
+            enc.map(0).ok(); // empty params update
+            enc.null().ok(); // policy hash
+        }
+        "HardForkInitiation" => {
+            // [1, prev_action_id, protocol_version]
+            enc.array(3).ok();
+            enc.u32(1).ok();
+            enc.null().ok();
+            enc.array(2).ok();
+            enc.u64(0).ok();
+            enc.u64(0).ok();
+        }
+        "TreasuryWithdrawals" => {
+            // [2, withdrawals_map, policy_hash]
+            enc.array(3).ok();
+            enc.u32(2).ok();
+            enc.map(0).ok();
+            enc.null().ok();
+        }
+        "NoConfidence" => {
+            // [3, prev_action_id]
+            enc.array(2).ok();
+            enc.u32(3).ok();
+            enc.null().ok();
+        }
+        "UpdateCommittee" => {
+            // [4, prev_action_id, remove_set, add_map, quorum]
+            enc.array(5).ok();
+            enc.u32(4).ok();
+            enc.null().ok();
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(0).ok();
+            enc.map(0).ok();
+            encode_tagged_rational(enc, 2, 3);
+        }
+        "NewConstitution" => {
+            // [5, prev_action_id, constitution]
+            enc.array(3).ok();
+            enc.u32(5).ok();
+            enc.null().ok();
+            enc.array(2).ok();
+            enc.array(2).ok();
+            enc.str("").ok();
+            enc.bytes(&[0u8; 32]).ok();
+            enc.null().ok();
+        }
+        _ => {
+            // [6]
+            enc.array(1).ok();
+            enc.u32(6).ok();
+        }
+    }
+}
+
 fn encode_relay_cbor(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
     relay: &crate::query_handler::RelaySnapshot,
@@ -1392,30 +1455,120 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             }
         }
         QueryResult::GovState(gov) => {
-            enc.map(4).ok();
-            enc.str("drep_count").ok();
-            enc.u64(gov.drep_count as u64).ok();
-            enc.str("committee_member_count").ok();
-            enc.u64(gov.committee_member_count as u64).ok();
-            enc.str("treasury").ok();
-            enc.u64(gov.treasury).ok();
-            enc.str("proposals").ok();
+            // ConwayGovState = array(7):
+            //   [0] Proposals, [1] Committee, [2] Constitution,
+            //   [3] curPParams, [4] prevPParams, [5] FuturePParams,
+            //   [6] DRepPulsingState
+            enc.array(7).ok();
+
+            // [0] Proposals = array(2) [roots, values]
+            enc.array(2).ok();
+            // roots = array(4) of StrictMaybe GovPurposeId (empty for now)
+            enc.array(4).ok();
+            for _ in 0..4 {
+                enc.array(0).ok(); // StrictMaybe Nothing = array(0)
+            }
+            // values = array(n) of GovActionState
             enc.array(gov.proposals.len() as u64).ok();
             for p in &gov.proposals {
-                enc.map(6).ok();
-                enc.str("tx_id").ok();
+                // GovActionState = array(7)
+                //   [0] gasId, [1] committeeVotes, [2] drepVotes,
+                //   [3] spoVotes, [4] procedure, [5] proposedIn, [6] expiresAfter
+                enc.array(7).ok();
+                // [0] GovActionId = array(2) [tx_hash, action_index]
+                enc.array(2).ok();
                 enc.bytes(&p.tx_id).ok();
-                enc.str("action_index").ok();
                 enc.u32(p.action_index).ok();
-                enc.str("action_type").ok();
-                enc.str(&p.action_type).ok();
-                enc.str("yes_votes").ok();
-                enc.u64(p.yes_votes).ok();
-                enc.str("no_votes").ok();
-                enc.u64(p.no_votes).ok();
-                enc.str("abstain_votes").ok();
-                enc.u64(p.abstain_votes).ok();
+                // [1] committeeVotes = Map<Credential, Vote> (empty for now)
+                enc.map(0).ok();
+                // [2] drepVotes = Map<Credential, Vote> (empty for now)
+                enc.map(0).ok();
+                // [3] spoVotes = Map<Credential, Vote> (empty for now)
+                enc.map(0).ok();
+                // [4] ProposalProcedure = array(4) [deposit, return_addr, gov_action, anchor]
+                enc.array(4).ok();
+                enc.u64(p.deposit).ok();
+                enc.bytes(&p.return_addr).ok();
+                // gov_action = sum type tagged by action type
+                encode_gov_action_tag(&mut enc, &p.action_type);
+                // anchor = array(2) [url, hash]
+                enc.array(2).ok();
+                enc.str(&p.anchor_url).ok();
+                enc.bytes(&p.anchor_hash).ok();
+                // [5] proposedIn (EpochNo)
+                enc.u64(p.proposed_epoch).ok();
+                // [6] expiresAfter (EpochNo)
+                enc.u64(p.expires_epoch).ok();
             }
+
+            // [1] Committee = StrictMaybe(array(2) [Map<ColdCred,EpochNo>, UnitInterval])
+            if gov.committee.members.is_empty() && gov.committee.threshold.is_none() {
+                enc.array(0).ok(); // StrictMaybe Nothing
+            } else {
+                enc.array(1).ok(); // StrictMaybe Just
+                enc.array(2).ok();
+                // Map<ColdCredential, EpochNo>
+                enc.map(gov.committee.members.len() as u64).ok();
+                for m in &gov.committee.members {
+                    // Key: Credential [type, hash]
+                    enc.array(2).ok();
+                    enc.u8(m.cold_credential_type).ok();
+                    enc.bytes(&m.cold_credential).ok();
+                    // Value: expiry epoch
+                    enc.u64(m.expiry_epoch.unwrap_or(0)).ok();
+                }
+                // UnitInterval (quorum threshold)
+                if let Some((num, den)) = gov.committee.threshold {
+                    encode_tagged_rational(&mut enc, num, den);
+                } else {
+                    encode_tagged_rational(&mut enc, 2, 3); // default 2/3
+                }
+            }
+
+            // [2] Constitution = array(2) [Anchor, StrictMaybe ScriptHash]
+            enc.array(2).ok();
+            // Anchor = array(2) [url, hash]
+            enc.array(2).ok();
+            enc.str(&gov.constitution_url).ok();
+            enc.bytes(&gov.constitution_hash).ok();
+            // StrictMaybe ScriptHash (null-encoded: null=Nothing, bytes=Just)
+            if let Some(ref script) = gov.constitution_script {
+                enc.bytes(script).ok();
+            } else {
+                enc.null().ok();
+            }
+
+            // [3] curPParams = array(31)
+            encode_protocol_params_cbor(&mut enc, &gov.cur_pparams);
+
+            // [4] prevPParams = array(31)
+            encode_protocol_params_cbor(&mut enc, &gov.prev_pparams);
+
+            // [5] FuturePParams = Sum: [0] = NoPParamsUpdate
+            enc.array(1).ok();
+            enc.u32(0).ok();
+
+            // [6] DRepPulsingState = DRComplete: array(2) [PulsingSnapshot(4), RatifyState(4)]
+            enc.array(2).ok();
+            // PulsingSnapshot = array(4) [Map<DRep,Coin>, Map<Credential,Vote>, Map<GASId,Gas>, Map<Pool,IndivPoolStake>]
+            enc.array(4).ok();
+            enc.map(0).ok(); // drep stake distribution
+            enc.map(0).ok(); // drep votes (credential→vote)
+            enc.map(0).ok(); // proposals map
+            enc.map(0).ok(); // pool stake distribution
+                             // RatifyState = array(4) [enacted, expired, delayed_flag, future_pparams]
+            enc.array(4).ok();
+            // enacted proposals (tag(258) set)
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(0).ok();
+            // expired proposals (tag(258) set)
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(0).ok();
+            // delayed flag (bool)
+            enc.bool(false).ok();
+            // future pparams: [0] = NoPParamsUpdate
+            enc.array(1).ok();
+            enc.u32(0).ok();
         }
         QueryResult::DRepState(dreps) => {
             // Wire format: Map<Credential, DRepState>
@@ -1929,7 +2082,9 @@ mod tests {
 
     #[test]
     fn test_encode_query_result_gov_state() {
-        use crate::query_handler::{GovStateSnapshot, ProposalSnapshot};
+        use crate::query_handler::{
+            CommitteeSnapshot, GovStateSnapshot, ProposalSnapshot, ProtocolParamsSnapshot,
+        };
 
         let result = QueryResult::GovState(GovStateSnapshot {
             proposals: vec![ProposalSnapshot {
@@ -1941,18 +2096,28 @@ mod tests {
                 yes_votes: 5,
                 no_votes: 2,
                 abstain_votes: 1,
+                deposit: 100_000_000_000,
+                return_addr: vec![0xbb; 29],
+                anchor_url: "https://example.com/proposal".to_string(),
+                anchor_hash: vec![0xcc; 32],
             }],
-            drep_count: 10,
-            committee_member_count: 3,
-            treasury: 5_000_000_000_000,
+            committee: CommitteeSnapshot::default(),
+            constitution_url: "https://constitution.example.com".to_string(),
+            constitution_hash: vec![0xdd; 32],
+            constitution_script: None,
+            cur_pparams: Box::new(ProtocolParamsSnapshot::default()),
+            prev_pparams: Box::new(ProtocolParamsSnapshot::default()),
         });
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
 
-        // Verify the outer structure
+        // Verify the outer structure: [4, [result]] (MsgResult with HFC wrapper)
         let mut decoder = minicbor::Decoder::new(&cbor);
         let _ = decoder.array();
         assert_eq!(decoder.u32().unwrap(), 4); // MsgResult
+        let _ = decoder.array(); // HFC wrapper
+                                 // Verify array(7) ConwayGovState
+        assert_eq!(decoder.array().unwrap(), Some(7));
     }
 
     #[test]

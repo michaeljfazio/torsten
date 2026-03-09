@@ -1698,6 +1698,10 @@ impl Node {
                     yes_votes: state.yes_votes,
                     no_votes: state.no_votes,
                     abstain_votes: state.abstain_votes,
+                    deposit: state.procedure.deposit.0,
+                    return_addr: state.procedure.return_addr.clone(),
+                    anchor_url: state.procedure.anchor.url.clone(),
+                    anchor_hash: state.procedure.anchor.data_hash.as_ref().to_vec(),
                 }
             })
             .collect();
@@ -1947,6 +1951,23 @@ impl Node {
             drep_entries,
             governance_proposals,
             committee,
+            constitution_url: ls
+                .governance
+                .constitution
+                .as_ref()
+                .map(|c| c.anchor.url.clone())
+                .unwrap_or_default(),
+            constitution_hash: ls
+                .governance
+                .constitution
+                .as_ref()
+                .map(|c| c.anchor.data_hash.as_ref().to_vec())
+                .unwrap_or_else(|| vec![0u8; 32]),
+            constitution_script: ls
+                .governance
+                .constitution
+                .as_ref()
+                .and_then(|c| c.script_hash.as_ref().map(|h| h.as_ref().to_vec())),
             stake_addresses,
             stake_snapshots,
             pool_params_entries,
