@@ -1322,9 +1322,7 @@ fn encode_language_views(
     }
 
     // Sort by short-lex order on key bytes (shorter keys first, ties broken lexicographically)
-    entries.sort_by(|(a, _), (b, _)| {
-        a.len().cmp(&b.len()).then_with(|| a.cmp(b))
-    });
+    entries.sort_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
 
     let mut buf = encode_map_header(entries.len());
     for (key, value) in entries {
@@ -1771,13 +1769,11 @@ mod tests {
         assert_eq!(encoded[0], 0xA1); // map(1)
         assert_eq!(encoded[1], 0x41); // bstr(1)
         assert_eq!(encoded[2], 0x00); // inner byte 0x00
-        // value starts at [3]: bstr wrapping indefinite array
-        // Let's check what we actually got
+                                      // value starts at [3]: bstr wrapping indefinite array
         assert!(
             encoded[3] >= 0x40 && encoded[3] <= 0x5F,
-            "Expected bstr header at [3], got 0x{:02X}, full: {:02X?}",
+            "Expected bstr header at [3], got 0x{:02X}",
             encoded[3],
-            &encoded[..std::cmp::min(encoded.len(), 20)]
         );
     }
 
@@ -1820,7 +1816,7 @@ mod tests {
         // map(1), key = uint(1) = [0x01]
         assert_eq!(encoded[0], 0xA1); // map(1)
         assert_eq!(encoded[1], 0x01); // uint 1
-        // value: definite-length array, NOT byte-wrapped
+                                      // value: definite-length array, NOT byte-wrapped
         assert_eq!(encoded[2], 0x82); // array(2)
     }
 
@@ -1834,9 +1830,9 @@ mod tests {
         };
         let encoded = encode_language_views(&cost_models, true, true, false);
         assert_eq!(encoded[0], 0xA2); // map(2)
-        // First entry should be V2 (key = 0x01, 1 byte)
+                                      // First entry should be V2 (key = 0x01, 1 byte)
         assert_eq!(encoded[1], 0x01); // V2 key
-        // Not V1's double-bagged key (0x41, 0x00)
+                                      // Not V1's double-bagged key (0x41, 0x00)
         assert_ne!(encoded[1], 0x41);
     }
 
@@ -1849,10 +1845,10 @@ mod tests {
         };
         let encoded = encode_language_views(&cost_models, true, true, true);
         assert_eq!(encoded[0], 0xA3); // map(3)
-        // Order: V2 (0x01), V3 (0x02), V1 (0x41 0x00)
+                                      // Order: V2 (0x01), V3 (0x02), V1 (0x41 0x00)
         assert_eq!(encoded[1], 0x01); // V2 key first
-        // Find V3 key after V2 value
-        // V2 value: array(1) + int(2) = [0x81, 0x02]
+                                      // Find V3 key after V2 value
+                                      // V2 value: array(1) + int(2) = [0x81, 0x02]
         assert_eq!(encoded[2], 0x81); // array(1) for V2
         assert_eq!(encoded[3], 0x02); // int 2 for V2
         assert_eq!(encoded[4], 0x02); // V3 key second

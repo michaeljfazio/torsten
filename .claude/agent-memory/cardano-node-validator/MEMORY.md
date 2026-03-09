@@ -20,13 +20,14 @@ TORSTEN_PIPELINE_DEPTH=150 ./target/release/torsten-node run \
 ```
 NOTE: socket-path can be `./node.sock` or `/tmp/torsten-preview.socket` — both work fine.
 
-## Preview Testnet Baselines (2026-03-09, commit fd838c5)
+## Preview Testnet Baselines (2026-03-10, commit 461f768)
 - DB at slot ~106.4M / block ~4.09M / epoch 1,231
-- Peers: 18.185.163.167, 13.58.19.0, 3.74.40.92, 52.211.202.88, 3.70.89.92 (8 known, 5 hot)
-- N2N handshake: ~576-755ms, version 14
-- At-tip block rate: ~1 block every 20-60 seconds (live testnet, ~5% active slots)
+- Peers: 52.215.17.31, 3.70.89.92, 18.117.34.199, 52.211.202.88, 3.74.40.92 (8 known, 5 hot)
+- N2N handshake: ~565-741ms, version 14
+- At-tip block rate: ~1 block every 15-35 seconds (live testnet, ~5% active slots)
 - Block fetch pool: 4 fetchers connected in parallel (3 cold, 0 warm, 5 hot at startup)
-- Catchup from intersection: 23 blocks replayed silently; no "Syncing" log output
+- Catchup from intersection: 584 blocks in ~28 seconds (~21 blocks/sec at tip proximity)
+- Catchup slot range: 106401541 → 106420818 (~19,277 slots)
 
 ## VRF Verification — Root Cause
 See `vrf-debugging.md` for details. Summary:
@@ -50,9 +51,10 @@ See `vrf-debugging.md` for details. Summary:
 3. **N2N server "Address already in use"** if old node not killed before restart
    - Always `pkill -f torsten-node && rm -f ./node.sock` before restart
 
-4. **rollback_count metric always 0** — rollback at tip to slot 106410874 seen but not counted
-   - Early-return guard in rollback handler (rollback_slot >= ledger_slot) may be too aggressive
-   - Investigate if valid tip rollbacks are being skipped vs correctly ignored
+4. **rollback_count metric always 0** — rollback at tip to slot 106420818 seen but not counted (confirmed 2026-03-10)
+   - Log line: `WARN torsten_node::node: Rollback to slot:106420818@0aeb04836c360c80b966764fab4abfcca7665eedf018fe05ca05e73e1aaed3c5`
+   - Counter remains 0 after rollback; early-return guard in rollback handler may be too aggressive
+   - Investigate rollback handler in `crates/torsten-node/src/node.rs`
 
 5. **`query stake-pools` shows garbled data** — CLI decodes wrong CBOR format
    - File: `crates/torsten-cli/src/commands/query.rs` lines 821-910
@@ -85,19 +87,21 @@ See `vrf-debugging.md` for details. Summary:
 - Prometheus metrics: WORKS — all counters including transactions now functional
 - "Syncing" log suppression at 100%: WORKS — zero noise when at tip
 
-## Prometheus Metrics (Preview at-tip, latest commit, 2026-03-09)
-- blocks_received_total: 27 (after ~5 min runtime, 23 catchup + 4 live)
-- blocks_applied_total: 27
+## Prometheus Metrics (Preview at-tip, 2026-03-10, commit 461f768)
+- blocks_received_total: 588 (584 catchup + 4 live after ~2 min)
+- blocks_applied_total: 588
 - peers_connected: 5
 - peers_cold: 3, peers_warm: 0, peers_hot: 5
 - sync_progress_percent: 10000 (100.00%)
-- slot_number: 106,410,991
-- block_number: 4,093,411
+- slot_number: 106,420,914
+- block_number: 4,093,719
 - epoch_number: 1,231
-- utxo_count: 0 (no UTxO replay)
-- transactions_received_total: 34 (FIXED — was always 0)
-- transactions_validated_total: 34 (FIXED — was always 0)
+- utxo_count: 0 (no UTxO replay — Mithril bootstrap starts ledger from genesis)
+- delegation_count: 1 (minimal — no full ledger replay)
+- transactions_received_total: 592
+- transactions_validated_total: 592
 - transactions_rejected_total: 0
+- rollback_count_total: 0 (BUG — 1 rollback occurred but not counted)
 
 ## Operational Notes
 - `pkill -f torsten-node && rm -f ./node.sock` before restart

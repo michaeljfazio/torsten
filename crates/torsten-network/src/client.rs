@@ -377,14 +377,20 @@ impl NodeToNodeClient {
                 }
                 NextResponse::Await => {
                     if !headers.is_empty() {
-                        return Ok(HeaderBatchResult::Headers(headers, latest_tip.expect("tip set by prior RollForward")));
+                        return Ok(HeaderBatchResult::Headers(
+                            headers,
+                            latest_tip.expect("tip set by prior RollForward"),
+                        ));
                     }
                     return Ok(HeaderBatchResult::Await);
                 }
             }
         }
 
-        Ok(HeaderBatchResult::Headers(headers, latest_tip.expect("tip set by prior RollForward")))
+        Ok(HeaderBatchResult::Headers(
+            headers,
+            latest_tip.expect("tip set by prior RollForward"),
+        ))
     }
 
     /// Fetch blocks by a list of points using the blockfetch protocol.

@@ -20,6 +20,7 @@
 - Pool desirability: `shelley/impl/src/.../Shelley/PoolRank.hs`
 
 ## Topic Files
+- [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
 - [n2n-protocols.md](n2n-protocols.md) - N2N protocol reference: mini-protocol IDs, CBOR/CDDL encodings, version negotiation, time limits, queue limits
 - [n2c-protocol-details.md](n2c-protocol-details.md) - N2C protocol: all 4 mini-protocols, message tags, 40 query types with CBOR tags, wire format
