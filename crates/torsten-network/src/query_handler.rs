@@ -478,17 +478,36 @@ impl QueryHandler {
 
                 match tag {
                     0 => {
-                        // Could be GetCurrentEra (hardcoded query) or era-wrapped query
+                        // Outer tag 0 = BlockQuery (era-wrapped) or GetCurrentEra
                         if len == 1 {
                             debug!("Query: GetCurrentEra");
                             return QueryResult::CurrentEra(self.state.era);
                         }
-                        // Era-wrapped query: [era, [query_tag, ...]]
+                        // Era-wrapped query: [0, [era_id, [query_tag, ...]]]
                         self.dispatch_era_query(decoder)
                     }
-                    2 => {
+                    1 => {
+                        // Outer tag 1 = GetSystemStart
                         debug!("Query: GetSystemStart");
                         QueryResult::SystemStart(self.state.system_start.clone())
+                    }
+                    2 => {
+                        // Outer tag 2 = GetChainBlockNo (QueryVersion2, N2C v16+)
+                        debug!("Query: GetChainBlockNo");
+                        QueryResult::ChainBlockNo(self.state.block_number.0)
+                    }
+                    3 => {
+                        // Outer tag 3 = GetChainPoint (QueryVersion2, N2C v16+)
+                        debug!("Query: GetChainPoint");
+                        let (slot, hash) = match &self.state.tip.point {
+                            Point::Origin => (0, vec![0u8; 32]),
+                            Point::Specific(s, h) => (s.0, h.to_vec()),
+                        };
+                        QueryResult::ChainTip {
+                            slot,
+                            hash,
+                            block_no: self.state.block_number.0,
+                        }
                     }
                     _ => {
                         // May be era-wrapped
@@ -500,8 +519,23 @@ impl QueryHandler {
                 // Indefinite array
                 let tag = decoder.u32().unwrap_or(999);
                 match tag {
-                    0 => QueryResult::CurrentEra(self.state.era),
-                    2 => QueryResult::SystemStart(self.state.system_start.clone()),
+                    0 => {
+                        // Try era-wrapped first, fall back to GetCurrentEra
+                        self.dispatch_era_query(decoder)
+                    }
+                    1 => QueryResult::SystemStart(self.state.system_start.clone()),
+                    2 => QueryResult::ChainBlockNo(self.state.block_number.0),
+                    3 => {
+                        let (slot, hash) = match &self.state.tip.point {
+                            Point::Origin => (0, vec![0u8; 32]),
+                            Point::Specific(s, h) => (s.0, h.to_vec()),
+                        };
+                        QueryResult::ChainTip {
+                            slot,
+                            hash,
+                            block_no: self.state.block_number.0,
+                        }
+                    }
                     _ => self.dispatch_era_query(decoder),
                 }
             }
@@ -516,7 +550,8 @@ impl QueryHandler {
     fn handle_simple_query(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
         match decoder.u32() {
             Ok(0) => QueryResult::CurrentEra(self.state.era),
-            Ok(2) => QueryResult::SystemStart(self.state.system_start.clone()),
+            Ok(1) => QueryResult::SystemStart(self.state.system_start.clone()),
+            Ok(2) => QueryResult::ChainBlockNo(self.state.block_number.0),
             _ => QueryResult::Error("Unknown simple query".into()),
         }
     }
@@ -537,7 +572,10 @@ impl QueryHandler {
         }
     }
 
-    /// Handle Shelley-era queries by tag
+    /// Handle Shelley-era queries by tag.
+    ///
+    /// Tag numbers match the Haskell cardano-ledger `BlockQuery` encoding
+    /// from ouroboros-consensus-shelley `encodeShelleyQuery`.
     fn handle_shelley_query(
         &self,
         query_tag: u32,
@@ -545,65 +583,26 @@ impl QueryHandler {
     ) -> QueryResult {
         match query_tag {
             0 => {
-                // GetLedgerTip / GetEpochNo
+                // Tag 0: GetLedgerTip
+                debug!("Query: GetLedgerTip");
+                let (slot, hash) = match &self.state.tip.point {
+                    Point::Origin => (0, vec![0u8; 32]),
+                    Point::Specific(s, h) => (s.0, h.to_vec()),
+                };
+                QueryResult::ChainTip {
+                    slot,
+                    hash,
+                    block_no: self.state.block_number.0,
+                }
+            }
+            1 => {
+                // Tag 1: GetEpochNo
                 debug!("Query: GetEpochNo");
                 QueryResult::EpochNo(self.state.epoch.0)
             }
-            1 => {
-                // GetEpochNo (alternate)
-                debug!("Query: GetEpochNo (alt)");
-                QueryResult::EpochNo(self.state.epoch.0)
-            }
             2 => {
-                // GetUTxOByTxIn — look up specific UTxOs by transaction input references
-                debug!("Query: GetUTxOByTxIn");
-                let mut inputs = Vec::new();
-                // Try to decode array of [tx_hash, output_index] pairs
-                if let Ok(Some(n)) = decoder.array() {
-                    for _ in 0..n {
-                        if let Ok(Some(_)) = decoder.array() {
-                            let tx_hash = decoder.bytes().unwrap_or(&[]).to_vec();
-                            let idx = decoder.u32().unwrap_or(0);
-                            inputs.push((tx_hash, idx));
-                        }
-                    }
-                }
-                if let Some(provider) = &self.utxo_provider {
-                    QueryResult::UtxoByAddress(provider.utxos_by_tx_inputs(&inputs))
-                } else {
-                    QueryResult::UtxoByAddress(vec![])
-                }
-            }
-            3 => {
-                // GetAccountState (treasury + reserves)
-                debug!("Query: GetAccountState");
-                QueryResult::AccountState {
-                    treasury: self.state.treasury,
-                    reserves: self.state.reserves,
-                }
-            }
-            4 => {
-                // GetUTxOByAddress
-                debug!("Query: GetUTxOByAddress");
-                // Try to read address bytes from the query payload
-                let addr_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
-                if let Some(provider) = &self.utxo_provider {
-                    let utxos = provider.utxos_at_address_bytes(&addr_bytes);
-                    QueryResult::UtxoByAddress(utxos)
-                } else {
-                    QueryResult::UtxoByAddress(vec![])
-                }
-            }
-            5 => {
-                // GetStakeDistribution
-                debug!("Query: GetStakeDistribution");
-                QueryResult::StakeDistribution(self.state.stake_pools.clone())
-            }
-            6 => {
-                // GetNonMyopicMemberRewards — estimate rewards for given stake amounts
+                // Tag 2: GetNonMyopicMemberRewards
                 debug!("Query: GetNonMyopicMemberRewards");
-
-                // Parse requested stake amounts from the remaining query payload
                 let mut amounts = Vec::new();
                 if let Ok(Some(n)) = decoder.array() {
                     for _ in 0..n {
@@ -615,17 +614,12 @@ impl QueryHandler {
                     }
                 }
                 let stake_amounts = if amounts.is_empty() {
-                    vec![1_000_000_000_000] // Default: 1M ADA in lovelace
+                    vec![1_000_000_000_000]
                 } else {
                     amounts
                 };
-
-                // Compute approximate rewards per pool for each stake amount
-                // Uses simplified reward formula:
-                //   reward ≈ (stake/total_stake) * rewards_pot * (1-margin) - cost_share
                 let total_stake: u64 = self.state.stake_pools.iter().map(|p| p.stake).sum();
-                let rewards_pot = self.state.reserves / 200; // ~0.5% of reserves per epoch
-
+                let rewards_pot = self.state.reserves / 200;
                 let mut result = Vec::new();
                 for amount in &stake_amounts {
                     let mut pool_rewards = Vec::new();
@@ -648,96 +642,44 @@ impl QueryHandler {
                         pool_rewards,
                     });
                 }
-
                 QueryResult::NonMyopicMemberRewards(result)
             }
-            7 => {
-                // GetCurrentPParams
+            3 => {
+                // Tag 3: GetCurrentPParams
                 debug!("Query: GetCurrentPParams");
                 QueryResult::ProtocolParams(Box::new(self.state.protocol_params.clone()))
             }
-            8 => {
-                // GetProposedPParamsUpdates — no pending updates tracked in Conway era
-                // (governance proposals replace the old update mechanism)
+            4 => {
+                // Tag 4: GetProposedPParamsUpdates (deprecated in Conway)
                 debug!("Query: GetProposedPParamsUpdates");
                 QueryResult::ProposedPParamsUpdates
             }
-            10 => {
-                // GetChainBlockNo
-                debug!("Query: GetChainBlockNo");
-                QueryResult::ChainBlockNo(self.state.block_number.0)
+            5 => {
+                // Tag 5: GetStakeDistribution
+                debug!("Query: GetStakeDistribution");
+                QueryResult::StakeDistribution(self.state.stake_pools.clone())
             }
-            11 => {
-                // GetChainPoint (chain tip)
-                debug!("Query: GetChainPoint");
-                let (slot, hash) = match &self.state.tip.point {
-                    Point::Origin => (0, vec![0u8; 32]),
-                    Point::Specific(s, h) => (s.0, h.to_vec()),
-                };
-                QueryResult::ChainTip {
-                    slot,
-                    hash,
-                    block_no: self.state.block_number.0,
+            6 => {
+                // Tag 6: GetUTxOByAddress
+                debug!("Query: GetUTxOByAddress");
+                let addr_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                if let Some(provider) = &self.utxo_provider {
+                    let utxos = provider.utxos_at_address_bytes(&addr_bytes);
+                    QueryResult::UtxoByAddress(utxos)
+                } else {
+                    QueryResult::UtxoByAddress(vec![])
                 }
             }
-            9 => {
-                // GetGenesisConfig
-                debug!("Query: GetGenesisConfig");
-                QueryResult::GenesisConfig {
-                    system_start: self.state.system_start.clone(),
-                    network_magic: self.state.network_magic,
-                    epoch_length: self.state.epoch_length,
-                    slot_length_secs: self.state.slot_length_secs,
-                    security_param: self.state.security_param,
-                }
-            }
-            13 => {
-                // GetUTxOWhole — return empty set (too large to serve in practice)
-                debug!("Query: GetUTxOWhole (returning empty — use GetUTxOByAddress instead)");
+            7 => {
+                // Tag 7: GetUTxOWhole (too large to serve in practice)
+                debug!("Query: GetUTxOWhole (returning empty)");
                 QueryResult::UtxoByAddress(vec![])
             }
-            20 => {
-                // GetGovState (Conway governance)
-                debug!("Query: GetGovState");
-                QueryResult::GovState(GovStateSnapshot {
-                    proposals: self.state.governance_proposals.clone(),
-                    drep_count: self.state.drep_count,
-                    committee_member_count: self.state.committee.members.len(),
-                    treasury: self.state.treasury,
-                })
-            }
-            21 => {
-                // GetDRepState — optionally filtered by credential hashes
-                debug!("Query: GetDRepState");
-                let mut filter_hashes: Vec<Vec<u8>> = Vec::new();
-                if let Ok(Some(n)) = decoder.array() {
-                    for _ in 0..n {
-                        if let Ok(bytes) = decoder.bytes() {
-                            filter_hashes.push(bytes.to_vec());
-                        }
-                    }
-                }
-                if filter_hashes.is_empty() {
-                    QueryResult::DRepState(self.state.drep_entries.clone())
-                } else {
-                    let filtered = self
-                        .state
-                        .drep_entries
-                        .iter()
-                        .filter(|d| filter_hashes.iter().any(|h| h == &d.credential_hash))
-                        .cloned()
-                        .collect();
-                    QueryResult::DRepState(filtered)
-                }
-            }
-            22 => {
-                // GetCommitteeState
-                debug!("Query: GetCommitteeState");
-                QueryResult::CommitteeState(self.state.committee.clone())
-            }
-            23 => {
-                // GetStakeAddressInfo — optionally filtered by credential hashes
-                debug!("Query: GetStakeAddressInfo");
+            // Tag 8: DebugEpochState — not implemented
+            // Tag 9: GetCBOR — not implemented
+            10 => {
+                // Tag 10: GetFilteredDelegationsAndRewardAccounts
+                debug!("Query: GetFilteredDelegationsAndRewardAccounts");
                 let mut filter_hashes: Vec<Vec<u8>> = Vec::new();
                 if let Ok(Some(n)) = decoder.array() {
                     for _ in 0..n {
@@ -759,8 +701,46 @@ impl QueryHandler {
                     QueryResult::StakeAddressInfo(filtered)
                 }
             }
-            12 => {
-                // GetStakePoolParams — optionally filtered by pool IDs
+            11 => {
+                // Tag 11: GetGenesisConfig
+                debug!("Query: GetGenesisConfig");
+                QueryResult::GenesisConfig {
+                    system_start: self.state.system_start.clone(),
+                    network_magic: self.state.network_magic,
+                    epoch_length: self.state.epoch_length,
+                    slot_length_secs: self.state.slot_length_secs,
+                    security_param: self.state.security_param,
+                }
+            }
+            // Tag 12: DebugNewEpochState — not implemented
+            // Tag 13: DebugChainDepState — not implemented
+            // Tag 14: GetRewardProvenance — not implemented
+            15 => {
+                // Tag 15: GetUTxOByTxIn
+                debug!("Query: GetUTxOByTxIn");
+                let mut inputs = Vec::new();
+                if let Ok(Some(n)) = decoder.array() {
+                    for _ in 0..n {
+                        if let Ok(Some(_)) = decoder.array() {
+                            let tx_hash = decoder.bytes().unwrap_or(&[]).to_vec();
+                            let idx = decoder.u32().unwrap_or(0);
+                            inputs.push((tx_hash, idx));
+                        }
+                    }
+                }
+                if let Some(provider) = &self.utxo_provider {
+                    QueryResult::UtxoByAddress(provider.utxos_by_tx_inputs(&inputs))
+                } else {
+                    QueryResult::UtxoByAddress(vec![])
+                }
+            }
+            16 => {
+                // Tag 16: GetStakePools
+                debug!("Query: GetStakePools");
+                QueryResult::StakeDistribution(self.state.stake_pools.clone())
+            }
+            17 => {
+                // Tag 17: GetStakePoolParams
                 debug!("Query: GetStakePoolParams");
                 let mut filter_pools: Vec<Vec<u8>> = Vec::new();
                 if let Ok(Some(n)) = decoder.array() {
@@ -783,11 +763,66 @@ impl QueryHandler {
                     QueryResult::PoolParams(filtered)
                 }
             }
-            24 => {
-                // GetStakeSnapshots
+            // Tag 18: GetRewardInfoPools — not implemented
+            // Tag 19: GetPoolState — not implemented
+            20 => {
+                // Tag 20: GetStakeSnapshots
                 debug!("Query: GetStakeSnapshots");
                 QueryResult::StakeSnapshots(self.state.stake_snapshots.clone())
             }
+            // Tag 21: GetPoolDistr — not implemented
+            // Tag 22: GetStakeDelegDeposits — not implemented
+            // Tag 23: GetConstitution — not implemented
+            24 => {
+                // Tag 24: GetGovState
+                debug!("Query: GetGovState");
+                QueryResult::GovState(GovStateSnapshot {
+                    proposals: self.state.governance_proposals.clone(),
+                    drep_count: self.state.drep_count,
+                    committee_member_count: self.state.committee.members.len(),
+                    treasury: self.state.treasury,
+                })
+            }
+            25 => {
+                // Tag 25: GetDRepState
+                debug!("Query: GetDRepState");
+                let mut filter_hashes: Vec<Vec<u8>> = Vec::new();
+                if let Ok(Some(n)) = decoder.array() {
+                    for _ in 0..n {
+                        if let Ok(bytes) = decoder.bytes() {
+                            filter_hashes.push(bytes.to_vec());
+                        }
+                    }
+                }
+                if filter_hashes.is_empty() {
+                    QueryResult::DRepState(self.state.drep_entries.clone())
+                } else {
+                    let filtered = self
+                        .state
+                        .drep_entries
+                        .iter()
+                        .filter(|d| filter_hashes.iter().any(|h| h == &d.credential_hash))
+                        .cloned()
+                        .collect();
+                    QueryResult::DRepState(filtered)
+                }
+            }
+            // Tag 26: GetDRepStakeDistr — not implemented
+            27 => {
+                // Tag 27: GetCommitteeMembersState
+                debug!("Query: GetCommitteeMembersState");
+                QueryResult::CommitteeState(self.state.committee.clone())
+            }
+            // Tag 28: GetFilteredVoteDelegatees — not implemented
+            29 => {
+                // Tag 29: GetAccountState (treasury + reserves)
+                debug!("Query: GetAccountState");
+                QueryResult::AccountState {
+                    treasury: self.state.treasury,
+                    reserves: self.state.reserves,
+                }
+            }
+            // Tags 30-39: not implemented
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");
                 QueryResult::Error(format!("Unsupported query: tag {query_tag}"))
@@ -818,7 +853,7 @@ mod tests {
     #[test]
     fn test_query_handler_default_state() {
         let handler = QueryHandler::new();
-        match query(&handler, 0) {
+        match query(&handler, 1) {
             QueryResult::EpochNo(e) => assert_eq!(e, 0),
             other => panic!("Expected EpochNo, got {other:?}"),
         }
@@ -832,7 +867,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 0) {
+        match query(&handler, 1) {
             QueryResult::EpochNo(e) => assert_eq!(e, 500),
             other => panic!("Expected EpochNo, got {other:?}"),
         }
@@ -851,7 +886,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 11) {
+        match query(&handler, 0) {
             QueryResult::ChainTip {
                 slot,
                 hash: h,
@@ -882,7 +917,15 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 10) {
+        // ChainBlockNo is outer tag 2 — build a MsgQuery CBOR: [3, [2]]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(3).unwrap(); // MsgQuery
+        enc.array(1).unwrap();
+        enc.u32(2).unwrap(); // GetChainBlockNo
+        let result = handler.handle_query_cbor(&buf);
+        match result {
             QueryResult::ChainBlockNo(n) => assert_eq!(n, 42000),
             other => panic!("Expected ChainBlockNo, got {other:?}"),
         }
@@ -899,15 +942,16 @@ mod tests {
 
     #[test]
     fn test_query_result_cbor_roundtrip() {
-        // Build a MsgQuery CBOR: [3, [0, [0]]]
+        // Build a MsgQuery CBOR: [3, [0, [1]]]
+        // Outer tag 0 = BlockQuery, inner tag 1 = GetEpochNo
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(3).unwrap(); // MsgQuery
         enc.array(2).unwrap();
-        enc.u32(0).unwrap(); // era tag
+        enc.u32(0).unwrap(); // outer: BlockQuery
         enc.array(1).unwrap();
-        enc.u32(0).unwrap(); // GetEpochNo
+        enc.u32(1).unwrap(); // inner: GetEpochNo
 
         let handler = QueryHandler::new();
         let result = handler.handle_query_cbor(&buf);
@@ -965,7 +1009,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 7) {
+        match query(&handler, 3) {
             QueryResult::ProtocolParams(params) => {
                 assert_eq!(params.min_fee_a, 44);
                 assert_eq!(params.min_fee_b, 155381);
@@ -1000,7 +1044,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 20) {
+        match query(&handler, 24) {
             QueryResult::GovState(gov) => {
                 assert_eq!(gov.drep_count, 5);
                 assert_eq!(gov.committee_member_count, 1);
@@ -1027,7 +1071,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 21) {
+        match query(&handler, 25) {
             QueryResult::DRepState(dreps) => {
                 assert_eq!(dreps.len(), 1);
                 assert_eq!(dreps[0].credential_hash, vec![0xdd; 32]);
@@ -1062,7 +1106,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 22) {
+        match query(&handler, 27) {
             QueryResult::CommitteeState(committee) => {
                 assert_eq!(committee.members.len(), 2);
                 assert_eq!(committee.resigned.len(), 1);
@@ -1093,7 +1137,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 23) {
+        match query(&handler, 10) {
             QueryResult::StakeAddressInfo(addrs) => {
                 assert_eq!(addrs.len(), 2);
                 assert_eq!(addrs[0].credential_hash, vec![0xaa; 28]);
@@ -1111,7 +1155,7 @@ mod tests {
         // Without a UtxoQueryProvider, should return empty
         let addr_bytes = vec![0x01; 57]; // fake address bytes
         let mut decoder = minicbor::Decoder::new(&addr_bytes);
-        match handler.handle_shelley_query(4, &mut decoder) {
+        match handler.handle_shelley_query(6, &mut decoder) {
             QueryResult::UtxoByAddress(utxos) => {
                 assert!(utxos.is_empty());
             }
@@ -1141,7 +1185,7 @@ mod tests {
 
         let addr_bytes = vec![0x01; 57];
         let mut decoder = minicbor::Decoder::new(&addr_bytes);
-        match handler.handle_shelley_query(4, &mut decoder) {
+        match handler.handle_shelley_query(6, &mut decoder) {
             QueryResult::UtxoByAddress(utxos) => {
                 assert_eq!(utxos.len(), 1);
                 assert_eq!(utxos[0].lovelace, 5_000_000);
@@ -1154,7 +1198,7 @@ mod tests {
     #[test]
     fn test_query_handler_gov_state_empty() {
         let handler = QueryHandler::new();
-        match query(&handler, 20) {
+        match query(&handler, 24) {
             QueryResult::GovState(gov) => {
                 assert_eq!(gov.drep_count, 0);
                 assert_eq!(gov.proposals.len(), 0);
@@ -1182,7 +1226,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 24) {
+        match query(&handler, 20) {
             QueryResult::StakeSnapshots(snap) => {
                 assert_eq!(snap.pools.len(), 1);
                 assert_eq!(snap.pools[0].mark_stake, 1_000_000);
@@ -1214,7 +1258,7 @@ mod tests {
             ..Default::default()
         });
 
-        match query(&handler, 12) {
+        match query(&handler, 17) {
             QueryResult::PoolParams(params) => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].pool_id, vec![0xbb; 28]);
