@@ -54,3 +54,31 @@ impl NetworkId {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_id_roundtrip() {
+        assert_eq!(NetworkId::from_u8(0), Some(NetworkId::Testnet));
+        assert_eq!(NetworkId::from_u8(1), Some(NetworkId::Mainnet));
+        assert_eq!(NetworkId::from_u8(2), None);
+        assert_eq!(NetworkId::Testnet.to_u8(), 0);
+        assert_eq!(NetworkId::Mainnet.to_u8(), 1);
+    }
+
+    #[test]
+    fn test_network_magic() {
+        assert_eq!(NetworkId::Mainnet.magic(), 764824073);
+        assert_eq!(NetworkId::Testnet.magic(), 1);
+    }
+
+    #[test]
+    fn test_bech32_hrp() {
+        assert_eq!(NetworkId::Mainnet.bech32_hrp_addr(), "addr");
+        assert_eq!(NetworkId::Testnet.bech32_hrp_addr(), "addr_test");
+        assert_eq!(NetworkId::Mainnet.bech32_hrp_stake(), "stake");
+        assert_eq!(NetworkId::Testnet.bech32_hrp_stake(), "stake_test");
+    }
+}
