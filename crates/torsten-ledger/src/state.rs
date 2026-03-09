@@ -1281,43 +1281,88 @@ impl LedgerState {
                 protocol_param_update,
                 ..
             } => {
-                // Apply protocol parameter updates
+                // Apply all protocol parameter updates
                 let update = protocol_param_update.as_ref();
-                if let Some(fee_a) = update.min_fee_a {
-                    self.protocol_params.min_fee_a = fee_a;
+                if let Some(v) = update.min_fee_a {
+                    self.protocol_params.min_fee_a = v;
                 }
-                if let Some(fee_b) = update.min_fee_b {
-                    self.protocol_params.min_fee_b = fee_b;
+                if let Some(v) = update.min_fee_b {
+                    self.protocol_params.min_fee_b = v;
                 }
-                if let Some(size) = update.max_block_body_size {
-                    self.protocol_params.max_block_body_size = size;
+                if let Some(v) = update.max_block_body_size {
+                    self.protocol_params.max_block_body_size = v;
                 }
-                if let Some(size) = update.max_tx_size {
-                    self.protocol_params.max_tx_size = size;
+                if let Some(v) = update.max_tx_size {
+                    self.protocol_params.max_tx_size = v;
                 }
-                if let Some(deposit) = update.key_deposit {
-                    self.protocol_params.key_deposit = deposit;
+                if let Some(v) = update.max_block_header_size {
+                    self.protocol_params.max_block_header_size = v;
                 }
-                if let Some(deposit) = update.pool_deposit {
-                    self.protocol_params.pool_deposit = deposit;
+                if let Some(v) = update.key_deposit {
+                    self.protocol_params.key_deposit = v;
                 }
-                if let Some(cost) = update.min_pool_cost {
-                    self.protocol_params.min_pool_cost = cost;
+                if let Some(v) = update.pool_deposit {
+                    self.protocol_params.pool_deposit = v;
                 }
-                if let Some(ref rho) = update.rho {
-                    self.protocol_params.rho = rho.clone();
+                if let Some(v) = update.e_max {
+                    self.protocol_params.e_max = v;
                 }
-                if let Some(ref tau) = update.tau {
-                    self.protocol_params.tau = tau.clone();
+                if let Some(v) = update.n_opt {
+                    self.protocol_params.n_opt = v;
                 }
-                if let Some(deposit) = update.drep_deposit {
-                    self.protocol_params.drep_deposit = deposit;
+                if let Some(ref v) = update.a0 {
+                    self.protocol_params.a0 = v.clone();
                 }
-                if let Some(lifetime) = update.gov_action_lifetime {
-                    self.protocol_params.gov_action_lifetime = lifetime;
+                if let Some(ref v) = update.rho {
+                    self.protocol_params.rho = v.clone();
                 }
-                if let Some(deposit) = update.gov_action_deposit {
-                    self.protocol_params.gov_action_deposit = deposit;
+                if let Some(ref v) = update.tau {
+                    self.protocol_params.tau = v.clone();
+                }
+                if let Some(v) = update.min_pool_cost {
+                    self.protocol_params.min_pool_cost = v;
+                }
+                if let Some(v) = update.ada_per_utxo_byte {
+                    self.protocol_params.ada_per_utxo_byte = v;
+                }
+                if let Some(ref v) = update.cost_models {
+                    // Merge cost models: only update languages that are specified
+                    if let Some(ref v1) = v.plutus_v1 {
+                        self.protocol_params.cost_models.plutus_v1 = Some(v1.clone());
+                    }
+                    if let Some(ref v2) = v.plutus_v2 {
+                        self.protocol_params.cost_models.plutus_v2 = Some(v2.clone());
+                    }
+                    if let Some(ref v3) = v.plutus_v3 {
+                        self.protocol_params.cost_models.plutus_v3 = Some(v3.clone());
+                    }
+                }
+                if let Some(ref v) = update.execution_costs {
+                    self.protocol_params.execution_costs = v.clone();
+                }
+                if let Some(v) = update.max_tx_ex_units {
+                    self.protocol_params.max_tx_ex_units = v;
+                }
+                if let Some(v) = update.max_block_ex_units {
+                    self.protocol_params.max_block_ex_units = v;
+                }
+                if let Some(v) = update.max_val_size {
+                    self.protocol_params.max_val_size = v;
+                }
+                if let Some(v) = update.collateral_percentage {
+                    self.protocol_params.collateral_percentage = v;
+                }
+                if let Some(v) = update.max_collateral_inputs {
+                    self.protocol_params.max_collateral_inputs = v;
+                }
+                if let Some(v) = update.drep_deposit {
+                    self.protocol_params.drep_deposit = v;
+                }
+                if let Some(v) = update.gov_action_lifetime {
+                    self.protocol_params.gov_action_lifetime = v;
+                }
+                if let Some(v) = update.gov_action_deposit {
+                    self.protocol_params.gov_action_deposit = v;
                 }
                 info!("Protocol parameters updated via governance action");
             }
@@ -3414,5 +3459,60 @@ mod tests {
         };
         let ps = &state.governance.proposals[&action_id];
         assert_eq!(ps.expires_epoch, EpochNo(15)); // epoch 5 + lifetime 10
+    }
+
+    #[test]
+    fn test_enact_parameter_change_applies_all_fields() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        // Create an update that changes multiple fields including cost models
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(55),
+            max_block_body_size: Some(131072),
+            max_block_header_size: Some(2000),
+            ada_per_utxo_byte: Some(Lovelace(5000)),
+            max_val_size: Some(10000),
+            collateral_percentage: Some(200),
+            max_collateral_inputs: Some(5),
+            cost_models: Some(CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1, 2, 3]),
+                plutus_v3: Some(vec![4, 5, 6]),
+            }),
+            max_tx_ex_units: Some(ExUnits {
+                mem: 20_000_000,
+                steps: 10_000_000_000,
+            }),
+            ..Default::default()
+        };
+
+        let action = GovAction::ParameterChange {
+            prev_action_id: None,
+            protocol_param_update: Box::new(update),
+            policy_hash: None,
+        };
+
+        state.enact_gov_action(&action);
+
+        assert_eq!(state.protocol_params.min_fee_a, 55);
+        assert_eq!(state.protocol_params.max_block_body_size, 131072);
+        assert_eq!(state.protocol_params.max_block_header_size, 2000);
+        assert_eq!(state.protocol_params.ada_per_utxo_byte, Lovelace(5000));
+        assert_eq!(state.protocol_params.max_val_size, 10000);
+        assert_eq!(state.protocol_params.collateral_percentage, 200);
+        assert_eq!(state.protocol_params.max_collateral_inputs, 5);
+        assert_eq!(
+            state.protocol_params.cost_models.plutus_v2,
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            state.protocol_params.cost_models.plutus_v3,
+            Some(vec![4, 5, 6])
+        );
+        // PlutusV1 should remain unchanged (wasn't in the update)
+        assert_eq!(state.protocol_params.cost_models.plutus_v1, None);
+        assert_eq!(state.protocol_params.max_tx_ex_units.mem, 20_000_000);
+        assert_eq!(state.protocol_params.max_tx_ex_units.steps, 10_000_000_000);
     }
 }

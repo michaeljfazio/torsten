@@ -520,6 +520,28 @@ pub fn validate_transaction(
                 }
             }
         }
+
+        // Bootstrap witnesses (Byron): Ed25519 signature verification
+        for witness in &tx.witness_set.bootstrap_witnesses {
+            if witness.vkey.len() == 32 && witness.signature.len() == 64 {
+                match torsten_crypto::keys::PaymentVerificationKey::from_bytes(&witness.vkey) {
+                    Ok(vk) => {
+                        if vk.verify(tx.hash.as_bytes(), &witness.signature).is_err() {
+                            errors.push(ValidationError::InvalidWitnessSignature(format!(
+                                "bootstrap:{:?}",
+                                &witness.vkey[..8]
+                            )));
+                        }
+                    }
+                    Err(_) => {
+                        errors.push(ValidationError::InvalidWitnessSignature(format!(
+                            "bootstrap:{:?}",
+                            &witness.vkey[..8.min(witness.vkey.len())]
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     if errors.is_empty() {
