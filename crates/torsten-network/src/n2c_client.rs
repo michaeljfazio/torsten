@@ -299,6 +299,12 @@ impl N2CClient {
         Ok(result)
     }
 
+    /// Query constitution (GetConstitution - Shelley query tag 23)
+    pub async fn query_constitution(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(23).await?;
+        Ok(result)
+    }
+
     /// Query governance state (GetGovState - Shelley query tag 24)
     pub async fn query_gov_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
         let result = self.send_query(24).await?;

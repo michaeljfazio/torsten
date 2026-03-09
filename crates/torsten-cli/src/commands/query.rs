@@ -121,6 +121,13 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
+    /// Query the current constitution
+    Constitution {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
     /// Compute the leader schedule for a stake pool
     LeadershipSchedule {
         /// Path to the VRF signing key file
@@ -1257,6 +1264,60 @@ impl QueryCmd {
                 println!("=============");
                 println!("Treasury: {} ADA", treasury / 1_000_000);
                 println!("Reserves: {} ADA", reserves / 1_000_000);
+
+                Ok(())
+            }
+            QuerySubcommand::Constitution {
+                socket_path,
+                testnet_magic,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let raw = client
+                    .query_constitution()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query constitution: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // Parse MsgResult [4, [array(2) [Anchor, MaybeScriptHash]]]
+                let mut decoder = minicbor::Decoder::new(&raw);
+                let _ = decoder.array();
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // HFC wrapper stripped
+                } else {
+                    decoder.set_position(pos);
+                }
+
+                // Constitution = array(2) [Anchor, MaybeScriptHash]
+                let mut url = String::new();
+                let mut data_hash = String::new();
+                let mut script_hash = String::from("none");
+
+                if let Ok(Some(2)) = decoder.array() {
+                    // Anchor = array(2) [url, hash]
+                    if let Ok(Some(2)) = decoder.array() {
+                        url = decoder.str().unwrap_or("").to_string();
+                        data_hash = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    }
+                    // StrictMaybe ScriptHash
+                    if let Ok(bytes) = decoder.bytes() {
+                        script_hash = hex::encode(bytes);
+                    }
+                }
+
+                println!("Constitution");
+                println!("============");
+                println!("URL:         {url}");
+                println!("Data Hash:   {data_hash}");
+                println!("Script Hash: {script_hash}");
 
                 Ok(())
             }
