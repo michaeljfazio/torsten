@@ -513,7 +513,10 @@ impl Node {
             ledger: self.ledger_state.clone(),
             slot_config,
         }));
-        info!("N2C server: Plutus tx validation enabled");
+        n2c_server.set_block_provider(Arc::new(ChainDBBlockProvider {
+            chain_db: self.chain_db.clone(),
+        }));
+        info!("N2C server: Plutus tx validation and block delivery enabled");
         let n2c_socket_path = self.socket_path.clone();
         tokio::spawn(async move {
             if let Err(e) = n2c_server.listen(&n2c_socket_path).await {
