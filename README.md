@@ -83,7 +83,7 @@ graph TD
 - **Pipelined multi-peer sync** with parallel block fetching from up to 4 peers
 - **Mithril snapshot import** for fast initial sync (4M blocks in ~60 seconds)
 - **N2N server** with ChainSync, BlockFetch, TxSubmission2, PeerSharing, KeepAlive
-- **N2C server** with LocalStateQuery, LocalTxSubmission, LocalTxMonitor
+- **N2C server** with LocalChainSync (block delivery), LocalStateQuery, LocalTxSubmission, LocalTxMonitor
 - **Plutus V1/V2/V3** script evaluation via UPLC CEK machine
 - **P2P peer management** with adaptive selection, EWMA latency tracking, reputation scoring
 - **Block production** with VRF proofs, operational certificates, and block announcement

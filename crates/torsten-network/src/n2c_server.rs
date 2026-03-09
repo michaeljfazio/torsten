@@ -122,22 +122,26 @@ async fn handle_n2c_connection(
     tx_validator: Option<Arc<dyn TxValidator>>,
     block_provider: Option<Arc<dyn BlockProvider>>,
 ) -> Result<(), N2CServerError> {
-    let mut buf = vec![0u8; 65536];
+    let mut read_buf = vec![0u8; 65536];
+    // Persistent buffer for partial segments across reads
+    let mut pending = Vec::new();
     let mut chainsync_cursor = ChainSyncCursor {
         cursor_slot: 0,
         has_intersection: false,
     };
 
     loop {
-        let n = stream.read(&mut buf).await?;
+        let n = stream.read(&mut read_buf).await?;
         if n == 0 {
             return Ok(()); // Client disconnected
         }
 
-        // Parse multiplexer segments from the received data
+        pending.extend_from_slice(&read_buf[..n]);
+
+        // Parse as many complete segments as possible from the pending buffer
         let mut offset = 0;
-        while offset < n {
-            let remaining = &buf[offset..n];
+        while offset < pending.len() {
+            let remaining = &pending[offset..];
             if remaining.len() < 8 {
                 break; // Need more data for a complete header
             }
@@ -162,9 +166,14 @@ async fn handle_n2c_connection(
                     }
                 }
                 Err(_) => {
-                    break; // Incomplete segment
+                    break; // Incomplete segment, wait for more data
                 }
             }
+        }
+
+        // Remove consumed bytes from pending buffer
+        if offset > 0 {
+            pending.drain(..offset);
         }
     }
 }
