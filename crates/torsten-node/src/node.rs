@@ -419,10 +419,12 @@ impl Node {
         info!("Ledger state initialized");
 
         let consensus = if let Some(ref genesis) = shelley_genesis {
-            OuroborosPraos::with_params(
+            OuroborosPraos::with_genesis_params(
                 genesis.active_slots_coeff,
                 genesis.security_param,
                 torsten_primitives::time::EpochLength(genesis.epoch_length),
+                genesis.slots_per_k_e_s_period,
+                genesis.max_k_e_s_evolutions,
             )
         } else {
             OuroborosPraos::new()
@@ -431,6 +433,8 @@ impl Node {
             epoch_length = consensus.epoch_length.0,
             security_param = consensus.security_param,
             active_slot_coeff = consensus.active_slot_coeff,
+            slots_per_kes_period = consensus.slots_per_kes_period,
+            max_kes_evolutions = consensus.max_kes_evolutions,
             "Ouroboros Praos consensus initialized"
         );
 
@@ -1460,9 +1464,16 @@ impl Node {
             let ls = self.ledger_state.read().await;
             let epoch_nonce = ls.epoch_nonce;
 
-            // Pre-compute total active stake for leader eligibility checks
-            let total_active_stake: u64 =
-                ls.stake_distribution.stake_map.values().map(|s| s.0).sum();
+            // Per Praos spec, leader eligibility uses the "set" snapshot
+            // (stake distribution from the previous epoch boundary).
+            // Fall back to current pool_params if snapshots aren't available yet.
+            let set_snapshot = ls.snapshots.set.as_ref();
+            let total_active_stake: u64 = if let Some(snap) = set_snapshot {
+                snap.pool_stake.values().map(|s| s.0).sum()
+            } else {
+                // During early sync, no snapshots exist yet — skip leader eligibility
+                0
+            };
 
             for block in &blocks {
                 if !block.era.is_shelley_based() {
@@ -1474,26 +1485,32 @@ impl Node {
                 let mut header_with_nonce = block.header.clone();
                 header_with_nonce.epoch_nonce = epoch_nonce;
 
-                // Look up pool registration for VRF key binding and leader eligibility
+                // Look up pool registration for VRF key binding and leader eligibility.
+                // Uses "set" snapshot for stake (per Praos spec), falls back to current
+                // pool_params for VRF key binding if snapshot is not available.
                 let pool_id = torsten_primitives::hash::blake2b_224(&block.header.issuer_vkey);
                 let issuer_info = if !block.header.issuer_vkey.is_empty() {
-                    ls.pool_params.get(&pool_id).and_then(|pool_reg| {
+                    // Try set snapshot first (correct per spec)
+                    let pool_reg = set_snapshot
+                        .and_then(|snap| snap.pool_params.get(&pool_id))
+                        .or_else(|| ls.pool_params.get(&pool_id));
+
+                    pool_reg.map(|reg| {
                         if total_active_stake == 0 {
-                            return None;
+                            // No snapshot data — just do VRF key binding, skip leader check
+                            return BlockIssuerInfo {
+                                vrf_keyhash: reg.vrf_keyhash,
+                                relative_stake: 1.0, // Assume eligible when no stake data
+                            };
                         }
-                        // Compute pool's relative stake
-                        let pool_stake: u64 = ls
-                            .delegations
-                            .iter()
-                            .filter(|(_, pid)| **pid == pool_id)
-                            .filter_map(|(cred, _)| {
-                                ls.stake_distribution.stake_map.get(cred).map(|s| s.0)
-                            })
-                            .sum();
-                        Some(BlockIssuerInfo {
-                            vrf_keyhash: pool_reg.vrf_keyhash,
+                        let pool_stake = set_snapshot
+                            .and_then(|snap| snap.pool_stake.get(&pool_id))
+                            .map(|s| s.0)
+                            .unwrap_or(0);
+                        BlockIssuerInfo {
+                            vrf_keyhash: reg.vrf_keyhash,
                             relative_stake: pool_stake as f64 / total_active_stake as f64,
-                        })
+                        }
                     })
                 } else {
                     None

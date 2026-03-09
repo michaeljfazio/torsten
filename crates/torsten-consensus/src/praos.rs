@@ -50,6 +50,8 @@ pub enum ConsensusError {
     VrfKeyMismatch,
     #[error("Unknown block issuer: pool {0} not found in stake distribution")]
     UnknownBlockIssuer(Hash28),
+    #[error("Operational cert counter over-incremented: got {got}, last seen {last_seen} (max increment is 1)")]
+    OpcertCounterOverIncremented { got: u64, last_seen: u64 },
 }
 
 /// Information about a registered pool needed for full block validation.
@@ -80,6 +82,10 @@ pub struct OuroborosPraos {
     pub security_param: u64,
     /// Epoch length in slots
     pub epoch_length: EpochLength,
+    /// Number of slots per KES period (from Shelley genesis, typically 129600)
+    pub slots_per_kes_period: u64,
+    /// Maximum KES evolutions before key expires (from Shelley genesis, typically 62)
+    pub max_kes_evolutions: u64,
     /// Current tip
     pub tip: Tip,
     /// Whether to enforce strict signature verification.
@@ -97,6 +103,8 @@ impl OuroborosPraos {
             active_slot_coeff: ACTIVE_SLOT_COEFF,
             security_param: SECURITY_PARAM,
             epoch_length: torsten_primitives::time::mainnet_epoch_length(),
+            slots_per_kes_period: KES_PERIOD_SLOTS,
+            max_kes_evolutions: MAX_KES_EVOLUTIONS,
             tip: Tip::origin(),
             strict_verification: false,
             opcert_counters: HashMap::new(),
@@ -112,6 +120,27 @@ impl OuroborosPraos {
             active_slot_coeff,
             security_param,
             epoch_length,
+            slots_per_kes_period: KES_PERIOD_SLOTS,
+            max_kes_evolutions: MAX_KES_EVOLUTIONS,
+            tip: Tip::origin(),
+            strict_verification: false,
+            opcert_counters: HashMap::new(),
+        }
+    }
+
+    pub fn with_genesis_params(
+        active_slot_coeff: f64,
+        security_param: u64,
+        epoch_length: EpochLength,
+        slots_per_kes_period: u64,
+        max_kes_evolutions: u64,
+    ) -> Self {
+        OuroborosPraos {
+            active_slot_coeff,
+            security_param,
+            epoch_length,
+            slots_per_kes_period,
+            max_kes_evolutions,
             tip: Tip::origin(),
             strict_verification: false,
             opcert_counters: HashMap::new(),
@@ -302,37 +331,64 @@ impl OuroborosPraos {
 
     /// Check and update the operational certificate sequence number for the block issuer.
     ///
-    /// In Praos, each pool's opcert counter must be monotonically non-decreasing.
-    /// A regression indicates a potential replay attack or misconfiguration.
+    /// Per the Haskell reference implementation, the opcert counter must satisfy:
+    ///   m <= n <= m + 1
+    /// where m is the last seen counter and n is the new counter.
+    /// This means the counter can stay the same or increment by exactly 1.
+    /// Regression (n < m) and over-increment (n > m+1) are both rejected.
     fn check_opcert_counter(&mut self, header: &BlockHeader) -> Result<(), ConsensusError> {
         if header.issuer_vkey.is_empty() {
             return Ok(());
         }
 
         let pool_id = torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
-        let seq = header.operational_cert.sequence_number;
+        let n = header.operational_cert.sequence_number;
 
-        if let Some(&last_seq) = self.opcert_counters.get(&pool_id) {
-            if seq < last_seq {
+        if let Some(&m) = self.opcert_counters.get(&pool_id) {
+            // Counter regression: n < m
+            if n < m {
                 if self.strict_verification {
                     warn!(
                         slot = header.slot.0,
                         pool = %pool_id,
-                        got = seq,
-                        expected = last_seq,
-                        "Praos: opcert sequence number regression"
+                        got = n,
+                        last_seen = m,
+                        "Praos: opcert counter regression"
                     );
                     return Err(ConsensusError::OpcertSequenceRegression {
-                        got: seq,
-                        expected: last_seq,
+                        got: n,
+                        expected: m,
                     });
                 }
                 debug!(
                     slot = header.slot.0,
                     pool = %pool_id,
-                    got = seq,
-                    expected = last_seq,
-                    "Praos: opcert sequence regression (non-fatal during sync)"
+                    got = n,
+                    last_seen = m,
+                    "Praos: opcert counter regression (non-fatal during sync)"
+                );
+            }
+            // Counter over-increment: n > m + 1
+            if n > m + 1 {
+                if self.strict_verification {
+                    warn!(
+                        slot = header.slot.0,
+                        pool = %pool_id,
+                        got = n,
+                        last_seen = m,
+                        "Praos: opcert counter over-incremented (max +1 per rotation)"
+                    );
+                    return Err(ConsensusError::OpcertCounterOverIncremented {
+                        got: n,
+                        last_seen: m,
+                    });
+                }
+                debug!(
+                    slot = header.slot.0,
+                    pool = %pool_id,
+                    got = n,
+                    last_seen = m,
+                    "Praos: opcert counter over-incremented (non-fatal during sync)"
                 );
             }
         }
@@ -341,11 +397,11 @@ impl OuroborosPraos {
         self.opcert_counters
             .entry(pool_id)
             .and_modify(|v| {
-                if seq > *v {
-                    *v = seq;
+                if n > *v {
+                    *v = n;
                 }
             })
-            .or_insert(seq);
+            .or_insert(n);
 
         Ok(())
     }
@@ -408,13 +464,14 @@ impl OuroborosPraos {
     /// The KES key must not have expired: the block's KES period must be
     /// >= the cert's start period and < start + max_evolutions.
     fn validate_kes_period(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
-        let block_kes_period = header.slot.0 / KES_PERIOD_SLOTS;
+        let block_kes_period = header.slot.0 / self.slots_per_kes_period;
         let cert_kes_period = header.operational_cert.kes_period;
 
         trace!(
             block_kes_period,
             cert_kes_period,
             slot = header.slot.0,
+            slots_per_kes_period = self.slots_per_kes_period,
             "Praos: checking KES period"
         );
 
@@ -432,16 +489,16 @@ impl OuroborosPraos {
 
         // KES key must not have expired
         let kes_evolutions = block_kes_period - cert_kes_period;
-        if kes_evolutions >= MAX_KES_EVOLUTIONS {
+        if kes_evolutions >= self.max_kes_evolutions {
             warn!(
                 kes_evolutions,
-                max = MAX_KES_EVOLUTIONS,
+                max = self.max_kes_evolutions,
                 "Praos: KES key expired"
             );
             return Err(ConsensusError::KesExpired {
                 current: block_kes_period,
                 cert_start: cert_kes_period,
-                max_evolutions: MAX_KES_EVOLUTIONS,
+                max_evolutions: self.max_kes_evolutions,
             });
         }
 
@@ -513,7 +570,7 @@ impl OuroborosPraos {
             return Ok(()); // Skip if sizes don't match expected KES format
         }
 
-        let block_kes_period = header.slot.0 / KES_PERIOD_SLOTS;
+        let block_kes_period = header.slot.0 / self.slots_per_kes_period;
         let kes_period_offset = block_kes_period.saturating_sub(opcert.kes_period);
 
         // Reconstruct the header body CBOR for verification
@@ -1178,5 +1235,90 @@ mod tests {
         };
         assert_eq!(info.relative_stake, 0.05);
         assert_eq!(info.vrf_keyhash, Hash32::from_bytes([42u8; 32]));
+    }
+
+    #[test]
+    fn test_opcert_counter_over_increment_non_strict() {
+        // Non-strict: over-increment is non-fatal
+        let mut praos = OuroborosPraos::new();
+
+        let mut header1 = make_valid_header(100);
+        header1.operational_cert.sequence_number = 5;
+        assert!(praos
+            .validate_header_full(&header1, SlotNo(200), None)
+            .is_ok());
+
+        // Jump from 5 to 10 (over-increment by 5) — non-fatal during sync
+        let mut header2 = make_valid_header(200);
+        header2.operational_cert.sequence_number = 10;
+        assert!(praos
+            .validate_header_full(&header2, SlotNo(300), None)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_opcert_counter_over_increment_strict() {
+        let mut praos = OuroborosPraos::new();
+
+        let mut header1 = make_valid_header(100);
+        header1.operational_cert.sequence_number = 5;
+        assert!(praos
+            .validate_header_full(&header1, SlotNo(200), None)
+            .is_ok());
+
+        praos.set_strict_verification(true);
+
+        // Jump from 5 to 7 (over-increment, max allowed is +1)
+        let mut header2 = make_valid_header(200);
+        header2.operational_cert.sequence_number = 7;
+        let result = praos.validate_header_full(&header2, SlotNo(300), None);
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::OpcertCounterOverIncremented {
+                    got: 7,
+                    last_seen: 5
+                })
+            ),
+            "Expected OpcertCounterOverIncremented, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_opcert_counter_increment_by_one_ok() {
+        // Exactly +1 should always be fine
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        // Can't test strict with dummy VRF, so just test non-strict increment tracking
+        praos.set_strict_verification(false);
+        let mut header1 = make_valid_header(100);
+        header1.operational_cert.sequence_number = 5;
+        assert!(praos
+            .validate_header_full(&header1, SlotNo(200), None)
+            .is_ok());
+
+        let mut header2 = make_valid_header(200);
+        header2.operational_cert.sequence_number = 6;
+        assert!(praos
+            .validate_header_full(&header2, SlotNo(300), None)
+            .is_ok());
+
+        let pool_id = torsten_primitives::hash::blake2b_224(&header1.issuer_vkey);
+        assert_eq!(praos.opcert_counters[&pool_id], 6);
+    }
+
+    #[test]
+    fn test_kes_params_from_genesis() {
+        let praos =
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62);
+        assert_eq!(praos.slots_per_kes_period, 129600);
+        assert_eq!(praos.max_kes_evolutions, 62);
+
+        // Custom KES params
+        let praos2 =
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 86400, 46);
+        assert_eq!(praos2.slots_per_kes_period, 86400);
+        assert_eq!(praos2.max_kes_evolutions, 46);
     }
 }
