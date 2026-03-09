@@ -1074,21 +1074,11 @@ impl Node {
                                             }
                                         }
                                         warn!("Rollback to {rollback_point}");
-                                        let mut db = self.chain_db.write().await;
-                                        if let Err(e) = db.rollback_to_point(&rollback_point) {
-                                            error!("Rollback failed: {e}");
-                                        }
-                                        drop(db);
-                                        self.notify_rollback(&rollback_point).await;
+                                        self.handle_rollback(&rollback_point).await;
                                     }
                                     HeaderBatchResult::RollBackward(point, _tip) => {
                                         warn!("Rollback to {point}");
-                                        let mut db = self.chain_db.write().await;
-                                        if let Err(e) = db.rollback_to_point(&point) {
-                                            error!("Rollback failed: {e}");
-                                        }
-                                        drop(db);
-                                        self.notify_rollback(&point).await;
+                                        self.handle_rollback(&point).await;
                                     }
                                     HeaderBatchResult::Await => {
                                         info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
@@ -1135,10 +1125,7 @@ impl Node {
                                     match event {
                                         ChainSyncEvent::RollBackward(point, tip) => {
                                             warn!("Rollback to {point}, tip: {tip}");
-                                            let mut db = self.chain_db.write().await;
-                                            if let Err(e) = db.rollback_to_point(&point) { error!("Rollback failed: {e}"); }
-                                            drop(db);
-                                            self.notify_rollback(&point).await;
+                                            self.handle_rollback(&point).await;
                                         }
                                         ChainSyncEvent::Await => {
                                             info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
@@ -1685,6 +1672,100 @@ impl Node {
                 tip_block_number,
             });
         }
+    }
+
+    /// Handle a chain rollback: roll back ChainDB, reload ledger state from snapshot,
+    /// and replay blocks from the snapshot up to the rollback point.
+    async fn handle_rollback(&self, rollback_point: &Point) {
+        // 1. Roll back ChainDB
+        {
+            let mut db = self.chain_db.write().await;
+            if let Err(e) = db.rollback_to_point(rollback_point) {
+                error!("ChainDB rollback failed: {e}");
+                return;
+            }
+        }
+
+        // 2. Reload ledger state from the last snapshot
+        let snapshot_path = self.database_path.join("ledger-snapshot.bin");
+        if snapshot_path.exists() {
+            match torsten_ledger::LedgerState::load_snapshot(&snapshot_path) {
+                Ok(snapshot_state) => {
+                    let snapshot_slot = snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    let rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);
+
+                    if snapshot_slot <= rollback_slot {
+                        // Snapshot is at or before the rollback point — replay forward
+                        let mut ls = self.ledger_state.write().await;
+                        *ls = snapshot_state;
+                        let replay_from = snapshot_slot;
+
+                        // 3. Replay blocks from snapshot tip to rollback point
+                        let db = self.chain_db.read().await;
+                        let mut current_slot = replay_from;
+                        let mut replayed = 0u64;
+                        while current_slot < rollback_slot {
+                            match db.get_next_block_after_slot(torsten_primitives::time::SlotNo(
+                                current_slot,
+                            )) {
+                                Ok(Some((next_slot, _hash, cbor))) => {
+                                    if next_slot.0 > rollback_slot {
+                                        break;
+                                    }
+                                    match torsten_serialization::multi_era::decode_block(&cbor) {
+                                        Ok(block) => {
+                                            if let Err(e) = ls.apply_block(&block) {
+                                                warn!("Ledger apply failed during replay: {e}");
+                                            }
+                                            replayed += 1;
+                                            current_slot = next_slot.0;
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to decode block during replay: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!("Failed to read block during replay: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        info!(
+                            snapshot_slot,
+                            rollback_slot,
+                            replayed,
+                            "Ledger state restored from snapshot and replayed"
+                        );
+                    } else {
+                        // Snapshot is ahead of rollback point — can't use it, reset to genesis
+                        warn!(
+                            snapshot_slot,
+                            rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0),
+                            "Snapshot is ahead of rollback point, resetting ledger state"
+                        );
+                        let mut ls = self.ledger_state.write().await;
+                        *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to load ledger snapshot for rollback: {e}");
+                    // Reset to empty ledger state as fallback
+                    let mut ls = self.ledger_state.write().await;
+                    *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+                }
+            }
+        } else {
+            // No snapshot — reset to empty ledger state
+            warn!("No ledger snapshot found for rollback, resetting ledger state");
+            let mut ls = self.ledger_state.write().await;
+            *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+        }
+
+        // 4. Notify peers
+        self.notify_rollback(rollback_point).await;
     }
 
     /// Attempt to forge a block if we are in block producer mode and are the slot leader.
