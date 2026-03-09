@@ -1114,9 +1114,9 @@ impl Node {
                                 }
 
                                 if !forward_blocks.is_empty() {
-                                    let blocks: Vec<_> = forward_blocks.iter().map(|(b, _)| b.clone()).collect();
-                                    let tip = &forward_blocks.last().unwrap().1;
-                                    self.process_forward_blocks(blocks, tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                    let tip = forward_blocks.last().unwrap().1.clone();
+                                    let blocks: Vec<_> = forward_blocks.into_iter().map(|(b, _)| b).collect();
+                                    self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                 }
 
                                 for event in other_events {
