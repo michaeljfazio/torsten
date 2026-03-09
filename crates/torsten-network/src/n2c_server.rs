@@ -1452,7 +1452,17 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
         QueryResult::PoolParams(params) => {
             enc.array(params.len() as u64).ok();
             for pool in params {
-                enc.map(7).ok();
+                let mut field_count = 7u64; // base fields
+                if !pool.reward_account.is_empty() {
+                    field_count += 1;
+                }
+                if !pool.owners.is_empty() {
+                    field_count += 1;
+                }
+                if pool.metadata_url.is_some() {
+                    field_count += 1;
+                }
+                enc.map(field_count).ok();
                 enc.str("pool_id").ok();
                 enc.bytes(&pool.pool_id).ok();
                 enc.str("vrf_keyhash").ok();
@@ -1469,6 +1479,29 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.array(pool.relays.len() as u64).ok();
                 for relay in &pool.relays {
                     enc.str(relay).ok();
+                }
+                if !pool.reward_account.is_empty() {
+                    enc.str("reward_account").ok();
+                    enc.bytes(&pool.reward_account).ok();
+                }
+                if !pool.owners.is_empty() {
+                    enc.str("owners").ok();
+                    enc.array(pool.owners.len() as u64).ok();
+                    for owner in &pool.owners {
+                        enc.bytes(owner).ok();
+                    }
+                }
+                if let Some(url) = &pool.metadata_url {
+                    enc.str("metadata").ok();
+                    enc.map(2).ok();
+                    enc.str("url").ok();
+                    enc.str(url).ok();
+                    enc.str("hash").ok();
+                    if let Some(hash) = &pool.metadata_hash {
+                        enc.bytes(hash).ok();
+                    } else {
+                        enc.null().ok();
+                    }
                 }
             }
         }

@@ -1017,6 +1017,10 @@ impl QueryCmd {
                     margin_num: u64,
                     margin_den: u64,
                     relays: Vec<String>,
+                    reward_account: String,
+                    owners: Vec<String>,
+                    metadata_url: Option<String>,
+                    metadata_hash: Option<String>,
                 }
 
                 let mut pools: Vec<PoolInfo> = Vec::new();
@@ -1031,6 +1035,10 @@ impl QueryCmd {
                         margin_num: 0,
                         margin_den: 1,
                         relays: Vec::new(),
+                        reward_account: String::new(),
+                        owners: Vec::new(),
+                        metadata_url: None,
+                        metadata_hash: None,
                     };
                     for _ in 0..map_len {
                         let key = decoder.str().unwrap_or("");
@@ -1047,6 +1055,35 @@ impl QueryCmd {
                                 let relay_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
                                 for _ in 0..relay_len {
                                     info.relays.push(decoder.str().unwrap_or("").to_string());
+                                }
+                            }
+                            "reward_account" => {
+                                info.reward_account = hex::encode(decoder.bytes().unwrap_or(&[]))
+                            }
+                            "owners" => {
+                                let owner_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                                for _ in 0..owner_len {
+                                    info.owners
+                                        .push(hex::encode(decoder.bytes().unwrap_or(&[])));
+                                }
+                            }
+                            "metadata" => {
+                                let mmap_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                                for _ in 0..mmap_len {
+                                    let mkey = decoder.str().unwrap_or("");
+                                    match mkey {
+                                        "url" => {
+                                            info.metadata_url =
+                                                Some(decoder.str().unwrap_or("").to_string())
+                                        }
+                                        "hash" => {
+                                            info.metadata_hash =
+                                                decoder.bytes().ok().map(hex::encode);
+                                        }
+                                        _ => {
+                                            decoder.skip().ok();
+                                        }
+                                    }
                                 }
                             }
                             _ => {
@@ -1069,16 +1106,28 @@ impl QueryCmd {
                 println!("Total Pools: {}", pools.len());
 
                 for pool in &filtered {
-                    println!("\nPool ID:     {}", pool.pool_id);
-                    println!("VRF Key:     {}", pool.vrf_keyhash);
-                    println!("Pledge:      {} ADA", pool.pledge / 1_000_000);
-                    println!("Cost:        {} ADA", pool.cost / 1_000_000);
+                    println!("\nPool ID:       {}", pool.pool_id);
+                    println!("VRF Key:       {}", pool.vrf_keyhash);
+                    println!("Pledge:        {} ADA", pool.pledge / 1_000_000);
+                    println!("Cost:          {} ADA", pool.cost / 1_000_000);
                     if pool.margin_den > 0 {
                         let margin_pct = (pool.margin_num as f64 / pool.margin_den as f64) * 100.0;
-                        println!("Margin:      {margin_pct:.2}%");
+                        println!("Margin:        {margin_pct:.2}%");
+                    }
+                    if !pool.reward_account.is_empty() {
+                        println!("Reward Acct:   {}", pool.reward_account);
+                    }
+                    if !pool.owners.is_empty() {
+                        println!("Owners:        {}", pool.owners.join(", "));
                     }
                     if !pool.relays.is_empty() {
-                        println!("Relays:      {}", pool.relays.join(", "));
+                        println!("Relays:        {}", pool.relays.join(", "));
+                    }
+                    if let Some(url) = &pool.metadata_url {
+                        println!("Metadata URL:  {url}");
+                    }
+                    if let Some(hash) = &pool.metadata_hash {
+                        println!("Metadata Hash: {hash}");
                     }
                 }
                 Ok(())
