@@ -99,20 +99,31 @@ The KES (Key Evolving Signature) period in the block header must be within the v
 opcert_start_kes_period <= current_kes_period < opcert_start_kes_period + max_kes_evolutions
 ```
 
-### VRF Output Validation
+### VRF Verification
 
-The VRF output in the block header is validated for correct format (correct length and structure).
+Full VRF verification includes:
+
+1. **VRF key binding** -- `blake2b_256(header.vrf_vkey)` must match the pool's registered `vrf_keyhash`
+2. **VRF proof verification** -- The VRF proof is cryptographically verified against the VRF public key
+3. **Leader eligibility** -- The VRF leader value is checked against the Praos threshold for the pool's relative stake using the phi function
 
 ### Operational Certificate Verification
 
-The operational certificate's Ed25519 signature is verified. The cold key signs a CBOR structure containing:
-- The hot (KES) verification key
-- The operational certificate sequence number
-- The starting KES period
+The operational certificate's Ed25519 signature is verified against the raw bytes signable format (matching Haskell's `OCertSignable`):
 
 ```
-signature = sign(cold_skey, cbor([hot_vkey, sequence_number, kes_period]))
+signable = hot_vkey(32 bytes) || counter(8 bytes BE) || kes_period(8 bytes BE)
+signature = sign(cold_skey, signable)
 ```
+
+The counter must be monotonically increasing per pool to prevent certificate replay.
+
+### KES Signature Verification
+
+Block headers are signed using the Sum6Kes scheme (depth-6 binary sum composition over Ed25519). The KES key is evolved to the correct period offset from the operational certificate's start period. Verification checks:
+
+1. The KES signature over the header body bytes is valid
+2. The KES period matches the expected value for the block's slot
 
 ### Slot Leader Eligibility
 
