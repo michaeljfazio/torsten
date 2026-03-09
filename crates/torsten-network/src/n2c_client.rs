@@ -259,7 +259,7 @@ impl N2CClient {
     /// Query protocol parameters (GetCurrentPParams - Shelley query tag 7)
     pub async fn query_protocol_params(&mut self) -> Result<String, N2CClientError> {
         let result = self.send_query(7).await?;
-        parse_string_result(&result)
+        parse_protocol_params_cbor(&result)
     }
 
     /// Query stake distribution (GetStakeDistribution - Shelley query tag 5)
@@ -724,8 +724,11 @@ fn parse_epoch_result(payload: &[u8]) -> Result<u64, N2CClientError> {
         .map_err(|e| N2CClientError::Protocol(format!("bad epoch: {e}")))
 }
 
-/// Parse a string from MsgResult CBOR
-fn parse_string_result(payload: &[u8]) -> Result<String, N2CClientError> {
+/// Parse protocol params CBOR map into JSON string.
+///
+/// Decodes the Cardano protocol params CBOR map (integer keys 0-33)
+/// and produces a cardano-cli compatible JSON representation.
+fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> {
     let mut decoder = minicbor::Decoder::new(payload);
     let _ = decoder.array();
     let tag = decoder.u32().unwrap_or(999);
@@ -734,10 +737,99 @@ fn parse_string_result(payload: &[u8]) -> Result<String, N2CClientError> {
             "expected MsgResult(4), got {tag}"
         )));
     }
-    decoder
-        .str()
-        .map(|s| s.to_string())
-        .map_err(|e| N2CClientError::Protocol(format!("bad string: {e}")))
+
+    // Try to parse as CBOR map first (new format), fall back to string (legacy)
+    match decoder.datatype() {
+        Ok(minicbor::data::Type::Map) => {
+            let map_len = decoder
+                .map()
+                .map_err(|e| N2CClientError::Protocol(format!("bad map: {e}")))?
+                .unwrap_or(0);
+
+            let key_names: &[&str] = &[
+                "txFeePerByte",        // 0
+                "txFeeFixed",          // 1
+                "maxBlockBodySize",    // 2
+                "maxTxSize",           // 3
+                "maxBlockHeaderSize",  // 4
+                "stakeAddressDeposit", // 5
+                "stakePoolDeposit",    // 6
+                "poolRetireMaxEpoch",  // 7
+                "stakePoolTargetNum",  // 8
+            ];
+
+            let rational_names: &[&str] = &[
+                "poolPledgeInfluence", // 9
+                "monetaryExpansion",   // 10
+                "treasuryCut",         // 11
+            ];
+
+            let mut entries = Vec::new();
+
+            for _ in 0..map_len {
+                let key = decoder
+                    .u32()
+                    .map_err(|e| N2CClientError::Protocol(format!("bad key: {e}")))?;
+
+                match key {
+                    0..=8 => {
+                        let val = decoder
+                            .u64()
+                            .map_err(|e| N2CClientError::Protocol(format!("bad u64: {e}")))?;
+                        if let Some(name) = key_names.get(key as usize) {
+                            entries.push(format!("  \"{name}\": {val}"));
+                        }
+                    }
+                    9..=11 => {
+                        let _ = decoder.tag();
+                        let _ = decoder.array();
+                        let num = decoder.u64().unwrap_or(0);
+                        let den = decoder.u64().unwrap_or(1);
+                        if let Some(name) = rational_names.get((key - 9) as usize) {
+                            entries.push(format!(
+                                "  \"{name}\": {{\n    \"numerator\": {num},\n    \"denominator\": {den}\n  }}"
+                            ));
+                        }
+                    }
+                    16 => {
+                        let val = decoder.u64().unwrap_or(0);
+                        entries.push(format!("  \"minPoolCost\": {val}"));
+                    }
+                    17 => {
+                        let val = decoder.u64().unwrap_or(0);
+                        entries.push(format!("  \"utxoCostPerByte\": {val}"));
+                    }
+                    22 => {
+                        let val = decoder.u64().unwrap_or(0);
+                        entries.push(format!("  \"maxValueSize\": {val}"));
+                    }
+                    23 => {
+                        let val = decoder.u64().unwrap_or(0);
+                        entries.push(format!("  \"collateralPercentage\": {val}"));
+                    }
+                    24 => {
+                        let val = decoder.u64().unwrap_or(0);
+                        entries.push(format!("  \"maxCollateralInputs\": {val}"));
+                    }
+                    _ => {
+                        let _ = decoder.skip();
+                    }
+                }
+            }
+            Ok(format!("{{\n{}\n}}", entries.join(",\n")))
+        }
+        Ok(minicbor::data::Type::String) => {
+            // Legacy string format fallback
+            decoder
+                .str()
+                .map(|s| s.to_string())
+                .map_err(|e| N2CClientError::Protocol(format!("bad string: {e}")))
+        }
+        Ok(dt) => Err(N2CClientError::Protocol(format!(
+            "unexpected CBOR type for protocol params: {dt:?}"
+        ))),
+        Err(e) => Err(N2CClientError::Protocol(format!("decode error: {e}"))),
+    }
 }
 
 /// Parse a u64 from MsgResult CBOR
@@ -812,16 +904,40 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_string_result() {
+    fn test_parse_protocol_params_legacy_string() {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(4).unwrap();
         enc.str("{\"min_fee_a\": 44}").unwrap();
 
-        let result = parse_string_result(&buf).unwrap();
+        let result = parse_protocol_params_cbor(&buf).unwrap();
         assert!(result.contains("min_fee_a"));
         assert!(result.contains("44"));
+    }
+
+    #[test]
+    fn test_parse_protocol_params_cbor_map() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap();
+        // CBOR map with integer keys
+        enc.map(3).unwrap();
+        enc.u32(0).unwrap().u64(44).unwrap(); // txFeePerByte
+        enc.u32(1).unwrap().u64(155381).unwrap(); // txFeeFixed
+        enc.u32(9).unwrap(); // poolPledgeInfluence (tagged rational)
+        enc.tag(minicbor::data::Tag::new(30)).unwrap();
+        enc.array(2).unwrap();
+        enc.u64(3).unwrap();
+        enc.u64(10).unwrap();
+
+        let result = parse_protocol_params_cbor(&buf).unwrap();
+        assert!(result.contains("\"txFeePerByte\": 44"));
+        assert!(result.contains("\"txFeeFixed\": 155381"));
+        assert!(result.contains("\"poolPledgeInfluence\""));
+        assert!(result.contains("\"numerator\": 3"));
+        assert!(result.contains("\"denominator\": 10"));
     }
 
     #[test]
