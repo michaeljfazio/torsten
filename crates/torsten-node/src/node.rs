@@ -645,6 +645,7 @@ impl Node {
             torsten_network::n2n_server::PeerSharingMode::PeerSharingEnabled,
         );
         n2n_server.set_mempool(self.mempool.clone());
+        n2n_server.set_peer_manager(self.peer_manager.clone());
         // Get the broadcast senders before spawning the server
         self.block_announcement_tx = Some(n2n_server.block_announcement_sender());
         self.rollback_announcement_tx = Some(n2n_server.rollback_announcement_sender());
@@ -853,6 +854,40 @@ impl Node {
             {
                 let pm = peer_manager.read().await;
                 info!("P2P: {}", pm.stats());
+            }
+
+            // Spawn PeerSharing client: request peers from connected peer in background
+            {
+                let ps_peer_addr = peer_addr;
+                let ps_network_magic = network_magic;
+                let ps_peer_manager = peer_manager.clone();
+                tokio::spawn(async move {
+                    match torsten_network::request_peers_from(
+                        ps_peer_addr.to_string().as_str(),
+                        ps_network_magic,
+                        10,
+                    )
+                    .await
+                    {
+                        Ok(peers) => {
+                            if peers.is_empty() {
+                                debug!("PeerSharing: no peers received from {ps_peer_addr}");
+                            } else {
+                                info!(
+                                    "PeerSharing: received {} peers from {ps_peer_addr}",
+                                    peers.len()
+                                );
+                                let mut pm = ps_peer_manager.write().await;
+                                for addr in peers {
+                                    pm.add_shared_peer(addr);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("PeerSharing with {ps_peer_addr}: {e}");
+                        }
+                    }
+                });
             }
 
             // Connect additional peers as block fetchers for parallel block fetch

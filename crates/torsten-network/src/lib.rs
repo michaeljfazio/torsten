@@ -11,7 +11,9 @@ pub mod query_handler;
 pub mod server;
 
 pub use client::{BlockFetchPool, ChainSyncEvent, HeaderBatchResult, HeaderInfo, NodeToNodeClient};
-pub use miniprotocols::peersharing::{PeerAddress, PeerSharingMessage, PeerSharingState};
+pub use miniprotocols::peersharing::{
+    request_peers_from, PeerAddress, PeerSharingMessage, PeerSharingState,
+};
 pub use n2c_client::N2CClient;
 pub use n2c_server::{N2CServer, TxValidator};
 pub use n2n_server::{BlockAnnouncement, BlockProvider, N2NServer, RollbackAnnouncement};
