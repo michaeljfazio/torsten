@@ -577,13 +577,36 @@ impl BlockFetchPool {
             }));
         }
 
-        // Collect results in order
+        // Collect results in order, retrying failed chunks on other fetchers
         let mut all_blocks = Vec::with_capacity(headers.len());
+        let mut failed_chunks: Vec<(usize, Vec<HeaderInfo>)> = Vec::new();
+
         for (i, handle) in handles.into_iter().enumerate() {
-            let blocks = handle
-                .await
-                .map_err(|e| ClientError::BlockFetch(format!("fetcher {i} task: {e}")))?
-                .map_err(|e| ClientError::BlockFetch(format!("fetcher {i}: {e}")))?;
+            match handle.await {
+                Ok(Ok(blocks)) => all_blocks.extend(blocks),
+                Ok(Err(e)) => {
+                    tracing::warn!("Fetcher {i} failed: {e}, will retry on another fetcher");
+                    let start = i * chunk_size;
+                    let end = (start + chunk_size).min(headers.len());
+                    failed_chunks.push((i, headers[start..end].to_vec()));
+                }
+                Err(e) => {
+                    tracing::warn!("Fetcher {i} task panicked: {e}, will retry on another fetcher");
+                    let start = i * chunk_size;
+                    let end = (start + chunk_size).min(headers.len());
+                    failed_chunks.push((i, headers[start..end].to_vec()));
+                }
+            }
+        }
+
+        // Retry failed chunks on the first available fetcher (round-robin)
+        for (failed_idx, chunk) in failed_chunks {
+            let fallback_idx = (failed_idx + 1) % num_fetchers;
+            let fetcher = self.fetchers[fallback_idx].clone();
+            let mut client = fetcher.lock().await;
+            let blocks = client.fetch_blocks_by_points(&chunk).await.map_err(|e| {
+                ClientError::BlockFetch(format!("retry on fetcher {fallback_idx}: {e}"))
+            })?;
             all_blocks.extend(blocks);
         }
 
