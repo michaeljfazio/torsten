@@ -991,6 +991,21 @@ impl Node {
             ls.tip.block_number.0
         });
 
+        // If the gap is very large (>50k blocks), skip the replay — it would
+        // take too long without an up-to-date ledger snapshot. The ledger state
+        // was already loaded from any existing snapshot before reaching here,
+        // so blocks_behind reflects the snapshot's position (or genesis if none).
+        if blocks_behind > 50_000 {
+            warn!(
+                blocks_behind,
+                db_tip_slot,
+                ledger_slot,
+                "Skipping ledger replay: gap too large. \
+                 The node will sync from peers and build ledger state incrementally."
+            );
+            return;
+        }
+
         info!(
             ledger_slot,
             db_tip_slot,
