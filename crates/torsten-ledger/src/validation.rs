@@ -85,6 +85,8 @@ pub enum ValidationError {
         limit: u64,
         total: u64,
     },
+    #[error("Output value too large: maximum={maximum}, actual={actual}")]
+    OutputValueTooLarge { maximum: u64, actual: u64 },
 }
 
 /// Validate a transaction against the current UTxO set and protocol parameters
@@ -313,6 +315,22 @@ pub fn validate_transaction(
                 minimum: min_utxo.0,
                 actual: output.value.coin.0,
             });
+        }
+    }
+
+    // Rule 5a: Output value size must not exceed max_val_size
+    // Per Cardano spec, the CBOR-encoded size of each output's value is bounded
+    if params.max_val_size > 0 {
+        for output in &body.outputs {
+            if !output.value.multi_asset.is_empty() {
+                let val_size = estimate_value_cbor_size(&output.value);
+                if val_size > params.max_val_size {
+                    errors.push(ValidationError::OutputValueTooLarge {
+                        maximum: params.max_val_size,
+                        actual: val_size,
+                    });
+                }
+            }
         }
     }
 
@@ -767,6 +785,44 @@ fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u
         tier_rate = tier_rate * MULTIPLIER_NUM / MULTIPLIER_DEN;
     }
     fee
+}
+
+/// Estimate the CBOR-encoded size of a Value.
+/// For ADA-only values, this is just the coin encoding.
+/// For multi-asset values, this accounts for the [coin, multiasset_map] encoding.
+fn estimate_value_cbor_size(value: &torsten_primitives::value::Value) -> u64 {
+    if value.multi_asset.is_empty() {
+        // Pure ADA: just the CBOR integer (1-9 bytes)
+        return cbor_uint_size(value.coin.0);
+    }
+    // Multi-asset: array(2) [coin, map]
+    let mut size: u64 = 1; // array header
+    size += cbor_uint_size(value.coin.0); // coin
+    size += 1; // map header (or more for large maps)
+    for assets in value.multi_asset.values() {
+        size += 1 + 28; // bytes header + 28-byte policy ID
+        size += 1; // nested map header
+        for (asset_name, quantity) in assets {
+            size += 1 + asset_name.0.len() as u64; // bytes header + name
+            size += cbor_uint_size(*quantity); // quantity
+        }
+    }
+    size
+}
+
+/// Estimate CBOR encoding size of an unsigned integer
+fn cbor_uint_size(value: u64) -> u64 {
+    if value < 24 {
+        1
+    } else if value <= 0xFF {
+        2
+    } else if value <= 0xFFFF {
+        3
+    } else if value <= 0xFFFF_FFFF {
+        5
+    } else {
+        9
+    }
 }
 
 /// Evaluate a native script given the set of key hashes that signed
@@ -2169,6 +2225,153 @@ mod tests {
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         // Should pass (no auxiliary data hash mismatch errors)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cbor_uint_size() {
+        assert_eq!(cbor_uint_size(0), 1);
+        assert_eq!(cbor_uint_size(23), 1);
+        assert_eq!(cbor_uint_size(24), 2);
+        assert_eq!(cbor_uint_size(255), 2);
+        assert_eq!(cbor_uint_size(256), 3);
+        assert_eq!(cbor_uint_size(65535), 3);
+        assert_eq!(cbor_uint_size(65536), 5);
+        assert_eq!(cbor_uint_size(0xFFFF_FFFF), 5);
+        assert_eq!(cbor_uint_size(0x1_0000_0000), 9);
+    }
+
+    #[test]
+    fn test_estimate_value_cbor_size_ada_only() {
+        let value = Value::lovelace(1_000_000);
+        let size = estimate_value_cbor_size(&value);
+        // ADA-only: just the uint encoding of 1_000_000 (5 bytes: 1A prefix + 4 bytes)
+        assert_eq!(size, cbor_uint_size(1_000_000));
+    }
+
+    #[test]
+    fn test_estimate_value_cbor_size_multi_asset() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut value = Value::lovelace(2_000_000);
+        value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 100);
+
+        let size = estimate_value_cbor_size(&value);
+        // array(2) header: 1
+        // coin (2_000_000): 5
+        // outer map header: 1
+        // policy_id bytes header + 28: 29
+        // inner map header: 1
+        // asset name "Token" (5 bytes): 1 + 5 = 6
+        // quantity 100: 2
+        // Total: 1 + 5 + 1 + 29 + 1 + 6 + 2 = 45
+        assert_eq!(size, 45);
+    }
+
+    #[test]
+    fn test_output_value_too_large() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(100_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        // Create output with many assets to make value large
+        let mut output_value = Value::lovelace(99_800_000);
+        for i in 0..100u8 {
+            let asset = AssetName::new(vec![i; 32]).unwrap();
+            output_value
+                .multi_asset
+                .entry(policy)
+                .or_default()
+                .insert(asset, 1_000_000);
+        }
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.max_val_size = 50; // Tiny limit to trigger the error
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: output_value,
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::OutputValueTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_ada_only_output_skips_max_val_size_check() {
+        // ADA-only outputs should not be checked against max_val_size
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.max_val_size = 1; // Absurdly small, but should not affect ADA-only
+
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
 }
