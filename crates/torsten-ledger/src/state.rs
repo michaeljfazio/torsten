@@ -299,17 +299,17 @@ impl LedgerState {
             }
         }
         if block_mem > self.protocol_params.max_block_ex_units.mem {
-            warn!(
+            debug!(
                 block_mem,
                 limit = self.protocol_params.max_block_ex_units.mem,
-                "Block exceeds max execution unit memory budget"
+                "Block exceeds max execution unit memory budget (expected during replay before PP updates)"
             );
         }
         if block_steps > self.protocol_params.max_block_ex_units.steps {
-            warn!(
+            debug!(
                 block_steps,
                 limit = self.protocol_params.max_block_ex_units.steps,
-                "Block exceeds max execution unit step budget"
+                "Block exceeds max execution unit step budget (expected during replay before PP updates)"
             );
         }
 
