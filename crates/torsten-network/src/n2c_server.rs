@@ -1553,6 +1553,18 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.str("securityParam").ok();
             enc.u64(*security_param).ok();
         }
+        QueryResult::NonMyopicMemberRewards(rewards) => {
+            // Map from stake_amount → map from pool_id → reward
+            enc.map(rewards.len() as u64).ok();
+            for entry in rewards {
+                enc.u64(entry.stake_amount).ok();
+                enc.map(entry.pool_rewards.len() as u64).ok();
+                for (pool_id, reward) in &entry.pool_rewards {
+                    enc.bytes(pool_id).ok();
+                    enc.u64(*reward).ok();
+                }
+            }
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }

@@ -35,6 +35,8 @@ pub enum QueryResult {
         slot_length_secs: u64,
         security_param: u64,
     },
+    /// NonMyopicMemberRewards: map from stake_amount → pool rewards
+    NonMyopicMemberRewards(Vec<NonMyopicRewardEntry>),
     Error(String),
 }
 
@@ -199,6 +201,14 @@ impl Default for ProtocolParamsSnapshot {
             pvt_committee_den: 100,
         }
     }
+}
+
+/// Entry for NonMyopicMemberRewards query result
+#[derive(Debug, Clone)]
+pub struct NonMyopicRewardEntry {
+    pub stake_amount: u64,
+    /// Pool ID → estimated reward for this stake amount
+    pub pool_rewards: Vec<(Vec<u8>, u64)>,
 }
 
 /// Snapshot of a stake pool for query results
@@ -571,9 +581,56 @@ impl QueryHandler {
                 QueryResult::StakeDistribution(self.state.stake_pools.clone())
             }
             6 => {
-                // GetNonMyopicMemberRewards — returns empty map (stake simulation not implemented)
+                // GetNonMyopicMemberRewards — estimate rewards for given stake amounts
                 debug!("Query: GetNonMyopicMemberRewards");
-                QueryResult::StakeDistribution(vec![])
+
+                // Parse requested stake amounts from the remaining query payload
+                let mut amounts = Vec::new();
+                if let Ok(Some(n)) = decoder.array() {
+                    for _ in 0..n {
+                        if let Ok(amt) = decoder.u64() {
+                            amounts.push(amt);
+                        } else {
+                            decoder.skip().ok();
+                        }
+                    }
+                }
+                let stake_amounts = if amounts.is_empty() {
+                    vec![1_000_000_000_000] // Default: 1M ADA in lovelace
+                } else {
+                    amounts
+                };
+
+                // Compute approximate rewards per pool for each stake amount
+                // Uses simplified reward formula:
+                //   reward ≈ (stake/total_stake) * rewards_pot * (1-margin) - cost_share
+                let total_stake: u64 = self.state.stake_pools.iter().map(|p| p.stake).sum();
+                let rewards_pot = self.state.reserves / 200; // ~0.5% of reserves per epoch
+
+                let mut result = Vec::new();
+                for amount in &stake_amounts {
+                    let mut pool_rewards = Vec::new();
+                    for pool in &self.state.stake_pools {
+                        if pool.stake == 0 || total_stake == 0 {
+                            continue;
+                        }
+                        let pool_reward =
+                            (pool.stake as u128 * rewards_pot as u128 / total_stake as u128) as u64;
+                        let after_cost = pool_reward.saturating_sub(pool.cost);
+                        let margin = pool.margin_num as f64 / pool.margin_den.max(1) as f64;
+                        let delegator_share = (after_cost as f64 * (1.0 - margin)) as u64;
+                        let delegator_reward = (*amount as u128 * delegator_share as u128
+                            / pool.stake.max(1) as u128)
+                            as u64;
+                        pool_rewards.push((pool.pool_id.clone(), delegator_reward));
+                    }
+                    result.push(NonMyopicRewardEntry {
+                        stake_amount: *amount,
+                        pool_rewards,
+                    });
+                }
+
+                QueryResult::NonMyopicMemberRewards(result)
             }
             7 => {
                 // GetCurrentPParams
