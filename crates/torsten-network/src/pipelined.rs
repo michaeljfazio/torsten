@@ -45,6 +45,10 @@ pub struct PipelinedPeerClient {
     remote_addr: SocketAddr,
     /// Number of outstanding (sent but not yet received) pipelined requests.
     in_flight: usize,
+    /// True when the connection has stale in-flight requests that couldn't be
+    /// drained (e.g. after AwaitReply with many pending MsgRequestNext).
+    /// The caller should reconnect before using this client again.
+    stale: bool,
 }
 
 impl PipelinedPeerClient {
@@ -105,6 +109,7 @@ impl PipelinedPeerClient {
             _plexer: plexer,
             remote_addr,
             in_flight: 0,
+            stale: false,
         })
     }
 
@@ -304,16 +309,37 @@ impl PipelinedPeerClient {
         Ok(())
     }
 
-    /// Drain all in-flight responses (used after rollback/await).
+    /// Drain in-flight responses with a timeout.
+    ///
+    /// After AwaitReply, each remaining in-flight MsgRequestNext requires a new
+    /// block to be produced (~20s each). With 150 in-flight, this would block
+    /// for ~50 minutes. Instead, drain what we can within a short timeout and
+    /// mark the client as stale so the caller can reconnect.
     async fn drain_in_flight(&mut self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
         while self.in_flight > 0 {
-            match self.cs_buf.recv_full_msg::<Message<HeaderContent>>().await {
-                Ok(_) => {
+            match tokio::time::timeout_at(
+                deadline,
+                self.cs_buf.recv_full_msg::<Message<HeaderContent>>(),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
                     self.in_flight -= 1;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     debug!("drain in-flight error (expected): {e}");
                     self.in_flight = 0;
+                    break;
+                }
+                Err(_) => {
+                    // Timeout — remaining in-flight would block for too long
+                    debug!(
+                        remaining = self.in_flight,
+                        "drain in-flight timeout, marking client stale"
+                    );
+                    self.in_flight = 0;
+                    self.stale = true;
                     break;
                 }
             }
@@ -328,6 +354,12 @@ impl PipelinedPeerClient {
     /// Remote address of this connection.
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
+    }
+
+    /// Whether the connection has stale in-flight requests and should be
+    /// reconnected before further use.
+    pub fn is_stale(&self) -> bool {
+        self.stale
     }
 
     /// Abort the connection.
