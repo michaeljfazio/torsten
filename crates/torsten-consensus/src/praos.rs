@@ -92,6 +92,11 @@ pub struct OuroborosPraos {
     /// When false (during initial sync), VRF/KES/opcert failures are non-fatal.
     /// When true (caught up to chain tip), verification failures reject blocks.
     pub strict_verification: bool,
+    /// Whether the epoch nonce has been correctly established.
+    /// After Mithril import, the epoch nonce is wrong until 2 full epoch transitions
+    /// have accumulated correct VRF nonce contributions. When false, VRF proof
+    /// verification is skipped even in strict mode.
+    pub nonce_established: bool,
     /// Tracked opcert sequence numbers per pool (cold key hash → highest seen sequence number).
     /// Used to detect opcert counter regressions (replay protection).
     opcert_counters: HashMap<Hash28, u64>,
@@ -107,6 +112,7 @@ impl OuroborosPraos {
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
             tip: Tip::origin(),
             strict_verification: false,
+            nonce_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -124,6 +130,7 @@ impl OuroborosPraos {
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
             tip: Tip::origin(),
             strict_verification: false,
+            nonce_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -143,6 +150,7 @@ impl OuroborosPraos {
             max_kes_evolutions,
             tip: Tip::origin(),
             strict_verification: false,
+            nonce_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -412,17 +420,31 @@ impl OuroborosPraos {
     /// This verifies that the block producer correctly evaluated the VRF,
     /// proving they had the right to produce this block.
     ///
-    /// Note: VRF proof verification requires a correct epoch nonce. After a
-    /// Mithril snapshot import (fast sync without full chain replay), the ledger's
-    /// epoch nonce is derived from genesis data rather than the actual chain history,
-    /// so VRF proof verification will always fail even for legitimate blocks.
-    /// For this reason, VRF proof failure is always a WARNING and never causes block
-    /// rejection — only VRF key binding (matching pool registration) is enforced in
-    /// strict mode. Once full chain replay is implemented, this can be strengthened.
+    /// Verify the VRF proof in the block header.
+    ///
+    /// In strict mode with an established nonce, VRF proof failure is fatal.
+    /// Otherwise, failures are logged as warnings because the epoch nonce may
+    /// not be correctly established yet (e.g., after Mithril import — needs
+    /// 2 full epoch transitions for nonce to stabilize).
     fn verify_vrf_proof(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
+        // VRF proof verification requires a correct epoch nonce.
+        // After Mithril import, the nonce is wrong until 2 full epoch transitions.
+        let vrf_is_fatal = self.strict_verification && self.nonce_established;
+
         // Construct the VRF seed per Praos spec:
         // input = Blake2b-256(slot_BE || epoch_nonce)
         let seed = crate::slot_leader::vrf_input(&header.epoch_nonce, header.slot);
+
+        debug!(
+            slot = header.slot.0,
+            epoch_nonce = %header.epoch_nonce,
+            vrf_vkey_len = header.vrf_vkey.len(),
+            vrf_proof_len = header.vrf_result.proof.len(),
+            vrf_output_len = header.vrf_result.output.len(),
+            seed_len = seed.len(),
+            nonce_established = self.nonce_established,
+            "Praos: VRF verification inputs"
+        );
 
         match torsten_crypto::vrf::verify_vrf_proof(
             &header.vrf_vkey,
@@ -434,8 +456,12 @@ impl OuroborosPraos {
                 if header.vrf_result.output.len() == 64
                     && header.vrf_result.output[..] != vrf_output[..]
                 {
+                    if vrf_is_fatal {
+                        return Err(ConsensusError::InvalidBlock(
+                            "VRF output mismatch".to_string(),
+                        ));
+                    }
                     warn!(slot = header.slot.0, "Praos: VRF output mismatch");
-                    // VRF output mismatch is also non-fatal for the same reason
                     return Ok(());
                 }
                 trace!(
@@ -445,10 +471,9 @@ impl OuroborosPraos {
                 Ok(())
             }
             Err(e) => {
-                // VRF proof verification is always a non-fatal warning.
-                // It requires the correct epoch nonce, which is only available after
-                // full chain replay from genesis. Mithril-bootstrapped nodes will
-                // always see VRF failures here until the nonce is established.
+                if vrf_is_fatal {
+                    return Err(ConsensusError::VrfVerification(format!("{e}")));
+                }
                 warn!(
                     slot = header.slot.0,
                     error = %e,
@@ -528,11 +553,8 @@ impl OuroborosPraos {
         }
 
         // Verify the operational certificate signature:
-        // The cold key (issuer_vkey) signs the CBOR encoding of [hot_vkey, seq_num, kes_period]
-        //
-        // Note: opcert signature verification is currently always non-fatal (WARN on failure).
-        // The CBOR encoding used here matches the Cardano spec, but full compatibility
-        // with all edge cases in the Haskell reference implementation is still being validated.
+        // The cold key (issuer_vkey) signs raw bytes: hot_vkey(32) || counter(8 BE) || kes_period(8 BE)
+        // per the Haskell OCertSignable format.
         if header.issuer_vkey.len() == 32 && opcert.sigma.len() == 64 {
             match verify_opcert_signature(
                 &header.issuer_vkey,
@@ -545,8 +567,9 @@ impl OuroborosPraos {
                     debug!("Operational certificate signature verified");
                 }
                 Err(e) => {
-                    // Opcert signature failure is always non-fatal until the CBOR encoding
-                    // is confirmed to match the Haskell reference implementation exactly.
+                    if self.strict_verification {
+                        return Err(e);
+                    }
                     warn!("Opcert signature verification failed: {e}");
                 }
             }
@@ -562,11 +585,21 @@ impl OuroborosPraos {
     fn verify_kes_signature(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
         // Skip verification if no KES signature is available (Byron blocks)
         if header.kes_signature.is_empty() {
+            debug!(
+                slot = header.slot.0,
+                "Praos: KES signature is empty — skipping"
+            );
             return Ok(());
         }
 
         let opcert = &header.operational_cert;
         if opcert.hot_vkey.len() != 32 || header.kes_signature.len() != 448 {
+            debug!(
+                slot = header.slot.0,
+                kes_sig_len = header.kes_signature.len(),
+                hot_vkey_len = opcert.hot_vkey.len(),
+                "Praos: Skipping KES verification — unexpected sizes"
+            );
             return Ok(()); // Skip if sizes don't match expected KES format
         }
 
@@ -595,13 +628,9 @@ impl OuroborosPraos {
                 Ok(())
             }
             Err(e) => {
-                // KES signature failure is always non-fatal (WARN level).
-                // KES verification requires the exact header body CBOR bytes that were
-                // originally signed by the block producer. The encode_block_header_body
-                // function must produce byte-for-byte identical output to the original
-                // signing serialization — any deviation will cause spurious failures.
-                // Until KES verification is confirmed correct against live blocks,
-                // failures are warnings that do not block block acceptance.
+                if self.strict_verification {
+                    return Err(ConsensusError::InvalidKesSignature);
+                }
                 warn!(
                     slot = header.slot.0,
                     error = %e,
@@ -654,7 +683,8 @@ impl OuroborosPraos {
 
 /// Verify the operational certificate Ed25519 signature.
 ///
-/// The cold key signs the CBOR encoding of: [hot_vkey, sequence_number, kes_period]
+/// The cold key signs the raw byte concatenation of: hot_vkey(32) || counter(8 BE) || kes_period(8 BE)
+/// This matches the Haskell `OCertSignable` serialization (NOT CBOR).
 /// This proves that the pool operator (cold key holder) authorized the hot key.
 pub fn verify_opcert_signature(
     cold_vkey_bytes: &[u8],
@@ -663,23 +693,18 @@ pub fn verify_opcert_signature(
     kes_period: u64,
     signature: &[u8],
 ) -> Result<(), ConsensusError> {
-    // Construct the signed message: CBOR array [hot_vkey, seq_num, kes_period]
-    let mut body_cbor = Vec::new();
-    let mut enc = minicbor::Encoder::new(&mut body_cbor);
-    enc.array(3)
-        .map_err(|e| ConsensusError::InvalidBlock(format!("CBOR encode error: {e}")))?;
-    enc.bytes(hot_vkey)
-        .map_err(|e| ConsensusError::InvalidBlock(format!("CBOR encode error: {e}")))?;
-    enc.u64(sequence_number)
-        .map_err(|e| ConsensusError::InvalidBlock(format!("CBOR encode error: {e}")))?;
-    enc.u64(kes_period)
-        .map_err(|e| ConsensusError::InvalidBlock(format!("CBOR encode error: {e}")))?;
+    // Construct the signed message: raw bytes per Haskell OCertSignable
+    // ocertSigKES(32 bytes) || ocertN(8 bytes BE) || ocertKESPeriod(8 bytes BE)
+    let mut signable = Vec::with_capacity(48);
+    signable.extend_from_slice(hot_vkey);
+    signable.extend_from_slice(&sequence_number.to_be_bytes());
+    signable.extend_from_slice(&kes_period.to_be_bytes());
 
     // Verify the Ed25519 signature
     let vk = PaymentVerificationKey::from_bytes(cold_vkey_bytes)
         .map_err(|_| ConsensusError::InvalidOperationalCert)?;
 
-    vk.verify(&body_cbor, signature)
+    vk.verify(&signable, signature)
         .map_err(|_| ConsensusError::InvalidOperationalCert)?;
 
     Ok(())
@@ -706,15 +731,6 @@ pub fn verify_leader_eligibility(
 
 /// Construct the VRF input for a given slot and epoch nonce.
 ///
-/// In Praos, the VRF input is: nonce || slot_number
-/// This is hashed by the VRF to produce the certified random value.
-pub fn vrf_input(slot: SlotNo, epoch_nonce: &[u8]) -> Vec<u8> {
-    let mut input = Vec::with_capacity(epoch_nonce.len() + 8);
-    input.extend_from_slice(epoch_nonce);
-    input.extend_from_slice(&slot.0.to_be_bytes());
-    input
-}
-
 impl Default for OuroborosPraos {
     fn default() -> Self {
         Self::new()
@@ -931,16 +947,15 @@ mod tests {
         let sequence_number = 0u64;
         let kes_period = 5u64;
 
-        // Build the opcert body: [hot_vkey, seq_num, kes_period]
-        let mut body = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut body);
-        enc.array(3).unwrap();
-        enc.bytes(&hot_vkey).unwrap();
-        enc.u64(sequence_number).unwrap();
-        enc.u64(kes_period).unwrap();
+        // Build the opcert signable: raw bytes per Haskell OCertSignable
+        // hot_vkey(32) || counter(8 BE) || kes_period(8 BE)
+        let mut signable = Vec::with_capacity(48);
+        signable.extend_from_slice(&hot_vkey);
+        signable.extend_from_slice(&sequence_number.to_be_bytes());
+        signable.extend_from_slice(&kes_period.to_be_bytes());
 
         // Sign with cold key
-        let signature = cold_sk.sign(&body);
+        let signature = cold_sk.sign(&signable);
 
         // Verify
         let result = verify_opcert_signature(
@@ -962,14 +977,13 @@ mod tests {
         let seq = 0u64;
         let kes = 5u64;
 
-        let mut body = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut body);
-        enc.array(3).unwrap();
-        enc.bytes(&hot_vkey).unwrap();
-        enc.u64(seq).unwrap();
-        enc.u64(kes).unwrap();
+        // Build raw signable bytes
+        let mut signable = Vec::with_capacity(48);
+        signable.extend_from_slice(&hot_vkey);
+        signable.extend_from_slice(&seq.to_be_bytes());
+        signable.extend_from_slice(&kes.to_be_bytes());
 
-        let signature = cold_sk.sign(&body);
+        let signature = cold_sk.sign(&signable);
 
         // Verify with wrong key should fail
         let result = verify_opcert_signature(&wrong_vk.to_bytes(), &hot_vkey, seq, kes, &signature);
@@ -990,13 +1004,17 @@ mod tests {
 
     #[test]
     fn test_vrf_input_construction() {
-        let epoch_nonce = [42u8; 32];
-        let input = vrf_input(SlotNo(12345), &epoch_nonce);
+        let epoch_nonce = Hash32::ZERO;
+        let input = crate::slot_leader::vrf_input(&epoch_nonce, SlotNo(12345));
 
-        // Should be nonce (32 bytes) + slot (8 bytes) = 40 bytes
-        assert_eq!(input.len(), 40);
-        assert_eq!(&input[..32], &epoch_nonce);
-        assert_eq!(&input[32..], &12345u64.to_be_bytes());
+        // vrf_input returns Blake2b-256(slot_BE || epoch_nonce) = 32 bytes
+        assert_eq!(input.len(), 32);
+        // Verify it's deterministic
+        let input2 = crate::slot_leader::vrf_input(&epoch_nonce, SlotNo(12345));
+        assert_eq!(input, input2);
+        // Different slot should produce different input
+        let input3 = crate::slot_leader::vrf_input(&epoch_nonce, SlotNo(12346));
+        assert_ne!(input, input3);
     }
 
     #[test]

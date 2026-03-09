@@ -280,6 +280,11 @@ pub struct Node {
         Option<tokio::sync::broadcast::Sender<torsten_network::RollbackAnnouncement>>,
     /// Prometheus metrics port
     metrics_port: u16,
+    /// Count of epoch transitions observed since node startup.
+    /// Used to determine when the epoch nonce is reliable for VRF verification.
+    /// After Mithril import, we need at least 2 epoch transitions for the
+    /// rolling nonce to be correctly accumulated.
+    epoch_transitions_observed: u32,
 }
 
 impl Node {
@@ -525,6 +530,7 @@ impl Node {
             block_announcement_tx: None,
             rollback_announcement_tx: None,
             metrics_port: args.metrics_port,
+            epoch_transitions_observed: 0,
         })
     }
 
@@ -1338,7 +1344,7 @@ impl Node {
                                     HeaderBatchResult::Await => {
                                         info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
                                         // Enable strict VRF/KES verification now that we're synced
-                                        self.consensus.set_strict_verification(true);
+                                        self.enable_strict_verification().await;
                                         self.update_query_state().await;
                                         self.try_forge_block().await;
                                         // At tip: reduce pipeline depth to 1 to avoid
@@ -1353,7 +1359,7 @@ impl Node {
                                     // We hit the tip — reduce pipeline depth and
                                     // enable strict verification for new blocks
                                     pipeline_depth = 1;
-                                    self.consensus.set_strict_verification(true);
+                                    self.enable_strict_verification().await;
                                     let old = pipelined.take().unwrap();
                                     let addr = old.remote_addr();
                                     old.abort().await;
@@ -1415,7 +1421,7 @@ impl Node {
                                         }
                                         ChainSyncEvent::Await => {
                                             info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
-                                            self.consensus.set_strict_verification(true);
+                                            self.enable_strict_verification().await;
                                             self.update_query_state().await;
                                         }
                                         ChainSyncEvent::RollForward(..) => unreachable!(),
@@ -1649,6 +1655,7 @@ impl Node {
                     epoch = current_epoch,
                     "Epoch transition — saving ledger snapshot"
                 );
+                self.epoch_transitions_observed = self.epoch_transitions_observed.saturating_add(1);
                 self.save_ledger_snapshot().await;
                 *last_snapshot_epoch = current_epoch;
             }
@@ -1726,6 +1733,21 @@ impl Node {
     }
 
     /// Update the query handler with the current ledger state
+    /// Enable strict verification mode and update nonce_established based on
+    /// whether enough epoch transitions have been observed since node startup
+    /// for the epoch nonce to be reliably computed from accumulated VRF outputs.
+    /// After Mithril import, needs at least 2 epoch transitions.
+    async fn enable_strict_verification(&mut self) {
+        self.consensus.set_strict_verification(true);
+        self.consensus.nonce_established = self.epoch_transitions_observed >= 2;
+        if !self.consensus.nonce_established {
+            debug!(
+                transitions = self.epoch_transitions_observed,
+                "VRF proof verification deferred: epoch nonce not yet established (need 2 epoch transitions)"
+            );
+        }
+    }
+
     async fn update_query_state(&self) {
         use torsten_network::query_handler::{
             CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, GenesisConfigSnapshot,
