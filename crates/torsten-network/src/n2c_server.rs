@@ -670,18 +670,24 @@ async fn handle_local_chainsync(
 
                         let (tip_slot, tip_hash, tip_block_no) = provider.get_tip();
 
+                        // Extract era tag from block CBOR: [era_tag, ...]
+                        let era_id = {
+                            let mut d = minicbor::Decoder::new(&cbor);
+                            d.array().ok();
+                            d.u32().unwrap_or(6) // default Conway if parse fails
+                        };
+
                         let mut buf = Vec::new();
                         let mut enc = minicbor::Encoder::new(&mut buf);
-                        // MsgRollForward [2, [era_id, block_cbor], tip]
+                        // MsgRollForward [2, [era_id, tagged(24, block_cbor)], tip]
                         enc.array(3)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         enc.u32(2)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                        // Wrapped block: [era_id, block_bytes]
-                        // era_id 6 = Conway (current era)
+                        // Wrapped block: [era_id, tag(24) block_bytes]
                         enc.array(2)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                        enc.u32(6)
+                        enc.u32(era_id)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         enc.tag(minicbor::data::Tag::new(24))
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
