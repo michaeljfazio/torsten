@@ -44,7 +44,7 @@ See README.md for the 10-crate workspace structure.
 - Use pallas crates for Cardano wire-format compatibility
 - `Transaction.hash` field is set during deserialization from `pallas tx.hash()`
 - `ChainSyncEvent::RollForward` uses `Box<Block>` to avoid large enum variant size
-- Invalid transactions (`is_valid: false`) are skipped during `apply_block`
+- Invalid transactions (`is_valid: false`): collateral consumed, collateral_return added, regular inputs/outputs skipped
 - N2N server uses `BlockProvider` trait for storage abstraction
 - N2C server uses `TxValidator` trait for Phase-1/Phase-2 tx validation before mempool admission
 - Batch block storage: `add_blocks_batch()` for single immutable flush per batch

@@ -343,6 +343,7 @@ pub struct ProtocolParamUpdate {
     pub max_val_size: Option<u64>,
     pub collateral_percentage: Option<u64>,
     pub max_collateral_inputs: Option<u64>,
+    pub min_fee_ref_script_cost_per_byte: Option<u64>,
     // Conway governance parameters
     pub drep_deposit: Option<Lovelace>,
     pub gov_action_deposit: Option<Lovelace>,

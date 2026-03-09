@@ -15,7 +15,7 @@ pub enum QueryResult {
     CurrentEra(u32),
     SystemStart(String),
     ChainBlockNo(u64),
-    ProtocolParams(String),
+    ProtocolParams(Box<ProtocolParamsSnapshot>),
     StakeDistribution(Vec<StakePoolSnapshot>),
     GovState(GovStateSnapshot),
     DRepState(Vec<DRepSnapshot>),
@@ -59,6 +59,135 @@ pub struct PoolParamsSnapshot {
     pub relays: Vec<String>,
     pub metadata_url: Option<String>,
     pub metadata_hash: Option<Vec<u8>>,
+}
+
+/// Protocol parameters snapshot for CBOR encoding in N2C queries
+#[derive(Debug, Clone)]
+pub struct ProtocolParamsSnapshot {
+    pub min_fee_a: u64,
+    pub min_fee_b: u64,
+    pub max_block_body_size: u64,
+    pub max_tx_size: u64,
+    pub max_block_header_size: u64,
+    pub key_deposit: u64,
+    pub pool_deposit: u64,
+    pub e_max: u64,
+    pub n_opt: u64,
+    pub a0_num: u64,
+    pub a0_den: u64,
+    pub rho_num: u64,
+    pub rho_den: u64,
+    pub tau_num: u64,
+    pub tau_den: u64,
+    pub min_pool_cost: u64,
+    pub ada_per_utxo_byte: u64,
+    pub cost_models_v1: Option<Vec<i64>>,
+    pub cost_models_v2: Option<Vec<i64>>,
+    pub cost_models_v3: Option<Vec<i64>>,
+    pub execution_costs_mem_num: u64,
+    pub execution_costs_mem_den: u64,
+    pub execution_costs_step_num: u64,
+    pub execution_costs_step_den: u64,
+    pub max_tx_ex_mem: u64,
+    pub max_tx_ex_steps: u64,
+    pub max_block_ex_mem: u64,
+    pub max_block_ex_steps: u64,
+    pub max_val_size: u64,
+    pub collateral_percentage: u64,
+    pub max_collateral_inputs: u64,
+    pub protocol_version_major: u64,
+    pub protocol_version_minor: u64,
+    pub min_fee_ref_script_cost_per_byte: u64,
+    // Conway governance
+    pub drep_deposit: u64,
+    pub drep_activity: u64,
+    pub gov_action_deposit: u64,
+    pub gov_action_lifetime: u64,
+    pub committee_min_size: u64,
+    pub committee_max_term_length: u64,
+    pub dvt_p_param_change_num: u64,
+    pub dvt_p_param_change_den: u64,
+    pub dvt_hard_fork_num: u64,
+    pub dvt_hard_fork_den: u64,
+    pub dvt_no_confidence_num: u64,
+    pub dvt_no_confidence_den: u64,
+    pub dvt_committee_normal_num: u64,
+    pub dvt_committee_normal_den: u64,
+    pub dvt_committee_no_confidence_num: u64,
+    pub dvt_committee_no_confidence_den: u64,
+    pub dvt_constitution_num: u64,
+    pub dvt_constitution_den: u64,
+    pub dvt_treasury_withdrawal_num: u64,
+    pub dvt_treasury_withdrawal_den: u64,
+    pub pvt_hard_fork_num: u64,
+    pub pvt_hard_fork_den: u64,
+    pub pvt_committee_num: u64,
+    pub pvt_committee_den: u64,
+}
+
+impl Default for ProtocolParamsSnapshot {
+    fn default() -> Self {
+        ProtocolParamsSnapshot {
+            min_fee_a: 44,
+            min_fee_b: 155381,
+            max_block_body_size: 90112,
+            max_tx_size: 16384,
+            max_block_header_size: 1100,
+            key_deposit: 2_000_000,
+            pool_deposit: 500_000_000,
+            e_max: 18,
+            n_opt: 500,
+            a0_num: 3,
+            a0_den: 10,
+            rho_num: 3,
+            rho_den: 1000,
+            tau_num: 2,
+            tau_den: 10,
+            min_pool_cost: 170_000_000,
+            ada_per_utxo_byte: 4310,
+            cost_models_v1: None,
+            cost_models_v2: None,
+            cost_models_v3: None,
+            execution_costs_mem_num: 577,
+            execution_costs_mem_den: 10000,
+            execution_costs_step_num: 721,
+            execution_costs_step_den: 10000000,
+            max_tx_ex_mem: 14_000_000,
+            max_tx_ex_steps: 10_000_000_000,
+            max_block_ex_mem: 62_000_000,
+            max_block_ex_steps: 40_000_000_000,
+            max_val_size: 5000,
+            collateral_percentage: 150,
+            max_collateral_inputs: 3,
+            protocol_version_major: 9,
+            protocol_version_minor: 0,
+            min_fee_ref_script_cost_per_byte: 15,
+            drep_deposit: 500_000_000,
+            drep_activity: 20,
+            gov_action_deposit: 100_000_000_000,
+            gov_action_lifetime: 6,
+            committee_min_size: 7,
+            committee_max_term_length: 146,
+            dvt_p_param_change_num: 67,
+            dvt_p_param_change_den: 100,
+            dvt_hard_fork_num: 60,
+            dvt_hard_fork_den: 100,
+            dvt_no_confidence_num: 67,
+            dvt_no_confidence_den: 100,
+            dvt_committee_normal_num: 67,
+            dvt_committee_normal_den: 100,
+            dvt_committee_no_confidence_num: 60,
+            dvt_committee_no_confidence_den: 100,
+            dvt_constitution_num: 75,
+            dvt_constitution_den: 100,
+            dvt_treasury_withdrawal_num: 67,
+            dvt_treasury_withdrawal_den: 100,
+            pvt_hard_fork_num: 51,
+            pvt_hard_fork_den: 100,
+            pvt_committee_num: 51,
+            pvt_committee_den: 100,
+        }
+    }
 }
 
 /// Snapshot of a stake pool for query results
@@ -141,8 +270,8 @@ pub struct NodeStateSnapshot {
     pub reserves: u64,
     pub drep_count: usize,
     pub proposal_count: usize,
-    /// Serialized protocol parameters as JSON
-    pub protocol_params_json: String,
+    /// Protocol parameters for CBOR encoding
+    pub protocol_params: ProtocolParamsSnapshot,
     /// Stake pool distribution data
     pub stake_pools: Vec<StakePoolSnapshot>,
     /// DRep registration data
@@ -174,7 +303,7 @@ impl Default for NodeStateSnapshot {
             reserves: 0,
             drep_count: 0,
             proposal_count: 0,
-            protocol_params_json: String::new(),
+            protocol_params: ProtocolParamsSnapshot::default(),
             stake_pools: Vec::new(),
             drep_entries: Vec::new(),
             governance_proposals: Vec::new(),
@@ -406,7 +535,7 @@ impl QueryHandler {
             7 => {
                 // GetCurrentPParams
                 debug!("Query: GetCurrentPParams");
-                QueryResult::ProtocolParams(self.state.protocol_params_json.clone())
+                QueryResult::ProtocolParams(Box::new(self.state.protocol_params.clone()))
             }
             10 => {
                 // GetChainBlockNo
@@ -630,14 +759,18 @@ mod tests {
     fn test_query_handler_protocol_params() {
         let mut handler = QueryHandler::new();
         handler.update_state(NodeStateSnapshot {
-            protocol_params_json: "{\"min_fee_a\": 44}".to_string(),
+            protocol_params: ProtocolParamsSnapshot {
+                min_fee_a: 44,
+                min_fee_b: 155381,
+                ..Default::default()
+            },
             ..Default::default()
         });
 
         match query(&handler, 7) {
-            QueryResult::ProtocolParams(json) => {
-                assert!(json.contains("min_fee_a"));
-                assert!(json.contains("44"));
+            QueryResult::ProtocolParams(params) => {
+                assert_eq!(params.min_fee_a, 44);
+                assert_eq!(params.min_fee_b, 155381);
             }
             other => panic!("Expected ProtocolParams, got {other:?}"),
         }

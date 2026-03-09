@@ -9,7 +9,7 @@ use torsten_primitives::hash::Hash32;
 use tracing::{debug, error, info, warn};
 
 use crate::multiplexer::Segment;
-use crate::query_handler::{QueryHandler, QueryResult};
+use crate::query_handler::{ProtocolParamsSnapshot, QueryHandler, QueryResult};
 
 /// Trait for validating transactions before mempool admission.
 /// Implementors should perform full Phase-1 and Phase-2 (Plutus) validation.
@@ -843,6 +843,274 @@ async fn handle_state_query(
 }
 
 /// Encode a QueryResult into a MsgResult CBOR response
+/// Encode protocol parameters as CBOR map with integer keys per Cardano spec.
+///
+/// Conway era protocol params use keys 0-33:
+///   0: min_fee_a, 1: min_fee_b, 2: max_block_body_size, 3: max_tx_size,
+///   4: max_block_header_size, 5: key_deposit, 6: pool_deposit, 7: e_max,
+///   8: n_opt, 9: a0, 10: rho, 11: tau, 16: min_pool_cost, 17: ada_per_utxo_byte,
+///   18: cost_models, 19: execution_costs, 20: max_tx_ex_units, 21: max_block_ex_units,
+///   22: max_val_size, 23: collateral_percentage, 24: max_collateral_inputs,
+///   25: protocol_version, 26: pool_voting_thresholds, 27: drep_voting_thresholds,
+///   28: committee_min_size, 29: committee_max_term_length, 30: gov_action_lifetime,
+///   31: gov_action_deposit, 32: drep_deposit, 33: drep_activity,
+///   34: min_fee_ref_script_cost_per_byte
+fn encode_protocol_params_cbor(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    pp: &ProtocolParamsSnapshot,
+) {
+    // Count entries: base 24 fields + optional cost model entries
+    let mut count = 24u64;
+    if pp.cost_models_v1.is_some() || pp.cost_models_v2.is_some() || pp.cost_models_v3.is_some() {
+        count += 1; // key 18
+    }
+    enc.map(count).ok();
+
+    // 0: min_fee_a
+    enc.u32(0).ok();
+    enc.u64(pp.min_fee_a).ok();
+
+    // 1: min_fee_b
+    enc.u32(1).ok();
+    enc.u64(pp.min_fee_b).ok();
+
+    // 2: max_block_body_size
+    enc.u32(2).ok();
+    enc.u64(pp.max_block_body_size).ok();
+
+    // 3: max_tx_size
+    enc.u32(3).ok();
+    enc.u64(pp.max_tx_size).ok();
+
+    // 4: max_block_header_size
+    enc.u32(4).ok();
+    enc.u64(pp.max_block_header_size).ok();
+
+    // 5: key_deposit
+    enc.u32(5).ok();
+    enc.u64(pp.key_deposit).ok();
+
+    // 6: pool_deposit
+    enc.u32(6).ok();
+    enc.u64(pp.pool_deposit).ok();
+
+    // 7: e_max
+    enc.u32(7).ok();
+    enc.u64(pp.e_max).ok();
+
+    // 8: n_opt
+    enc.u32(8).ok();
+    enc.u64(pp.n_opt).ok();
+
+    // 9: a0 (rational)
+    enc.u32(9).ok();
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.a0_num).ok();
+    enc.u64(pp.a0_den).ok();
+
+    // 10: rho (rational)
+    enc.u32(10).ok();
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.rho_num).ok();
+    enc.u64(pp.rho_den).ok();
+
+    // 11: tau (rational)
+    enc.u32(11).ok();
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.tau_num).ok();
+    enc.u64(pp.tau_den).ok();
+
+    // 16: min_pool_cost
+    enc.u32(16).ok();
+    enc.u64(pp.min_pool_cost).ok();
+
+    // 17: ada_per_utxo_byte
+    enc.u32(17).ok();
+    enc.u64(pp.ada_per_utxo_byte).ok();
+
+    // 18: cost_models (map: {0: [v1], 1: [v2], 2: [v3]})
+    if pp.cost_models_v1.is_some() || pp.cost_models_v2.is_some() || pp.cost_models_v3.is_some() {
+        enc.u32(18).ok();
+        let cm_count = pp.cost_models_v1.is_some() as u64
+            + pp.cost_models_v2.is_some() as u64
+            + pp.cost_models_v3.is_some() as u64;
+        enc.map(cm_count).ok();
+        if let Some(ref v1) = pp.cost_models_v1 {
+            enc.u32(0).ok();
+            enc.array(v1.len() as u64).ok();
+            for cost in v1 {
+                enc.i64(*cost).ok();
+            }
+        }
+        if let Some(ref v2) = pp.cost_models_v2 {
+            enc.u32(1).ok();
+            enc.array(v2.len() as u64).ok();
+            for cost in v2 {
+                enc.i64(*cost).ok();
+            }
+        }
+        if let Some(ref v3) = pp.cost_models_v3 {
+            enc.u32(2).ok();
+            enc.array(v3.len() as u64).ok();
+            for cost in v3 {
+                enc.i64(*cost).ok();
+            }
+        }
+    }
+
+    // 19: execution_costs [mem_price, step_price] as tagged rationals
+    enc.u32(19).ok();
+    enc.array(2).ok();
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.execution_costs_mem_num).ok();
+    enc.u64(pp.execution_costs_mem_den).ok();
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.execution_costs_step_num).ok();
+    enc.u64(pp.execution_costs_step_den).ok();
+
+    // 20: max_tx_ex_units [mem, steps]
+    enc.u32(20).ok();
+    enc.array(2).ok();
+    enc.u64(pp.max_tx_ex_mem).ok();
+    enc.u64(pp.max_tx_ex_steps).ok();
+
+    // 21: max_block_ex_units [mem, steps]
+    enc.u32(21).ok();
+    enc.array(2).ok();
+    enc.u64(pp.max_block_ex_mem).ok();
+    enc.u64(pp.max_block_ex_steps).ok();
+
+    // 22: max_val_size
+    enc.u32(22).ok();
+    enc.u64(pp.max_val_size).ok();
+
+    // 23: collateral_percentage
+    enc.u32(23).ok();
+    enc.u64(pp.collateral_percentage).ok();
+
+    // 24: max_collateral_inputs
+    enc.u32(24).ok();
+    enc.u64(pp.max_collateral_inputs).ok();
+
+    // 25: protocol_version [major, minor]
+    enc.u32(25).ok();
+    enc.array(2).ok();
+    enc.u64(pp.protocol_version_major).ok();
+    enc.u64(pp.protocol_version_minor).ok();
+
+    // 26: pool_voting_thresholds [pvt_committee, pvt_hard_fork, ...]
+    enc.u32(26).ok();
+    enc.array(5).ok();
+    // motion_no_confidence
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.pvt_committee_num).ok();
+    enc.u64(pp.pvt_committee_den).ok();
+    // committee_normal
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.pvt_committee_num).ok();
+    enc.u64(pp.pvt_committee_den).ok();
+    // committee_no_confidence
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.pvt_committee_num).ok();
+    enc.u64(pp.pvt_committee_den).ok();
+    // hard_fork_initiation
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.pvt_hard_fork_num).ok();
+    enc.u64(pp.pvt_hard_fork_den).ok();
+    // pp_security_group (use pvt_committee as placeholder)
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.pvt_committee_num).ok();
+    enc.u64(pp.pvt_committee_den).ok();
+
+    // 27: drep_voting_thresholds [dvt_*, ...]
+    enc.u32(27).ok();
+    enc.array(10).ok();
+    // motion_no_confidence
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_no_confidence_num).ok();
+    enc.u64(pp.dvt_no_confidence_den).ok();
+    // committee_normal
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_committee_normal_num).ok();
+    enc.u64(pp.dvt_committee_normal_den).ok();
+    // committee_no_confidence
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_committee_no_confidence_num).ok();
+    enc.u64(pp.dvt_committee_no_confidence_den).ok();
+    // update_constitution
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_constitution_num).ok();
+    enc.u64(pp.dvt_constitution_den).ok();
+    // hard_fork_initiation
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_hard_fork_num).ok();
+    enc.u64(pp.dvt_hard_fork_den).ok();
+    // pp_network_group
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_p_param_change_num).ok();
+    enc.u64(pp.dvt_p_param_change_den).ok();
+    // pp_economic_group
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_p_param_change_num).ok();
+    enc.u64(pp.dvt_p_param_change_den).ok();
+    // pp_technical_group
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_p_param_change_num).ok();
+    enc.u64(pp.dvt_p_param_change_den).ok();
+    // pp_governance_group
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_p_param_change_num).ok();
+    enc.u64(pp.dvt_p_param_change_den).ok();
+    // treasury_withdrawal
+    enc.tag(minicbor::data::Tag::new(30)).ok();
+    enc.array(2).ok();
+    enc.u64(pp.dvt_treasury_withdrawal_num).ok();
+    enc.u64(pp.dvt_treasury_withdrawal_den).ok();
+
+    // 28: committee_min_size
+    enc.u32(28).ok();
+    enc.u64(pp.committee_min_size).ok();
+
+    // 29: committee_max_term_length
+    enc.u32(29).ok();
+    enc.u64(pp.committee_max_term_length).ok();
+
+    // 30: gov_action_lifetime
+    enc.u32(30).ok();
+    enc.u64(pp.gov_action_lifetime).ok();
+
+    // 31: gov_action_deposit
+    enc.u32(31).ok();
+    enc.u64(pp.gov_action_deposit).ok();
+
+    // 32: drep_deposit
+    enc.u32(32).ok();
+    enc.u64(pp.drep_deposit).ok();
+
+    // 33: drep_activity
+    enc.u32(33).ok();
+    enc.u64(pp.drep_activity).ok();
+}
+
 fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
@@ -877,8 +1145,8 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
         QueryResult::ChainBlockNo(block_no) => {
             enc.u64(*block_no).ok();
         }
-        QueryResult::ProtocolParams(json) => {
-            enc.str(json).ok();
+        QueryResult::ProtocolParams(pp) => {
+            encode_protocol_params_cbor(&mut enc, pp);
         }
         QueryResult::StakeDistribution(pools) => {
             enc.map(pools.len() as u64).ok();
@@ -1223,16 +1491,22 @@ mod tests {
 
     #[test]
     fn test_encode_query_result_protocol_params() {
-        let result = QueryResult::ProtocolParams("{\"min_fee_a\": 44}".to_string());
+        let pp = ProtocolParamsSnapshot {
+            min_fee_a: 44,
+            min_fee_b: 155381,
+            ..Default::default()
+        };
+        let result = QueryResult::ProtocolParams(Box::new(pp));
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
 
-        // Verify we can decode the string back
+        // Verify we can decode the CBOR map
         let mut decoder = minicbor::Decoder::new(&cbor);
         let _ = decoder.array();
         assert_eq!(decoder.u32().unwrap(), 4); // MsgResult
-        let json = decoder.str().unwrap();
-        assert!(json.contains("min_fee_a"));
+                                               // Result is a CBOR map with integer keys
+        let map_len = decoder.map().unwrap().unwrap();
+        assert!(map_len >= 24); // At least 24 entries
     }
 
     #[test]

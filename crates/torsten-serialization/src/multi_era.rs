@@ -1118,6 +1118,14 @@ fn convert_pallas_protocol_param_update(
         max_val_size: update.max_value_size,
         collateral_percentage: update.collateral_percentage,
         max_collateral_inputs: update.max_collateral_inputs,
+        min_fee_ref_script_cost_per_byte: update.minfee_refscript_cost_per_byte.as_ref().map(|r| {
+            // Convert rational to integer (numerator/denominator)
+            if r.denominator > 0 {
+                r.numerator / r.denominator
+            } else {
+                15 // default
+            }
+        }),
         drep_deposit: update.drep_deposit.map(Lovelace),
         gov_action_deposit: update.governance_action_deposit.map(Lovelace),
         gov_action_lifetime: update.governance_action_validity_period,

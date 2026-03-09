@@ -1398,6 +1398,9 @@ impl LedgerState {
                 if let Some(v) = update.max_collateral_inputs {
                     self.protocol_params.max_collateral_inputs = v;
                 }
+                if let Some(v) = update.min_fee_ref_script_cost_per_byte {
+                    self.protocol_params.min_fee_ref_script_cost_per_byte = v;
+                }
                 if let Some(v) = update.drep_deposit {
                     self.protocol_params.drep_deposit = v;
                 }

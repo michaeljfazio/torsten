@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashSet};
 use torsten_primitives::hash::{Hash28, Hash32, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::{Certificate, NativeScript, ScriptRef, Transaction};
+use torsten_primitives::transaction::{
+    Certificate, NativeScript, ScriptRef, Transaction, TransactionInput,
+};
 use torsten_primitives::value::{AssetName, Lovelace};
 use tracing::{debug, trace, warn};
 
@@ -261,8 +263,17 @@ pub fn validate_transaction(
         }
     }
 
-    // Rule 4: Fee must be >= minimum
-    let min_fee = params.min_fee(tx_size);
+    // Rule 4: Fee must be >= minimum (including reference script costs)
+    let ref_script_size = calculate_ref_script_size(&body.reference_inputs, utxo_set);
+    let ref_script_fee = if ref_script_size > 0 {
+        // CIP-0112: tiered pricing for reference scripts
+        // Base cost = min_fee_ref_script_cost_per_byte * ref_script_size
+        // Applied in 25KiB tiers with 1.2x multiplier per tier
+        calculate_ref_script_tiered_fee(params.min_fee_ref_script_cost_per_byte, ref_script_size)
+    } else {
+        0
+    };
+    let min_fee = Lovelace(params.min_fee(tx_size).0 + ref_script_fee);
     if body.fee.0 < min_fee.0 {
         errors.push(ValidationError::FeeTooSmall {
             minimum: min_fee.0,
@@ -691,6 +702,53 @@ fn compute_script_ref_hash(script_ref: &ScriptRef) -> Hash28 {
             torsten_primitives::hash::blake2b_224(&tagged)
         }
     }
+}
+
+/// Calculate total reference script size from reference inputs
+fn calculate_ref_script_size(reference_inputs: &[TransactionInput], utxo_set: &UtxoSet) -> u64 {
+    let mut total_size: u64 = 0;
+    for ref_input in reference_inputs {
+        if let Some(utxo) = utxo_set.lookup(ref_input) {
+            if let Some(script_ref) = &utxo.script_ref {
+                total_size += script_ref_byte_size(script_ref);
+            }
+        }
+    }
+    total_size
+}
+
+/// Get the byte size of a script reference
+fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
+    match script_ref {
+        ScriptRef::NativeScript(ns) => torsten_serialization::encode_native_script(ns).len() as u64,
+        ScriptRef::PlutusV1(bytes) | ScriptRef::PlutusV2(bytes) | ScriptRef::PlutusV3(bytes) => {
+            bytes.len() as u64
+        }
+    }
+}
+
+/// CIP-0112 tiered pricing for reference scripts.
+///
+/// Divides the script size into 25KiB tiers, each tier costs 1.2x the previous.
+/// base_fee_per_byte is applied at the first tier, then multiplied by 1.2 for each
+/// subsequent tier.
+fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u64 {
+    const TIER_SIZE: u64 = 25_600; // 25 KiB
+    const MULTIPLIER_NUM: u64 = 12;
+    const MULTIPLIER_DEN: u64 = 10;
+
+    let mut remaining = total_size;
+    let mut fee: u64 = 0;
+    let mut tier_rate = base_fee_per_byte;
+
+    while remaining > 0 {
+        let chunk = remaining.min(TIER_SIZE);
+        fee = fee.saturating_add(tier_rate * chunk);
+        remaining -= chunk;
+        // Apply 1.2x multiplier for next tier
+        tier_rate = tier_rate * MULTIPLIER_NUM / MULTIPLIER_DEN;
+    }
+    fee
 }
 
 /// Evaluate a native script given the set of key hashes that signed
@@ -1965,5 +2023,33 @@ mod tests {
         tagged.extend_from_slice(&script_bytes);
         let expected = torsten_primitives::hash::blake2b_224(&tagged);
         assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_ref_script_tiered_fee_calculation() {
+        // Base fee 15 lovelace per byte
+        // Single tier (< 25KiB): 15 * 1000 = 15000
+        assert_eq!(calculate_ref_script_tiered_fee(15, 1000), 15_000);
+
+        // Exactly one tier (25600 bytes): 15 * 25600 = 384000
+        assert_eq!(calculate_ref_script_tiered_fee(15, 25_600), 384_000);
+
+        // Two tiers: first 25600 at 15, next bytes at 18 (15 * 12/10)
+        let fee = calculate_ref_script_tiered_fee(15, 26_600);
+        // First tier: 15 * 25600 = 384000
+        // Second tier: 18 * 1000 = 18000
+        assert_eq!(fee, 384_000 + 18_000);
+
+        // Zero size = zero fee
+        assert_eq!(calculate_ref_script_tiered_fee(15, 0), 0);
+    }
+
+    #[test]
+    fn test_script_ref_byte_size() {
+        let v2_script = ScriptRef::PlutusV2(vec![0u8; 500]);
+        assert_eq!(script_ref_byte_size(&v2_script), 500);
+
+        let v3_script = ScriptRef::PlutusV3(vec![0u8; 1024]);
+        assert_eq!(script_ref_byte_size(&v3_script), 1024);
     }
 }
