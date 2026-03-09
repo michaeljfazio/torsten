@@ -269,6 +269,13 @@ impl N2CClient {
         Ok(result)
     }
 
+    /// Query account state (GetAccountState - query tag 3)
+    /// Returns treasury and reserves in lovelace
+    pub async fn query_account_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(3).await?;
+        Ok(result)
+    }
+
     /// Query governance state (GetGovState - query tag 20)
     pub async fn query_gov_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
         let result = self.send_query(20).await?;

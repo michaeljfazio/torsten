@@ -114,6 +114,13 @@ enum QuerySubcommand {
         #[arg(long)]
         stake_pool_id: Option<String>,
     },
+    /// Query treasury and reserves (account state)
+    Treasury {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
     /// Compute the leader schedule for a stake pool
     LeadershipSchedule {
         /// Path to the VRF signing key file
@@ -1074,6 +1081,38 @@ impl QueryCmd {
                         println!("Relays:      {}", pool.relays.join(", "));
                     }
                 }
+                Ok(())
+            }
+            QuerySubcommand::Treasury {
+                socket_path,
+                testnet_magic,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let raw = client
+                    .query_account_state()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query account state: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // Parse MsgResult [4, [treasury, reserves]]
+                let mut decoder = minicbor::Decoder::new(&raw);
+                let _ = decoder.array();
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                let _ = decoder.array();
+                let treasury = decoder.u64().unwrap_or(0);
+                let reserves = decoder.u64().unwrap_or(0);
+
+                println!("Account State");
+                println!("=============");
+                println!("Treasury: {} ADA", treasury / 1_000_000);
+                println!("Reserves: {} ADA", reserves / 1_000_000);
+
                 Ok(())
             }
             QuerySubcommand::LeadershipSchedule {

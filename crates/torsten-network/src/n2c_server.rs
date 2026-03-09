@@ -1466,6 +1466,12 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 }
             }
         }
+        QueryResult::AccountState { treasury, reserves } => {
+            // Account state: [treasury, reserves]
+            enc.array(2).ok();
+            enc.u64(*treasury).ok();
+            enc.u64(*reserves).ok();
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }

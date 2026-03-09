@@ -24,6 +24,10 @@ pub enum QueryResult {
     UtxoByAddress(Vec<UtxoSnapshot>),
     StakeSnapshots(StakeSnapshotsResult),
     PoolParams(Vec<PoolParamsSnapshot>),
+    AccountState {
+        treasury: u64,
+        reserves: u64,
+    },
     Error(String),
 }
 
@@ -523,6 +527,14 @@ impl QueryHandler {
                     QueryResult::UtxoByAddress(provider.utxos_by_tx_inputs(&inputs))
                 } else {
                     QueryResult::UtxoByAddress(vec![])
+                }
+            }
+            3 => {
+                // GetAccountState (treasury + reserves)
+                debug!("Query: GetAccountState");
+                QueryResult::AccountState {
+                    treasury: self.state.treasury,
+                    reserves: self.state.reserves,
                 }
             }
             4 => {
