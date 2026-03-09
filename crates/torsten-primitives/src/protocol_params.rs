@@ -35,6 +35,7 @@ pub struct ProtocolParameters {
     pub max_val_size: u64,
     pub collateral_percentage: u64,
     pub max_collateral_inputs: u64,
+    pub min_fee_ref_script_cost_per_byte: u64,
 
     // Conway governance
     pub drep_deposit: Lovelace,
@@ -156,6 +157,7 @@ impl ProtocolParameters {
             max_val_size: 5000,
             collateral_percentage: 150,
             max_collateral_inputs: 3,
+            min_fee_ref_script_cost_per_byte: 15,
             drep_deposit: Lovelace(500_000_000),
             drep_activity: 20,
             gov_action_deposit: Lovelace(100_000_000_000),

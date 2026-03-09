@@ -515,6 +515,10 @@ impl ConwayGenesis {
         // In practice, the protocol uses the most restrictive of the group thresholds
         params.dvt_p_param_change = float_to_rational(dvt.pp_gov_group);
 
+        if let Some(cost) = self.min_fee_ref_script_cost_per_byte {
+            params.min_fee_ref_script_cost_per_byte = cost;
+        }
+
         // PlutusV3 cost model from Conway genesis
         if let Some(v3) = &self.plutus_v3_cost_model {
             info!(
