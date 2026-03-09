@@ -1016,37 +1016,44 @@ fn convert_pallas_gov_action(action: &pallas_primitives::conway::GovAction) -> G
         })
     };
     match action {
-        PGA::ParameterChange(prev_id, _update, _script) => GovAction::ParameterChange {
+        PGA::ParameterChange(prev_id, update, script) => GovAction::ParameterChange {
             prev_action_id: convert_prev(prev_id),
-            protocol_param_update: Box::default(),
-            policy_hash: None,
+            protocol_param_update: Box::new(convert_pallas_protocol_param_update(update)),
+            policy_hash: script.as_ref().map(pallas_hash_to_torsten28),
         },
         PGA::HardForkInitiation(prev_id, version) => GovAction::HardForkInitiation {
             prev_action_id: convert_prev(prev_id),
             protocol_version: (version.0, version.1),
         },
-        PGA::TreasuryWithdrawals(withdrawals, _script) => {
+        PGA::TreasuryWithdrawals(withdrawals, script) => {
             let mut converted = BTreeMap::new();
             for (account, amount) in withdrawals.iter() {
                 converted.insert(account.to_vec(), Lovelace(*amount));
             }
             GovAction::TreasuryWithdrawals {
                 withdrawals: converted,
-                policy_hash: None,
+                policy_hash: script.as_ref().map(pallas_hash_to_torsten28),
             }
         }
         PGA::NoConfidence(prev_id) => GovAction::NoConfidence {
             prev_action_id: convert_prev(prev_id),
         },
-        PGA::UpdateCommittee(prev_id, _remove, _add, _threshold) => GovAction::UpdateCommittee {
-            prev_action_id: convert_prev(prev_id),
-            members_to_remove: Vec::new(),
-            members_to_add: BTreeMap::new(),
-            threshold: Rational {
-                numerator: 0,
-                denominator: 1,
-            },
-        },
+        PGA::UpdateCommittee(prev_id, remove, add, threshold) => {
+            let members_to_remove = remove.iter().map(convert_pallas_stake_credential).collect();
+            let mut members_to_add = BTreeMap::new();
+            for (cred, epoch) in add.iter() {
+                members_to_add.insert(convert_pallas_stake_credential(cred), *epoch);
+            }
+            GovAction::UpdateCommittee {
+                prev_action_id: convert_prev(prev_id),
+                members_to_remove,
+                members_to_add,
+                threshold: Rational {
+                    numerator: threshold.numerator,
+                    denominator: threshold.denominator,
+                },
+            }
+        }
         PGA::NewConstitution(prev_id, constitution) => GovAction::NewConstitution {
             prev_action_id: convert_prev(prev_id),
             constitution: Constitution {
@@ -1057,6 +1064,47 @@ fn convert_pallas_gov_action(action: &pallas_primitives::conway::GovAction) -> G
             },
         },
         PGA::Information => GovAction::InfoAction,
+    }
+}
+
+fn convert_pallas_protocol_param_update(
+    update: &pallas_primitives::conway::ProtocolParamUpdate,
+) -> ProtocolParamUpdate {
+    let convert_rational = |r: &pallas_primitives::RationalNumber| Rational {
+        numerator: r.numerator,
+        denominator: r.denominator,
+    };
+    ProtocolParamUpdate {
+        min_fee_a: update.minfee_a,
+        min_fee_b: update.minfee_b,
+        max_block_body_size: update.max_block_body_size,
+        max_tx_size: update.max_transaction_size,
+        max_block_header_size: update.max_block_header_size,
+        key_deposit: update.key_deposit.map(Lovelace),
+        pool_deposit: update.pool_deposit.map(Lovelace),
+        e_max: update.maximum_epoch,
+        n_opt: update.desired_number_of_stake_pools,
+        a0: update.pool_pledge_influence.as_ref().map(convert_rational),
+        rho: update.expansion_rate.as_ref().map(convert_rational),
+        tau: update.treasury_growth_rate.as_ref().map(convert_rational),
+        min_pool_cost: update.min_pool_cost.map(Lovelace),
+        ada_per_utxo_byte: update.ada_per_utxo_byte.map(Lovelace),
+        cost_models: None,     // Complex — cost model conversion handled separately
+        execution_costs: None, // Complex — ExUnitPrices conversion handled separately
+        max_tx_ex_units: update.max_tx_ex_units.as_ref().map(|e| ExUnits {
+            mem: e.mem,
+            steps: e.steps,
+        }),
+        max_block_ex_units: update.max_block_ex_units.as_ref().map(|e| ExUnits {
+            mem: e.mem,
+            steps: e.steps,
+        }),
+        max_val_size: update.max_value_size,
+        collateral_percentage: update.collateral_percentage,
+        max_collateral_inputs: update.max_collateral_inputs,
+        drep_deposit: update.drep_deposit.map(Lovelace),
+        gov_action_deposit: update.governance_action_deposit.map(Lovelace),
+        gov_action_lifetime: update.governance_action_validity_period,
     }
 }
 
