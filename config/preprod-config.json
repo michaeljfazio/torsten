@@ -1,0 +1,12 @@
+{
+  "Network": "Testnet",
+  "NetworkMagic": 1,
+  "EnableP2P": true,
+  "TargetNumberOfActivePeers": 20,
+  "TargetNumberOfEstablishedPeers": 40,
+  "TargetNumberOfKnownPeers": 100,
+  "ShelleyGenesisFile": "preprod-shelley-genesis.json",
+  "AlonzoGenesisFile": "preprod-alonzo-genesis.json",
+  "ConwayGenesisFile": "preprod-conway-genesis.json",
+  "MinSeverity": "Info"
+}
