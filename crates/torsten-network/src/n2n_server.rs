@@ -1040,6 +1040,25 @@ fn handle_n2n_blockfetch(
             let (from_slot, _from_hash) = from.unwrap();
             let (to_slot, _to_hash) = to.unwrap();
 
+            // Limit range to prevent DoS — max 2000 blocks per request
+            const MAX_BLOCKFETCH_RANGE: u64 = 2000;
+            if to_slot > from_slot + MAX_BLOCKFETCH_RANGE {
+                warn!(from_slot, to_slot, "BlockFetch: range too large, rejecting");
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                segments.push(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_BLOCKFETCH,
+                    is_responder: true,
+                    payload: buf,
+                });
+                return Ok(segments);
+            }
+
             // MsgStartBatch: [2]
             let mut start_buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut start_buf);
@@ -1258,9 +1277,12 @@ fn handle_n2n_txsubmission(
                 vec![]
             };
 
-            // Track newly sent tx IDs as inflight
+            // Track newly sent tx IDs as inflight (capped to prevent memory growth)
+            const MAX_TX_INFLIGHT: usize = 1000;
             for (tx_hash, _) in &txs {
-                peer_state.tx_inflight.push(*tx_hash);
+                if peer_state.tx_inflight.len() < MAX_TX_INFLIGHT {
+                    peer_state.tx_inflight.push(*tx_hash);
+                }
             }
 
             // MsgReplyTxIds: [1, [[tx_id, size], ...]]
