@@ -1325,10 +1325,8 @@ fn handle_n2n_txsubmission(
             if let Some(mp) = mempool {
                 for _ in 0..requested_len {
                     if let Ok(tx_hash_bytes) = decoder.bytes() {
-                        if tx_hash_bytes.len() == 32 {
-                            let hash = torsten_primitives::hash::Hash32::from_bytes(
-                                tx_hash_bytes.try_into().unwrap(),
-                            );
+                        if let Ok(hash_arr) = <[u8; 32]>::try_from(tx_hash_bytes) {
+                            let hash = torsten_primitives::hash::Hash32::from_bytes(hash_arr);
                             if let Some(tx) = mp.get_tx(&hash) {
                                 if let Some(ref raw) = tx.raw_cbor {
                                     tx_bodies.push(raw.clone());

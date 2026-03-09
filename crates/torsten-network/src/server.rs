@@ -26,7 +26,7 @@ pub struct NodeServerConfig {
 impl Default for NodeServerConfig {
     fn default() -> Self {
         NodeServerConfig {
-            listen_addr: "0.0.0.0:3001".parse().unwrap(),
+            listen_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 3001)),
             socket_path: PathBuf::from("node.sock"),
             max_connections: 200,
         }

@@ -61,9 +61,11 @@ fn encode_input_cbor(input: &torsten_primitives::transaction::TransactionInput) 
     use minicbor::Encoder;
     let mut buf = Vec::with_capacity(40);
     let mut enc = Encoder::new(&mut buf);
-    enc.array(2).unwrap();
-    enc.bytes(input.transaction_id.as_bytes()).unwrap();
-    enc.u32(input.index).unwrap();
+    // minicbor encoding to Vec<u8> is infallible
+    enc.array(2).expect("vec write");
+    enc.bytes(input.transaction_id.as_bytes())
+        .expect("vec write");
+    enc.u32(input.index).expect("vec write");
     buf
 }
 

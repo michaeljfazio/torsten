@@ -62,7 +62,7 @@ impl NodeToNodeClient {
         // Resolve the address for display purposes
         let remote_addr = format!("{addr}")
             .parse()
-            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
 
         info!("connected to peer {remote_addr}");
 
@@ -411,10 +411,8 @@ impl NodeToNodeClient {
         // Fetch all points as one range (from first to last).
         // Then verify the returned blocks match our expected points by count and hash.
         let first = PallasPoint::Specific(points[0].slot, points[0].hash.to_vec());
-        let last = PallasPoint::Specific(
-            points.last().unwrap().slot,
-            points.last().unwrap().hash.to_vec(),
-        );
+        let last_pt = points.last().expect("points non-empty (checked above)");
+        let last = PallasPoint::Specific(last_pt.slot, last_pt.hash.to_vec());
 
         let bodies = self
             .peer
