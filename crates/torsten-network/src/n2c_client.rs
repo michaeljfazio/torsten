@@ -253,15 +253,35 @@ impl N2CClient {
         Ok(era)
     }
 
-    /// Query the chain block number (GetChainBlockNo - Shelley query tag 10)
+    /// Query the chain block number (GetChainBlockNo - top-level query tag 2)
     pub async fn query_block_no(&mut self) -> Result<u64, N2CClientError> {
-        let result = self.send_query(10).await?;
-        parse_u64_result(&result)
+        // GetChainBlockNo is a top-level (non-era-wrapped) query
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgQuery
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetChainBlockNo
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_STATE_QUERY,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        parse_u64_result(&resp.payload)
     }
 
-    /// Query protocol parameters (GetCurrentPParams - Shelley query tag 7)
+    /// Query protocol parameters (GetCurrentPParams - Shelley query tag 3)
     pub async fn query_protocol_params(&mut self) -> Result<String, N2CClientError> {
-        let result = self.send_query(7).await?;
+        let result = self.send_query(3).await?;
         parse_protocol_params_cbor(&result)
     }
 
@@ -272,55 +292,55 @@ impl N2CClient {
         Ok(result)
     }
 
-    /// Query account state (GetAccountState - query tag 3)
+    /// Query account state (GetAccountState - Shelley query tag 29)
     /// Returns treasury and reserves in lovelace
     pub async fn query_account_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(3).await?;
+        let result = self.send_query(29).await?;
         Ok(result)
     }
 
-    /// Query governance state (GetGovState - query tag 20)
+    /// Query governance state (GetGovState - Shelley query tag 24)
     pub async fn query_gov_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(20).await?;
-        Ok(result)
-    }
-
-    /// Query DRep state (GetDRepState - query tag 21)
-    pub async fn query_drep_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(21).await?;
-        Ok(result)
-    }
-
-    /// Query committee state (GetCommitteeState - query tag 22)
-    pub async fn query_committee_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(22).await?;
-        Ok(result)
-    }
-
-    /// Query stake address info (GetStakeAddressInfo - query tag 23)
-    pub async fn query_stake_address_info(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(23).await?;
-        Ok(result)
-    }
-
-    /// Query stake snapshots (GetStakeSnapshots - query tag 24)
-    pub async fn query_stake_snapshot(&mut self) -> Result<Vec<u8>, N2CClientError> {
         let result = self.send_query(24).await?;
         Ok(result)
     }
 
-    /// Query stake pool params (GetStakePoolParams - query tag 12)
-    pub async fn query_pool_params(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(12).await?;
+    /// Query DRep state (GetDRepState - Shelley query tag 25)
+    pub async fn query_drep_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(25).await?;
         Ok(result)
     }
 
-    /// Query UTxOs at a specific address (GetUTxOByAddress - query tag 4)
+    /// Query committee state (GetCommitteeMembersState - Shelley query tag 27)
+    pub async fn query_committee_state(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(27).await?;
+        Ok(result)
+    }
+
+    /// Query stake address info (GetFilteredDelegationsAndRewardAccounts - Shelley query tag 10)
+    pub async fn query_stake_address_info(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(10).await?;
+        Ok(result)
+    }
+
+    /// Query stake snapshots (GetStakeSnapshots - Shelley query tag 20)
+    pub async fn query_stake_snapshot(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(20).await?;
+        Ok(result)
+    }
+
+    /// Query stake pool params (GetStakePoolParams - Shelley query tag 17)
+    pub async fn query_pool_params(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        let result = self.send_query(17).await?;
+        Ok(result)
+    }
+
+    /// Query UTxOs at a specific address (GetUTxOByAddress - Shelley query tag 6)
     pub async fn query_utxo_by_address(
         &mut self,
         addr_bytes: &[u8],
     ) -> Result<Vec<u8>, N2CClientError> {
-        // Build MsgQuery with address parameter: [3, [era, [4, addr_bytes]]]
+        // Build MsgQuery with address parameter: [3, [era, [6, addr_bytes]]]
         let mut payload = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut payload);
         enc.array(2)
@@ -333,7 +353,7 @@ impl N2CClient {
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // era tag (Shelley+)
         enc.array(2)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
-        enc.u32(4)
+        enc.u32(6)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetUTxOByAddress
         enc.bytes(addr_bytes)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
