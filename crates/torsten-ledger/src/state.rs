@@ -312,8 +312,25 @@ impl LedgerState {
 
         // Apply each transaction
         for tx in &block.transactions {
-            // Skip invalid transactions (phase-2 validation failure)
+            // Handle invalid transactions (phase-2 validation failure):
+            // - Collateral inputs are consumed (forfeit to block producer)
+            // - Regular inputs/outputs/certificates are NOT applied
+            // - If collateral_return is present, it becomes a new UTxO
             if !tx.is_valid {
+                // Consume collateral inputs
+                for col_input in &tx.body.collateral {
+                    self.utxo_set.remove(col_input);
+                }
+                // If there's a collateral return output, add it
+                if let Some(col_return) = &tx.body.collateral_return {
+                    let return_input = torsten_primitives::transaction::TransactionInput {
+                        transaction_id: tx.hash,
+                        index: tx.body.outputs.len() as u32, // collateral return is after regular outputs
+                    };
+                    self.utxo_set.insert(return_input, col_return.clone());
+                }
+                // Fee from collateral is still collected
+                self.epoch_fees += tx.body.fee;
                 continue;
             }
 
