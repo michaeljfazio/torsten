@@ -442,21 +442,9 @@ async fn handle_n2n_connection(
                                     peer_state.chainsync_cursor_slot = Some(ann.slot);
                                     peer_state.chainsync_cursor_hash = Some(next_hash);
 
-                                    let mut payload = Vec::new();
-                                    let mut enc = minicbor::Encoder::new(&mut payload);
-                                    enc.array(3)
-                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                                    enc.u32(2)
-                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-
-                                    // Wrapped header
-                                    enc.tag(minicbor::data::Tag::new(24))
-                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                                    enc.bytes(&block_cbor)
-                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-
-                                    // Tip
-                                    encode_tip(&mut enc, ann.slot, &ann.hash, ann.block_number)?;
+                                    let payload = build_chainsync_roll_forward(
+                                        &block_cbor, ann.slot, &ann.hash, ann.block_number,
+                                    )?;
 
                                     let segment = Segment {
                                         transmission_time: 0,
@@ -760,27 +748,9 @@ async fn handle_n2n_chainsync(
                 peer_state.chainsync_cursor_slot = Some(next_slot);
                 peer_state.chainsync_cursor_hash = Some(next_hash);
 
-                // MsgRollForward: [2, wrapped_header, tip]
-                // N2N chainsync sends headers, not full blocks.
-                // The header is wrapped: [era_tag, [variant, cbor_header]]
-                // For simplicity, we send the raw block CBOR as the header
-                // (the peer will parse it).
-                let mut buf = Vec::new();
-                let mut enc = minicbor::Encoder::new(&mut buf);
-                enc.array(3)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                enc.u32(2)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-
-                // Wrapped header: tag(24) bytes(header_cbor)
-                // For N2N ChainSync, headers are CBOR-wrapped
-                enc.tag(minicbor::data::Tag::new(24))
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                enc.bytes(&block_cbor)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-
-                // Tip: [point, block_number]
-                encode_tip(&mut enc, tip_slot, &tip_hash, tip_block)?;
+                // MsgRollForward: [2, [era_tag, tag(24) header_cbor], tip]
+                let buf =
+                    build_chainsync_roll_forward(&block_cbor, tip_slot, &tip_hash, tip_block)?;
 
                 Ok(Some(Segment {
                     transmission_time: 0,
@@ -871,6 +841,69 @@ async fn handle_n2n_chainsync(
             Ok(None)
         }
     }
+}
+
+/// Extract the block header CBOR and era tag from full block CBOR.
+///
+/// Cardano block CBOR structure: [era_tag, [header, tx_bodies, witnesses, aux, invalid_txs]]
+/// Returns (era_tag, header_cbor_bytes) or None if parsing fails.
+fn extract_header_from_block(block_cbor: &[u8]) -> Option<(u16, Vec<u8>)> {
+    let mut decoder = minicbor::Decoder::new(block_cbor);
+
+    // Outer array: [era_tag, block_content]
+    decoder.array().ok()?;
+    let era_tag = decoder.u32().ok()? as u16;
+
+    // Inner array: [header, tx_bodies, witnesses, aux_data, invalid_txs]
+    decoder.array().ok()?;
+
+    // Capture the raw CBOR bytes of the header element
+    let header_start = decoder.position();
+    // Skip over the header element (whatever its structure)
+    decoder.skip().ok()?;
+    let header_end = decoder.position();
+
+    Some((era_tag, block_cbor[header_start..header_end].to_vec()))
+}
+
+/// Build a MsgRollForward ChainSync segment from block CBOR.
+///
+/// Extracts just the header from the full block and wraps it properly:
+/// MsgRollForward: [2, [era_tag, tag(24) header_cbor], tip]
+fn build_chainsync_roll_forward(
+    block_cbor: &[u8],
+    tip_slot: u64,
+    tip_hash: &[u8; 32],
+    tip_block: u64,
+) -> Result<Vec<u8>, N2NServerError> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+    enc.array(3)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.u32(2)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+
+    // Extract header from full block CBOR for bandwidth efficiency
+    if let Some((era_tag, header_bytes)) = extract_header_from_block(block_cbor) {
+        // Wrapped header: [era_tag, tag(24) header_cbor]
+        enc.array(2)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+        enc.u32(era_tag as u32)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+        enc.tag(minicbor::data::Tag::new(24))
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+        enc.bytes(&header_bytes)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    } else {
+        // Fallback: send full block CBOR if header extraction fails
+        enc.tag(minicbor::data::Tag::new(24))
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+        enc.bytes(block_cbor)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    }
+
+    encode_tip(&mut enc, tip_slot, tip_hash, tip_block)?;
+    Ok(buf)
 }
 
 /// Encode a CBOR point: [slot, hash]
@@ -1501,6 +1534,76 @@ mod tests {
         let mut dec = minicbor::Decoder::new(&segments[segments.len() - 1].payload);
         dec.array().unwrap();
         assert_eq!(dec.u32().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_extract_header_from_block() {
+        // Build a mock block CBOR: [era_tag=6, [header, tx_bodies, witnesses, aux, invalid]]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(6).unwrap(); // era tag (Babbage)
+
+        // Inner array with 5 elements
+        enc.array(5).unwrap();
+
+        // Header: [header_body, kes_sig]
+        enc.array(2).unwrap();
+        enc.array(10).unwrap(); // header_body (10 fields)
+        for i in 0..10u64 {
+            enc.u64(i).unwrap();
+        }
+        enc.bytes(&[0xAA; 32]).unwrap(); // kes_sig placeholder
+
+        // Remaining 4 elements (tx_bodies, witnesses, aux, invalid)
+        enc.map(0).unwrap();
+        enc.array(0).unwrap();
+        enc.null().unwrap();
+        enc.array(0).unwrap();
+
+        let result = extract_header_from_block(&buf);
+        assert!(result.is_some());
+        let (era_tag, header_bytes) = result.unwrap();
+        assert_eq!(era_tag, 6);
+
+        // Verify header_bytes decode to [header_body, kes_sig]
+        let mut dec = minicbor::Decoder::new(&header_bytes);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 2);
+    }
+
+    #[test]
+    fn test_build_chainsync_roll_forward() {
+        // Build a mock block
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(6).unwrap(); // era tag
+        enc.array(5).unwrap();
+        enc.array(2).unwrap(); // header
+        enc.u64(42).unwrap(); // header_body placeholder
+        enc.bytes(&[0xBB; 32]).unwrap(); // kes_sig
+        enc.map(0).unwrap();
+        enc.array(0).unwrap();
+        enc.null().unwrap();
+        enc.array(0).unwrap();
+
+        let tip_hash = [0xCC; 32];
+        let payload = build_chainsync_roll_forward(&buf, 100, &tip_hash, 50).unwrap();
+
+        // Decode: [2, [era_tag, tag(24) header_cbor], tip]
+        let mut dec = minicbor::Decoder::new(&payload);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 3);
+        assert_eq!(dec.u32().unwrap(), 2); // MsgRollForward tag
+
+        // Wrapped header: [era_tag, tag(24) header_bytes]
+        let inner_arr = dec.array().unwrap().unwrap();
+        assert_eq!(inner_arr, 2);
+        assert_eq!(dec.u32().unwrap(), 6); // era tag
+        assert_eq!(dec.tag().unwrap(), minicbor::data::Tag::new(24));
+        let header_bytes = dec.bytes().unwrap();
+        assert!(!header_bytes.is_empty());
     }
 
     #[test]
