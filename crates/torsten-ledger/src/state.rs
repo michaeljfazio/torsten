@@ -1364,6 +1364,42 @@ impl LedgerState {
                 if let Some(v) = update.gov_action_deposit {
                     self.protocol_params.gov_action_deposit = v;
                 }
+                if let Some(ref v) = update.dvt_p_param_change {
+                    self.protocol_params.dvt_p_param_change = v.clone();
+                }
+                if let Some(ref v) = update.dvt_hard_fork {
+                    self.protocol_params.dvt_hard_fork = v.clone();
+                }
+                if let Some(ref v) = update.dvt_no_confidence {
+                    self.protocol_params.dvt_no_confidence = v.clone();
+                }
+                if let Some(ref v) = update.dvt_committee_normal {
+                    self.protocol_params.dvt_committee_normal = v.clone();
+                }
+                if let Some(ref v) = update.dvt_committee_no_confidence {
+                    self.protocol_params.dvt_committee_no_confidence = v.clone();
+                }
+                if let Some(ref v) = update.dvt_constitution {
+                    self.protocol_params.dvt_constitution = v.clone();
+                }
+                if let Some(ref v) = update.dvt_treasury_withdrawal {
+                    self.protocol_params.dvt_treasury_withdrawal = v.clone();
+                }
+                if let Some(ref v) = update.pvt_hard_fork {
+                    self.protocol_params.pvt_hard_fork = v.clone();
+                }
+                if let Some(ref v) = update.pvt_committee {
+                    self.protocol_params.pvt_committee = v.clone();
+                }
+                if let Some(v) = update.min_committee_size {
+                    self.protocol_params.committee_min_size = v;
+                }
+                if let Some(v) = update.committee_term_limit {
+                    self.protocol_params.committee_max_term_length = v;
+                }
+                if let Some(v) = update.drep_activity {
+                    self.protocol_params.drep_activity = v;
+                }
                 info!("Protocol parameters updated via governance action");
             }
             GovAction::HardForkInitiation {

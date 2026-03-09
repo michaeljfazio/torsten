@@ -347,6 +347,19 @@ pub struct ProtocolParamUpdate {
     pub drep_deposit: Option<Lovelace>,
     pub gov_action_deposit: Option<Lovelace>,
     pub gov_action_lifetime: Option<u64>,
+    // Governance voting thresholds
+    pub dvt_p_param_change: Option<Rational>,
+    pub dvt_hard_fork: Option<Rational>,
+    pub dvt_no_confidence: Option<Rational>,
+    pub dvt_committee_normal: Option<Rational>,
+    pub dvt_committee_no_confidence: Option<Rational>,
+    pub dvt_constitution: Option<Rational>,
+    pub dvt_treasury_withdrawal: Option<Rational>,
+    pub pvt_hard_fork: Option<Rational>,
+    pub pvt_committee: Option<Rational>,
+    pub min_committee_size: Option<u64>,
+    pub committee_term_limit: Option<u64>,
+    pub drep_activity: Option<u64>,
 }
 
 /// Plutus cost models

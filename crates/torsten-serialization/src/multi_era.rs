@@ -1121,6 +1121,49 @@ fn convert_pallas_protocol_param_update(
         drep_deposit: update.drep_deposit.map(Lovelace),
         gov_action_deposit: update.governance_action_deposit.map(Lovelace),
         gov_action_lifetime: update.governance_action_validity_period,
+        dvt_p_param_change: update.drep_voting_thresholds.as_ref().map(|d| {
+            // Use the most restrictive param group threshold as the unified threshold
+            // (Cardano spec has 4 groups; we simplify to one)
+            Rational {
+                numerator: d.pp_governance_group.numerator,
+                denominator: d.pp_governance_group.denominator,
+            }
+        }),
+        dvt_hard_fork: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.hard_fork_initiation)),
+        dvt_no_confidence: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.motion_no_confidence)),
+        dvt_committee_normal: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.committee_normal)),
+        dvt_committee_no_confidence: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.committee_no_confidence)),
+        dvt_constitution: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.update_constitution)),
+        dvt_treasury_withdrawal: update
+            .drep_voting_thresholds
+            .as_ref()
+            .map(|d| convert_rational(&d.treasury_withdrawal)),
+        pvt_hard_fork: update
+            .pool_voting_thresholds
+            .as_ref()
+            .map(|p| convert_rational(&p.hard_fork_initiation)),
+        pvt_committee: update
+            .pool_voting_thresholds
+            .as_ref()
+            .map(|p| convert_rational(&p.committee_normal)),
+        min_committee_size: update.min_committee_size,
+        committee_term_limit: update.committee_term_limit,
+        drep_activity: update.drep_inactivity_period,
     }
 }
 
