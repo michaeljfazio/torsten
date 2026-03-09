@@ -1822,6 +1822,24 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             // Empty map — Conway era uses governance proposals instead of PP updates
             enc.map(0).ok();
         }
+        QueryResult::Constitution {
+            url,
+            data_hash,
+            script_hash,
+        } => {
+            // Constitution = array(2) [Anchor, StrictMaybe ScriptHash]
+            enc.array(2).ok();
+            // Anchor = array(2) [url, hash]
+            enc.array(2).ok();
+            enc.str(url).ok();
+            enc.bytes(data_hash).ok();
+            // StrictMaybe ScriptHash (null-encoded)
+            if let Some(script) = script_hash {
+                enc.bytes(script).ok();
+            } else {
+                enc.null().ok();
+            }
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }

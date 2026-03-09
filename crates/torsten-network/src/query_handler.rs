@@ -41,6 +41,12 @@ pub enum QueryResult {
     NonMyopicMemberRewards(Vec<NonMyopicRewardEntry>),
     /// Empty proposed protocol parameter updates (Conway uses governance proposals)
     ProposedPParamsUpdates,
+    /// Constitution: anchor + optional guardrail script hash
+    Constitution {
+        url: String,
+        data_hash: Vec<u8>,
+        script_hash: Option<Vec<u8>>,
+    },
     Error(String),
 }
 
@@ -910,7 +916,15 @@ impl QueryHandler {
             }
             // Tag 21: GetPoolDistr — not implemented
             // Tag 22: GetStakeDelegDeposits — not implemented
-            // Tag 23: GetConstitution — not implemented
+            23 => {
+                // Tag 23: GetConstitution
+                debug!("Query: GetConstitution");
+                QueryResult::Constitution {
+                    url: self.state.constitution_url.clone(),
+                    data_hash: self.state.constitution_hash.clone(),
+                    script_hash: self.state.constitution_script.clone(),
+                }
+            }
             24 => {
                 // Tag 24: GetGovState
                 debug!("Query: GetGovState");
