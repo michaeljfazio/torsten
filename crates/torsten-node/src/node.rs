@@ -1326,6 +1326,17 @@ impl Node {
                 self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
                 self.metrics.set_sync_progress(progress);
                 self.metrics.set_mempool_count(self.mempool.len() as u64);
+                self.metrics.mempool_bytes.store(
+                    self.mempool.total_bytes() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                {
+                    let pm = self.peer_manager.read().await;
+                    self.metrics.peers_connected.store(
+                        pm.hot_peer_count() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 self.metrics.delegation_count.store(
                     ls.delegations.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,

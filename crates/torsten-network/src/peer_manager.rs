@@ -517,6 +517,11 @@ impl PeerManager {
         }
     }
 
+    /// Number of currently hot (actively syncing) peers.
+    pub fn hot_peer_count(&self) -> usize {
+        self.hot_peers.len()
+    }
+
     /// Get the best N peers by reputation for block fetching.
     /// Returns addresses of hot peers sorted by reputation (best first).
     pub fn best_peers_for_fetch(&self, count: usize) -> Vec<SocketAddr> {
