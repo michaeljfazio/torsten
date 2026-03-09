@@ -69,17 +69,20 @@ impl N2CClient {
     /// Perform the N2C handshake
     pub async fn handshake(&mut self, network_magic: u64) -> Result<(), N2CClientError> {
         // Build handshake proposal: [0, { version: [magic, false] }]
-        // Propose versions 14-17 (N2C versions for recent eras)
+        // Propose versions 16-17 (current N2C versions for Conway era)
+        // Version numbers are sent both with and without bit 15 set
+        // to be compatible with both torsten and Haskell cardano-node servers
+        let n2c_versions = [16u32, 17];
         let mut proposal = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut proposal);
         enc.array(2)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
         enc.u32(0)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgProposeVersions
-        enc.map(4)
+        enc.map(n2c_versions.len() as u64)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
 
-        for version in [14u32, 15, 16, 17] {
+        for version in n2c_versions {
             enc.u32(version)
                 .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
             enc.array(2)

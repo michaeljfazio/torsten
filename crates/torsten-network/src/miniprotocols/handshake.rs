@@ -21,13 +21,6 @@ pub enum NodeToNodeVersion {
 /// Supported node-to-client protocol versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeToClientVersion {
-    V9 = 9,
-    V10 = 10,
-    V11 = 11,
-    V12 = 12,
-    V13 = 13,
-    V14 = 14,
-    V15 = 15,
     V16 = 16,
     V17 = 17,
 }

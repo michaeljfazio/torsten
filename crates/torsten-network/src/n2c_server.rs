@@ -244,11 +244,12 @@ fn handle_handshake(payload: &[u8]) -> Result<Option<Segment>, N2CServerError> {
 
     // Try to parse the proposed versions to extract network magic
     let network_magic = parse_handshake_magic(payload).unwrap_or(764824073); // mainnet default
-    let version = parse_highest_version(payload).unwrap_or(16);
+    let (version, wire_version) = parse_highest_version(payload).unwrap_or((16, 16));
 
-    debug!("N2C handshake: accepting version {version}, magic {network_magic}");
+    debug!("N2C handshake: accepting version {version} (wire: {wire_version}), magic {network_magic}");
 
-    // Encode accept response: [1, version, [magic, false]]
+    // Encode accept response: [1, wire_version, [magic, false]]
+    // Use wire_version to preserve bit-15 encoding if client sent it
     encoder
         .array(3)
         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
@@ -256,7 +257,7 @@ fn handle_handshake(payload: &[u8]) -> Result<Option<Segment>, N2CServerError> {
         .u32(1)
         .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // MsgAcceptVersion
     encoder
-        .u32(version as u32)
+        .u32(wire_version)
         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
     encoder
         .array(2)
@@ -295,27 +296,45 @@ fn parse_handshake_magic(payload: &[u8]) -> Option<u64> {
     }
 }
 
-/// Parse the highest proposed version number
-fn parse_highest_version(payload: &[u8]) -> Option<u16> {
+/// N2C version numbers have bit 15 set on the wire (Haskell convention).
+/// V16 = 32784, V17 = 32785, etc. Strip bit 15 to get the logical version.
+const N2C_VERSION_BIT: u32 = 1 << 15; // 0x8000
+
+/// Maximum N2C version we support
+const N2C_MAX_VERSION: u32 = 17;
+
+/// Minimum N2C version we support
+const N2C_MIN_VERSION: u32 = 16;
+
+/// Parse the highest proposed version number.
+/// Handles both raw version numbers (from torsten-cli) and
+/// bit-15-encoded versions (from cardano-cli / Haskell clients).
+/// Returns (logical_version, wire_version) where wire_version preserves
+/// the original encoding for the accept response.
+fn parse_highest_version(payload: &[u8]) -> Option<(u16, u32)> {
     let mut decoder = minicbor::Decoder::new(payload);
     decoder.array().ok()?;
     decoder.u32().ok()?; // msg type
     let map_len = decoder.map().ok()??;
-    let mut highest = 0u16;
+    let mut best: Option<(u16, u32)> = None;
     for _ in 0..map_len {
-        if let Ok(v) = decoder.u32() {
-            if v as u16 > highest && v <= 17 {
-                highest = v as u16;
+        if let Ok(wire_v) = decoder.u32() {
+            // Strip bit 15 if present to get logical version
+            let logical = if wire_v & N2C_VERSION_BIT != 0 {
+                wire_v & !N2C_VERSION_BIT
+            } else {
+                wire_v
+            };
+            if (N2C_MIN_VERSION..=N2C_MAX_VERSION).contains(&logical)
+                && (best.is_none() || logical as u16 > best.unwrap().0)
+            {
+                best = Some((logical as u16, wire_v));
             }
         }
         // Skip the value (params)
         decoder.skip().ok()?;
     }
-    if highest > 0 {
-        Some(highest)
-    } else {
-        None
-    }
+    best
 }
 
 /// Handle LocalTxSubmission messages
@@ -1586,22 +1605,60 @@ mod tests {
 
     #[test]
     fn test_parse_highest_version_basic() {
-        // Encode a handshake proposal: [0, {1: [764824073, false], 16: [764824073, false]}]
+        // Propose versions 16 and 17 without bit 15 (torsten-cli style)
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(0).unwrap(); // MsgProposeVersions
         enc.map(2).unwrap();
-        enc.u32(1).unwrap();
-        enc.array(2).unwrap();
-        enc.u64(764824073).unwrap();
-        enc.bool(false).unwrap();
         enc.u32(16).unwrap();
         enc.array(2).unwrap();
         enc.u64(764824073).unwrap();
         enc.bool(false).unwrap();
+        enc.u32(17).unwrap();
+        enc.array(2).unwrap();
+        enc.u64(764824073).unwrap();
+        enc.bool(false).unwrap();
 
-        assert_eq!(parse_highest_version(&buf), Some(16));
+        assert_eq!(parse_highest_version(&buf), Some((17, 17)));
+    }
+
+    #[test]
+    fn test_parse_highest_version_bit15() {
+        // Propose versions with bit 15 set (cardano-cli / Haskell style)
+        // V16 = 32784, V17 = 32785
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(0).unwrap(); // MsgProposeVersions
+        enc.map(2).unwrap();
+        enc.u32(32784).unwrap(); // V16 with bit 15
+        enc.array(2).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(32785).unwrap(); // V17 with bit 15
+        enc.array(2).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+
+        let result = parse_highest_version(&buf);
+        assert_eq!(result, Some((17, 32785))); // logical 17, wire 32785
+    }
+
+    #[test]
+    fn test_parse_highest_version_unsupported() {
+        // Propose only old versions (below V16)
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(0).unwrap();
+        enc.map(1).unwrap();
+        enc.u32(1).unwrap();
+        enc.array(2).unwrap();
+        enc.u64(764824073).unwrap();
+        enc.bool(false).unwrap();
+
+        assert_eq!(parse_highest_version(&buf), None);
     }
 
     #[test]
