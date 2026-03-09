@@ -14,7 +14,7 @@ use torsten_primitives::transaction::{
     Vote, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 /// Total ADA supply (45 billion ADA = 45 * 10^15 lovelace)
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
@@ -161,9 +161,21 @@ pub struct PoolRegistration {
     pub cost: Lovelace,
     pub margin_numerator: u64,
     pub margin_denominator: u64,
+    /// Reward account for pool operator rewards
+    #[serde(default)]
+    pub reward_account: Vec<u8>,
+    /// Pool owner stake key hashes
+    #[serde(default)]
+    pub owners: Vec<Hash28>,
     /// Relay endpoints declared by the pool operator
     #[serde(default)]
     pub relays: Vec<Relay>,
+    /// Pool metadata URL
+    #[serde(default)]
+    pub metadata_url: Option<String>,
+    /// Pool metadata hash
+    #[serde(default)]
+    pub metadata_hash: Option<Hash32>,
 }
 
 impl LedgerState {
@@ -405,7 +417,11 @@ impl LedgerState {
                     cost: params.cost,
                     margin_numerator: params.margin.numerator,
                     margin_denominator: params.margin.denominator,
+                    reward_account: params.reward_account.clone(),
+                    owners: params.pool_owners.clone(),
                     relays: params.relays.clone(),
+                    metadata_url: params.pool_metadata.as_ref().map(|m| m.url.clone()),
+                    metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
                 };
                 debug!("Pool registered: {}", params.operator.to_hex());
                 self.pool_params.insert(params.operator, pool_reg);
@@ -921,14 +937,47 @@ impl LedgerState {
             }
         }
 
+        // CIP-1694: Validate policy_hash matches constitution guardrail script
+        // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash
+        let constitution_script = self
+            .governance
+            .constitution
+            .as_ref()
+            .and_then(|c| c.script_hash);
+        match &proposal.gov_action {
+            GovAction::ParameterChange { policy_hash, .. }
+            | GovAction::TreasuryWithdrawals { policy_hash, .. } => {
+                if let Some(required_hash) = constitution_script {
+                    match policy_hash {
+                        Some(provided) if *provided == required_hash => {
+                            // Valid — policy hash matches constitution guardrail
+                        }
+                        Some(provided) => {
+                            warn!(
+                                "Governance proposal policy_hash {} does not match constitution guardrail {}",
+                                provided.to_hex(),
+                                required_hash.to_hex()
+                            );
+                        }
+                        None => {
+                            debug!(
+                                "Governance proposal missing policy_hash (constitution requires {})",
+                                required_hash.to_hex()
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
         let action_id = GovActionId {
             transaction_id: *tx_hash,
             action_index,
         };
 
-        // Governance action lifetime: proposals expire after a configurable number of epochs
-        // Default: 6 epochs (govActionLifetime parameter)
-        let gov_action_lifetime = 6;
+        // Governance action lifetime from protocol parameters
+        let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
         let expires_epoch = EpochNo(self.epoch.0 + gov_action_lifetime);
 
         let state = ProposalState {
@@ -2990,7 +3039,11 @@ mod tests {
                     cost: Lovelace(340_000_000),
                     margin_numerator: 1,
                     margin_denominator: 100,
+                    reward_account: vec![],
+                    owners: vec![],
                     relays: vec![],
+                    metadata_url: None,
+                    metadata_hash: None,
                 },
             );
         }
@@ -3226,5 +3279,140 @@ mod tests {
         assert_eq!(loaded.epoch, EpochNo(42));
         assert_eq!(loaded.tip.block_number, BlockNo(5000));
         assert_eq!(loaded.utxo_set.len(), 1);
+    }
+
+    #[test]
+    fn test_pool_registration_stores_metadata() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        let pool_id = Hash28::from_bytes([1u8; 28]);
+        let owner1 = Hash28::from_bytes([10u8; 28]);
+        let owner2 = Hash28::from_bytes([11u8; 28]);
+        let pool_params = PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([2u8; 32]),
+            pledge: Lovelace(500_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account: vec![0xe0; 29],
+            pool_owners: vec![owner1, owner2],
+            relays: vec![],
+            pool_metadata: Some(PoolMetadata {
+                url: "https://example.com/pool.json".to_string(),
+                hash: Hash32::from_bytes([99u8; 32]),
+            }),
+        };
+
+        state.process_certificate(&Certificate::PoolRegistration(pool_params));
+        let reg = &state.pool_params[&pool_id];
+
+        assert_eq!(reg.reward_account, vec![0xe0; 29]);
+        assert_eq!(reg.owners.len(), 2);
+        assert_eq!(reg.owners[0], owner1);
+        assert_eq!(reg.owners[1], owner2);
+        assert_eq!(
+            reg.metadata_url.as_deref(),
+            Some("https://example.com/pool.json")
+        );
+        assert_eq!(reg.metadata_hash, Some(Hash32::from_bytes([99u8; 32])));
+    }
+
+    #[test]
+    fn test_guardrail_script_policy_validation() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        // Set up a constitution with a guardrail script hash
+        let guardrail_hash = Hash28::from_bytes([42u8; 28]);
+        state.governance.constitution = Some(Constitution {
+            anchor: Anchor {
+                url: "https://constitution.example.com".to_string(),
+                data_hash: Hash32::ZERO,
+            },
+            script_hash: Some(guardrail_hash),
+        });
+
+        // Submit a ParameterChange proposal with matching policy_hash — should succeed
+        let update = torsten_primitives::transaction::ProtocolParamUpdate::default();
+        let proposal_with_match = ProposalProcedure {
+            deposit: Lovelace(100_000_000_000),
+            return_addr: vec![0u8; 29],
+            gov_action: GovAction::ParameterChange {
+                prev_action_id: None,
+                protocol_param_update: Box::new(update.clone()),
+                policy_hash: Some(guardrail_hash),
+            },
+            anchor: Anchor {
+                url: "https://example.com".to_string(),
+                data_hash: Hash32::ZERO,
+            },
+        };
+        state.process_proposal(&Hash32::from_bytes([1u8; 32]), 0, &proposal_with_match);
+        assert_eq!(state.governance.proposals.len(), 1);
+
+        // Submit a proposal with mismatched policy_hash — still accepted (logged as warning)
+        let proposal_mismatch = ProposalProcedure {
+            deposit: Lovelace(100_000_000_000),
+            return_addr: vec![0u8; 29],
+            gov_action: GovAction::ParameterChange {
+                prev_action_id: None,
+                protocol_param_update: Box::new(update.clone()),
+                policy_hash: Some(Hash28::from_bytes([99u8; 28])),
+            },
+            anchor: Anchor {
+                url: "https://example.com".to_string(),
+                data_hash: Hash32::ZERO,
+            },
+        };
+        state.process_proposal(&Hash32::from_bytes([2u8; 32]), 0, &proposal_mismatch);
+        assert_eq!(state.governance.proposals.len(), 2);
+
+        // Submit a proposal with no policy_hash — still accepted (logged as debug)
+        let proposal_no_hash = ProposalProcedure {
+            deposit: Lovelace(100_000_000_000),
+            return_addr: vec![0u8; 29],
+            gov_action: GovAction::ParameterChange {
+                prev_action_id: None,
+                protocol_param_update: Box::new(update),
+                policy_hash: None,
+            },
+            anchor: Anchor {
+                url: "https://example.com".to_string(),
+                data_hash: Hash32::ZERO,
+            },
+        };
+        state.process_proposal(&Hash32::from_bytes([3u8; 32]), 0, &proposal_no_hash);
+        assert_eq!(state.governance.proposals.len(), 3);
+    }
+
+    #[test]
+    fn test_gov_action_lifetime_from_protocol_params() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.gov_action_lifetime = 10;
+        let mut state = LedgerState::new(params);
+        state.epoch = EpochNo(5);
+
+        let proposal = ProposalProcedure {
+            deposit: Lovelace(100_000_000_000),
+            return_addr: vec![0u8; 29],
+            gov_action: GovAction::InfoAction,
+            anchor: Anchor {
+                url: "https://example.com".to_string(),
+                data_hash: Hash32::ZERO,
+            },
+        };
+        let tx_hash = Hash32::from_bytes([1u8; 32]);
+        state.process_proposal(&tx_hash, 0, &proposal);
+
+        let action_id = GovActionId {
+            transaction_id: tx_hash,
+            action_index: 0,
+        };
+        let ps = &state.governance.proposals[&action_id];
+        assert_eq!(ps.expires_epoch, EpochNo(15)); // epoch 5 + lifetime 10
     }
 }

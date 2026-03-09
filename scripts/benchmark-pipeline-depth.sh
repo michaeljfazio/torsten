@@ -3,12 +3,12 @@
 #
 # Usage: ./scripts/benchmark-pipeline-depth.sh [duration_seconds]
 #
-# Each configuration syncs for the specified duration (default: 120s),
+# Each configuration syncs from genesis for the specified duration (default: 180s),
 # then the blocks/sec throughput is extracted from the logs.
 
 set -euo pipefail
 
-DURATION=${1:-120}
+DURATION=${1:-180}
 BINARY="./target/release/torsten-node"
 CONFIG="./config/preview-config.json"
 TOPOLOGY="./config/preview-topology.json"
@@ -39,14 +39,7 @@ for depth in "${DEPTHS[@]}"; do
     mkdir -p "${DB_DIR}"
     rm -f "${SOCKET}"
 
-    # First do a mithril import to skip to a known point
-    echo "  Importing Mithril snapshot..."
-    ${BINARY} mithril-import \
-        --network-magic 2 \
-        --database-path "${DB_DIR}" \
-        --temp-dir /tmp/torsten-mithril 2>&1 | tail -1
-
-    # Run the node with the specified pipeline depth
+    # Run the node with the specified pipeline depth (sync from genesis)
     echo "  Syncing with depth=${depth} for ${DURATION}s..."
     TORSTEN_PIPELINE_DEPTH=${depth} \
     TORSTEN_HEADER_BATCH_SIZE=${BATCH_SIZE} \
@@ -55,10 +48,10 @@ for depth in "${DEPTHS[@]}"; do
         --topology "${TOPOLOGY}" \
         --database-path "${DB_DIR}" \
         --socket-path "${SOCKET}" \
-        2>&1 | tee "${LOG_FILE}" | grep "blocks/s" | tail -5
+        2>&1 | tee "${LOG_FILE}" | grep --line-buffered "blocks/s" | tail -5 || true
 
-    # Extract the average blocks/sec from the last few log lines
-    avg_bps=$(grep "blocks/s" "${LOG_FILE}" | tail -5 | \
+    # Extract the average blocks/sec from the last few log lines (skip first few warmup entries)
+    avg_bps=$(grep "blocks/s" "${LOG_FILE}" | tail -10 | head -5 | \
         sed 's/.*| \([0-9.]*\) blocks\/s.*/\1/' | \
         awk '{sum += $1; n++} END {if (n > 0) printf "%.1f", sum/n; else print "0"}')
 

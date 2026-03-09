@@ -5,7 +5,7 @@ use torsten_primitives::era::Era;
 use torsten_primitives::hash::{blake2b_256, Hash28, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
 use torsten_primitives::transaction::Transaction;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Block producer credentials loaded from disk
 #[allow(dead_code)]
@@ -34,7 +34,16 @@ pub struct BlockProducerCredentials {
 
 impl BlockProducerCredentials {
     /// Load block producer credentials from the given file paths.
-    pub fn load(vrf_skey_path: &Path, kes_skey_path: &Path, opcert_path: &Path) -> Result<Self> {
+    ///
+    /// Requires all four keys: VRF signing key, KES signing key, operational
+    /// certificate, and cold signing key. The cold key is needed to derive
+    /// the pool ID (blake2b-224 of the cold verification key).
+    pub fn load_with_cold_key(
+        vrf_skey_path: &Path,
+        kes_skey_path: &Path,
+        opcert_path: &Path,
+        cold_skey_path: &Path,
+    ) -> Result<Self> {
         // Load VRF signing key
         let vrf_content = std::fs::read_to_string(vrf_skey_path)
             .with_context(|| format!("Failed to read VRF skey: {}", vrf_skey_path.display()))?;
@@ -84,43 +93,6 @@ impl BlockProducerCredentials {
         let opcert_kes_period = decoder.u64()?;
         let opcert_sigma = decoder.bytes()?.to_vec();
 
-        // We need the cold key to derive the pool ID.
-        // The cold verification key is embedded in the opcert signature flow.
-        // For now, we derive pool_id from the KES vkey (this is a simplification).
-        // In a real implementation, the cold key would be loaded separately.
-        // Actually - we need the cold signing key to produce new blocks, but for
-        // pool ID derivation we need the cold *verification* key.
-        // The opcert was signed by the cold key, so we can't recover it from the cert alone.
-        // We'll require the cold key path as well.
-
-        // For now, create a placeholder pool_id.
-        // The actual pool_id will be set when we have the cold verification key.
-        let pool_id = Hash28::default();
-
-        Ok(BlockProducerCredentials {
-            vrf_skey,
-            vrf_vkey,
-            cold_skey: torsten_crypto::keys::PaymentSigningKey::generate(), // placeholder
-            cold_vkey: vec![],
-            kes_skey: kes_key_bytes,
-            kes_vkey: kes_vkey_bytes,
-            opcert_sequence,
-            opcert_kes_period,
-            opcert_sigma,
-            pool_id,
-        })
-    }
-
-    /// Load credentials with cold key for pool ID derivation
-    #[allow(dead_code)]
-    pub fn load_with_cold_key(
-        vrf_skey_path: &Path,
-        kes_skey_path: &Path,
-        opcert_path: &Path,
-        cold_skey_path: &Path,
-    ) -> Result<Self> {
-        let mut creds = Self::load(vrf_skey_path, kes_skey_path, opcert_path)?;
-
         // Load cold signing key
         let cold_content = std::fs::read_to_string(cold_skey_path)
             .with_context(|| format!("Failed to read cold skey: {}", cold_skey_path.display()))?;
@@ -130,14 +102,25 @@ impl BlockProducerCredentials {
             .ok_or_else(|| anyhow::anyhow!("Missing cborHex in cold skey file"))?;
         let cold_cbor = hex::decode(cold_cbor_hex)?;
         let cold_key_bytes = unwrap_cbor(&cold_cbor);
-        creds.cold_skey = torsten_crypto::keys::PaymentSigningKey::from_bytes(cold_key_bytes)?;
-        let cold_vk = creds.cold_skey.verification_key();
-        creds.cold_vkey = cold_vk.to_bytes().to_vec();
+        let cold_skey = torsten_crypto::keys::PaymentSigningKey::from_bytes(cold_key_bytes)?;
+        let cold_vk = cold_skey.verification_key();
+        let cold_vkey = cold_vk.to_bytes().to_vec();
 
         // Pool ID = blake2b-224 of the cold verification key
-        creds.pool_id = torsten_primitives::hash::blake2b_224(&cold_vk.to_bytes());
+        let pool_id = torsten_primitives::hash::blake2b_224(&cold_vk.to_bytes());
 
-        Ok(creds)
+        Ok(BlockProducerCredentials {
+            vrf_skey,
+            vrf_vkey,
+            cold_skey,
+            cold_vkey,
+            kes_skey: kes_key_bytes,
+            kes_vkey: kes_vkey_bytes,
+            opcert_sequence,
+            opcert_kes_period,
+            opcert_sigma,
+            pool_id,
+        })
     }
 }
 
@@ -246,8 +229,7 @@ pub fn forge_block(
         );
         sig_bytes
     } else {
-        warn!("No KES secret key loaded, using placeholder KES signature");
-        vec![0u8; 448]
+        anyhow::bail!("Cannot forge block: KES secret key is empty");
     };
 
     // Build the final block with correct header hash

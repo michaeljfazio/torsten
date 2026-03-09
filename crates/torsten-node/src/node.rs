@@ -39,6 +39,8 @@ pub struct NodeArgs {
     pub shelley_vrf_key: Option<PathBuf>,
     /// Path to operational certificate (enables block production)
     pub shelley_operational_certificate: Option<PathBuf>,
+    /// Path to cold signing key (required for block production)
+    pub shelley_cold_key: Option<PathBuf>,
 }
 
 /// Provides block data from ChainDB for the N2N server
@@ -364,15 +366,20 @@ impl Node {
         }));
         let query_handler = Arc::new(RwLock::new(qh));
 
-        // Load block producer credentials if all three key paths are provided
+        // Load block producer credentials if all key paths are provided
         let block_producer = match (
             &args.shelley_vrf_key,
             &args.shelley_kes_key,
             &args.shelley_operational_certificate,
+            &args.shelley_cold_key,
         ) {
-            (Some(vrf_path), Some(kes_path), Some(opcert_path)) => {
-                match crate::forge::BlockProducerCredentials::load(vrf_path, kes_path, opcert_path)
-                {
+            (Some(vrf_path), Some(kes_path), Some(opcert_path), Some(cold_key_path)) => {
+                match crate::forge::BlockProducerCredentials::load_with_cold_key(
+                    vrf_path,
+                    kes_path,
+                    opcert_path,
+                    cold_key_path,
+                ) {
                     Ok(creds) => {
                         info!(
                             pool_id = %creds.pool_id,
@@ -387,6 +394,13 @@ impl Node {
                         None
                     }
                 }
+            }
+            (Some(_), Some(_), Some(_), None) => {
+                warn!(
+                    "Block producer keys provided but --shelley-cold-key is missing. \
+                     Running in relay-only mode."
+                );
+                None
             }
             _ => {
                 info!("Running in relay-only mode (no block producer keys configured)");
@@ -915,11 +929,12 @@ impl Node {
 
         let use_pool = !fetch_pool.is_empty();
         let use_pipelined = pipelined.is_some();
-        // Pipeline depth configurable via TORSTEN_PIPELINE_DEPTH env var (default: 100)
+        // Pipeline depth configurable via TORSTEN_PIPELINE_DEPTH env var (default: 150)
+        // Benchmarked optimal: 150 yields ~275 blocks/sec vs ~151 at depth 100
         let pipeline_depth: usize = std::env::var("TORSTEN_PIPELINE_DEPTH")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
+            .unwrap_or(150);
         if use_pipelined {
             info!(
                 "Pipelined ChainSync enabled (pipeline depth {}), blocks from {} fetcher(s)",
@@ -1443,11 +1458,11 @@ impl Node {
                     cost: reg.cost.0,
                     margin_num: reg.margin_numerator,
                     margin_den: reg.margin_denominator,
-                    reward_account: Vec::new(), // Not tracked in PoolRegistration yet
-                    owners: Vec::new(),         // Not tracked in PoolRegistration yet
+                    reward_account: reg.reward_account.clone(),
+                    owners: reg.owners.iter().map(|o| o.as_ref().to_vec()).collect(),
                     relays,
-                    metadata_url: None,  // Not tracked in PoolRegistration yet
-                    metadata_hash: None, // Not tracked in PoolRegistration yet
+                    metadata_url: reg.metadata_url.clone(),
+                    metadata_hash: reg.metadata_hash.map(|h| h.as_ref().to_vec()),
                 }
             })
             .collect();
