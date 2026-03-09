@@ -80,7 +80,6 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(true)
-        .with_thread_ids(true)
         .init();
 
     let cli = Cli::parse();
