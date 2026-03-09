@@ -1272,6 +1272,7 @@ impl LedgerState {
     /// Ratified proposals are enacted (their effects applied) and removed.
     fn ratify_proposals(&mut self) {
         let total_drep_stake = self.compute_total_drep_stake();
+        let total_spo_stake = self.compute_total_spo_stake();
 
         // Collect ratified proposal IDs and their actions
         let ratified: Vec<(GovActionId, GovAction)> = self
@@ -1279,7 +1280,7 @@ impl LedgerState {
             .proposals
             .iter()
             .filter(|(action_id, state)| {
-                self.check_ratification(action_id, state, total_drep_stake)
+                self.check_ratification(action_id, state, total_drep_stake, total_spo_stake)
             })
             .map(|(id, state)| (id.clone(), state.procedure.gov_action.clone()))
             .collect();
@@ -1330,6 +1331,7 @@ impl LedgerState {
         action_id: &GovActionId,
         state: &ProposalState,
         total_drep_stake: u64,
+        total_spo_stake: u64,
     ) -> bool {
         // Count votes by voter type
         let (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total) =
@@ -1360,7 +1362,8 @@ impl LedgerState {
                 let spo_threshold = self.protocol_params.pvt_hard_fork.as_f64();
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
+                let spo_met =
+                    check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 drep_met && spo_met
             }
             GovAction::NoConfidence { .. } => {
@@ -1368,7 +1371,8 @@ impl LedgerState {
                 let spo_threshold = self.protocol_params.pvt_motion_no_confidence.as_f64();
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
+                let spo_met =
+                    check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 drep_met && spo_met
             }
             GovAction::UpdateCommittee { .. } => {
@@ -1385,7 +1389,8 @@ impl LedgerState {
                 };
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
+                let spo_met =
+                    check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 drep_met && spo_met
             }
             GovAction::NewConstitution { .. } => {
@@ -1523,6 +1528,25 @@ impl LedgerState {
         } else {
             total
         }
+    }
+
+    /// Compute total active SPO stake across all pools.
+    /// Used as the denominator for SPO voting thresholds.
+    fn compute_total_spo_stake(&self) -> u64 {
+        // Use "set" snapshot if available (previous epoch), else current pool_stake
+        if let Some(ref snapshot) = self.snapshots.set {
+            let total: u64 = snapshot.pool_stake.values().map(|s| s.0).sum();
+            return total.max(1);
+        }
+        // Fallback: sum all pool stake from current delegations
+        let mut pool_stakes: HashMap<Hash28, u64> = HashMap::new();
+        for (stake_cred, pool_id) in &self.delegations {
+            if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
+                *pool_stakes.entry(*pool_id).or_default() += stake.0;
+            }
+        }
+        let total: u64 = pool_stakes.values().sum();
+        total.max(1)
     }
 
     /// Enact a ratified governance action by applying its effects
