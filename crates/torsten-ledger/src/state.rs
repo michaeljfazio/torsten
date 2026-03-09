@@ -19,6 +19,69 @@ use tracing::{debug, info, trace, warn};
 /// Total ADA supply (45 billion ADA = 45 * 10^15 lovelace)
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
 
+/// Reduced rational number (i128 numerator/denominator with GCD reduction).
+/// Matches Haskell's Rational for reward calculations with rationalToCoinViaFloor.
+#[derive(Clone, Copy)]
+struct Rat {
+    n: i128,
+    d: i128,
+}
+
+impl Rat {
+    fn new(n: i128, d: i128) -> Self {
+        if d == 0 {
+            return Rat { n: 0, d: 1 };
+        }
+        let g = Self::gcd(n.unsigned_abs(), d.unsigned_abs()) as i128;
+        let sign = if d < 0 { -1 } else { 1 };
+        Rat {
+            n: sign * n / g,
+            d: sign * d / g,
+        }
+    }
+
+    fn gcd(a: u128, b: u128) -> u128 {
+        if b == 0 {
+            a
+        } else {
+            Self::gcd(b, a % b)
+        }
+    }
+
+    fn add(&self, other: &Rat) -> Rat {
+        Rat::new(self.n * other.d + other.n * self.d, self.d * other.d)
+    }
+
+    fn sub(&self, other: &Rat) -> Rat {
+        Rat::new(self.n * other.d - other.n * self.d, self.d * other.d)
+    }
+
+    fn mul(&self, other: &Rat) -> Rat {
+        Rat::new(self.n * other.n, self.d * other.d)
+    }
+
+    fn div(&self, other: &Rat) -> Rat {
+        Rat::new(self.n * other.d, self.d * other.n)
+    }
+
+    fn min_rat(&self, other: &Rat) -> Rat {
+        // Compare self vs other: self.n/self.d vs other.n/other.d
+        if self.n * other.d <= other.n * self.d {
+            *self
+        } else {
+            *other
+        }
+    }
+
+    fn floor_u64(&self) -> u64 {
+        if self.d == 0 || self.n <= 0 {
+            0
+        } else {
+            (self.n / self.d) as u64
+        }
+    }
+}
+
 /// The complete ledger state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerState {
@@ -842,8 +905,6 @@ impl LedgerState {
 
         // Saturation point: z0 = 1/nOpt
         let n_opt = self.protocol_params.n_opt.max(1);
-        // a0 pledge influence
-        let a0 = self.protocol_params.a0.as_f64();
 
         let mut total_distributed: u64 = 0;
 
@@ -894,32 +955,45 @@ impl LedgerState {
                 continue;
             }
 
-            // maxPool'(a0, nOpt, R, sigma, p):
+            // maxPool'(a0, nOpt, R, sigma, p) using rational arithmetic:
             //   z0 = 1/nOpt
             //   sigma' = min(sigma, z0), p' = min(p, z0)
-            //   maxPool = R/(1+a0) * (sigma' + p' * a0 * (sigma' - p'*(z0-sigma')/z0) / z0)
-            let z0 = 1.0 / n_opt as f64;
-            let sigma = (pool_active_stake.0 as f64 / total_stake as f64).min(z0);
-            let p = (pool_reg.pledge.0 as f64 / total_stake as f64).min(z0);
+            //   maxPool = floor(R/(1+a0) * (sigma' + p' * a0 * (sigma' - p'*(z0-sigma')/z0) / z0))
+            //
+            // Uses Rat (i128 num/den with GCD reduction) to match Haskell's Rational.
+            let a0_r = Rat::new(
+                self.protocol_params.a0.numerator as i128,
+                self.protocol_params.a0.denominator.max(1) as i128,
+            );
+            let z0 = Rat::new(1, n_opt as i128);
+            let sigma_raw = Rat::new(pool_active_stake.0 as i128, total_stake as i128);
+            let p_raw = Rat::new(pool_reg.pledge.0 as i128, total_stake as i128);
+            let sigma = sigma_raw.min_rat(&z0);
+            let p = p_raw.min_rat(&z0);
 
-            let factor1 = reward_pot as f64 / (1.0 + a0);
-            let factor4 = (z0 - sigma) / z0;
-            let factor3 = (sigma - p * factor4) / z0;
-            let factor2 = sigma + p * a0 * factor3;
-            let max_pool = (factor1 * factor2).floor() as u64;
+            // factor4 = (z0 - sigma') / z0
+            let f4 = z0.sub(&sigma).div(&z0);
+            // factor3 = (sigma' - p' * factor4) / z0
+            let f3 = sigma.sub(&p.mul(&f4)).div(&z0);
+            // factor2 = sigma' + p' * a0 * factor3
+            let f2 = sigma.add(&p.mul(&a0_r).mul(&f3));
+            // factor1 = R / (1 + a0)
+            let f1 = Rat::new(reward_pot as i128, 1).div(&Rat::new(1, 1).add(&a0_r));
+            // maxPool = floor(factor1 * factor2)
+            let max_pool = f1.mul(&f2).floor_u64();
 
-            // Apparent performance: beta / sigma_a
-            //   beta = blocks_made / total_blocks
-            //   sigma_a = pool_stake / total_active_stake
-            //   perf = beta / sigma_a
+            // Apparent performance: beta / sigma_a (rational arithmetic)
+            //   perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
+            //        = (blocks_made * total_active_stake) / (total_blocks * pool_stake)
             let blocks_made = self.epoch_blocks_by_pool.get(pool_id).copied().unwrap_or(0);
             let pool_reward = if blocks_made == 0 || pool_active_stake.0 == 0 {
                 0u64
             } else {
-                let beta = blocks_made as f64 / total_blocks_in_epoch as f64;
-                let sigma_a = pool_active_stake.0 as f64 / total_active_stake as f64;
-                let apparent_perf = if sigma_a > 0.0 { beta / sigma_a } else { 0.0 };
-                (apparent_perf * max_pool as f64).floor() as u64
+                let perf = Rat::new(
+                    blocks_made as i128 * total_active_stake as i128,
+                    total_blocks_in_epoch as i128 * pool_active_stake.0 as i128,
+                );
+                perf.mul(&Rat::new(max_pool as i128, 1)).floor_u64()
             };
 
             if pool_reward == 0 {
@@ -950,9 +1024,26 @@ impl LedgerState {
                 cost + op_extra.max(0) as u64
             };
 
-            // Distribute member rewards proportionally to delegators
+            // Distribute member rewards proportionally to delegators.
+            // Pool owners are excluded — they receive only the operator reward.
+            // Build owner set (as Hash32 keys) for filtering
+            let owner_set: std::collections::HashSet<Hash32> = pool_reg
+                .owners
+                .iter()
+                .map(|o| {
+                    let mut kb = [0u8; 32];
+                    kb[..28].copy_from_slice(o.as_bytes());
+                    Hash32::from_bytes(kb)
+                })
+                .collect();
+
             if let Some(delegators) = delegators_by_pool.get(pool_id) {
                 for cred_hash in delegators {
+                    // Skip pool owners — they only get leader/operator reward
+                    if owner_set.contains(cred_hash) {
+                        continue;
+                    }
+
                     let member_stake = go_snapshot
                         .stake_distribution
                         .get(cred_hash)
