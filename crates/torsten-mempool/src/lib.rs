@@ -244,6 +244,18 @@ impl Mempool {
         self.config.max_transactions
     }
 
+    /// Get a transaction's raw CBOR bytes (for LocalTxMonitor protocol)
+    pub fn get_tx_cbor(&self, tx_hash: &TransactionHash) -> Option<Vec<u8>> {
+        self.txs
+            .get(tx_hash)
+            .and_then(|entry| entry.tx.raw_cbor.clone())
+    }
+
+    /// Get the first transaction hash in the mempool (for iteration)
+    pub fn first_tx_hash(&self) -> Option<TransactionHash> {
+        self.order.read().front().copied()
+    }
+
     /// Snapshot of current mempool state
     pub fn snapshot(&self) -> MempoolSnapshot {
         MempoolSnapshot {

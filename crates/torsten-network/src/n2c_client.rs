@@ -527,6 +527,51 @@ impl N2CClient {
         Ok((capacity, size, num_txs))
     }
 
+    /// Get the next transaction from the mempool snapshot.
+    /// Returns `Some((era_id, tx_bytes))` if a transaction is available, or `None` if empty.
+    pub async fn monitor_next_tx(&mut self) -> Result<Option<(u32, Vec<u8>)>, N2CClientError> {
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(6)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgNextTx
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_TX_MONITOR,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        let mut decoder = minicbor::Decoder::new(&resp.payload);
+        let _ = decoder.array();
+        let tag = decoder
+            .u32()
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        if tag != 7 {
+            return Err(N2CClientError::Protocol(format!(
+                "expected MsgNextTxReply(7), got {tag}"
+            )));
+        }
+        // Check if the response is null (no tx) or [era_id, tx_bytes]
+        match decoder.datatype() {
+            Ok(minicbor::data::Type::Null) => {
+                let _ = decoder.null();
+                Ok(None)
+            }
+            Ok(minicbor::data::Type::Array) => {
+                let _ = decoder.array();
+                let era_id = decoder.u32().unwrap_or(0);
+                let tx_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                Ok(Some((era_id, tx_bytes)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Release the mempool snapshot
     pub async fn monitor_release(&mut self) -> Result<(), N2CClientError> {
         let mut payload = Vec::new();

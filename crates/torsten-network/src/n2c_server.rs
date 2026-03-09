@@ -447,15 +447,42 @@ fn handle_tx_monitor(
         6 => {
             // MsgNextTx → MsgNextTxReply(null | [era_id, tx_bytes])
             debug!("LocalTxMonitor: MsgNextTx");
-            // For now, return null (no tx) since we don't iterate the mempool
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
-            enc.array(2)
-                .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-            enc.u32(7)
-                .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // MsgNextTxReply
-            enc.null()
-                .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // no tx
+
+            // Try to return the first transaction from the mempool
+            if let Some(tx_hash) = mempool.first_tx_hash() {
+                if let Some(tx_cbor) = mempool.get_tx_cbor(&tx_hash) {
+                    debug!("LocalTxMonitor: MsgNextTxReply with tx {}", tx_hash);
+                    // MsgNextTxReply [7, [era_id, tx_bytes]]
+                    enc.array(2)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    enc.u32(7)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    enc.array(2)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    enc.u32(6)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // era 6 = Conway
+                    enc.bytes(&tx_cbor)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                } else {
+                    // Tx exists but no CBOR — return null
+                    enc.array(2)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    enc.u32(7)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    enc.null()
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                }
+            } else {
+                // Empty mempool — return null
+                enc.array(2)
+                    .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                enc.u32(7)
+                    .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                enc.null()
+                    .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+            }
             Ok(Some(Segment {
                 transmission_time: 0,
                 protocol_id: MINI_PROTOCOL_TX_MONITOR,
