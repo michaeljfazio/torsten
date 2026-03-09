@@ -1472,6 +1472,25 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.u64(*treasury).ok();
             enc.u64(*reserves).ok();
         }
+        QueryResult::GenesisConfig {
+            system_start,
+            network_magic,
+            epoch_length,
+            slot_length_secs,
+            security_param,
+        } => {
+            enc.map(5).ok();
+            enc.str("systemStart").ok();
+            enc.str(system_start).ok();
+            enc.str("networkMagic").ok();
+            enc.u32(*network_magic).ok();
+            enc.str("epochLength").ok();
+            enc.u64(*epoch_length).ok();
+            enc.str("slotLength").ok();
+            enc.u64(*slot_length_secs).ok();
+            enc.str("securityParam").ok();
+            enc.u64(*security_param).ok();
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }

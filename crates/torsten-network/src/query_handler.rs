@@ -28,6 +28,13 @@ pub enum QueryResult {
         treasury: u64,
         reserves: u64,
     },
+    GenesisConfig {
+        system_start: String,
+        network_magic: u32,
+        epoch_length: u64,
+        slot_length_secs: u64,
+        security_param: u64,
+    },
     Error(String),
 }
 
@@ -290,6 +297,12 @@ pub struct NodeStateSnapshot {
     pub stake_snapshots: StakeSnapshotsResult,
     /// Pool parameters for pool-params queries
     pub pool_params_entries: Vec<PoolParamsSnapshot>,
+    /// Epoch length in slots (for era history query)
+    pub epoch_length: u64,
+    /// Slot length in seconds (for era history query)
+    pub slot_length_secs: u64,
+    /// Network magic number
+    pub network_magic: u32,
 }
 
 impl Default for NodeStateSnapshot {
@@ -315,6 +328,9 @@ impl Default for NodeStateSnapshot {
             stake_addresses: Vec::new(),
             stake_snapshots: StakeSnapshotsResult::default(),
             pool_params_entries: Vec::new(),
+            epoch_length: 432000,     // Mainnet default
+            slot_length_secs: 1,      // Shelley slot length
+            network_magic: 764824073, // Mainnet magic
         }
     }
 }
@@ -554,10 +570,20 @@ impl QueryHandler {
                 debug!("Query: GetStakeDistribution");
                 QueryResult::StakeDistribution(self.state.stake_pools.clone())
             }
+            6 => {
+                // GetNonMyopicMemberRewards — returns empty map (stake simulation not implemented)
+                debug!("Query: GetNonMyopicMemberRewards");
+                QueryResult::StakeDistribution(vec![])
+            }
             7 => {
                 // GetCurrentPParams
                 debug!("Query: GetCurrentPParams");
                 QueryResult::ProtocolParams(Box::new(self.state.protocol_params.clone()))
+            }
+            8 => {
+                // GetProposedPParamsUpdates — returns empty (no pending updates tracked)
+                debug!("Query: GetProposedPParamsUpdates");
+                QueryResult::StakeDistribution(vec![])
             }
             10 => {
                 // GetChainBlockNo
@@ -576,6 +602,22 @@ impl QueryHandler {
                     hash,
                     block_no: self.state.block_number.0,
                 }
+            }
+            9 => {
+                // GetGenesisConfig
+                debug!("Query: GetGenesisConfig");
+                QueryResult::GenesisConfig {
+                    system_start: self.state.system_start.clone(),
+                    network_magic: self.state.network_magic,
+                    epoch_length: self.state.epoch_length,
+                    slot_length_secs: self.state.slot_length_secs,
+                    security_param: 2160,
+                }
+            }
+            13 => {
+                // GetUTxOWhole — return empty set (too large to serve in practice)
+                debug!("Query: GetUTxOWhole (returning empty — use GetUTxOByAddress instead)");
+                QueryResult::UtxoByAddress(vec![])
             }
             20 => {
                 // GetGovState (Conway governance)

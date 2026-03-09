@@ -1623,6 +1623,9 @@ impl Node {
             stake_addresses,
             stake_snapshots,
             pool_params_entries,
+            epoch_length: ls.epoch_length,
+            slot_length_secs: 1, // Shelley slot length is always 1 second
+            network_magic: self.network_magic as u32,
         };
 
         // Drop the ledger read lock before acquiring the query handler write lock
