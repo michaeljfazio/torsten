@@ -90,6 +90,74 @@ graph TD
 - **cardano-cli compatible** CLI for key generation, transaction building, and queries
 - **Prometheus metrics** on port 12798
 
+## Feature Status
+
+| Feature | Status |
+|---------|--------|
+| **Consensus** | |
+| Ouroboros Praos leader election (VRF) | :white_check_mark: |
+| KES signature validation | :white_check_mark: |
+| Epoch nonce computation | :white_check_mark: |
+| Chain selection (longest chain) | :white_check_mark: |
+| Epoch transitions (mark/set/go snapshots) | :white_check_mark: |
+| Reward calculation and distribution | :white_check_mark: |
+| **Ledger** | |
+| UTxO management (HashMap, O(1) lookups) | :white_check_mark: |
+| Transaction validation (Phase-1) | :white_check_mark: |
+| Plutus script execution (Phase-2, V1/V2/V3) | :white_check_mark: |
+| Native script evaluation | :white_check_mark: |
+| Certificate processing (stake, delegation, pool) | :white_check_mark: |
+| Multi-era support (Byron–Conway) | :white_check_mark: |
+| **Conway Governance (CIP-1694)** | |
+| DRep registration, voting, delegation | :white_check_mark: |
+| Constitutional committee | :white_check_mark: |
+| Governance proposals and ratification | :white_check_mark: |
+| Treasury withdrawals | :white_check_mark: |
+| Stake-weighted voting thresholds | :white_check_mark: |
+| **Networking (N2N)** | |
+| Ouroboros multiplexer | :white_check_mark: |
+| Handshake (V14/V15) | :white_check_mark: |
+| ChainSync (pipelined, ~275 blocks/s) | :white_check_mark: |
+| BlockFetch (multi-peer, up to 4 fetchers) | :white_check_mark: |
+| TxSubmission2 | :white_check_mark: |
+| KeepAlive | :white_check_mark: |
+| PeerSharing | :white_check_mark: |
+| N2N server (inbound connections) | :white_check_mark: |
+| **Networking (N2C)** | |
+| LocalStateQuery (protocol params, UTxO, stake, governance) | :white_check_mark: |
+| LocalChainSync (block delivery) | :white_check_mark: |
+| LocalTxSubmission (with Phase-1/Phase-2 validation) | :white_check_mark: |
+| LocalTxMonitor | :white_check_mark: |
+| **P2P** | |
+| Peer manager (cold/warm/hot lifecycle) | :white_check_mark: |
+| DNS multi-resolution | :white_check_mark: |
+| Ledger-based peer discovery (SPO relays) | :white_check_mark: |
+| Adaptive peer selection (EWMA latency) | :white_check_mark: |
+| **Block Production** | |
+| VRF proof generation | :white_check_mark: |
+| Block forging with KES signing | :white_check_mark: |
+| Operational certificate handling | :white_check_mark: |
+| Block announcement (active push) | :white_check_mark: |
+| **Storage** | |
+| ImmutableDB (RocksDB) | :white_check_mark: |
+| VolatileDB (in-memory) | :white_check_mark: |
+| Rollback support | :white_check_mark: |
+| Mithril snapshot import | :white_check_mark: |
+| Ledger state snapshots (checkpointed) | :white_check_mark: |
+| **CLI** | |
+| Key generation (payment, stake, VRF, KES, node) | :white_check_mark: |
+| Address building (payment, stake, enterprise) | :white_check_mark: |
+| Transaction build, sign, submit | :white_check_mark: |
+| Query commands (tip, utxo, params, stake, governance) | :white_check_mark: |
+| Governance commands (drep, committee, vote, action) | :white_check_mark: |
+| **Observability** | |
+| Prometheus metrics (port 12798) | :white_check_mark: |
+| SIGHUP topology reload | :white_check_mark: |
+| **Pending** | |
+| Full VRF/KES cryptographic verification | :construction: |
+| Mainnet production readiness | :construction: |
+| Genesis bootstrap from peers | :construction: |
+
 ## Network Magic
 
 | Network | Magic |

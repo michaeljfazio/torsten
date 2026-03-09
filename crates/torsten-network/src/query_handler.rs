@@ -30,13 +30,7 @@ pub enum QueryResult {
         treasury: u64,
         reserves: u64,
     },
-    GenesisConfig {
-        system_start: String,
-        network_magic: u32,
-        epoch_length: u64,
-        slot_length_secs: u64,
-        security_param: u64,
-    },
+    GenesisConfig(Box<GenesisConfigSnapshot>),
     /// NonMyopicMemberRewards: map from stake_amount → pool rewards
     NonMyopicMemberRewards(Vec<NonMyopicRewardEntry>),
     /// Empty proposed protocol parameter updates (Conway uses governance proposals)
@@ -262,6 +256,65 @@ pub struct NonMyopicRewardEntry {
     pub pool_rewards: Vec<(Vec<u8>, u64)>,
 }
 
+/// CompactGenesis snapshot for GetGenesisConfig (tag 11).
+/// CBOR: array(15) matching ShelleyGenesis wire format.
+#[derive(Debug, Clone)]
+pub struct GenesisConfigSnapshot {
+    /// ISO-8601 UTC timestamp, e.g. "2022-04-01T00:00:00Z"
+    pub system_start: String,
+    pub network_magic: u32,
+    /// 0=Testnet, 1=Mainnet
+    pub network_id: u8,
+    /// activeSlotsCoeff as numerator/denominator (no tag(30))
+    pub active_slots_coeff_num: u64,
+    pub active_slots_coeff_den: u64,
+    pub security_param: u64,
+    pub epoch_length: u64,
+    pub slots_per_kes_period: u64,
+    pub max_kes_evolutions: u64,
+    /// Slot length in microseconds (1 second = 1_000_000)
+    pub slot_length_micros: u64,
+    pub update_quorum: u64,
+    pub max_lovelace_supply: u64,
+    /// Legacy Shelley protocol params
+    pub protocol_params: ShelleyPParamsSnapshot,
+    /// Genesis delegates: Vec<(genesis_keyhash_28, delegate_keyhash_28, vrf_hash_32)>
+    pub gen_delegs: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+}
+
+/// Legacy Shelley-era protocol parameters for CompactGenesis.
+/// CBOR: array(18) with split protocolVersion major/minor (legacy encoding).
+#[derive(Debug, Clone)]
+pub struct ShelleyPParamsSnapshot {
+    pub min_fee_a: u64,
+    pub min_fee_b: u64,
+    pub max_block_body_size: u32,
+    pub max_tx_size: u32,
+    pub max_block_header_size: u16,
+    pub key_deposit: u64,
+    pub pool_deposit: u64,
+    pub e_max: u32,
+    pub n_opt: u16,
+    /// a0 as tagged rational tag(30)[num, den]
+    pub a0_num: u64,
+    pub a0_den: u64,
+    /// rho as tagged rational
+    pub rho_num: u64,
+    pub rho_den: u64,
+    /// tau as tagged rational
+    pub tau_num: u64,
+    pub tau_den: u64,
+    /// decentralization parameter (d) — 0 in Conway
+    pub d_num: u64,
+    pub d_den: u64,
+    /// protocol version major
+    pub protocol_version_major: u64,
+    /// protocol version minor
+    pub protocol_version_minor: u64,
+    pub min_utxo_value: u64,
+    pub min_pool_cost: u64,
+}
+
 /// Snapshot of a stake pool for query results (GetStakeDistribution).
 ///
 /// Wire format: Map<pool_hash(28), [tag(30)[num,den], vrf_hash(32)]>
@@ -424,6 +477,8 @@ pub struct NodeStateSnapshot {
     pub network_magic: u32,
     /// Security parameter (k)
     pub security_param: u64,
+    /// Full genesis config for GetGenesisConfig query (tag 11)
+    pub genesis_config: Option<GenesisConfigSnapshot>,
 }
 
 impl Default for NodeStateSnapshot {
@@ -456,6 +511,7 @@ impl Default for NodeStateSnapshot {
             slot_length_secs: 1,      // Shelley slot length
             network_magic: 764824073, // Mainnet magic
             security_param: 2160,     // Mainnet security parameter
+            genesis_config: None,
         }
     }
 }
@@ -837,14 +893,62 @@ impl QueryHandler {
                 }
             }
             11 => {
-                // Tag 11: GetGenesisConfig
+                // Tag 11: GetGenesisConfig (CompactGenesis)
                 debug!("Query: GetGenesisConfig");
-                QueryResult::GenesisConfig {
-                    system_start: self.state.system_start.clone(),
-                    network_magic: self.state.network_magic,
-                    epoch_length: self.state.epoch_length,
-                    slot_length_secs: self.state.slot_length_secs,
-                    security_param: self.state.security_param,
+                if let Some(ref gc) = self.state.genesis_config {
+                    QueryResult::GenesisConfig(Box::new(gc.clone()))
+                } else {
+                    // Fallback: minimal genesis config from node state fields
+                    QueryResult::GenesisConfig(Box::new(GenesisConfigSnapshot {
+                        system_start: self.state.system_start.clone(),
+                        network_magic: self.state.network_magic,
+                        network_id: if self.state.network_magic == 764824073 {
+                            1
+                        } else {
+                            0
+                        },
+                        active_slots_coeff_num: 1,
+                        active_slots_coeff_den: 20,
+                        security_param: self.state.security_param,
+                        epoch_length: self.state.epoch_length,
+                        slots_per_kes_period: 129600,
+                        max_kes_evolutions: 62,
+                        slot_length_micros: self.state.slot_length_secs * 1_000_000,
+                        update_quorum: 5,
+                        max_lovelace_supply: 45_000_000_000_000_000,
+                        protocol_params: ShelleyPParamsSnapshot {
+                            min_fee_a: self.state.protocol_params.min_fee_a,
+                            min_fee_b: self.state.protocol_params.min_fee_b,
+                            max_block_body_size: self.state.protocol_params.max_block_body_size
+                                as u32,
+                            max_tx_size: self.state.protocol_params.max_tx_size as u32,
+                            max_block_header_size: self.state.protocol_params.max_block_header_size
+                                as u16,
+                            key_deposit: self.state.protocol_params.key_deposit,
+                            pool_deposit: self.state.protocol_params.pool_deposit,
+                            e_max: self.state.protocol_params.e_max as u32,
+                            n_opt: self.state.protocol_params.n_opt as u16,
+                            a0_num: self.state.protocol_params.a0_num,
+                            a0_den: self.state.protocol_params.a0_den,
+                            rho_num: self.state.protocol_params.rho_num,
+                            rho_den: self.state.protocol_params.rho_den,
+                            tau_num: self.state.protocol_params.tau_num,
+                            tau_den: self.state.protocol_params.tau_den,
+                            d_num: 0,
+                            d_den: 1,
+                            protocol_version_major: self
+                                .state
+                                .protocol_params
+                                .protocol_version_major,
+                            protocol_version_minor: self
+                                .state
+                                .protocol_params
+                                .protocol_version_minor,
+                            min_utxo_value: 0,
+                            min_pool_cost: self.state.protocol_params.min_pool_cost,
+                        },
+                        gen_delegs: Vec::new(),
+                    }))
                 }
             }
             // Tag 12: DebugNewEpochState — not implemented

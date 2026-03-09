@@ -1387,6 +1387,73 @@ fn encode_relay_cbor(
     }
 }
 
+/// Parse an ISO-8601 UTC timestamp to (year, dayOfYear, picosecondsOfDay).
+/// Input format: "2022-04-01T00:00:00Z" or similar.
+fn parse_utctime(s: &str) -> (u64, u64, u64) {
+    // Try to parse "YYYY-MM-DDThh:mm:ssZ"
+    let s = s.trim_end_matches('Z');
+    let parts: Vec<&str> = s.split('T').collect();
+    if parts.len() != 2 {
+        return (2017, 266, 0); // fallback: mainnet system start
+    }
+    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+
+    if date_parts.len() < 3 || time_parts.len() < 3 {
+        return (2017, 266, 0);
+    }
+
+    let (year, month, day) = (date_parts[0], date_parts[1], date_parts[2]);
+
+    // Calculate day of year
+    let days_in_months: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let mut day_of_year = day;
+    for (i, &days) in days_in_months.iter().enumerate().take((month - 1) as usize) {
+        day_of_year += days;
+        if i == 1 && is_leap {
+            day_of_year += 1;
+        }
+    }
+
+    // Picoseconds of day
+    let picos = (time_parts[0] * 3600 + time_parts[1] * 60 + time_parts[2]) * 1_000_000_000_000;
+
+    (year, day_of_year, picos)
+}
+
+/// Encode legacy Shelley PParams as array(18) (N2C V16-V20 legacy format).
+fn encode_shelley_pparams(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    pp: &crate::query_handler::ShelleyPParamsSnapshot,
+) {
+    enc.array(18).ok();
+    enc.u64(pp.min_fee_a).ok(); // [0] txFeePerByte
+    enc.u64(pp.min_fee_b).ok(); // [1] txFeeFixed
+    enc.u32(pp.max_block_body_size).ok(); // [2] maxBBSize
+    enc.u32(pp.max_tx_size).ok(); // [3] maxTxSize
+    enc.u16(pp.max_block_header_size).ok(); // [4] maxBHSize
+    enc.u64(pp.key_deposit).ok(); // [5] keyDeposit
+    enc.u64(pp.pool_deposit).ok(); // [6] poolDeposit
+    enc.u32(pp.e_max).ok(); // [7] eMax
+    enc.u16(pp.n_opt).ok(); // [8] nOpt
+    encode_tagged_rational(enc, pp.a0_num, pp.a0_den); // [9] a0
+    encode_tagged_rational(enc, pp.rho_num, pp.rho_den); // [10] rho
+    encode_tagged_rational(enc, pp.tau_num, pp.tau_den); // [11] tau
+    encode_tagged_rational(enc, pp.d_num, pp.d_den); // [12] d (decentralization)
+                                                     // [13] extraEntropy: NeutralNonce = [0]
+    enc.array(1).ok();
+    enc.u32(0).ok();
+    // [14] protocolVersion major
+    enc.u64(pp.protocol_version_major).ok();
+    // [15] protocolVersion minor
+    enc.u64(pp.protocol_version_minor).ok();
+    // [16] minUTxOValue
+    enc.u64(pp.min_utxo_value).ok();
+    // [17] minPoolCost
+    enc.u64(pp.min_pool_cost).ok();
+}
+
 fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
@@ -1787,24 +1854,68 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.u64(*treasury).ok();
             enc.u64(*reserves).ok();
         }
-        QueryResult::GenesisConfig {
-            system_start,
-            network_magic,
-            epoch_length,
-            slot_length_secs,
-            security_param,
-        } => {
-            enc.map(5).ok();
-            enc.str("systemStart").ok();
-            enc.str(system_start).ok();
-            enc.str("networkMagic").ok();
-            enc.u32(*network_magic).ok();
-            enc.str("epochLength").ok();
-            enc.u64(*epoch_length).ok();
-            enc.str("slotLength").ok();
-            enc.u64(*slot_length_secs).ok();
-            enc.str("securityParam").ok();
-            enc.u64(*security_param).ok();
+        QueryResult::GenesisConfig(gc) => {
+            // CompactGenesis: array(15) matching ShelleyGenesis CBOR wire format
+            enc.array(15).ok();
+
+            // [0] systemStart: UTCTime = array(3) [year, dayOfYear, picosecondsOfDay]
+            let (year, day_of_year, picos) = parse_utctime(&gc.system_start);
+            enc.array(3).ok();
+            enc.u64(year).ok();
+            enc.u64(day_of_year).ok();
+            enc.u64(picos).ok();
+
+            // [1] networkMagic: u32
+            enc.u32(gc.network_magic).ok();
+
+            // [2] networkId: 0=Testnet, 1=Mainnet
+            enc.u8(gc.network_id).ok();
+
+            // [3] activeSlotsCoeff: [num, den] (NO tag(30))
+            enc.array(2).ok();
+            enc.u64(gc.active_slots_coeff_num).ok();
+            enc.u64(gc.active_slots_coeff_den).ok();
+
+            // [4] securityParam: u64
+            enc.u64(gc.security_param).ok();
+
+            // [5] epochLength: u64
+            enc.u64(gc.epoch_length).ok();
+
+            // [6] slotsPerKESPeriod: u64
+            enc.u64(gc.slots_per_kes_period).ok();
+
+            // [7] maxKESEvolutions: u64
+            enc.u64(gc.max_kes_evolutions).ok();
+
+            // [8] slotLength: Fixed E6 integer (microseconds)
+            enc.u64(gc.slot_length_micros).ok();
+
+            // [9] updateQuorum: u64
+            enc.u64(gc.update_quorum).ok();
+
+            // [10] maxLovelaceSupply: u64
+            enc.u64(gc.max_lovelace_supply).ok();
+
+            // [11] protocolParams: legacy Shelley PParams array(18)
+            encode_shelley_pparams(&mut enc, &gc.protocol_params);
+
+            // [12] genDelegs: Map<hash28 → array(2)[hash28, hash32]>
+            enc.map(gc.gen_delegs.len() as u64).ok();
+            for (genesis_hash, delegate_hash, vrf_hash) in &gc.gen_delegs {
+                enc.bytes(genesis_hash).ok();
+                enc.array(2).ok();
+                enc.bytes(delegate_hash).ok();
+                enc.bytes(vrf_hash).ok();
+            }
+
+            // [13] initialFunds: empty map (CompactGenesis)
+            enc.map(0).ok();
+
+            // [14] staking: array(2) [empty_map, empty_map] (CompactGenesis)
+            enc.array(2).ok();
+            enc.map(0).ok();
+            enc.map(0).ok();
         }
         QueryResult::NonMyopicMemberRewards(rewards) => {
             // Map from stake_amount → map from pool_id → reward
@@ -2562,5 +2673,139 @@ mod tests {
         let mut decoder = minicbor::Decoder::new(&segment.payload);
         let _ = decoder.array();
         assert_eq!(decoder.u32().unwrap(), 1); // MsgAwaitReply
+    }
+
+    #[test]
+    fn test_parse_utctime() {
+        // Preview testnet: 2022-04-01T00:00:00Z → (2022, 91, 0)
+        let (y, d, p) = parse_utctime("2022-04-01T00:00:00Z");
+        assert_eq!(y, 2022);
+        assert_eq!(d, 91); // April 1 = day 91 in non-leap year
+        assert_eq!(p, 0);
+
+        // Mainnet: 2017-09-23T21:44:51Z
+        let (y, d, p) = parse_utctime("2017-09-23T21:44:51Z");
+        assert_eq!(y, 2017);
+        assert_eq!(d, 266); // Sep 23 = day 266
+        assert_eq!(p, (21 * 3600 + 44 * 60 + 51) * 1_000_000_000_000);
+
+        // Leap year: 2024-03-01T00:00:00Z
+        let (y, d, _) = parse_utctime("2024-03-01T00:00:00Z");
+        assert_eq!(y, 2024);
+        assert_eq!(d, 61); // Jan(31) + Feb(29, leap) + 1 = 61
+    }
+
+    #[test]
+    fn test_genesis_config_cbor_array15() {
+        use crate::query_handler::{GenesisConfigSnapshot, ShelleyPParamsSnapshot};
+
+        let gc = GenesisConfigSnapshot {
+            system_start: "2022-04-01T00:00:00Z".to_string(),
+            network_magic: 2,
+            network_id: 0,
+            active_slots_coeff_num: 1,
+            active_slots_coeff_den: 20,
+            security_param: 2160,
+            epoch_length: 86400,
+            slots_per_kes_period: 129600,
+            max_kes_evolutions: 62,
+            slot_length_micros: 1_000_000,
+            update_quorum: 5,
+            max_lovelace_supply: 45_000_000_000_000_000,
+            protocol_params: ShelleyPParamsSnapshot {
+                min_fee_a: 44,
+                min_fee_b: 155381,
+                max_block_body_size: 65536,
+                max_tx_size: 16384,
+                max_block_header_size: 1100,
+                key_deposit: 2_000_000,
+                pool_deposit: 500_000_000,
+                e_max: 18,
+                n_opt: 150,
+                a0_num: 3,
+                a0_den: 10,
+                rho_num: 3,
+                rho_den: 1000,
+                tau_num: 2,
+                tau_den: 10,
+                d_num: 0,
+                d_den: 1,
+                protocol_version_major: 2,
+                protocol_version_minor: 0,
+                min_utxo_value: 1_000_000,
+                min_pool_cost: 340_000_000,
+            },
+            gen_delegs: Vec::new(),
+        };
+
+        let result = QueryResult::GenesisConfig(Box::new(gc));
+        let encoded = encode_query_result(&result);
+
+        // Decode and verify it's array(15) inside the HFC wrapper
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let _ = dec.array(); // [4, ...]
+        assert_eq!(dec.u32().unwrap(), 4); // MsgResult
+        let _ = dec.array(); // HFC success wrapper
+        let len = dec.array().unwrap(); // CompactGenesis array
+        assert_eq!(len, Some(15));
+
+        // [0] UTCTime: array(3)
+        assert_eq!(dec.array().unwrap(), Some(3));
+        assert_eq!(dec.u64().unwrap(), 2022); // year
+        assert_eq!(dec.u64().unwrap(), 91); // dayOfYear
+        assert_eq!(dec.u64().unwrap(), 0); // picos
+
+        // [1] networkMagic
+        assert_eq!(dec.u32().unwrap(), 2);
+
+        // [2] networkId
+        assert_eq!(dec.u32().unwrap(), 0); // Testnet
+
+        // [3] activeSlotsCoeff: [num, den] no tag
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u64().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 20);
+
+        // [4] securityParam
+        assert_eq!(dec.u64().unwrap(), 2160);
+
+        // [5] epochLength
+        assert_eq!(dec.u64().unwrap(), 86400);
+
+        // [6] slotsPerKESPeriod
+        assert_eq!(dec.u64().unwrap(), 129600);
+
+        // [7] maxKESEvolutions
+        assert_eq!(dec.u64().unwrap(), 62);
+
+        // [8] slotLength (microseconds)
+        assert_eq!(dec.u64().unwrap(), 1_000_000);
+
+        // [9] updateQuorum
+        assert_eq!(dec.u64().unwrap(), 5);
+
+        // [10] maxLovelaceSupply
+        assert_eq!(dec.u64().unwrap(), 45_000_000_000_000_000);
+
+        // [11] protocolParams: array(18)
+        assert_eq!(dec.array().unwrap(), Some(18));
+        assert_eq!(dec.u64().unwrap(), 44); // minFeeA
+        assert_eq!(dec.u64().unwrap(), 155381); // minFeeB
+
+        // Skip remaining pparams fields
+        for _ in 2..18 {
+            dec.skip().unwrap();
+        }
+
+        // [12] genDelegs: empty map
+        assert_eq!(dec.map().unwrap(), Some(0));
+
+        // [13] initialFunds: empty map
+        assert_eq!(dec.map().unwrap(), Some(0));
+
+        // [14] staking: array(2) [empty_map, empty_map]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.map().unwrap(), Some(0));
+        assert_eq!(dec.map().unwrap(), Some(0));
     }
 }

@@ -76,21 +76,19 @@ See `vrf-debugging.md` for details. Summary:
    - File: `crates/torsten-cli/src/commands/query.rs` lines 821-910
    - Fix: Either fix the decoder to match CBOR map format, or add tag-16 query to n2c_client
 
-9. **`query protocol-parameters` missing Conway-era fields** (WARNING)
-   - Server correctly encodes all 31 fields (including cost models, governance thresholds)
-   - n2c_client `parse_protocol_params_cbor()` skips fields 15 (costModels), 16 (prices), 22-30 (governance)
-   - File: `crates/torsten-network/src/n2c_client.rs` lines 847-888
-   - All governance thresholds, DVT/PVT values, drepDeposit, govActionDeposit are missing from output
-   - Fix: decode and include all 31 fields in JSON output
+9. **`query protocol-parameters` missing Conway-era fields** — FIXED as of commit fd838c5
+   - All 31 fields now returned including costModels (PlutusV1/V3), DVT/PVT thresholds,
+     dRepDeposit, govActionDeposit, minFeeRefScriptCostPerByte, executionUnitPrices
+   - Confirmed working 2026-03-09
 
-## Working Features Confirmed (2026-03-09, commit c580901)
+## Working Features Confirmed (2026-03-09, commit fd838c5)
 - Mithril snapshot import: WORKS
 - Peer connections: 5 peers all connect successfully
 - Chain sync to tip: WORKS — reaches 100% sync, receives live blocks
 - Live block reception: WORKS — ~1 block/20-60s at tip (1 or 2 txs per block observed)
 - Rollback handling: WORKS — clean rollback observed, non-fatal
 - N2C query tip: WORKS — correct slot/block/epoch/era/syncProgress
-- N2C protocol-parameters: PARTIAL — basic fields present, Conway fields missing
+- N2C protocol-parameters: WORKS — all 31 fields including full Conway governance fields
 - N2C gov-state: WORKS — responds correctly (0 values without UTxO replay)
 - N2C tx-mempool: WORKS — correct slot, capacity=16384, 0 txs
 - N2C treasury: WORKS — responds (0 without UTxO replay)
@@ -101,13 +99,13 @@ See `vrf-debugging.md` for details. Summary:
 - N2C stake-snapshot: WORKS — 0 stake (no UTxO replay)
 - Prometheus metrics: WORKS — all metrics correctly populated (except peers_connected undercount)
 
-## Prometheus Metrics (Preview, at-tip 2026-03-09, commit c580901)
-- blocks_received_total: 684 (in ~8 min of node runtime)
-- blocks_applied_total: 684
-- peers_connected: 1 (undercount — actually 5 connected)
+## Prometheus Metrics (Preview, at-tip 2026-03-09, commit fd838c5)
+- blocks_received_total: 715 (in ~2.5 min of node runtime, 715 blocks replayed from Mithril + 1 live)
+- blocks_applied_total: 715
+- peers_connected: 1 (undercount — actually 5 connected: 1 chainSync + 4 block fetchers)
 - sync_progress_percent: 10000 (100.00%)
-- slot_number: 106,406,193
-- block_number: 4,093,282 (correct in metrics AND N2C query now)
+- slot_number: 106,407,547
+- block_number: 4,093,314
 - epoch_number: 1,231
 - utxo_count: 0 (no UTxO replay)
 - delegation_count: 0

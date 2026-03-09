@@ -148,6 +148,41 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
     }
 }
 
+/// Convert an f64 to a (numerator, denominator) rational approximation.
+/// Handles common Cardano genesis values like 0.05 → (1, 20).
+fn float_to_rational(f: f64) -> (u64, u64) {
+    if f == 0.0 {
+        return (0, 1);
+    }
+    if f == 1.0 {
+        return (1, 1);
+    }
+    // Try to find exact fraction with small denominators first
+    for den in 1..=10000u64 {
+        let num = (f * den as f64).round() as u64;
+        let reconstructed = num as f64 / den as f64;
+        if (reconstructed - f).abs() < 1e-12 {
+            // Simplify by GCD
+            let g = gcd(num, den);
+            return (num / g, den / g);
+        }
+    }
+    // Fallback: use large denominator
+    let den = 1_000_000u64;
+    let num = (f * den as f64).round() as u64;
+    let g = gcd(num, den);
+    (num / g, den / g)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 /// Convert a UTxO entry to a snapshot for N2C queries
 fn utxo_to_snapshot(
     input: &torsten_primitives::transaction::TransactionInput,
@@ -1610,9 +1645,9 @@ impl Node {
     /// Update the query handler with the current ledger state
     async fn update_query_state(&self) {
         use torsten_network::query_handler::{
-            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, PoolParamsSnapshot,
-            PoolStakeSnapshotEntry, ProposalSnapshot, StakeAddressSnapshot, StakePoolSnapshot,
-            StakeSnapshotsResult,
+            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, GenesisConfigSnapshot,
+            PoolParamsSnapshot, PoolStakeSnapshotEntry, ProposalSnapshot, ShelleyPParamsSnapshot,
+            StakeAddressSnapshot, StakePoolSnapshot, StakeSnapshotsResult,
         };
 
         let ls = self.ledger_state.read().await;
@@ -1975,6 +2010,52 @@ impl Node {
             slot_length_secs: 1, // Shelley slot length is always 1 second
             network_magic: self.network_magic as u32,
             security_param: self.consensus.security_param,
+            genesis_config: self.shelley_genesis.as_ref().map(|g| {
+                let gp = &g.protocol_params;
+                // Convert a0 from f64 to rational
+                let (a0_num, a0_den) = float_to_rational(gp.a0);
+                let (rho_num, rho_den) = float_to_rational(gp.rho);
+                let (tau_num, tau_den) = float_to_rational(gp.tau);
+                let (asc_num, asc_den) = float_to_rational(g.active_slots_coeff);
+                GenesisConfigSnapshot {
+                    system_start: g.system_start.clone(),
+                    network_magic: g.network_magic as u32,
+                    network_id: if g.network_id == "Mainnet" { 1 } else { 0 },
+                    active_slots_coeff_num: asc_num,
+                    active_slots_coeff_den: asc_den,
+                    security_param: g.security_param,
+                    epoch_length: g.epoch_length,
+                    slots_per_kes_period: g.slots_per_k_e_s_period,
+                    max_kes_evolutions: g.max_k_e_s_evolutions,
+                    slot_length_micros: g.slot_length * 1_000_000,
+                    update_quorum: g.update_quorum,
+                    max_lovelace_supply: g.max_lovelace_supply,
+                    protocol_params: ShelleyPParamsSnapshot {
+                        min_fee_a: gp.min_fee_a,
+                        min_fee_b: gp.min_fee_b,
+                        max_block_body_size: gp.max_block_body_size as u32,
+                        max_tx_size: gp.max_tx_size as u32,
+                        max_block_header_size: gp.max_block_header_size as u16,
+                        key_deposit: gp.key_deposit,
+                        pool_deposit: gp.pool_deposit,
+                        e_max: gp.e_max as u32,
+                        n_opt: gp.n_opt as u16,
+                        a0_num,
+                        a0_den,
+                        rho_num,
+                        rho_den,
+                        tau_num,
+                        tau_den,
+                        d_num: 0,
+                        d_den: 1,
+                        protocol_version_major: gp.protocol_version.major,
+                        protocol_version_minor: gp.protocol_version.minor,
+                        min_utxo_value: gp.min_u_tx_o_value,
+                        min_pool_cost: gp.min_pool_cost,
+                    },
+                    gen_delegs: Vec::new(),
+                }
+            }),
         };
 
         // Drop the ledger read lock before acquiring the query handler write lock
