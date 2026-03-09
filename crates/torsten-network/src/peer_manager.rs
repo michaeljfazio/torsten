@@ -498,9 +498,21 @@ impl PeerManager {
         }
     }
 
-    /// Recompute reputation scores for all peers
+    /// Recompute reputation scores for all peers.
+    /// Applies time-based decay: failure counts halve after 5 minutes of no failures.
     pub fn recompute_reputations(&mut self) {
         for info in self.peers.values_mut() {
+            // Decay failure count if last failure was > 5 minutes ago
+            if info.failure_count > 0 {
+                if let Some(last_failed) = info.last_failed {
+                    let decay_interval = Duration::from_secs(300); // 5 minutes
+                    let elapsed = last_failed.elapsed();
+                    let decay_steps = (elapsed.as_secs() / decay_interval.as_secs()) as u32;
+                    if decay_steps > 0 {
+                        info.failure_count = info.failure_count.saturating_sub(decay_steps);
+                    }
+                }
+            }
             info.performance.compute_reputation(info.failure_count);
         }
     }

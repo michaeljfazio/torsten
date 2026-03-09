@@ -1798,7 +1798,10 @@ impl Node {
             *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
         }
 
-        // 4. Notify peers
+        // 4. Clear mempool — UTxO set has changed, existing txs may be invalid
+        self.mempool.clear();
+
+        // 5. Notify peers
         self.notify_rollback(rollback_point).await;
     }
 
