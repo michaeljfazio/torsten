@@ -946,6 +946,7 @@ impl Node {
                             let mut pm = peer_manager.write().await;
                             pm.peer_connected(addr, 14, true);
                             pm.record_handshake_rtt(addr, rtt_ms);
+                            pm.promote_to_hot(addr);
                             drop(pm);
                             info!("Connected block fetcher to {target} (handshake {rtt_ms:.0}ms)");
                             fetch_pool.add_fetcher(c);
