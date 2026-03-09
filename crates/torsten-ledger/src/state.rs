@@ -881,8 +881,22 @@ impl LedgerState {
         let tau_num = self.protocol_params.tau.numerator as i128;
         let tau_den = self.protocol_params.tau.denominator.max(1) as i128;
 
-        // Monetary expansion: floor(rho * reserves)
-        let expansion = (rho_num * self.reserves.0 as i128 / rho_den) as u64;
+        // Monetary expansion with eta performance adjustment:
+        //   expected_blocks = floor(active_slot_coeff * epoch_length) (since d=0 in Conway)
+        //   eta = min(1, actual_blocks / expected_blocks)
+        //   deltaR1 = floor(eta * rho * reserves)
+        let expected_blocks =
+            (self.protocol_params.active_slot_coeff() * self.epoch_length as f64).floor() as u64;
+        let actual_blocks = self.epoch_block_count;
+        // eta = min(1, actual/expected) — applied as rational: min(1, actual/expected)
+        // expansion = floor(min(actual, expected) / expected * rho * reserves)
+        let effective_blocks = actual_blocks.min(expected_blocks);
+        let expansion = if expected_blocks == 0 {
+            0u64
+        } else {
+            (rho_num * self.reserves.0 as i128 * effective_blocks as i128
+                / (rho_den * expected_blocks as i128)) as u64
+        };
         let total_rewards_available = expansion + self.epoch_fees.0;
 
         if total_rewards_available == 0 {
@@ -2463,9 +2477,10 @@ mod tests {
         state.process_epoch_transition(EpochNo(3));
 
         // Pool produced blocks proportional to its stake
+        // expected_blocks = epoch_length * active_slot_coeff = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000); // 500k ADA fees
-        state.epoch_blocks_by_pool.insert(pool_id, 1000);
-        state.epoch_block_count = 1000;
+        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        state.epoch_block_count = 21600;
 
         // Epoch 3→4: triggers reward calculation using "go" snapshot
         state.process_epoch_transition(EpochNo(4));
@@ -2531,16 +2546,19 @@ mod tests {
         state.process_epoch_transition(EpochNo(2));
         state.process_epoch_transition(EpochNo(3));
 
-        // No blocks produced, no fees — pool produced 0 blocks
-        // epoch_blocks_by_pool is empty
+        // No blocks produced but some fees collected
+        state.epoch_fees = Lovelace(100_000_000); // Some fees from prior blocks
+                                                  // epoch_blocks_by_pool is empty — no pool produced blocks
+        state.epoch_block_count = 0;
 
         state.process_epoch_transition(EpochNo(4));
 
         // Pool produced no blocks, so performance = 0, no pool rewards
-        // All pool pot goes to treasury as undistributed
+        // eta = 0, so expansion = 0, but fees still contribute to reward pot
+        // All pool pot (from fees) goes to treasury as undistributed
         let member_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
         assert_eq!(member_rewards, 0);
-        // But treasury still gets the treasury cut + undistributed
+        // Treasury gets treasury_cut from fees + undistributed
         assert!(state.treasury.0 > 0);
     }
 
@@ -2591,9 +2609,10 @@ mod tests {
         state.process_epoch_transition(EpochNo(2));
         state.process_epoch_transition(EpochNo(3));
 
+        // expected_blocks = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000);
-        state.epoch_blocks_by_pool.insert(pool_id, 1000);
-        state.epoch_block_count = 1000;
+        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        state.epoch_block_count = 21600;
         state.process_epoch_transition(EpochNo(4));
 
         // No pool rewards when pledge not met — all goes to treasury as undistributed
@@ -2652,9 +2671,10 @@ mod tests {
         state.process_epoch_transition(EpochNo(2));
         state.process_epoch_transition(EpochNo(3));
 
+        // expected_blocks = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000);
-        state.epoch_blocks_by_pool.insert(pool_id, 1000);
-        state.epoch_block_count = 1000;
+        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        state.epoch_block_count = 21600;
         state.process_epoch_transition(EpochNo(4));
 
         // Operator reward should go to owner_hash credential, not pool_id padded to 32
@@ -2666,7 +2686,7 @@ mod tests {
             .unwrap_or(Lovelace(0));
         assert!(
             owner_reward.0 > 0,
-            "Owner should receive operator + member rewards at registered reward account"
+            "Owner should receive operator rewards at registered reward account"
         );
 
         // Pool_id padded to 32 bytes should NOT have rewards (old bug)
