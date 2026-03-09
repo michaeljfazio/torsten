@@ -1216,6 +1216,111 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Compute the script data hash for transaction integrity verification.
+///
+/// Per Cardano ledger spec, this is:
+///   blake2b_256(redeemers_cbor || datums_cbor || language_views_cbor)
+///
+/// Where:
+/// - redeemers_cbor = CBOR encoding of the redeemers list
+/// - datums_cbor = CBOR encoding of plutus datums (tag 258 array), or empty if no datums
+/// - language_views_cbor = CBOR encoding of cost models for languages used in the tx
+pub fn compute_script_data_hash(
+    redeemers: &[Redeemer],
+    plutus_data: &[PlutusData],
+    cost_models: &CostModels,
+    has_v1: bool,
+    has_v2: bool,
+    has_v3: bool,
+) -> Hash32 {
+    let mut preimage = Vec::new();
+
+    // 1. Encode redeemers as a CBOR array
+    let mut redeemers_buf = encode_array_header(redeemers.len());
+    for r in redeemers {
+        redeemers_buf.extend(encode_redeemer(r));
+    }
+    preimage.extend(&redeemers_buf);
+
+    // 2. Encode datums (if any) as #6.258([d1, d2, ...])
+    if !plutus_data.is_empty() {
+        let mut datums_buf = encode_tag(258);
+        datums_buf.extend(encode_array_header(plutus_data.len()));
+        for d in plutus_data {
+            datums_buf.extend(encode_plutus_data(d));
+        }
+        preimage.extend(&datums_buf);
+    }
+
+    // 3. Encode language views (cost models for languages used in the transaction)
+    preimage.extend(encode_language_views(cost_models, has_v1, has_v2, has_v3));
+
+    blake2b_256(&preimage)
+}
+
+/// Encode cost models as "language views" for script data hash computation.
+///
+/// Per the Cardano ledger spec:
+/// - PlutusV1 uses integer key 0
+/// - PlutusV2 uses integer key 1
+/// - PlutusV3 uses integer key 2
+///
+/// Only includes cost models for languages actually used in the transaction.
+fn encode_language_views(
+    cost_models: &CostModels,
+    has_v1: bool,
+    has_v2: bool,
+    has_v3: bool,
+) -> Vec<u8> {
+    let mut count = 0;
+    if has_v1 && cost_models.plutus_v1.is_some() {
+        count += 1;
+    }
+    if has_v2 && cost_models.plutus_v2.is_some() {
+        count += 1;
+    }
+    if has_v3 && cost_models.plutus_v3.is_some() {
+        count += 1;
+    }
+
+    if count == 0 {
+        // Empty map
+        return encode_map_header(0);
+    }
+
+    let mut buf = encode_map_header(count);
+
+    if has_v1 {
+        if let Some(v1) = &cost_models.plutus_v1 {
+            buf.extend(encode_uint(0));
+            buf.extend(encode_array_header(v1.len()));
+            for cost in v1 {
+                buf.extend(encode_int(*cost as i128));
+            }
+        }
+    }
+    if has_v2 {
+        if let Some(v2) = &cost_models.plutus_v2 {
+            buf.extend(encode_uint(1));
+            buf.extend(encode_array_header(v2.len()));
+            for cost in v2 {
+                buf.extend(encode_int(*cost as i128));
+            }
+        }
+    }
+    if has_v3 {
+        if let Some(v3) = &cost_models.plutus_v3 {
+            buf.extend(encode_uint(2));
+            buf.extend(encode_array_header(v3.len()));
+            for cost in v3 {
+                buf.extend(encode_int(*cost as i128));
+            }
+        }
+    }
+
+    buf
+}
+
 /// Compute the block body hash from the transaction bodies.
 ///
 /// This is blake2b-256 of the concatenated CBOR-encoded transaction bodies array.

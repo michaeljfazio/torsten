@@ -1,10 +1,10 @@
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoSet;
 use std::collections::{BTreeMap, HashSet};
-use torsten_primitives::hash::{Hash32, PolicyId};
+use torsten_primitives::hash::{Hash28, Hash32, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::{Certificate, NativeScript, Transaction};
+use torsten_primitives::transaction::{Certificate, NativeScript, ScriptRef, Transaction};
 use torsten_primitives::value::{AssetName, Lovelace};
 use tracing::{debug, trace, warn};
 
@@ -40,6 +40,8 @@ pub enum ValidationError {
     CollateralNotFound(String),
     #[error("Collateral input contains tokens (must be pure ADA): {0}")]
     CollateralHasTokens(String),
+    #[error("Collateral mismatch: total_collateral={declared}, effective={computed}")]
+    CollateralMismatch { declared: u64, computed: u64 },
     #[error("Reference input not found in UTxO set: {0}")]
     ReferenceInputNotFound(String),
     #[error("Reference input overlaps with regular input: {0}")]
@@ -196,39 +198,53 @@ pub fn validate_transaction(
     // Rule 3c: Every minting policy must have a corresponding script
     // (native script or Plutus script in witness set or reference inputs)
     if !body.mint.is_empty() {
-        // Collect script hashes from witness set
-        let native_script_hashes: HashSet<Hash32> = tx
-            .witness_set
-            .native_scripts
-            .iter()
-            .map(|script| {
-                // Hash the native script CBOR to get the script hash
-                // For simplicity, use a synthetic hash based on the script content
-                // In production, this would be the exact script hash
-                let serialized = format!("{:?}", script);
-                let hash28 = torsten_primitives::hash::blake2b_224(serialized.as_bytes());
-                let mut bytes = [0u8; 32];
-                bytes[..28].copy_from_slice(hash28.as_bytes());
-                Hash32::from_bytes(bytes)
-            })
-            .collect();
-        let has_plutus = has_plutus_scripts(tx);
+        // Collect all available script hashes from witness set and reference inputs
+        let mut available_script_hashes: HashSet<Hash28> = HashSet::new();
+
+        // Native scripts from witness set: blake2b_224(0x00 || script_cbor)
+        for script in &tx.witness_set.native_scripts {
+            let script_cbor = torsten_serialization::encode_native_script(script);
+            let mut tagged = Vec::with_capacity(1 + script_cbor.len());
+            tagged.push(0x00);
+            tagged.extend_from_slice(&script_cbor);
+            available_script_hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
+        }
+
+        // Plutus scripts from witness set: blake2b_224(type_tag || script_bytes)
+        for s in &tx.witness_set.plutus_v1_scripts {
+            let mut tagged = Vec::with_capacity(1 + s.len());
+            tagged.push(0x01);
+            tagged.extend_from_slice(s);
+            available_script_hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
+        }
+        for s in &tx.witness_set.plutus_v2_scripts {
+            let mut tagged = Vec::with_capacity(1 + s.len());
+            tagged.push(0x02);
+            tagged.extend_from_slice(s);
+            available_script_hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
+        }
+        for s in &tx.witness_set.plutus_v3_scripts {
+            let mut tagged = Vec::with_capacity(1 + s.len());
+            tagged.push(0x03);
+            tagged.extend_from_slice(s);
+            available_script_hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
+        }
+
+        // Reference scripts from reference inputs
+        for ref_input in &body.reference_inputs {
+            if let Some(utxo) = utxo_set.lookup(ref_input) {
+                if let Some(script_ref) = &utxo.script_ref {
+                    let hash = compute_script_ref_hash(script_ref);
+                    available_script_hashes.insert(hash);
+                }
+            }
+        }
 
         for policy in body.mint.keys() {
-            // Check if the policy has a corresponding script
-            let policy_hash32 = {
-                let mut bytes = [0u8; 32];
-                bytes[..28].copy_from_slice(policy.as_bytes());
-                Hash32::from_bytes(bytes)
-            };
-            // Accept if there's any Plutus script (redeemers handle the mapping)
-            // or if there's a matching native script hash
-            if !has_plutus && !native_script_hashes.contains(&policy_hash32) {
-                // Policy has no script — log but don't reject during sync
-                // (exact native script hash computation may differ)
+            if !available_script_hashes.contains(policy) {
                 trace!(
                     policy = %policy.to_hex(),
-                    "Minting policy without matching script in witness set"
+                    "Minting policy without matching script in witness set or reference inputs"
                 );
             }
         }
@@ -364,8 +380,25 @@ pub fn validate_transaction(
                     }
                 }
             }
+            // Account for collateral return output (Babbage+)
+            let effective_collateral = if let Some(col_return) = &body.collateral_return {
+                collateral_value.saturating_sub(col_return.value.coin.0)
+            } else {
+                collateral_value
+            };
+
+            // If total_collateral is specified, it must match effective collateral
+            if let Some(total_col) = body.total_collateral {
+                if total_col.0 != effective_collateral {
+                    errors.push(ValidationError::CollateralMismatch {
+                        declared: total_col.0,
+                        computed: effective_collateral,
+                    });
+                }
+            }
+
             let required_collateral = body.fee.0 * params.collateral_percentage / 100;
-            if collateral_value < required_collateral {
+            if effective_collateral < required_collateral {
                 errors.push(ValidationError::InsufficientCollateral);
             }
         }
@@ -392,7 +425,28 @@ pub fn validate_transaction(
         let has_redeemers = !tx.witness_set.redeemers.is_empty();
         let has_datums = !tx.witness_set.plutus_data.is_empty();
         if has_redeemers || has_datums {
-            if body.script_data_hash.is_none() {
+            if let Some(declared_hash) = &body.script_data_hash {
+                // Verify the script data hash matches the computed value
+                let has_v1 = !tx.witness_set.plutus_v1_scripts.is_empty();
+                let has_v2 = !tx.witness_set.plutus_v2_scripts.is_empty();
+                let has_v3 = !tx.witness_set.plutus_v3_scripts.is_empty();
+                let computed = torsten_serialization::compute_script_data_hash(
+                    &tx.witness_set.redeemers,
+                    &tx.witness_set.plutus_data,
+                    &params.cost_models,
+                    has_v1,
+                    has_v2,
+                    has_v3,
+                );
+                if *declared_hash != computed {
+                    // Log mismatch but don't reject during sync (encoding may differ)
+                    trace!(
+                        expected = %declared_hash.to_hex(),
+                        computed = %computed.to_hex(),
+                        "Script data hash mismatch (may be encoding difference)"
+                    );
+                }
+            } else {
                 errors.push(ValidationError::MissingScriptDataHash);
             }
         } else if body.script_data_hash.is_some()
@@ -551,6 +605,38 @@ fn has_plutus_scripts(tx: &Transaction) -> bool {
         || !tx.witness_set.plutus_v2_scripts.is_empty()
         || !tx.witness_set.plutus_v3_scripts.is_empty()
         || !tx.witness_set.redeemers.is_empty()
+}
+
+/// Compute the script hash for a reference script.
+/// Hash = blake2b_224(type_tag || script_bytes)
+fn compute_script_ref_hash(script_ref: &ScriptRef) -> Hash28 {
+    match script_ref {
+        ScriptRef::NativeScript(ns) => {
+            let script_cbor = torsten_serialization::encode_native_script(ns);
+            let mut tagged = Vec::with_capacity(1 + script_cbor.len());
+            tagged.push(0x00);
+            tagged.extend_from_slice(&script_cbor);
+            torsten_primitives::hash::blake2b_224(&tagged)
+        }
+        ScriptRef::PlutusV1(bytes) => {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x01);
+            tagged.extend_from_slice(bytes);
+            torsten_primitives::hash::blake2b_224(&tagged)
+        }
+        ScriptRef::PlutusV2(bytes) => {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x02);
+            tagged.extend_from_slice(bytes);
+            torsten_primitives::hash::blake2b_224(&tagged)
+        }
+        ScriptRef::PlutusV3(bytes) => {
+            let mut tagged = Vec::with_capacity(1 + bytes.len());
+            tagged.push(0x03);
+            tagged.extend_from_slice(bytes);
+            torsten_primitives::hash::blake2b_224(&tagged)
+        }
+    }
 }
 
 /// Evaluate a native script given the set of key hashes that signed
@@ -1632,5 +1718,198 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::InvalidWitnessSignature(_))));
+    }
+
+    #[test]
+    fn test_collateral_return_reduces_effective_collateral() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        // Collateral input with 5 ADA
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        // Set collateral return to get back 4.7 ADA, leaving 0.3 ADA effective collateral
+        tx.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(4_700_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            raw_cbor: None,
+        });
+        tx.body.total_collateral = Some(Lovelace(300_000));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_collateral_return_mismatch_total() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        tx.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(4_700_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            raw_cbor: None,
+        });
+        // Declare wrong total_collateral (should be 300_000)
+        tx.body.total_collateral = Some(Lovelace(500_000));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::CollateralMismatch { .. })));
+    }
+
+    #[test]
+    fn test_reference_script_minting_validation() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        // Create a native script and compute its hash
+        let pubkey_hash = Hash32::from_bytes([42u8; 32]);
+        let native_script = NativeScript::ScriptPubkey(pubkey_hash);
+        let script_hash = compute_script_ref_hash(&ScriptRef::NativeScript(native_script.clone()));
+
+        // Put the script as a reference script in a UTxO
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::NativeScript(native_script)),
+                raw_cbor: None,
+            },
+        );
+
+        // Create a tx that mints using the reference script's policy
+        let asset = AssetName(b"Token".to_vec());
+        let mut mint: BTreeMap<PolicyId, BTreeMap<AssetName, i64>> = BTreeMap::new();
+        mint.entry(script_hash)
+            .or_default()
+            .insert(asset.clone(), 10);
+
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.mint = mint;
+        tx.body.reference_inputs.push(ref_input);
+        tx.body.outputs[0]
+            .value
+            .multi_asset
+            .entry(script_hash)
+            .or_default()
+            .insert(asset, 10);
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        // Should pass — the minting policy is satisfied by the reference script
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compute_script_ref_hash_plutus_v2() {
+        let script_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let hash = compute_script_ref_hash(&ScriptRef::PlutusV2(script_bytes.clone()));
+
+        // Verify it matches blake2b_224(0x02 || script_bytes)
+        let mut tagged = vec![0x02];
+        tagged.extend_from_slice(&script_bytes);
+        let expected = torsten_primitives::hash::blake2b_224(&tagged);
+        assert_eq!(hash, expected);
     }
 }

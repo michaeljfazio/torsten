@@ -1089,8 +1089,24 @@ fn convert_pallas_protocol_param_update(
         tau: update.treasury_growth_rate.as_ref().map(convert_rational),
         min_pool_cost: update.min_pool_cost.map(Lovelace),
         ada_per_utxo_byte: update.ada_per_utxo_byte.map(Lovelace),
-        cost_models: None,     // Complex — cost model conversion handled separately
-        execution_costs: None, // Complex — ExUnitPrices conversion handled separately
+        cost_models: update
+            .cost_models_for_script_languages
+            .as_ref()
+            .map(|cm| CostModels {
+                plutus_v1: cm.plutus_v1.clone(),
+                plutus_v2: cm.plutus_v2.clone(),
+                plutus_v3: cm.plutus_v3.clone(),
+            }),
+        execution_costs: update.execution_costs.as_ref().map(|ec| ExUnitPrices {
+            mem_price: Rational {
+                numerator: ec.mem_price.numerator,
+                denominator: ec.mem_price.denominator,
+            },
+            step_price: Rational {
+                numerator: ec.step_price.numerator,
+                denominator: ec.step_price.denominator,
+            },
+        }),
         max_tx_ex_units: update.max_tx_ex_units.as_ref().map(|e| ExUnits {
             mem: e.mem,
             steps: e.steps,
