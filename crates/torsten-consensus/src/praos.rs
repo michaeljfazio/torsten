@@ -474,11 +474,20 @@ impl OuroborosPraos {
                 if vrf_is_fatal {
                     return Err(ConsensusError::VrfVerification(format!("{e}")));
                 }
-                warn!(
-                    slot = header.slot.0,
-                    error = %e,
-                    "Praos: VRF proof verification failed"
-                );
+                // Use debug level when nonce isn't established (expected after Mithril import)
+                if self.nonce_established {
+                    warn!(
+                        slot = header.slot.0,
+                        error = %e,
+                        "Praos: VRF proof verification failed"
+                    );
+                } else {
+                    debug!(
+                        slot = header.slot.0,
+                        error = %e,
+                        "Praos: VRF proof verification deferred (epoch nonce not established)"
+                    );
+                }
                 Ok(())
             }
         }
@@ -570,7 +579,7 @@ impl OuroborosPraos {
                     if self.strict_verification {
                         return Err(e);
                     }
-                    warn!("Opcert signature verification failed: {e}");
+                    debug!("Opcert signature verification deferred (non-strict mode): {e}");
                 }
             }
         }
@@ -631,11 +640,11 @@ impl OuroborosPraos {
                 if self.strict_verification {
                     return Err(ConsensusError::InvalidKesSignature);
                 }
-                warn!(
+                debug!(
                     slot = header.slot.0,
                     error = %e,
                     kes_period = kes_period_offset,
-                    "Praos: KES signature verification failed"
+                    "Praos: KES signature verification deferred (non-strict mode)"
                 );
                 Ok(())
             }
