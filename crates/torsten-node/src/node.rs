@@ -915,9 +915,15 @@ impl Node {
 
         let use_pool = !fetch_pool.is_empty();
         let use_pipelined = pipelined.is_some();
+        // Pipeline depth configurable via TORSTEN_PIPELINE_DEPTH env var (default: 100)
+        let pipeline_depth: usize = std::env::var("TORSTEN_PIPELINE_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
         if use_pipelined {
             info!(
-                "Pipelined ChainSync enabled (pipeline depth 100), blocks from {} fetcher(s)",
+                "Pipelined ChainSync enabled (pipeline depth {}), blocks from {} fetcher(s)",
+                pipeline_depth,
                 fetch_pool.len()
             );
         } else if use_pool {
@@ -932,7 +938,11 @@ impl Node {
         let mut last_log_time = std::time::Instant::now();
         let mut last_query_update = std::time::Instant::now();
         let mut blocks_since_last_log: u64 = 0;
-        let header_batch_size = if use_pipelined || use_pool { 500 } else { 100 };
+        // Header batch size configurable via TORSTEN_HEADER_BATCH_SIZE env var
+        let header_batch_size: usize = std::env::var("TORSTEN_HEADER_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if use_pipelined || use_pool { 500 } else { 100 });
 
         loop {
             if *shutdown_rx.borrow() {
@@ -944,7 +954,8 @@ impl Node {
                 // Pipelined/multi-peer mode: collect headers, fetch blocks from pool
                 let header_future = async {
                     if let Some(ref mut pc) = pipelined {
-                        pc.request_headers_pipelined(header_batch_size).await
+                        pc.request_headers_pipelined_with_depth(header_batch_size, pipeline_depth)
+                            .await
                     } else {
                         client.request_headers_batch(header_batch_size).await
                     }
