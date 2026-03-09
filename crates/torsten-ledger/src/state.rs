@@ -98,6 +98,9 @@ pub struct GovernanceState {
     pub proposal_count: u64,
     /// Current constitution (set by NewConstitution governance action)
     pub constitution: Option<Constitution>,
+    /// Whether the committee is in a no-confidence state (dissolved by NoConfidence action)
+    #[serde(default)]
+    pub no_confidence: bool,
 }
 
 /// Registration state for a DRep
@@ -1181,8 +1184,17 @@ impl LedgerState {
                 drep_met && spo_met
             }
             GovAction::UpdateCommittee { .. } => {
-                let drep_threshold = self.protocol_params.dvt_committee_normal.as_f64();
-                let spo_threshold = self.protocol_params.pvt_committee_normal.as_f64();
+                let (drep_threshold, spo_threshold) = if self.governance.no_confidence {
+                    (
+                        self.protocol_params.dvt_committee_no_confidence.as_f64(),
+                        self.protocol_params.pvt_committee_no_confidence.as_f64(),
+                    )
+                } else {
+                    (
+                        self.protocol_params.dvt_committee_normal.as_f64(),
+                        self.protocol_params.pvt_committee_normal.as_f64(),
+                    )
+                };
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_total, spo_threshold);
@@ -1499,6 +1511,7 @@ impl LedgerState {
                 // No confidence motion: remove all committee hot key authorizations and expirations
                 self.governance.committee_hot_keys.clear();
                 self.governance.committee_expiration.clear();
+                self.governance.no_confidence = true;
                 info!("No confidence motion enacted: committee disbanded");
             }
             GovAction::UpdateCommittee {
@@ -1521,6 +1534,8 @@ impl LedgerState {
                         .insert(key, EpochNo(*expiration_epoch));
                     // Hot key auth comes via CommitteeHotAuth certificates
                 }
+                // UpdateCommittee restores confidence
+                self.governance.no_confidence = false;
                 info!(
                     "Committee updated: {} removed, {} added",
                     members_to_remove.len(),
