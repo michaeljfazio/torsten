@@ -712,13 +712,25 @@ impl LedgerState {
 
         // Process pending pool retirements for this epoch
         if let Some(retiring_pools) = self.pending_retirements.remove(&new_epoch) {
+            let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
-                self.pool_params.remove(pool_id);
-                debug!(
-                    "Pool retired at epoch {}: {}",
-                    new_epoch.0,
-                    pool_id.to_hex()
-                );
+                // Refund pool deposit to operator's registered reward account
+                if let Some(pool_reg) = self.pool_params.remove(pool_id) {
+                    let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
+                    *self.reward_accounts.entry(op_key).or_insert(Lovelace(0)) += pool_deposit;
+                    debug!(
+                        "Pool retired at epoch {}: {} (deposit {} refunded)",
+                        new_epoch.0,
+                        pool_id.to_hex(),
+                        pool_deposit.0
+                    );
+                } else {
+                    debug!(
+                        "Pool retired at epoch {}: {} (no params found)",
+                        new_epoch.0,
+                        pool_id.to_hex()
+                    );
+                }
             }
         }
 
