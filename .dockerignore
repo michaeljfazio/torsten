@@ -1,0 +1,7 @@
+target/
+.git/
+db-*/
+*.sock
+.mcp.json
+.claude/
+docs/book/

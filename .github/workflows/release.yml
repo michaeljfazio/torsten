@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: michaeljfazio/torsten
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Build native binaries for Linux and macOS
+  # ──────────────────────────────────────────────
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: torsten-x86_64-linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: torsten-aarch64-linux
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: torsten-x86_64-macos
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: torsten-aarch64-macos
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} --bin torsten-node --bin torsten-cli
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/torsten-node dist/
+          cp target/${{ matrix.target }}/release/torsten-cli dist/
+          cp -r config dist/
+          cp README.md LICENSE* dist/ 2>/dev/null || true
+          cd dist && tar czf ../${{ matrix.artifact }}.tar.gz *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  # ──────────────────────────────────────────────
+  # Build multi-arch container images
+  # ──────────────────────────────────────────────
+  build-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=torsten
+            org.opencontainers.image.description=Cardano node implementation in Rust
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.source=https://github.com/michaeljfazio/torsten
+
+  # ──────────────────────────────────────────────
+  # Create GitHub Release with binary assets
+  # ──────────────────────────────────────────────
+  create-release:
+    needs: [build-binaries, build-container]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name "*.tar.gz" -exec mv {} . \;
+          sha256sum *.tar.gz > SHA256SUMS.txt
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Torsten ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
+          body: |
+            ## Container Image
+
+            ```bash
+            docker pull ghcr.io/michaeljfazio/torsten:${{ steps.version.outputs.version }}
+            ```
+
+            Available for `linux/amd64` and `linux/arm64`.
+
+            ## Binary Downloads
+
+            | Platform | Architecture | Download |
+            |----------|-------------|----------|
+            | Linux | x86_64 | `torsten-x86_64-linux.tar.gz` |
+            | Linux | aarch64 | `torsten-aarch64-linux.tar.gz` |
+            | macOS | x86_64 | `torsten-x86_64-macos.tar.gz` |
+            | macOS | Apple Silicon | `torsten-aarch64-macos.tar.gz` |
+
+            Verify checksums: `sha256sum -c SHA256SUMS.txt`
