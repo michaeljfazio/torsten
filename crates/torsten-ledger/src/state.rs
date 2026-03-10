@@ -730,9 +730,10 @@ impl LedgerState {
             // Collect pre-Conway protocol parameter update proposals
             if let Some(ref update) = tx.body.update {
                 for (genesis_hash, ppu) in &update.proposed_updates {
-                    debug!(
+                    info!(
                         genesis_hash = %genesis_hash.to_hex(),
                         target_epoch = update.epoch,
+                        protocol_version = ?ppu.protocol_version_major.zip(ppu.protocol_version_minor),
                         "Collected protocol parameter update proposal"
                     );
                     self.pending_pp_updates
@@ -1133,11 +1134,13 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
-        // Apply pre-Conway protocol parameter update proposals for this epoch.
-        // In Shelley-Babbage, genesis delegates submit update proposals targeting a future epoch.
-        // At the epoch boundary, if enough distinct genesis delegates proposed updates
-        // (>= update_quorum), all their proposals are merged and applied.
-        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
+        // Apply pre-Conway protocol parameter update proposals (PPUP rule).
+        // In Shelley-Babbage, genesis delegates submit update proposals targeting epoch E.
+        // At the epoch boundary E → E+1, proposals targeting E are evaluated:
+        // if enough distinct genesis delegates proposed updates (>= update_quorum),
+        // their proposals are merged and applied to take effect in epoch E+1.
+        // Note: self.epoch still holds the OLD epoch at this point (updated at end).
+        if let Some(proposals) = self.pending_pp_updates.remove(&self.epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::new();
@@ -1182,10 +1185,28 @@ impl LedgerState {
                     merge_field!(protocol_version_major);
                     merge_field!(protocol_version_minor);
                 }
+                // Log protocol version change if applicable
+                if merged.protocol_version_major.is_some()
+                    || merged.protocol_version_minor.is_some()
+                {
+                    info!(
+                        epoch = new_epoch.0,
+                        from_major = self.protocol_params.protocol_version_major,
+                        from_minor = self.protocol_params.protocol_version_minor,
+                        to_major = ?merged.protocol_version_major,
+                        to_minor = ?merged.protocol_version_minor,
+                        "Protocol version change via pre-Conway update"
+                    );
+                }
                 self.apply_protocol_param_update(&merged);
                 info!(
                     epoch = new_epoch.0,
                     proposers = distinct_proposers,
+                    protocol_version = format!(
+                        "{}.{}",
+                        self.protocol_params.protocol_version_major,
+                        self.protocol_params.protocol_version_minor
+                    ),
                     "Pre-Conway protocol parameter update applied"
                 );
             } else {
@@ -5072,7 +5093,8 @@ mod tests {
         assert_eq!(state.protocol_params.min_fee_a, 44);
         assert_eq!(state.protocol_params.max_block_body_size, 90112);
 
-        // Two distinct genesis delegates propose updates for epoch 5
+        // Two distinct genesis delegates propose updates targeting epoch 4 (current).
+        // Per the PPUP rule, proposals targeting epoch E are applied at the E→E+1 boundary.
         let hash1 = Hash32::from_bytes([0x01; 32]);
         let hash2 = Hash32::from_bytes([0x02; 32]);
         let update = ProtocolParamUpdate {
@@ -5082,12 +5104,12 @@ mod tests {
         };
         state
             .pending_pp_updates
-            .entry(EpochNo(5))
+            .entry(EpochNo(4))
             .or_default()
             .push((hash1, update.clone()));
         state
             .pending_pp_updates
-            .entry(EpochNo(5))
+            .entry(EpochNo(4))
             .or_default()
             .push((hash2, update));
 
@@ -5110,7 +5132,7 @@ mod tests {
 
         let original_fee = state.protocol_params.min_fee_a;
 
-        // Only 2 proposers (quorum is 3)
+        // Only 2 proposers targeting epoch 4 (quorum is 3)
         let hash1 = Hash32::from_bytes([0x01; 32]);
         let hash2 = Hash32::from_bytes([0x02; 32]);
         let update = ProtocolParamUpdate {
@@ -5119,12 +5141,12 @@ mod tests {
         };
         state
             .pending_pp_updates
-            .entry(EpochNo(5))
+            .entry(EpochNo(4))
             .or_default()
             .push((hash1, update.clone()));
         state
             .pending_pp_updates
-            .entry(EpochNo(5))
+            .entry(EpochNo(4))
             .or_default()
             .push((hash2, update));
 
@@ -5143,6 +5165,7 @@ mod tests {
         state.epoch = EpochNo(9);
         state.epoch_length = 100;
 
+        // Proposal targets epoch 9 (current), applied at 9→10 boundary
         let hash1 = Hash32::from_bytes([0x01; 32]);
         let update = ProtocolParamUpdate {
             protocol_version_major: Some(7),
@@ -5151,7 +5174,7 @@ mod tests {
         };
         state
             .pending_pp_updates
-            .entry(EpochNo(10))
+            .entry(EpochNo(9))
             .or_default()
             .push((hash1, update));
 
