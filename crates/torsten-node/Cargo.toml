@@ -42,6 +42,9 @@ tar = { workspace = true }
 indicatif = { workspace = true }
 futures-util = { workspace = true }
 pallas-traverse = { workspace = true }
+sha2 = { workspace = true }
+memmap2 = { workspace = true }
+crc32fast = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

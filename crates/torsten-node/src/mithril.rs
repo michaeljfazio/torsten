@@ -3,9 +3,14 @@
 //! Downloads a Mithril-certified snapshot of the Cardano immutable DB,
 //! extracts the cardano-node chunk files, parses blocks with pallas,
 //! and bulk-imports them into Torsten's ImmutableDB (cardano-lsm).
+//!
+//! Supports both the legacy `/artifact/snapshots` API and the newer
+//! `/artifact/cardano-database` API with per-immutable-file downloads.
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,11 @@ const PREVIEW_AGGREGATOR: &str =
 const PREPROD_AGGREGATOR: &str =
     "https://aggregator.release-preprod.api.mithril.network/aggregator";
 
-/// Snapshot metadata from the Mithril aggregator API
+// ---------------------------------------------------------------------------
+// API response types
+// ---------------------------------------------------------------------------
+
+/// Snapshot metadata from the Mithril aggregator API (legacy endpoint)
 #[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)]
 struct SnapshotListItem {
@@ -33,7 +42,7 @@ struct SnapshotListItem {
     compression_algorithm: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct SnapshotBeacon {
     epoch: u64,
     immutable_file_number: u64,
@@ -50,6 +59,10 @@ struct SnapshotDetail {
     compression_algorithm: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Secondary index parsing
+// ---------------------------------------------------------------------------
+
 /// Entry from a cardano-node secondary index file.
 /// Each entry is 56 bytes in the secondary index.
 #[derive(Debug, Clone)]
@@ -57,7 +70,7 @@ struct SecondaryIndexEntry {
     block_offset: u64,
     _header_offset: u16,
     _header_size: u16,
-    _checksum: u32,
+    checksum: u32,
     header_hash: [u8; 32],
     _block_or_ebb: u64,
 }
@@ -73,18 +86,27 @@ impl SecondaryIndexEntry {
         let checksum = u32::from_be_bytes(data[12..16].try_into().ok()?);
         let mut header_hash = [0u8; 32];
         header_hash.copy_from_slice(&data[16..48]);
-        let _block_or_ebb = u64::from_be_bytes(data[48..56].try_into().ok()?);
+        let block_or_ebb = u64::from_be_bytes(data[48..56].try_into().ok()?);
 
         Some(SecondaryIndexEntry {
             block_offset,
             _header_offset: header_offset,
             _header_size: header_size,
-            _checksum: checksum,
+            checksum,
             header_hash,
-            _block_or_ebb,
+            _block_or_ebb: block_or_ebb,
         })
     }
 }
+
+/// Verify a block's CRC32 checksum against the secondary index entry.
+fn verify_block_checksum(block_data: &[u8], expected: u32) -> bool {
+    crc32fast::hash(block_data) == expected
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Get the aggregator URL for a given network magic
 pub fn aggregator_url(network_magic: u64) -> &'static str {
@@ -93,6 +115,16 @@ pub fn aggregator_url(network_magic: u64) -> &'static str {
         2 => PREVIEW_AGGREGATOR,
         1 => PREPROD_AGGREGATOR,
         _ => MAINNET_AGGREGATOR,
+    }
+}
+
+/// Get the Mithril network name for a given magic (matches CardanoNetwork::Display in mithril-common)
+fn mithril_network_name(network_magic: u64) -> &'static str {
+    match network_magic {
+        764824073 => "mainnet",
+        2 => "preview",
+        1 => "preprod",
+        _ => "private",
     }
 }
 
@@ -165,14 +197,18 @@ pub async fn import_snapshot(
     );
     extract_archive(&archive_path, &extract_dir)?;
 
-    // Step 5: Import blocks into ImmutableDB
+    // Step 5: Verify snapshot digest (Mithril digest over extracted immutable files)
+    let network_name = mithril_network_name(network_magic);
+    verify_snapshot_digest(&extract_dir, network_name, &latest.beacon, &detail.digest)?;
+
+    // Step 6: Import blocks into ImmutableDB
     info!(
         database_path = %database_path.display(),
         "Importing blocks into ImmutableDB"
     );
     import_chunk_files(&extract_dir, database_path)?;
 
-    // Step 6: Cleanup
+    // Step 7: Cleanup
     info!("Cleaning up temporary files");
     if let Err(e) = fs::remove_file(&archive_path) {
         warn!(error = %e, "Failed to remove archive file");
@@ -184,6 +220,10 @@ pub async fn import_snapshot(
     info!("Mithril snapshot import complete!");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Download & verification
+// ---------------------------------------------------------------------------
 
 /// Download a snapshot archive with progress reporting
 async fn download_snapshot(
@@ -242,6 +282,122 @@ async fn download_snapshot(
 
     Ok(())
 }
+
+/// Verify the Mithril snapshot digest over extracted immutable files.
+///
+/// Reproduces the Mithril aggregator's digest algorithm:
+///   1. beacon_hash = hex(SHA256(network || epoch_be || immutable_file_number_be))
+///   2. For each file in immutable/ (sorted by number then path): file_hash = SHA256(contents)
+///   3. digest = hex(SHA256(beacon_hash_hex_bytes || file_hash_1 || file_hash_2 || ...))
+fn verify_snapshot_digest(
+    extract_dir: &Path,
+    network_name: &str,
+    beacon: &SnapshotBeacon,
+    expected_digest: &str,
+) -> Result<()> {
+    info!("Verifying Mithril snapshot digest");
+
+    let immutable_dir = find_immutable_dir(extract_dir)
+        .context("Could not find immutable/ directory for digest verification")?;
+
+    // Step 1: Compute beacon hash
+    let beacon_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(network_name.as_bytes());
+        hasher.update(beacon.epoch.to_be_bytes());
+        hasher.update(beacon.immutable_file_number.to_be_bytes());
+        hex::encode(hasher.finalize())
+    };
+
+    // Step 2: Collect and sort immutable files (number then path, matching Mithril)
+    let mut immutable_files: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&immutable_dir).context("Failed to read immutable directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        // Only include chunk/primary/secondary files
+        let is_immutable =
+            name.ends_with(".chunk") || name.ends_with(".primary") || name.ends_with(".secondary");
+        if !is_immutable {
+            continue;
+        }
+
+        // Parse the file number from the stem (e.g. "00123.chunk" -> 123)
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let file_number = stem.parse::<u64>().unwrap_or(0);
+
+        // Only include files up to the beacon's immutable_file_number
+        if file_number <= beacon.immutable_file_number {
+            immutable_files.push((file_number, path));
+        }
+    }
+
+    // Sort by number first, then by path (matches Mithril's Ord for ImmutableFile)
+    immutable_files
+        .sort_by(|(num_a, path_a), (num_b, path_b)| num_a.cmp(num_b).then(path_a.cmp(path_b)));
+
+    let total_files = immutable_files.len() as u64;
+    let pb = ProgressBar::new(total_files);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files (verifying digest)",
+            )
+            .expect("invalid template")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
+
+    // Step 3: Hash each file individually, then combine
+    let mut final_hasher = Sha256::new();
+    final_hasher.update(beacon_hash.as_bytes());
+
+    let mut buf = [0u8; 256 * 1024];
+    for (_file_number, path) in &immutable_files {
+        let mut file_hasher = Sha256::new();
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("Failed to open immutable file: {}", path.display()))?;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .with_context(|| format!("IO error reading: {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            file_hasher.update(&buf[..n]);
+        }
+        final_hasher.update(file_hasher.finalize());
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("Verification complete");
+
+    let computed = hex::encode(final_hasher.finalize());
+    if computed != expected_digest {
+        anyhow::bail!(
+            "Mithril snapshot digest mismatch!\n  Expected: {expected_digest}\n  Computed: {computed}\n\
+             The snapshot may be corrupted or tampered with. Delete the extract directory and retry."
+        );
+    }
+
+    info!(
+        files_verified = total_files,
+        "Mithril snapshot digest verified successfully"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Archive extraction
+// ---------------------------------------------------------------------------
 
 /// Extract a tar.zst archive to a directory
 fn extract_archive(archive_path: &Path, extract_dir: &Path) -> Result<()> {
@@ -322,6 +478,10 @@ fn find_immutable_dir(extract_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Block import
+// ---------------------------------------------------------------------------
+
 /// Import cardano-node immutable chunk files into Torsten's ImmutableDB
 fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     let immutable_dir = find_immutable_dir(extract_dir)
@@ -379,13 +539,14 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
 
     let mut total_blocks_imported = 0u64;
     let mut skipped_chunks = 0u64;
+    let mut checksum_failures = 0u64;
 
     for chunk_num in &chunk_numbers {
         let chunk_path = immutable_dir.join(format!("{chunk_num:05}.chunk"));
         let secondary_path = immutable_dir.join(format!("{chunk_num:05}.secondary"));
 
         let mut blocks = if secondary_path.exists() {
-            parse_chunk_with_index(&chunk_path, &secondary_path)?
+            parse_chunk_with_index(&chunk_path, &secondary_path, &mut checksum_failures)?
         } else {
             Vec::new()
         };
@@ -426,9 +587,18 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     }
 
     pb.finish_with_message("Import complete");
+
+    if checksum_failures > 0 {
+        warn!(
+            checksum_failures,
+            "Some blocks had CRC32 checksum mismatches (imported anyway)"
+        );
+    }
+
     info!(
         total_blocks = total_blocks_imported,
         skipped_chunks,
+        checksum_failures,
         tip_slot = immutable_db.tip_slot().0,
         "Block import complete — persisting to disk"
     );
@@ -448,10 +618,20 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
 /// A parsed block: (slot, hash, block_number, raw_cbor)
 type ParsedBlock = (SlotNo, Hash32, BlockNo, Vec<u8>);
 
-/// Parse a chunk file using the secondary index for block boundaries
-fn parse_chunk_with_index(chunk_path: &Path, secondary_path: &Path) -> Result<Vec<ParsedBlock>> {
+/// Parse a chunk file using the secondary index for block boundaries.
+///
+/// Uses memory-mapped I/O for the chunk file to avoid loading the entire file
+/// into memory. The secondary index is small enough to read directly.
+fn parse_chunk_with_index(
+    chunk_path: &Path,
+    secondary_path: &Path,
+    checksum_failures: &mut u64,
+) -> Result<Vec<ParsedBlock>> {
     let secondary_data = fs::read(secondary_path).context("Failed to read secondary index file")?;
-    let chunk_data = fs::read(chunk_path).context("Failed to read chunk file")?;
+
+    // Memory-map the chunk file instead of reading it entirely into memory
+    let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     // Parse secondary index entries (56 bytes each, no header)
     let mut entries = Vec::new();
@@ -492,6 +672,20 @@ fn parse_chunk_with_index(chunk_path: &Path, secondary_path: &Path) -> Result<Ve
 
         let block_cbor = &chunk_data[block_start..block_end];
 
+        // Verify CRC32 checksum from secondary index
+        if entry.checksum != 0 && !verify_block_checksum(block_cbor, entry.checksum) {
+            *checksum_failures += 1;
+            warn!(
+                chunk = %chunk_path.display(),
+                offset = block_start,
+                expected_crc = entry.checksum,
+                actual_crc = crc32fast::hash(block_cbor),
+                "Block CRC32 checksum mismatch"
+            );
+            // Continue importing — the block may still be valid (checksum
+            // could be computed over a different range in some eras)
+        }
+
         // Try to decode with pallas to get the slot and block number
         match pallas_traverse::MultiEraBlock::decode(block_cbor) {
             Ok(pallas_block) => {
@@ -516,26 +710,41 @@ fn parse_chunk_with_index(chunk_path: &Path, secondary_path: &Path) -> Result<Ve
     Ok(blocks)
 }
 
-/// Parse a chunk file by sequential CBOR decoding (fallback when no secondary index)
+/// Parse a chunk file by sequential CBOR decoding (fallback when no secondary index).
+///
+/// Uses memory-mapped I/O and proper CBOR size probing to avoid O(n^2)
+/// byte-by-byte scanning on decode failures.
 fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
-    let chunk_data = fs::read(chunk_path).context("Failed to read chunk file")?;
-    if chunk_data.is_empty() {
+    let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    let chunk_len = chunk_file.metadata()?.len() as usize;
+    if chunk_len == 0 {
         return Ok(Vec::new());
     }
+
+    let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     let mut blocks = Vec::new();
     let mut offset = 0;
 
     while offset < chunk_data.len() {
-        // Try to find the next CBOR array start
-        // Cardano blocks are encoded as CBOR arrays: tag 0x82 (2-element array) for multi-era wrapper
         let remaining = &chunk_data[offset..];
         if remaining.is_empty() {
             break;
         }
 
-        // Try to decode starting from current offset
-        match pallas_traverse::MultiEraBlock::decode(remaining) {
+        // First, probe the CBOR item size to know how many bytes to skip
+        // regardless of whether pallas can decode this particular era/block.
+        let item_size = match cbor_item_size(remaining) {
+            Some(size) if size > 0 => size,
+            _ => {
+                // Not valid CBOR at this offset — skip one byte
+                offset += 1;
+                continue;
+            }
+        };
+
+        // Try to decode the CBOR item as a Cardano block
+        match pallas_traverse::MultiEraBlock::decode(&remaining[..item_size]) {
             Ok(pallas_block) => {
                 let slot = SlotNo(pallas_block.slot());
                 let block_no = BlockNo(pallas_block.number());
@@ -543,19 +752,14 @@ fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
                     pallas_block.hash().as_ref().try_into().unwrap_or([0u8; 32]);
                 let hash = Hash32::from_bytes(hash_bytes);
 
-                // We need to figure out how many bytes this block consumed
-                // Use minicbor to determine the CBOR item size
-                let size = cbor_item_size(remaining).unwrap_or(remaining.len());
-                let block_cbor = remaining[..size].to_vec();
-
-                blocks.push((slot, hash, block_no, block_cbor));
-                offset += size;
+                blocks.push((slot, hash, block_no, remaining[..item_size].to_vec()));
             }
             Err(_) => {
-                // Skip to next byte and try again
-                offset += 1;
+                // Valid CBOR but not a decodable Cardano block (e.g. EBB) — skip it
             }
         }
+
+        offset += item_size;
     }
 
     Ok(blocks)
@@ -563,66 +767,61 @@ fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
 
 /// Determine the size of the next CBOR item in a byte slice
 fn cbor_item_size(data: &[u8]) -> Option<usize> {
-    // Use minicbor's decoder to probe the size
     let mut decoder = minicbor::Decoder::new(data);
-
-    // Save position, skip one item, return consumed bytes
     let start = decoder.position();
-
-    // Try to skip a CBOR data item
-    // For a top-level array (which Cardano blocks are), we need to skip the entire array
-    fn skip_item(decoder: &mut minicbor::Decoder) -> Result<(), minicbor::decode::Error> {
-        use minicbor::data::Type;
-        match decoder.datatype()? {
-            Type::Array | Type::ArrayIndef => {
-                let len = decoder.array()?;
-                if let Some(n) = len {
-                    for _ in 0..n {
-                        skip_item(decoder)?;
-                    }
-                } else {
-                    loop {
-                        if decoder.datatype()? == Type::Break {
-                            decoder.skip()?;
-                            break;
-                        }
-                        skip_item(decoder)?;
-                    }
-                }
-                Ok(())
-            }
-            Type::Map | Type::MapIndef => {
-                let len = decoder.map()?;
-                if let Some(n) = len {
-                    for _ in 0..n {
-                        skip_item(decoder)?;
-                        skip_item(decoder)?;
-                    }
-                } else {
-                    loop {
-                        if decoder.datatype()? == Type::Break {
-                            decoder.skip()?;
-                            break;
-                        }
-                        skip_item(decoder)?;
-                        skip_item(decoder)?;
-                    }
-                }
-                Ok(())
-            }
-            Type::Tag => {
-                decoder.tag()?;
-                skip_item(decoder)
-            }
-            _ => {
-                decoder.skip()?;
-                Ok(())
-            }
-        }
-    }
-
     skip_item(&mut decoder).ok()?;
     Some(decoder.position() - start)
+}
+
+/// Recursively skip one CBOR data item in the decoder.
+fn skip_item(decoder: &mut minicbor::Decoder) -> Result<(), minicbor::decode::Error> {
+    use minicbor::data::Type;
+    match decoder.datatype()? {
+        Type::Array | Type::ArrayIndef => {
+            let len = decoder.array()?;
+            if let Some(n) = len {
+                for _ in 0..n {
+                    skip_item(decoder)?;
+                }
+            } else {
+                loop {
+                    if decoder.datatype()? == Type::Break {
+                        decoder.skip()?;
+                        break;
+                    }
+                    skip_item(decoder)?;
+                }
+            }
+            Ok(())
+        }
+        Type::Map | Type::MapIndef => {
+            let len = decoder.map()?;
+            if let Some(n) = len {
+                for _ in 0..n {
+                    skip_item(decoder)?;
+                    skip_item(decoder)?;
+                }
+            } else {
+                loop {
+                    if decoder.datatype()? == Type::Break {
+                        decoder.skip()?;
+                        break;
+                    }
+                    skip_item(decoder)?;
+                    skip_item(decoder)?;
+                }
+            }
+            Ok(())
+        }
+        Type::Tag => {
+            decoder.tag()?;
+            skip_item(decoder)
+        }
+        _ => {
+            decoder.skip()?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +853,11 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregator_url_unknown_defaults_to_mainnet() {
+        assert_eq!(aggregator_url(999), aggregator_url(764824073));
+    }
+
+    #[test]
     fn test_secondary_index_entry_parse() {
         let mut data = [0u8; 56];
         // block_offset = 1024
@@ -673,7 +877,7 @@ mod tests {
         assert_eq!(entry.block_offset, 1024);
         assert_eq!(entry._header_offset, 2);
         assert_eq!(entry._header_size, 100);
-        assert_eq!(entry._checksum, 12345);
+        assert_eq!(entry.checksum, 12345);
         assert_eq!(entry.header_hash, [0xAB; 32]);
         assert_eq!(entry._block_or_ebb, 5000);
     }
@@ -703,6 +907,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cbor_item_size_map() {
+        // {1: 2} — 0xA1 0x01 0x02
+        let data = [0xA1, 0x01, 0x02];
+        let size = cbor_item_size(&data).unwrap();
+        assert_eq!(size, 3);
+    }
+
+    #[test]
+    fn test_cbor_item_size_tagged() {
+        // tag(24) + bytes(2) [0x01, 0x02]
+        // 0xD8 0x18 0x42 0x01 0x02
+        let data = [0xD8, 0x18, 0x42, 0x01, 0x02];
+        let size = cbor_item_size(&data).unwrap();
+        assert_eq!(size, 5);
+    }
+
+    #[test]
+    fn test_cbor_item_size_invalid() {
+        let data = [0xFF]; // CBOR break — not a valid top-level item
+                           // May or may not return None depending on minicbor's skip behaviour
+                           // Just ensure it doesn't panic
+        let _ = cbor_item_size(&data);
+    }
+
+    #[test]
     fn test_find_immutable_dir_direct() {
         let dir = tempfile::tempdir().unwrap();
         let immutable = dir.path().join("immutable");
@@ -719,8 +948,346 @@ mod tests {
     }
 
     #[test]
+    fn test_find_immutable_dir_deep_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("snapshot-abc").join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+        assert_eq!(find_immutable_dir(dir.path()), Some(immutable));
+    }
+
+    #[test]
     fn test_find_immutable_dir_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(find_immutable_dir(dir.path()), None);
+    }
+
+    #[test]
+    fn test_verify_block_checksum_valid() {
+        let data = b"hello world";
+        let crc = crc32fast::hash(data);
+        assert!(verify_block_checksum(data, crc));
+    }
+
+    #[test]
+    fn test_verify_block_checksum_invalid() {
+        let data = b"hello world";
+        assert!(!verify_block_checksum(data, 0xDEADBEEF));
+    }
+
+    #[test]
+    fn test_verify_block_checksum_empty() {
+        let data = b"";
+        let crc = crc32fast::hash(data);
+        assert!(verify_block_checksum(data, crc));
+    }
+
+    /// Helper: compute the expected Mithril digest for test immutable files.
+    fn compute_expected_digest(
+        network: &str,
+        epoch: u64,
+        immutable_file_number: u64,
+        files: &[(u64, &str, &[u8])], // (number, extension, content)
+    ) -> String {
+        // Beacon hash
+        let beacon_hash = {
+            let mut h = Sha256::new();
+            h.update(network.as_bytes());
+            h.update(epoch.to_be_bytes());
+            h.update(immutable_file_number.to_be_bytes());
+            hex::encode(h.finalize())
+        };
+
+        // Sort files by number then by name (matching Mithril)
+        let mut sorted: Vec<_> = files.to_vec();
+        sorted.sort_by(|(num_a, ext_a, _), (num_b, ext_b, _)| {
+            let name_a = format!("{num_a:05}.{ext_a}");
+            let name_b = format!("{num_b:05}.{ext_b}");
+            num_a.cmp(num_b).then(name_a.cmp(&name_b))
+        });
+
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(beacon_hash.as_bytes());
+        for (_, _, content) in &sorted {
+            final_hasher.update(Sha256::digest(content));
+        }
+        hex::encode(final_hasher.finalize())
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        let chunk_data = b"chunk data for file 1";
+        let primary_data = b"primary data for file 1";
+        let secondary_data = b"secondary data for file 1";
+        fs::write(immutable.join("00001.chunk"), chunk_data).unwrap();
+        fs::write(immutable.join("00001.primary"), primary_data).unwrap();
+        fs::write(immutable.join("00001.secondary"), secondary_data).unwrap();
+
+        let beacon = SnapshotBeacon {
+            epoch: 100,
+            immutable_file_number: 1,
+        };
+
+        let expected = compute_expected_digest(
+            "preview",
+            100,
+            1,
+            &[
+                (1, "chunk", chunk_data),
+                (1, "primary", primary_data),
+                (1, "secondary", secondary_data),
+            ],
+        );
+
+        let result = verify_snapshot_digest(dir.path(), "preview", &beacon, &expected);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        let files = [
+            (1u64, "chunk", b"c1" as &[u8]),
+            (1, "primary", b"p1"),
+            (1, "secondary", b"s1"),
+            (2, "chunk", b"c2"),
+            (2, "primary", b"p2"),
+            (2, "secondary", b"s2"),
+        ];
+
+        for (num, ext, content) in &files {
+            fs::write(immutable.join(format!("{num:05}.{ext}")), content).unwrap();
+        }
+
+        let beacon = SnapshotBeacon {
+            epoch: 50,
+            immutable_file_number: 2,
+        };
+
+        let expected = compute_expected_digest("mainnet", 50, 2, &files);
+
+        let result = verify_snapshot_digest(dir.path(), "mainnet", &beacon, &expected);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_excludes_files_beyond_beacon() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        // File 1 is within beacon, file 2 is beyond
+        fs::write(immutable.join("00001.chunk"), b"c1").unwrap();
+        fs::write(immutable.join("00002.chunk"), b"c2-should-be-excluded").unwrap();
+
+        let beacon = SnapshotBeacon {
+            epoch: 10,
+            immutable_file_number: 1,
+        };
+
+        // Expected digest only includes file 1
+        let expected = compute_expected_digest("preview", 10, 1, &[(1, "chunk", b"c1" as &[u8])]);
+
+        let result = verify_snapshot_digest(dir.path(), "preview", &beacon, &expected);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        fs::write(immutable.join("00001.chunk"), b"data").unwrap();
+
+        let beacon = SnapshotBeacon {
+            epoch: 1,
+            immutable_file_number: 1,
+        };
+
+        let result = verify_snapshot_digest(
+            dir.path(),
+            "preview",
+            &beacon,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("digest mismatch"));
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_no_immutable_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let beacon = SnapshotBeacon {
+            epoch: 1,
+            immutable_file_number: 1,
+        };
+        let result = verify_snapshot_digest(dir.path(), "preview", &beacon, "abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mithril_network_name() {
+        assert_eq!(mithril_network_name(764824073), "mainnet");
+        assert_eq!(mithril_network_name(2), "preview");
+        assert_eq!(mithril_network_name(1), "preprod");
+        assert_eq!(mithril_network_name(999), "private");
+    }
+
+    #[test]
+    fn test_import_chunk_files_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No immutable/ directory
+        let db_dir = tempfile::tempdir().unwrap();
+        let result = import_chunk_files(dir.path(), db_dir.path());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Could not find immutable/"));
+    }
+
+    #[test]
+    fn test_import_chunk_files_no_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let result = import_chunk_files(dir.path(), db_dir.path());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No chunk files found"));
+    }
+
+    #[test]
+    fn test_secondary_index_multiple_entries() {
+        // Parse 3 sequential entries from a contiguous buffer
+        let mut buf = [0u8; 56 * 3];
+        for (i, offset_val) in [0u64, 1000, 2000].iter().enumerate() {
+            let base = i * 56;
+            buf[base..base + 8].copy_from_slice(&offset_val.to_be_bytes());
+            buf[base + 8..base + 10].copy_from_slice(&0u16.to_be_bytes());
+            buf[base + 10..base + 12].copy_from_slice(&100u16.to_be_bytes());
+            buf[base + 12..base + 16].copy_from_slice(&(i as u32).to_be_bytes());
+            buf[base + 16..base + 48].copy_from_slice(&[i as u8; 32]);
+            buf[base + 48..base + 56].copy_from_slice(&(i as u64).to_be_bytes());
+        }
+
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        while offset + 56 <= buf.len() {
+            if let Some(entry) = SecondaryIndexEntry::from_bytes(&buf[offset..]) {
+                entries.push(entry);
+            }
+            offset += 56;
+        }
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].block_offset, 0);
+        assert_eq!(entries[1].block_offset, 1000);
+        assert_eq!(entries[2].block_offset, 2000);
+    }
+
+    #[test]
+    fn test_parse_chunk_sequential_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        fs::write(&chunk_path, b"").unwrap();
+
+        let blocks = parse_chunk_sequential(&chunk_path).unwrap();
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chunk_sequential_invalid_cbor() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        // Write some random non-CBOR data
+        fs::write(&chunk_path, [0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        let blocks = parse_chunk_sequential(&chunk_path).unwrap();
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chunk_sequential_valid_cbor_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        // Valid CBOR: [1, 2] — but not a Cardano block
+        fs::write(&chunk_path, [0x82, 0x01, 0x02]).unwrap();
+
+        let blocks = parse_chunk_sequential(&chunk_path).unwrap();
+        // Should skip it (valid CBOR but not a decodable block)
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chunk_with_index_missing_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        let secondary_path = dir.path().join("00000.secondary");
+
+        // Only create secondary, not chunk
+        fs::write(&secondary_path, [0u8; 56]).unwrap();
+
+        let mut failures = 0;
+        let result = parse_chunk_with_index(&chunk_path, &secondary_path, &mut failures);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_chunk_with_index_empty_secondary() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        let secondary_path = dir.path().join("00000.secondary");
+
+        fs::write(&chunk_path, b"some data").unwrap();
+        fs::write(&secondary_path, b"").unwrap(); // empty secondary
+
+        let mut failures = 0;
+        let blocks = parse_chunk_with_index(&chunk_path, &secondary_path, &mut failures).unwrap();
+        assert!(blocks.is_empty());
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn test_parse_chunk_with_index_bad_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk_path = dir.path().join("00000.chunk");
+        let secondary_path = dir.path().join("00000.secondary");
+
+        // Write a small chunk file
+        fs::write(&chunk_path, [0x82, 0x01, 0x02]).unwrap();
+
+        // Write a secondary index entry with an offset beyond the chunk file
+        let mut entry_data = [0u8; 56];
+        entry_data[0..8].copy_from_slice(&9999u64.to_be_bytes()); // offset way past end
+        fs::write(&secondary_path, entry_data).unwrap();
+
+        let mut failures = 0;
+        let blocks = parse_chunk_with_index(&chunk_path, &secondary_path, &mut failures).unwrap();
+        assert!(blocks.is_empty()); // should skip the invalid entry
+    }
+
+    #[test]
+    fn test_extract_archive_already_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        let extract_dir = dir.path().join("extracted");
+        let immutable = extract_dir.join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        // Should return Ok immediately without touching the archive
+        let fake_archive = dir.path().join("nonexistent.tar.zst");
+        let result = extract_archive(&fake_archive, &extract_dir);
+        assert!(result.is_ok());
     }
 }

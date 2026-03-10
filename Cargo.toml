@@ -104,6 +104,7 @@ zstd = "0.13"
 tar = "0.4"
 indicatif = "0.17"
 futures-util = "0.3"
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3
