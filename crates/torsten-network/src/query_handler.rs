@@ -49,7 +49,36 @@ pub enum QueryResult {
     DRepStakeDistr(Vec<DRepStakeEntry>),
     /// Filtered vote delegatees: Map<Credential, DRep> (tag 28)
     FilteredVoteDelegatees(Vec<VoteDelegateeEntry>),
+    /// Era history: list of era summaries for slot/time conversions
+    EraHistory(Vec<EraSummary>),
     Error(String),
+}
+
+/// Summary of a single Cardano era for GetEraHistory responses
+#[derive(Debug, Clone)]
+pub struct EraSummary {
+    /// Start slot number
+    pub start_slot: u64,
+    /// Start epoch number
+    pub start_epoch: u64,
+    /// Start time in picoseconds relative to system start
+    pub start_time_pico: u64,
+    /// End bound (None = current/unbounded era)
+    pub end: Option<EraBound>,
+    /// Epoch length in slots
+    pub epoch_size: u64,
+    /// Slot length in milliseconds
+    pub slot_length_ms: u64,
+    /// Safe zone (number of slots past era end where predictions are still valid)
+    pub safe_zone: u64,
+}
+
+/// Era boundary
+#[derive(Debug, Clone)]
+pub struct EraBound {
+    pub slot: u64,
+    pub epoch: u64,
+    pub time_pico: u64,
 }
 
 /// Stake snapshot result (mark/set/go)
@@ -528,6 +557,8 @@ pub struct NodeStateSnapshot {
     pub drep_stake_distr: Vec<DRepStakeEntry>,
     /// Vote delegatees for GetFilteredVoteDelegatees (tag 28)
     pub vote_delegatees: Vec<VoteDelegateeEntry>,
+    /// Era summaries for GetEraHistory query
+    pub era_summaries: Vec<EraSummary>,
 }
 
 impl Default for NodeStateSnapshot {
@@ -564,6 +595,7 @@ impl Default for NodeStateSnapshot {
             stake_deleg_deposits: Vec::new(),
             drep_stake_distr: Vec::new(),
             vote_delegatees: Vec::new(),
+            era_summaries: Vec::new(),
         }
     }
 }
@@ -794,17 +826,35 @@ impl QueryHandler {
     /// Dispatch an era-specific query
     fn dispatch_era_query(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
         // Try to parse inner query: [query_tag, ...]
+        // HFC query nesting:
+        //   [0, [era_id, [shelley_tag, ...]]] = QueryIfCurrent
+        //   [2, [hf_tag, ...]]                = QueryHardFork
         match decoder.array() {
             Ok(_) => {
                 let query_tag = decoder.u32().unwrap_or(999);
+                // Check if this is a QueryHardFork tag
+                if query_tag == 2 {
+                    return self.handle_hard_fork_query(decoder);
+                }
                 self.handle_shelley_query(query_tag, decoder)
             }
             Err(_) => {
                 // Try as a simple integer tag
                 let query_tag = decoder.u32().unwrap_or(999);
+                if query_tag == 2 {
+                    return self.handle_hard_fork_query(decoder);
+                }
                 self.handle_shelley_query(query_tag, decoder)
             }
         }
+    }
+
+    /// Handle QueryHardFork queries (GetInterpreter = GetEraHistory)
+    fn handle_hard_fork_query(&self, _decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
+        // QueryHardFork tag 2 contains GetInterpreter [1, 0]
+        // We return era summaries regardless of the sub-tag
+        debug!("Query: GetEraHistory (QueryHardFork/GetInterpreter)");
+        QueryResult::EraHistory(self.state.era_summaries.clone())
     }
 
     /// Handle Shelley-era queries by tag.

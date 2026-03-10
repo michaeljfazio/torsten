@@ -2262,6 +2262,7 @@ impl Node {
             stake_deleg_deposits,
             drep_stake_distr,
             vote_delegatees,
+            era_summaries: self.build_era_summaries(&ls),
             genesis_config: self.shelley_genesis.as_ref().map(|g| {
                 let gp = &g.protocol_params;
                 // Convert a0 from f64 to rational
@@ -2315,6 +2316,82 @@ impl Node {
 
         let mut handler = self.query_handler.write().await;
         handler.update_state(snapshot);
+    }
+
+    /// Build era summaries for GetEraHistory responses.
+    ///
+    /// For testnets (preview/preprod), Shelley starts at slot 0 with uniform parameters.
+    /// For mainnet, Byron has 20s slots and 21600 slot epochs before Shelley at slot 4492800.
+    /// We produce a simplified summary covering Byron (if mainnet) + Shelley-through-Conway.
+    fn build_era_summaries(
+        &self,
+        _ls: &torsten_ledger::LedgerState,
+    ) -> Vec<torsten_network::query_handler::EraSummary> {
+        use torsten_network::query_handler::{EraBound, EraSummary};
+
+        let epoch_length = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.epoch_length)
+            .unwrap_or(432000);
+        let slot_length_ms = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.slot_length * 1000)
+            .unwrap_or(1000);
+        let safe_zone = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.security_param * 2)
+            .unwrap_or(4320);
+
+        let is_mainnet = self.network_magic == 764824073;
+
+        if is_mainnet {
+            // Mainnet: Byron era (slots 0..4492800, epochs 0..208, 20s slots, 21600 epoch)
+            // then Shelley+ from slot 4492800, epoch 208
+            let byron_epoch_len: u64 = 21600;
+            let byron_slot_len_ms: u64 = 20000;
+            let byron_slots = 208 * byron_epoch_len; // 4492800
+            let byron_time_pico =
+                (byron_slots as u128 * byron_slot_len_ms as u128 * 1_000_000_000) as u64;
+
+            vec![
+                EraSummary {
+                    start_slot: 0,
+                    start_epoch: 0,
+                    start_time_pico: 0,
+                    end: Some(EraBound {
+                        slot: byron_slots,
+                        epoch: 208,
+                        time_pico: byron_time_pico,
+                    }),
+                    epoch_size: byron_epoch_len,
+                    slot_length_ms: byron_slot_len_ms,
+                    safe_zone: byron_epoch_len, // Byron safe zone = full epoch
+                },
+                EraSummary {
+                    start_slot: byron_slots,
+                    start_epoch: 208,
+                    start_time_pico: byron_time_pico,
+                    end: None,
+                    epoch_size: epoch_length,
+                    slot_length_ms,
+                    safe_zone,
+                },
+            ]
+        } else {
+            // Testnets: single era from slot 0
+            vec![EraSummary {
+                start_slot: 0,
+                start_epoch: 0,
+                start_time_pico: 0,
+                end: None,
+                epoch_size: epoch_length,
+                slot_length_ms,
+                safe_zone,
+            }]
+        }
     }
 
     /// Notify connected N2N peers of a chain rollback by sending MsgRollBackward.

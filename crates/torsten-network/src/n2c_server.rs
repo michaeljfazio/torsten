@@ -1473,6 +1473,7 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             | QueryResult::SystemStart(_)
             | QueryResult::ChainBlockNo(_)
             | QueryResult::ChainTip { .. }
+            | QueryResult::EraHistory(_)
     );
 
     if needs_hfc_wrapper {
@@ -2026,6 +2027,56 @@ fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                         enc.u8(entry.drep_type).ok();
                     }
                 }
+            }
+        }
+        QueryResult::EraHistory(summaries) => {
+            // Wire format: array of EraSummary entries (no HFC wrapper)
+            // Each EraSummary = [start_bound, era_end, era_params]
+            // Bound = [relative_time_pico, slot_no, epoch_no]
+            // EraEnd = Bound | null
+            // EraParams = [epoch_size, slot_length_ms, safe_zone, genesis_window]
+            // SafeZone: StandardSafeZone(n) = [3, 0, n, [1, 0]]
+            //           UnsafeIndefiniteSafeZone = [1, 1]
+            enc.array(summaries.len() as u64).ok();
+            for (i, summary) in summaries.iter().enumerate() {
+                enc.array(3).ok();
+                // Start bound
+                enc.array(3).ok();
+                enc.u64(summary.start_time_pico).ok();
+                enc.u64(summary.start_slot).ok();
+                enc.u64(summary.start_epoch).ok();
+                // Era end
+                if let Some(end) = &summary.end {
+                    enc.array(3).ok();
+                    enc.u64(end.time_pico).ok();
+                    enc.u64(end.slot).ok();
+                    enc.u64(end.epoch).ok();
+                } else {
+                    enc.null().ok();
+                }
+                // Era params: [epoch_size, slot_length_ms, safe_zone, genesis_window]
+                enc.array(4).ok();
+                enc.u64(summary.epoch_size).ok();
+                enc.u64(summary.slot_length_ms).ok();
+                // Safe zone encoding
+                let is_last = i == summaries.len() - 1;
+                if is_last {
+                    // Current era: UnsafeIndefiniteSafeZone = [1, 1]
+                    enc.array(2).ok();
+                    enc.u64(1).ok();
+                    enc.u64(1).ok();
+                } else {
+                    // Past era: StandardSafeZone(n) = [3, 0, n, [1, 0]]
+                    enc.array(4).ok();
+                    enc.u64(3).ok();
+                    enc.u64(0).ok();
+                    enc.u64(summary.safe_zone).ok();
+                    enc.array(2).ok();
+                    enc.u64(1).ok();
+                    enc.u64(0).ok();
+                }
+                // genesis_window = null (optional, only in Peras)
+                enc.null().ok();
             }
         }
         QueryResult::Error(msg) => {
