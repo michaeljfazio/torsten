@@ -479,9 +479,7 @@ mod leader_check {
         let mut recip_q = IBig::from(0);
         fp_div(&mut recip_q, &cert_nat_max, &q);
 
-        let one_minus_f_fp = IBig::from(f_den - f_num)
-            * &*PRECISION
-            / IBig::from(f_den);
+        let one_minus_f_fp = IBig::from(f_den - f_num) * &*PRECISION / IBig::from(f_den);
 
         let mut ln_one_minus_f = IBig::from(0);
         ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
@@ -1022,22 +1020,23 @@ mod leader_check {
 
             // Now trace intermediate values for the passing case
             let cert_nat_max = cert_nat_max();
-            let cert_nat =
-                IBig::from(dashu_int::UBig::from_be_bytes(&leader_just_below));
+            let cert_nat = IBig::from(dashu_int::UBig::from_be_bytes(&leader_just_below));
             let q = &cert_nat_max - &cert_nat;
             let mut recip_q = IBig::from(0);
             fp_div(&mut recip_q, &cert_nat_max, &q);
             let recip_q_f64 = ibig_to_f64(&recip_q);
             eprintln!("recip_q (1/(1-a)) = {:.15}", recip_q_f64);
 
-            let one_minus_f_fp = IBig::from(f_den - f_num)
-                * &*PRECISION
-                / IBig::from(f_den);
+            let one_minus_f_fp = IBig::from(f_den - f_num) * &*PRECISION / IBig::from(f_den);
             let mut ln_one_minus_f = IBig::from(0);
             ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
             let c = -&ln_one_minus_f;
             let c_f64 = ibig_to_f64(&c);
-            eprintln!("|ln(1-f)| = {:.15} (expected {:.15})", c_f64, -(1.0 - f).ln());
+            eprintln!(
+                "|ln(1-f)| = {:.15} (expected {:.15})",
+                c_f64,
+                -(1.0 - f).ln()
+            );
 
             let sigma_fp = float_to_fixed(sigma);
             let sigma_roundtrip = ibig_to_f64(&sigma_fp);
@@ -1050,7 +1049,10 @@ mod leader_check {
             fp_scale(&mut x);
             let x_f64 = ibig_to_f64(&x);
             let expected_x = sigma * (-(1.0 - f).ln());
-            eprintln!("x = sigma * |ln(1-f)| = {:.15} (expected {:.15})", x_f64, expected_x);
+            eprintln!(
+                "x = sigma * |ln(1-f)| = {:.15} (expected {:.15})",
+                x_f64, expected_x
+            );
 
             let mut exp_x = IBig::from(0);
             ref_exp(&mut exp_x, &x);
@@ -1082,7 +1084,11 @@ mod leader_check {
         #[test]
         fn test_leader_check_real_stakes() {
             // Test with exact relative_stake values from actual preview testnet pools
-            let stakes = [0.039145993077029484, 0.0009393015339035087, 0.0009173133273195841];
+            let stakes = [
+                0.039145993077029484,
+                0.0009393015339035087,
+                0.0009173133273195841,
+            ];
             let f = 0.05;
 
             for sigma in &stakes {

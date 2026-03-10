@@ -47,7 +47,7 @@ Torsten is organized as a 10-crate Cargo workspace:
 | `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
 | `torsten-ledger` | UTxO set, transaction validation, ledger state, certificates, native scripts, rewards |
 | `torsten-mempool` | Thread-safe transaction mempool |
-| `torsten-storage` | ChainDB (ImmutableDB via cardano-lsm + VolatileDB in-memory, optional RocksDB backend) |
+| `torsten-storage` | ChainDB (ImmutableDB via cardano-lsm + VolatileDB in-memory) |
 | `torsten-node` | Main binary, config, topology, pipelined chain sync, Mithril import |
 | `torsten-cli` | cardano-cli compatible CLI |
 
@@ -142,7 +142,7 @@ graph TD
 | Block announcement (active push) | :white_check_mark: |
 | **Storage** | |
 | ImmutableDB (cardano-lsm, pure Rust) | :white_check_mark: |
-| ImmutableDB (RocksDB, opt-in) | :white_check_mark: |
+| io_uring async I/O (Linux) | :white_check_mark: |
 | VolatileDB (in-memory) | :white_check_mark: |
 | Rollback support | :white_check_mark: |
 | Mithril snapshot import | :white_check_mark: |

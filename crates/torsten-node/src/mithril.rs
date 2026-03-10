@@ -2,7 +2,7 @@
 //!
 //! Downloads a Mithril-certified snapshot of the Cardano immutable DB,
 //! extracts the cardano-node chunk files, parses blocks with pallas,
-//! and bulk-imports them into Torsten's RocksDB-based ImmutableDB.
+//! and bulk-imports them into Torsten's ImmutableDB (cardano-lsm).
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -165,7 +165,7 @@ pub async fn import_snapshot(
     );
     extract_archive(&archive_path, &extract_dir)?;
 
-    // Step 5: Import blocks into RocksDB
+    // Step 5: Import blocks into ImmutableDB
     info!(
         database_path = %database_path.display(),
         "Importing blocks into ImmutableDB"
@@ -322,7 +322,7 @@ fn find_immutable_dir(extract_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Import cardano-node immutable chunk files into Torsten's RocksDB
+/// Import cardano-node immutable chunk files into Torsten's ImmutableDB
 fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     let immutable_dir = find_immutable_dir(extract_dir)
         .context("Could not find immutable/ directory in extracted snapshot")?;
@@ -354,9 +354,10 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
         anyhow::bail!("No chunk files found in immutable directory");
     }
 
-    // Open the database
+    // Open the database with bulk-import-optimized settings (deferred compaction)
     let immutable_path = database_path.join("immutable");
-    let mut immutable_db = torsten_storage::immutable_db::ImmutableDB::open(&immutable_path)?;
+    let mut immutable_db =
+        torsten_storage::lsm::LsmImmutableDB::open_for_bulk_import(&immutable_path)?;
 
     // Check if we already have blocks (resume support)
     let existing_tip = immutable_db.tip_slot();
@@ -422,20 +423,6 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
         total_blocks_imported += batch.len() as u64;
 
         pb.inc(1);
-        if *chunk_num % 100 == 0 {
-            debug!(
-                chunk = chunk_num,
-                total_imported = total_blocks_imported,
-                "Import progress"
-            );
-        }
-
-        // Compact every 500 chunks to consolidate SST files and avoid
-        // "too many open files" on systems with low ulimits (e.g. macOS default 256)
-        if *chunk_num % 500 == 0 && *chunk_num > 0 {
-            info!(chunk = chunk_num, "Triggering compaction...");
-            immutable_db.compact();
-        }
     }
 
     pb.finish_with_message("Import complete");
@@ -443,8 +430,17 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
         total_blocks = total_blocks_imported,
         skipped_chunks,
         tip_slot = immutable_db.tip_slot().0,
-        "Block import complete"
+        "Block import complete — persisting to disk"
     );
+
+    // Persist all data to a durable snapshot before exiting.
+    // cardano-lsm uses ephemeral writes; without this call, any data still in
+    // the in-memory memtable would be lost when the process exits.
+    immutable_db
+        .persist()
+        .context("Failed to persist imported blocks to disk")?;
+
+    info!("Import persisted successfully (compaction will run on next node start)");
 
     Ok(())
 }

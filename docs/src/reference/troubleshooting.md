@@ -4,40 +4,9 @@ Common issues and their solutions when running Torsten.
 
 ## Build Issues
 
-### `libclang` not found
-
-**Error:**
-```
-error: failed to run custom build command for `rocksdb-sys`
-...
-couldn't find any valid shared or static libraries named clang
-```
-
-**Solution:** Install the `libclang` development package for your OS:
-
-```bash
-# Ubuntu / Debian
-sudo apt-get install -y libclang-dev
-
-# macOS
-brew install llvm
-
-# Fedora
-sudo dnf install clang-devel
-
-# Arch Linux
-sudo pacman -S clang
-```
-
-On macOS, you may also need to set:
-
-```bash
-export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
-```
-
 ### Compilation is slow
 
-The initial build compiles RocksDB from source, which takes several minutes. Subsequent builds are much faster due to cargo caching.
+The initial build compiles all dependencies from source, which takes several minutes. Subsequent builds are much faster due to cargo caching.
 
 For faster development iteration, use debug builds:
 
@@ -108,7 +77,7 @@ The Unix socket file inherits the permissions of the process that created it. En
 
 ### Database corruption
 
-**Symptoms:** Node crashes on startup with RocksDB errors.
+**Symptoms:** Node crashes on startup with storage errors.
 
 **Solution:** The safest approach is to delete the database and resync:
 
@@ -147,7 +116,7 @@ Monitor disk usage and ensure adequate free space.
 
 2. **Network latency.** The ChainSync protocol has an inherent per-header RTT (~300ms). High-latency connections will reduce throughput.
 
-3. **Slow disk.** RocksDB performance depends on disk I/O speed. SSDs are strongly recommended.
+3. **Slow disk.** Storage performance depends on disk I/O speed. SSDs are strongly recommended. On Linux, enable `io_uring` for improved performance: `cargo build --release --features io-uring`.
 
 4. **CPU-bound during ledger validation.** Block processing includes UTxO validation and Plutus script execution. This is CPU-intensive during sync.
 

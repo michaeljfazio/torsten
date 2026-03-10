@@ -7,7 +7,7 @@ Torsten's storage layer is implemented in the `torsten-storage` crate, centered 
 ```mermaid
 flowchart TD
     CDB[ChainDB] --> VOL[VolatileDB<br/>In-Memory BTreeMap<br/>Last k=2160 blocks]
-    CDB --> IMM[ImmutableDB<br/>cardano-lsm default / RocksDB opt-in<br/>Permanent blocks]
+    CDB --> IMM[ImmutableDB<br/>cardano-lsm LSM tree<br/>Permanent blocks]
 
     NEW[New Block] -->|add_block| VOL
     VOL -->|flush when > k blocks| IMM
@@ -20,22 +20,13 @@ flowchart TD
 
 ## Storage Backend
 
-The ImmutableDB supports two backends, selected at compile time via feature flags:
-
-| Backend | Feature Flag | Default | Dependencies |
-|---------|-------------|---------|-------------|
-| **cardano-lsm** | _(default)_ | Yes | Pure Rust, no system deps |
-| **RocksDB** | `--features rocksdb` | No | Requires `libclang-dev` on Linux |
-
-### cardano-lsm (Default)
-
-[cardano-lsm](https://crates.io/crates/cardano-lsm) is a pure Rust LSM tree designed specifically for Cardano blockchain indexing. It provides:
+The ImmutableDB uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust LSM tree designed specifically for Cardano blockchain indexing. It provides:
 
 - **Blockchain-optimized compaction** -- hybrid tiered/leveled strategy tuned for block write patterns
-- **Bloom filters** -- efficient negative lookups (3.2x faster than RocksDB in benchmarks)
-- **Cheap snapshots** -- reference-counted snapshots for fast rollback
-- **No system dependencies** -- pure Rust, no `libclang-dev` needed for builds
-- **Optional `io_uring`** -- batched concurrent reads on Linux NVMe drives
+- **Bloom filters** -- efficient negative lookups
+- **Cheap snapshots** -- reference-counted snapshots for fast rollback and durable persistence
+- **No system dependencies** -- pure Rust, no native libraries needed
+- **Optional io_uring** -- batched concurrent reads on Linux for NVMe drives (`--features io-uring`)
 
 Configuration (in `LsmImmutableDB::open`):
 - 128MB write buffer (memtable)
@@ -43,15 +34,15 @@ Configuration (in `LsmImmutableDB::open`):
 - 10 bits per key bloom filter
 - Hybrid compaction: tiered L0 (size ratio 4.0), leveled L1+ (size ratio 10.0)
 
-### RocksDB (Legacy)
+### io_uring Support (Linux)
 
-To build with the RocksDB backend:
+On Linux with kernel 5.1+, enable io_uring for async I/O during compaction:
 
 ```bash
-cargo build --release --features rocksdb
+cargo build --release --features io-uring
 ```
 
-This requires `libclang-dev` on Ubuntu/Debian (`sudo apt-get install -y libclang-dev`).
+On other platforms (macOS, Windows), the feature flag is accepted but falls back to synchronous I/O automatically.
 
 ## ChainDB
 
@@ -91,7 +82,7 @@ The VolatileDB holds the last k=2160 blocks (the security parameter). Once a blo
 
 ## ImmutableDB
 
-The ImmutableDB stores blocks permanently on disk. Both backends share the same key format and metadata.
+The ImmutableDB stores blocks permanently on disk using the cardano-lsm LSM tree.
 
 ### WriteBatch
 
@@ -114,10 +105,19 @@ The ImmutableDB tracks:
 
 This metadata is persisted to enable tip recovery on restart.
 
+### Persistence Model
+
+cardano-lsm uses ephemeral writes -- data is held in an in-memory memtable and periodically flushed to SSTables on disk. To ensure durability across process restarts, Torsten calls `persist()` which creates a named snapshot. On the next open, the snapshot is restored automatically.
+
+Key persistence points:
+- **Node shutdown** -- `persist_immutable()` is called after flushing volatile blocks
+- **Mithril import** -- `persist()` is called after the bulk import completes
+- **Background compaction** -- runs on node startup to consolidate SSTables
+
 ## Tip Recovery
 
 When the node restarts, it recovers its tip from persisted metadata:
-1. The ImmutableDB tip is read from persisted metadata
+1. The ImmutableDB tip is read from the latest snapshot
 2. The VolatileDB starts empty (in-memory state is lost on restart)
 3. The node resumes syncing from the ImmutableDB tip
 
@@ -129,8 +129,10 @@ In addition to block storage, the node periodically saves ledger state snapshots
 
 ```
 database-path/
-  immutable/       # LSM tree or RocksDB database files
-    ...
+  immutable/          # cardano-lsm database
+    active/           # Current SSTables
+    snapshots/        # Durable snapshots (hard-linked)
+      latest/         # Most recent persist() snapshot
 ```
 
 The VolatileDB has no on-disk representation -- it exists only in memory.
@@ -139,16 +141,11 @@ The VolatileDB has no on-disk representation -- it exists only in memory.
 
 - **Batch size** -- The flush batch size balances memory usage (larger batches use more memory) against write efficiency (fewer disk syncs)
 - **Memory usage** -- The VolatileDB holds approximately k blocks in memory. At ~2160 blocks, this is typically a few hundred MB depending on block sizes
-- **Backend selection** -- cardano-lsm is recommended (default). It benchmarks 2-5x faster than RocksDB on most operations and uses ~11% less disk space. RocksDB is 1.5x faster only on sequential range scans.
 
 ## Benchmarks
 
 Run storage benchmarks with:
 
 ```bash
-# Default (cardano-lsm)
 cargo bench -p torsten-storage
-
-# RocksDB
-cargo bench -p torsten-storage --features rocksdb
 ```

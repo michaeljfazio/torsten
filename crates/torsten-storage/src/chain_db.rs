@@ -1,6 +1,3 @@
-#[cfg(feature = "rocksdb")]
-use crate::immutable_db::ImmutableDB;
-#[cfg(not(feature = "rocksdb"))]
 use crate::lsm::LsmImmutableDB;
 use crate::volatile_db::VolatileDB;
 use std::path::Path;
@@ -13,10 +10,6 @@ use tracing::{info, trace, warn};
 #[derive(Error, Debug)]
 pub enum ChainDBError {
     #[error("Immutable DB error: {0}")]
-    #[cfg(feature = "rocksdb")]
-    Immutable(#[from] crate::immutable_db::ImmutableDBError),
-    #[error("Immutable DB error (LSM): {0}")]
-    #[cfg(not(feature = "rocksdb"))]
     Immutable(#[from] crate::lsm::LsmImmutableDBError),
     #[error("Volatile DB error: {0}")]
     Volatile(#[from] crate::volatile_db::VolatileDBError),
@@ -32,13 +25,9 @@ pub const SECURITY_PARAM_K: usize = 2160;
 /// Blocks within the last k slots are in VolatileDB (can be rolled back).
 /// Blocks older than k slots are in ImmutableDB (permanent).
 ///
-/// The immutable backend is selected at compile time:
-/// - Default: `cardano-lsm`-backed `LsmImmutableDB`
-/// - `rocksdb` feature: RocksDB-backed `ImmutableDB`
+/// The immutable backend uses `cardano-lsm`, a pure Rust LSM tree optimized
+/// for blockchain indexing. Enable `io-uring` feature for async I/O on Linux.
 pub struct ChainDB {
-    #[cfg(feature = "rocksdb")]
-    immutable: ImmutableDB,
-    #[cfg(not(feature = "rocksdb"))]
     immutable: LsmImmutableDB,
     volatile: VolatileDB,
 }
@@ -47,10 +36,6 @@ impl ChainDB {
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
         info!(path = %db_path.display(), k = SECURITY_PARAM_K, "Opening ChainDB");
         let immutable_path = db_path.join("immutable");
-
-        #[cfg(feature = "rocksdb")]
-        let immutable = ImmutableDB::open(&immutable_path)?;
-        #[cfg(not(feature = "rocksdb"))]
         let immutable = LsmImmutableDB::open(&immutable_path)?;
 
         let volatile = VolatileDB::new(SECURITY_PARAM_K * 2);
@@ -282,6 +267,20 @@ impl ChainDB {
         self.volatile.has_block(hash) || self.immutable.has_block(hash)
     }
 
+    /// Persist the immutable DB to durable storage.
+    ///
+    /// Saves a cardano-lsm snapshot so in-memory data survives process restarts.
+    pub fn persist_immutable(&mut self) -> Result<(), ChainDBError> {
+        self.immutable.persist()?;
+        Ok(())
+    }
+
+    /// Trigger a full compaction of the immutable DB.
+    /// Useful after a Mithril snapshot import to consolidate SSTables.
+    pub fn compact_immutable(&mut self) {
+        self.immutable.compact();
+    }
+
     /// Flush ALL volatile blocks to immutable DB. Called during graceful shutdown
     /// to ensure no blocks are lost.
     pub fn flush_volatile_to_immutable(&mut self) -> Result<(), ChainDBError> {
@@ -305,13 +304,16 @@ impl ChainDB {
 
     /// Flush old blocks from volatile to immutable when chain is long enough.
     /// Uses batched writes for performance.
+    ///
+    /// Note: does NOT call `persist()` on every flush — the memtable data will
+    /// be flushed to SSTables automatically when it exceeds the configured size.
+    /// Call [`persist_immutable`] explicitly on shutdown to ensure durability.
     fn maybe_flush_to_immutable(&mut self) -> Result<(), ChainDBError> {
         let volatile_count = self.volatile.block_count();
         if volatile_count <= SECURITY_PARAM_K {
             return Ok(());
         }
 
-        // Get oldest blocks that are beyond k-deep and flush them
         let to_flush = volatile_count - SECURITY_PARAM_K;
         info!(
             volatile_count,
@@ -319,7 +321,6 @@ impl ChainDB {
         );
         let flushed = self.volatile.drain_oldest(to_flush);
 
-        // Use batched write — all blocks in a single atomic write batch
         let batch: Vec<_> = flushed
             .iter()
             .map(|(hash, slot, block_no, cbor)| (*slot, hash, *block_no, cbor.as_slice()))

@@ -303,13 +303,12 @@ impl QueryCmd {
 
                 let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
 
-                if arr_len == 0 {
-                    println!("No UTxOs found at {address}");
-                    return Ok(());
-                }
-
                 println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
                 println!("{}", "-".repeat(96));
+
+                if arr_len == 0 {
+                    return Ok(());
+                }
 
                 for _ in 0..arr_len {
                     let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);

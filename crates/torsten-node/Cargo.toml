@@ -6,7 +6,7 @@ description = "Torsten Cardano node - main entry point"
 
 [features]
 default = []
-rocksdb = ["torsten-storage/rocksdb"]
+io-uring = ["torsten-storage/io-uring"]
 
 [[bin]]
 name = "torsten-node"

@@ -13,7 +13,7 @@ Torsten is organized as a 10-crate Cargo workspace. Each crate has a focused res
 | `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
 | `torsten-ledger` | UTxO set, transaction validation, ledger state, certificate processing, native script evaluation, reward calculation |
 | `torsten-mempool` | Thread-safe transaction mempool |
-| `torsten-storage` | ChainDB (ImmutableDB via RocksDB with WriteBatch + VolatileDB in-memory) |
+| `torsten-storage` | ChainDB (ImmutableDB via cardano-lsm + VolatileDB in-memory) |
 | `torsten-node` | Main binary, config, topology, pipelined chain sync loop |
 | `torsten-cli` | cardano-cli compatible CLI |
 
@@ -60,7 +60,7 @@ Torsten leverages the [pallas](https://github.com/txpipe/pallas) family of crate
 Other key dependencies:
 
 - **tokio** -- Async runtime
-- **rocksdb** -- Persistent storage for the immutable database
+- **cardano-lsm** -- Pure Rust LSM tree for the immutable database
 - **minicbor** -- CBOR encoding for custom types
 - **ed25519-dalek** -- Ed25519 signatures
 - **blake2** -- Blake2b hashing

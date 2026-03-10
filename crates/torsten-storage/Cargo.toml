@@ -6,13 +6,12 @@ description = "Block and chain storage for Torsten (ImmutableDB + VolatileDB)"
 
 [features]
 default = []
-rocksdb = ["dep:rocksdb"]
+io-uring = ["cardano-lsm/io-uring"]
 
 [dependencies]
 torsten-primitives = { workspace = true }
 torsten-serialization = { workspace = true }
 torsten-crypto = { workspace = true }
-rocksdb = { workspace = true, optional = true }
 cardano-lsm = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }

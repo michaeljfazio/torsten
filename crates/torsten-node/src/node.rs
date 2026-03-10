@@ -639,7 +639,7 @@ impl Node {
         }
         info!("Mempool: {} transactions", self.mempool.len());
 
-        // Replay blocks from ChainDB if the ledger is behind storage
+        // Replay blocks from ChainDB if the ledger is behind storage.
         // This happens after a Mithril snapshot import — blocks are in storage
         // but the ledger hasn't processed them yet.
         self.replay_ledger_from_storage().await;
@@ -1196,14 +1196,18 @@ impl Node {
             }
         }
 
-        // Save final ledger snapshot and flush ChainDB on shutdown
-        self.save_ledger_snapshot().await;
+        // Flush ChainDB and persist to disk BEFORE saving ledger snapshot
+        // (ensures ledger snapshot is consistent with persisted blocks)
         {
             let mut db = self.chain_db.write().await;
             if let Err(e) = db.flush_volatile_to_immutable() {
                 error!("Failed to flush ChainDB on shutdown: {e}");
             }
+            if let Err(e) = db.persist_immutable() {
+                error!("Failed to persist immutable DB on shutdown: {e}");
+            }
         }
+        self.save_ledger_snapshot().await;
         info!("Node shutdown complete");
         Ok(())
     }
@@ -1980,11 +1984,11 @@ impl Node {
                 let epochs_crossed = (current_epoch - *last_snapshot_epoch) as u32;
                 info!(
                     epoch = current_epoch,
-                    epochs_crossed,
-                    "Epoch transition — saving ledger snapshot"
+                    epochs_crossed, "Epoch transition — saving ledger snapshot"
                 );
-                self.epoch_transitions_observed =
-                    self.epoch_transitions_observed.saturating_add(epochs_crossed);
+                self.epoch_transitions_observed = self
+                    .epoch_transitions_observed
+                    .saturating_add(epochs_crossed);
                 self.save_ledger_snapshot().await;
                 *last_snapshot_epoch = current_epoch;
             }

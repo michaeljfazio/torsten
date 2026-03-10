@@ -39,7 +39,7 @@ cargo fmt --all -- --check
 cargo build --release
 ```
 
-CI requires `libclang-dev` on Ubuntu only when building with `--features rocksdb`. The default cardano-lsm backend is pure Rust and has no system dependencies.
+The cardano-lsm storage backend is pure Rust with no system dependencies. On Linux, enable `--features io-uring` for async I/O.
 
 ## Hard Requirements
 - **Zero warnings** — All code must compile with `RUSTFLAGS="-D warnings"`
@@ -58,7 +58,7 @@ torsten-node (binary: main node, config, pipelined sync, Mithril import, block f
 ├── torsten-network (Ouroboros mini-protocols, N2N/N2C multiplexer, pipelined client)
 ├── torsten-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
 ├── torsten-ledger (UTxO set, tx validation, ledger state, certificates, rewards, governance)
-├── torsten-storage (ChainDB = ImmutableDB via cardano-lsm [default] or RocksDB [--features rocksdb] + VolatileDB in-memory)
+├── torsten-storage (ChainDB = ImmutableDB via cardano-lsm + VolatileDB in-memory)
 └── torsten-mempool (thread-safe tx mempool)
 
 torsten-cli (binary: cardano-cli compatible, 33+ subcommands)
@@ -71,7 +71,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 ### Key Traits & Abstractions
 - **`BlockProvider`** (storage) — trait used by N2N server for block serving
 - **`TxValidator`** (ledger) — trait used by N2C server for Phase-1/Phase-2 tx validation before mempool admission
-- **`ChainDB`** — wraps ImmutableDB (cardano-lsm by default, RocksDB via `--features rocksdb`) + VolatileDB (BTreeMap), handles rollback and volatile→immutable flush
+- **`ChainDB`** — wraps ImmutableDB (cardano-lsm) + VolatileDB (BTreeMap), handles rollback and volatile→immutable flush
 
 ### Wire Format
 - All Cardano wire-format compatibility via pallas crates (v1.0.0-alpha.5)

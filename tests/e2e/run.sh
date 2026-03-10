@@ -60,7 +60,7 @@ if [ "$MODE" = "offline" ]; then
 fi
 
 # Step 3: Check/configure node socket
-SOCKET="${TORSTEN_INTEGRATION_SOCKET:-./node.sock}"
+SOCKET="${TORSTEN_INTEGRATION_SOCKET:-$PROJECT_ROOT/node.sock}"
 export TORSTEN_INTEGRATION_SOCKET="$SOCKET"
 
 NODE_PID=""
@@ -68,9 +68,9 @@ if ! "$TORSTEN_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
     echo ""
     echo "--- Node not running. Checking for config..."
 
-    CONFIG="${TORSTEN_CONFIG:-config/preview-config.json}"
-    TOPOLOGY="${TORSTEN_TOPOLOGY:-config/preview-topology.json}"
-    DB_PATH="${TORSTEN_DB_PATH:-./db-preview}"
+    CONFIG="${TORSTEN_CONFIG:-$PROJECT_ROOT/config/preview-config.json}"
+    TOPOLOGY="${TORSTEN_TOPOLOGY:-$PROJECT_ROOT/config/preview-topology.json}"
+    DB_PATH="${TORSTEN_DB_PATH:-$PROJECT_ROOT/db-preview}"
 
     if [ ! -f "$CONFIG" ]; then
         echo "ERROR: No node running and config file not found: $CONFIG"

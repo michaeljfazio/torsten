@@ -25,6 +25,12 @@
 - Haskell uses exact Rational for sigma/f; Torsten uses f64 -> precision loss
 - activeSlotLog precomputed once via ln', not per-block
 
+## Pool Distribution for Leader Check
+- `nesPd` = `ssStakeMarkPoolDistr(esSnapshots es0)`, set once at epoch boundary
+- Mark snapshot (pre-rotation) = set snapshot (post-rotation); memoized, not recomputed mid-epoch
+- Torsten bug: uses snapshots.set on-the-fly instead of memoized pool_distr
+- See [pool-distr-leader-check.md](pool-distr-leader-check.md)
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order

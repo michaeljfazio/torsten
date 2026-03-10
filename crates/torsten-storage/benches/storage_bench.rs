@@ -1,15 +1,11 @@
-//! Criterion benchmarks comparing RocksDB vs cardano-lsm ImmutableDB backends.
+//! Criterion benchmarks for the cardano-lsm ImmutableDB backend.
 //!
-//! Run with default (LSM):        cargo bench -p torsten-storage
-//! Run with RocksDB:              cargo bench -p torsten-storage --features rocksdb
+//! Run: cargo bench -p torsten-storage
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{BlockNo, SlotNo};
 
-#[cfg(feature = "rocksdb")]
-use torsten_storage::immutable_db::ImmutableDB as DB;
-#[cfg(not(feature = "rocksdb"))]
 use torsten_storage::lsm::LsmImmutableDB as DB;
 
 const NUM_BLOCKS: u64 = 5_000;
@@ -67,16 +63,6 @@ fn generate_blocks(count: u64) -> Vec<(SlotNo, Hash32, BlockNo, Vec<u8>)> {
         .collect()
 }
 
-#[cfg(feature = "rocksdb")]
-fn backend_name() -> &'static str {
-    "rocksdb"
-}
-
-#[cfg(not(feature = "rocksdb"))]
-fn backend_name() -> &'static str {
-    "lsm"
-}
-
 fn open_db(path: &std::path::Path) -> DB {
     DB::open(path).unwrap()
 }
@@ -95,9 +81,8 @@ fn populate_db(path: &std::path::Path, blocks: &[(SlotNo, Hash32, BlockNo, Vec<u
 
 fn bench_sequential_insert(c: &mut Criterion) {
     let blocks = generate_blocks(NUM_BLOCKS);
-    let name = format!("{}/sequential_insert_{}", backend_name(), NUM_BLOCKS);
 
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/sequential_insert", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -106,8 +91,7 @@ fn bench_sequential_insert(c: &mut Criterion) {
             |(dir, blocks)| {
                 let mut db = open_db(dir.path());
                 for (slot, hash, block_no, data) in &blocks {
-                    db.put_block_with_blockno(*slot, hash, *block_no, data)
-                        .unwrap();
+                    db.put_block(*slot, hash, *block_no, data).unwrap();
                 }
             },
             BatchSize::PerIteration,
@@ -117,14 +101,8 @@ fn bench_sequential_insert(c: &mut Criterion) {
 
 fn bench_batch_insert(c: &mut Criterion) {
     let blocks = generate_blocks(NUM_BLOCKS);
-    let name = format!(
-        "{}/batch_insert_{}_by_{}",
-        backend_name(),
-        NUM_BLOCKS,
-        BATCH_SIZE
-    );
 
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/batch_insert", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -158,9 +136,7 @@ fn bench_random_read_by_hash(c: &mut Criterion) {
         })
         .collect();
 
-    let name = format!("{}/random_read_by_hash_{}", backend_name(), NUM_LOOKUPS);
-
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/random_read_by_hash", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -191,9 +167,7 @@ fn bench_random_read_by_slot(c: &mut Criterion) {
         })
         .collect();
 
-    let name = format!("{}/random_read_by_slot_{}", backend_name(), NUM_LOOKUPS);
-
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/random_read_by_slot", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -213,9 +187,8 @@ fn bench_random_read_by_slot(c: &mut Criterion) {
 
 fn bench_sequential_scan(c: &mut Criterion) {
     let blocks = generate_blocks(NUM_BLOCKS);
-    let name = format!("{}/sequential_scan_{}", backend_name(), NUM_BLOCKS);
 
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/sequential_scan", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -240,9 +213,7 @@ fn bench_negative_lookup(c: &mut Criterion) {
         .map(make_hash)
         .collect();
 
-    let name = format!("{}/negative_lookup_{}", backend_name(), NUM_LOOKUPS);
-
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/negative_lookup", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();
@@ -262,9 +233,8 @@ fn bench_negative_lookup(c: &mut Criterion) {
 
 fn bench_tip_query(c: &mut Criterion) {
     let blocks = generate_blocks(NUM_BLOCKS);
-    let name = format!("{}/tip_query_{}", backend_name(), NUM_LOOKUPS);
 
-    c.bench_function(&name, |b| {
+    c.bench_function("lsm/tip_query", |b| {
         b.iter_batched(
             || {
                 let dir = tempfile::tempdir().unwrap();

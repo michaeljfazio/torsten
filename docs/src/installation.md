@@ -73,45 +73,7 @@ Torsten requires **Rust 1.75 or later** (edition 2021).
 
 #### System Dependencies
 
-The default build uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust storage backend with **no system dependencies** beyond the Rust toolchain. On all platforms, `cargo build` works out of the box.
-
-If you opt into the RocksDB backend (`--features rocksdb`), you will need `libclang` for compilation:
-
-<details>
-<summary>RocksDB system dependencies (only needed with <code>--features rocksdb</code>)</summary>
-
-**Ubuntu / Debian:**
-
-```bash
-sudo apt-get update
-sudo apt-get install -y libclang-dev build-essential pkg-config
-```
-
-**macOS (Homebrew):**
-
-```bash
-brew install llvm
-```
-
-The `llvm` package includes `libclang`. Homebrew typically configures the paths automatically. If not, you may need to set:
-
-```bash
-export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
-```
-
-**Fedora / RHEL:**
-
-```bash
-sudo dnf install clang-devel
-```
-
-**Arch Linux:**
-
-```bash
-sudo pacman -S clang
-```
-
-</details>
+Torsten uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust storage backend with **no system dependencies** beyond the Rust toolchain. On all platforms, `cargo build` works out of the box.
 
 ### Build
 
@@ -122,16 +84,16 @@ git clone https://github.com/michaeljfazio/torsten.git
 cd torsten
 ```
 
-Build in release mode (default, uses cardano-lsm):
+Build in release mode:
 
 ```bash
 cargo build --release
 ```
 
-To build with the RocksDB backend instead:
+On Linux with kernel 5.1+, you can enable io_uring for improved disk I/O during compaction:
 
 ```bash
-cargo build --release --features rocksdb
+cargo build --release --features io-uring
 ```
 
 This produces two binaries in `target/release/`:

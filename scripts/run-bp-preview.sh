@@ -4,7 +4,7 @@
 # Usage: ./scripts/run-bp-preview.sh [--log FILE]
 #
 # Prerequisites:
-#   - Build: cargo build --release --features torsten-node/rocksdb
+#   - Build: cargo build --release
 #   - Keys in ./keys/preview-test/pool/ (kes.skey, vrf.skey, opcert.cert, cold.skey)
 #   - Database in ./db-preview/ (use mithril-import first if empty)
 
@@ -24,7 +24,7 @@ KEY_DIR=./keys/preview-test/pool
 
 if [[ ! -x "$BIN" ]]; then
     echo "Binary not found. Building..."
-    cargo build --release --features torsten-node/rocksdb
+    cargo build --release
 fi
 
 for f in kes.skey vrf.skey opcert.cert cold.skey; do

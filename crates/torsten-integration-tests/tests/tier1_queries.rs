@@ -67,7 +67,7 @@ fn tier1_query_protocol_parameters() {
     let pp = query_json(&socket, &["protocol-parameters"]);
 
     // Check for key protocol parameter fields
-    let expected_keys = ["minFeeA", "maxBlockSize", "maxTxSize"];
+    let expected_keys = ["txFeePerByte", "maxBlockBodySize", "maxTxSize"];
     for key in expected_keys {
         assert!(
             pp.get(key).is_some(),
