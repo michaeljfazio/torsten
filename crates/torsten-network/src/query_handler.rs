@@ -960,11 +960,39 @@ impl QueryHandler {
             }
             6 => {
                 // Tag 6: GetUTxOByAddress
+                // Argument: tag(258) Set<Address> or single address bytes
                 debug!("Query: GetUTxOByAddress");
-                let addr_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                let mut addresses: Vec<Vec<u8>> = Vec::new();
+                let pos = decoder.position();
+                // Try single bare address bytes first (most common case)
+                if let Ok(bytes) = decoder.bytes() {
+                    addresses.push(bytes.to_vec());
+                } else {
+                    // Try tag(258) Set<Address>
+                    decoder.set_position(pos);
+                    let _ = decoder.tag(); // consume tag(258)
+                    if let Ok(Some(n)) = decoder.array() {
+                        for _ in 0..n {
+                            if let Ok(bytes) = decoder.bytes() {
+                                addresses.push(bytes.to_vec());
+                            }
+                        }
+                    }
+                }
+                // Fallback: use remaining decoder bytes as raw address
+                if addresses.is_empty() {
+                    decoder.set_position(pos);
+                    let remaining = &decoder.input()[pos..];
+                    if !remaining.is_empty() {
+                        addresses.push(remaining.to_vec());
+                    }
+                }
                 if let Some(provider) = &self.utxo_provider {
-                    let utxos = provider.utxos_at_address_bytes(&addr_bytes);
-                    QueryResult::UtxoByAddress(utxos)
+                    let mut all_utxos = Vec::new();
+                    for addr in &addresses {
+                        all_utxos.extend(provider.utxos_at_address_bytes(addr));
+                    }
+                    QueryResult::UtxoByAddress(all_utxos)
                 } else {
                     QueryResult::UtxoByAddress(vec![])
                 }

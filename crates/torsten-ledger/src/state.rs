@@ -392,8 +392,20 @@ impl LedgerState {
             );
         }
 
+        // Track processed tx hashes to skip duplicates within a block
+        let mut processed_tx_hashes =
+            std::collections::HashSet::with_capacity(block.transactions.len());
+
         // Apply each transaction
         for tx in &block.transactions {
+            if !processed_tx_hashes.insert(tx.hash) {
+                warn!(
+                    tx_hash = %tx.hash.to_hex(),
+                    slot = block.slot().0,
+                    "Duplicate transaction hash in block, skipping"
+                );
+                continue;
+            }
             // Handle invalid transactions (phase-2 validation failure):
             // - Collateral inputs are consumed (forfeit to block producer)
             // - Regular inputs/outputs/certificates are NOT applied
