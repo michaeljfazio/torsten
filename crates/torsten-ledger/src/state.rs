@@ -399,12 +399,26 @@ impl LedgerState {
             // - Regular inputs/outputs/certificates are NOT applied
             // - If collateral_return is present, it becomes a new UTxO
             if !tx.is_valid {
-                // Consume collateral inputs
+                // Consume collateral inputs (update stake distribution)
                 for col_input in &tx.body.collateral {
+                    if let Some(spent) = self.utxo_set.lookup(col_input) {
+                        if let Some(cred) = stake_credential_hash(&spent.address) {
+                            if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred) {
+                                stake.0 = stake.0.saturating_sub(spent.value.coin.0);
+                            }
+                        }
+                    }
                     self.utxo_set.remove(col_input);
                 }
                 // If there's a collateral return output, add it
                 if let Some(col_return) = &tx.body.collateral_return {
+                    if let Some(cred) = stake_credential_hash(&col_return.address) {
+                        *self
+                            .stake_distribution
+                            .stake_map
+                            .entry(cred)
+                            .or_insert(Lovelace(0)) += Lovelace(col_return.value.coin.0);
+                    }
                     let return_input = torsten_primitives::transaction::TransactionInput {
                         transaction_id: tx.hash,
                         index: tx.body.outputs.len() as u32, // collateral return is after regular outputs
@@ -416,6 +430,17 @@ impl LedgerState {
                 continue;
             }
 
+            // Update stake distribution from consumed inputs (subtract)
+            for input in &tx.body.inputs {
+                if let Some(spent_output) = self.utxo_set.lookup(input) {
+                    if let Some(cred_hash) = stake_credential_hash(&spent_output.address) {
+                        if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
+                            stake.0 = stake.0.saturating_sub(spent_output.value.coin.0);
+                        }
+                    }
+                }
+            }
+
             // Apply UTxO changes (may fail for missing inputs during initial sync)
             if let Err(e) =
                 self.utxo_set
@@ -425,6 +450,17 @@ impl LedgerState {
                 // Skip UTxO changes entirely to avoid phantom outputs that inflate
                 // the UTxO set. Fees and certificates are still processed.
                 debug!("UTxO application skipped (missing inputs): {e}");
+            }
+
+            // Update stake distribution from new outputs (add)
+            for output in &tx.body.outputs {
+                if let Some(cred_hash) = stake_credential_hash(&output.address) {
+                    *self
+                        .stake_distribution
+                        .stake_map
+                        .entry(cred_hash)
+                        .or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+                }
             }
 
             // Accumulate fees
@@ -1810,18 +1846,22 @@ impl LedgerState {
         }
     }
 
-    /// Process a withdrawal from a reward account
+    /// Process a withdrawal from a reward account.
+    /// Per Cardano spec, the withdrawal amount must exactly match the reward balance.
+    /// After withdrawal, the balance is reduced by the withdrawal amount.
     fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
-        // In Cardano, withdrawals consume rewards from the reward account.
-        // The withdrawal amount is added to the tx input sum (handled in value conservation).
-        if reward_account.len() >= 29 {
-            // The reward account is 1 byte header + 28 bytes key hash
-            let mut key_bytes = [0u8; 32];
-            let copy_len = (reward_account.len() - 1).min(32);
-            key_bytes[..copy_len].copy_from_slice(&reward_account[1..1 + copy_len]);
-            let key = Hash32::from_bytes(key_bytes);
-            if let Some(balance) = self.reward_accounts.get_mut(&key) {
-                *balance = balance.checked_sub(amount).unwrap_or(Lovelace(0));
+        let key = Self::reward_account_to_hash(reward_account);
+        if let Some(balance) = self.reward_accounts.get_mut(&key) {
+            if balance.0 >= amount.0 {
+                balance.0 -= amount.0;
+            } else {
+                debug!(
+                    account = %key.to_hex(),
+                    balance = balance.0,
+                    withdrawal = amount.0,
+                    "Withdrawal exceeds reward balance"
+                );
+                balance.0 = 0;
             }
         }
     }
@@ -1902,6 +1942,17 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
     let mut bytes = [0u8; 32];
     bytes[..28].copy_from_slice(h28.as_bytes());
     Hash32::from_bytes(bytes)
+}
+
+/// Extract the staking credential hash from an address (Base and Reward addresses only).
+/// Returns None for Enterprise, Pointer, and Byron addresses which have no staking part.
+fn stake_credential_hash(address: &torsten_primitives::address::Address) -> Option<Hash32> {
+    use torsten_primitives::address::Address;
+    match address {
+        Address::Base(base) => Some(credential_to_hash(&base.stake)),
+        Address::Reward(reward) => Some(credential_to_hash(&reward.stake)),
+        _ => None,
+    }
 }
 
 /// DRep voting group for protocol parameter classification per CIP-1694.
@@ -4489,5 +4540,130 @@ mod tests {
         assert!(groups
             .iter()
             .all(|g| *g == (DRepPPGroup::Network, StakePoolPPGroup::Security)));
+    }
+
+    #[test]
+    fn test_utxo_stake_distribution_tracking() {
+        use torsten_primitives::address::BaseAddress;
+        use torsten_primitives::credentials::Credential as Cred;
+        use torsten_primitives::network::NetworkId;
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Create a base address with a staking credential
+        let stake_cred = Cred::VerificationKey(Hash28::from_bytes([0xAA; 28]));
+        let payment_cred = Cred::VerificationKey(Hash28::from_bytes([0xBB; 28]));
+        let base_addr = Address::Base(BaseAddress {
+            network: NetworkId::Mainnet,
+            payment: payment_cred,
+            stake: stake_cred,
+        });
+
+        // Build a genesis UTxO
+        let genesis_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01; 32]),
+            index: 0,
+        };
+        let genesis_output = TransactionOutput {
+            address: base_addr.clone(),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            raw_cbor: None,
+        };
+        state.utxo_set.insert(genesis_input.clone(), genesis_output);
+
+        // Create a transaction that spends the genesis UTxO and creates new outputs
+        let tx = Transaction {
+            hash: Hash32::from_bytes([0x02; 32]),
+            body: TransactionBody {
+                inputs: vec![genesis_input],
+                outputs: vec![TransactionOutput {
+                    address: base_addr.clone(),
+                    value: Value::lovelace(7_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(3_000_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: std::collections::BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: std::collections::BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                voting_procedures: std::collections::BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
+        state.apply_block(&block).unwrap();
+
+        // The staking credential should have stake = 7_000_000 (output) - 0 (initial was never tracked as registered)
+        // Actually: genesis UTxO was not tracked (inserted directly), but the output is tracked.
+        // So the spent input subtracts 0 (not in stake_map), output adds 7_000_000.
+        let cred_hash = credential_to_hash(
+            &torsten_primitives::credentials::Credential::VerificationKey(Hash28::from_bytes(
+                [0xAA; 28],
+            )),
+        );
+        let stake = state
+            .stake_distribution
+            .stake_map
+            .get(&cred_hash)
+            .map(|l| l.0)
+            .unwrap_or(0);
+        assert_eq!(stake, 7_000_000);
+    }
+
+    #[test]
+    fn test_stake_credential_hash_extraction() {
+        use torsten_primitives::address::{BaseAddress, EnterpriseAddress};
+        use torsten_primitives::credentials::Credential as Cred;
+        use torsten_primitives::network::NetworkId;
+
+        // Base address has a staking credential
+        let base = Address::Base(BaseAddress {
+            network: NetworkId::Mainnet,
+            payment: Cred::VerificationKey(Hash28::from_bytes([0xBB; 28])),
+            stake: Cred::VerificationKey(Hash28::from_bytes([0xAA; 28])),
+        });
+        assert!(stake_credential_hash(&base).is_some());
+
+        // Enterprise address has no staking credential
+        let enterprise = Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Mainnet,
+            payment: Cred::VerificationKey(Hash28::from_bytes([0xCC; 28])),
+        });
+        assert!(stake_credential_hash(&enterprise).is_none());
+
+        // Byron address has no staking credential
+        let byron = Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        });
+        assert!(stake_credential_hash(&byron).is_none());
     }
 }
