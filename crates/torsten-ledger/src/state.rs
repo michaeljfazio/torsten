@@ -82,6 +82,10 @@ impl Rat {
     }
 }
 
+fn default_update_quorum() -> u64 {
+    5 // Mainnet default: 5 out of 7 genesis delegates
+}
+
 /// The complete ledger state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerState {
@@ -135,6 +139,9 @@ pub struct LedgerState {
     /// Pending protocol parameter update proposals (pre-Conway):
     /// Maps target_epoch -> [(genesis_delegate_hash, proposed_update)]
     pub pending_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
+    /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
+    #[serde(default = "default_update_quorum")]
+    pub update_quorum: u64,
     /// Conway governance state
     pub governance: GovernanceState,
     /// Slot configuration for Plutus time conversion
@@ -277,6 +284,7 @@ impl LedgerState {
             prev_epoch_first_block_hash: None,
             genesis_hash: Hash32::ZERO,
             pending_pp_updates: BTreeMap::new(),
+            update_quorum: default_update_quorum(),
             governance: GovernanceState::default(),
             slot_config: SlotConfig::default(),
         }
@@ -320,6 +328,161 @@ impl LedgerState {
             genesis_hash = %hash.to_hex(),
             "Ledger: rolling nonce initialized from genesis hash"
         );
+    }
+
+    /// Set the update quorum threshold (from Shelley genesis)
+    pub fn set_update_quorum(&mut self, quorum: u64) {
+        self.update_quorum = quorum;
+        info!(update_quorum = quorum, "Ledger: update quorum configured");
+    }
+
+    /// Apply a single ProtocolParamUpdate to the current protocol parameters.
+    /// Each field in the update, if Some, overwrites the corresponding parameter.
+    /// Used by both pre-Conway update proposals and Conway governance actions.
+    fn apply_protocol_param_update(&mut self, update: &ProtocolParamUpdate) {
+        if let Some(v) = update.min_fee_a {
+            self.protocol_params.min_fee_a = v;
+        }
+        if let Some(v) = update.min_fee_b {
+            self.protocol_params.min_fee_b = v;
+        }
+        if let Some(v) = update.max_block_body_size {
+            self.protocol_params.max_block_body_size = v;
+        }
+        if let Some(v) = update.max_tx_size {
+            self.protocol_params.max_tx_size = v;
+        }
+        if let Some(v) = update.max_block_header_size {
+            self.protocol_params.max_block_header_size = v;
+        }
+        if let Some(v) = update.key_deposit {
+            self.protocol_params.key_deposit = v;
+        }
+        if let Some(v) = update.pool_deposit {
+            self.protocol_params.pool_deposit = v;
+        }
+        if let Some(v) = update.e_max {
+            self.protocol_params.e_max = v;
+        }
+        if let Some(v) = update.n_opt {
+            self.protocol_params.n_opt = v;
+        }
+        if let Some(ref v) = update.a0 {
+            self.protocol_params.a0 = v.clone();
+        }
+        if let Some(ref v) = update.rho {
+            self.protocol_params.rho = v.clone();
+        }
+        if let Some(ref v) = update.tau {
+            self.protocol_params.tau = v.clone();
+        }
+        if let Some(v) = update.min_pool_cost {
+            self.protocol_params.min_pool_cost = v;
+        }
+        if let Some(v) = update.ada_per_utxo_byte {
+            self.protocol_params.ada_per_utxo_byte = v;
+        }
+        if let Some(ref v) = update.cost_models {
+            if let Some(ref v1) = v.plutus_v1 {
+                self.protocol_params.cost_models.plutus_v1 = Some(v1.clone());
+            }
+            if let Some(ref v2) = v.plutus_v2 {
+                self.protocol_params.cost_models.plutus_v2 = Some(v2.clone());
+            }
+            if let Some(ref v3) = v.plutus_v3 {
+                self.protocol_params.cost_models.plutus_v3 = Some(v3.clone());
+            }
+        }
+        if let Some(ref v) = update.execution_costs {
+            self.protocol_params.execution_costs = v.clone();
+        }
+        if let Some(v) = update.max_tx_ex_units {
+            self.protocol_params.max_tx_ex_units = v;
+        }
+        if let Some(v) = update.max_block_ex_units {
+            self.protocol_params.max_block_ex_units = v;
+        }
+        if let Some(v) = update.max_val_size {
+            self.protocol_params.max_val_size = v;
+        }
+        if let Some(v) = update.collateral_percentage {
+            self.protocol_params.collateral_percentage = v;
+        }
+        if let Some(v) = update.max_collateral_inputs {
+            self.protocol_params.max_collateral_inputs = v;
+        }
+        if let Some(v) = update.min_fee_ref_script_cost_per_byte {
+            self.protocol_params.min_fee_ref_script_cost_per_byte = v;
+        }
+        if let Some(v) = update.drep_deposit {
+            self.protocol_params.drep_deposit = v;
+        }
+        if let Some(v) = update.gov_action_lifetime {
+            self.protocol_params.gov_action_lifetime = v;
+        }
+        if let Some(v) = update.gov_action_deposit {
+            self.protocol_params.gov_action_deposit = v;
+        }
+        if let Some(ref v) = update.dvt_pp_network_group {
+            self.protocol_params.dvt_pp_network_group = v.clone();
+        }
+        if let Some(ref v) = update.dvt_pp_economic_group {
+            self.protocol_params.dvt_pp_economic_group = v.clone();
+        }
+        if let Some(ref v) = update.dvt_pp_technical_group {
+            self.protocol_params.dvt_pp_technical_group = v.clone();
+        }
+        if let Some(ref v) = update.dvt_pp_gov_group {
+            self.protocol_params.dvt_pp_gov_group = v.clone();
+        }
+        if let Some(ref v) = update.dvt_hard_fork {
+            self.protocol_params.dvt_hard_fork = v.clone();
+        }
+        if let Some(ref v) = update.dvt_no_confidence {
+            self.protocol_params.dvt_no_confidence = v.clone();
+        }
+        if let Some(ref v) = update.dvt_committee_normal {
+            self.protocol_params.dvt_committee_normal = v.clone();
+        }
+        if let Some(ref v) = update.dvt_committee_no_confidence {
+            self.protocol_params.dvt_committee_no_confidence = v.clone();
+        }
+        if let Some(ref v) = update.dvt_constitution {
+            self.protocol_params.dvt_constitution = v.clone();
+        }
+        if let Some(ref v) = update.dvt_treasury_withdrawal {
+            self.protocol_params.dvt_treasury_withdrawal = v.clone();
+        }
+        if let Some(ref v) = update.pvt_motion_no_confidence {
+            self.protocol_params.pvt_motion_no_confidence = v.clone();
+        }
+        if let Some(ref v) = update.pvt_committee_normal {
+            self.protocol_params.pvt_committee_normal = v.clone();
+        }
+        if let Some(ref v) = update.pvt_committee_no_confidence {
+            self.protocol_params.pvt_committee_no_confidence = v.clone();
+        }
+        if let Some(ref v) = update.pvt_hard_fork {
+            self.protocol_params.pvt_hard_fork = v.clone();
+        }
+        if let Some(ref v) = update.pvt_pp_security_group {
+            self.protocol_params.pvt_pp_security_group = v.clone();
+        }
+        if let Some(v) = update.min_committee_size {
+            self.protocol_params.committee_min_size = v;
+        }
+        if let Some(v) = update.committee_term_limit {
+            self.protocol_params.committee_max_term_length = v;
+        }
+        if let Some(v) = update.drep_activity {
+            self.protocol_params.drep_activity = v;
+        }
+        if let Some(v) = update.protocol_version_major {
+            self.protocol_params.protocol_version_major = v;
+        }
+        if let Some(v) = update.protocol_version_minor {
+            self.protocol_params.protocol_version_minor = v;
+        }
     }
 
     /// Apply a block to the ledger state
@@ -914,6 +1077,74 @@ impl LedgerState {
         // Clean up retirements from past epochs (shouldn't happen but be safe)
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
+
+        // Apply pre-Conway protocol parameter update proposals for this epoch.
+        // In Shelley-Babbage, genesis delegates submit update proposals targeting a future epoch.
+        // At the epoch boundary, if enough distinct genesis delegates proposed updates
+        // (>= update_quorum), all their proposals are merged and applied.
+        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
+            // Count distinct proposers (genesis delegate hashes)
+            let mut proposer_set: std::collections::HashSet<Hash32> =
+                std::collections::HashSet::new();
+            for (genesis_hash, _) in &proposals {
+                proposer_set.insert(*genesis_hash);
+            }
+            let distinct_proposers = proposer_set.len() as u64;
+
+            if distinct_proposers >= self.update_quorum {
+                // Merge all proposals: later proposals override earlier ones per field
+                let mut merged = ProtocolParamUpdate::default();
+                for (_, ppu) in &proposals {
+                    // Merge each field: if the proposal sets it, override
+                    macro_rules! merge_field {
+                        ($field:ident) => {
+                            if ppu.$field.is_some() {
+                                merged.$field = ppu.$field.clone();
+                            }
+                        };
+                    }
+                    merge_field!(min_fee_a);
+                    merge_field!(min_fee_b);
+                    merge_field!(max_block_body_size);
+                    merge_field!(max_tx_size);
+                    merge_field!(max_block_header_size);
+                    merge_field!(key_deposit);
+                    merge_field!(pool_deposit);
+                    merge_field!(e_max);
+                    merge_field!(n_opt);
+                    merge_field!(a0);
+                    merge_field!(rho);
+                    merge_field!(tau);
+                    merge_field!(min_pool_cost);
+                    merge_field!(ada_per_utxo_byte);
+                    merge_field!(cost_models);
+                    merge_field!(execution_costs);
+                    merge_field!(max_tx_ex_units);
+                    merge_field!(max_block_ex_units);
+                    merge_field!(max_val_size);
+                    merge_field!(collateral_percentage);
+                    merge_field!(max_collateral_inputs);
+                    merge_field!(protocol_version_major);
+                    merge_field!(protocol_version_minor);
+                }
+                self.apply_protocol_param_update(&merged);
+                info!(
+                    epoch = new_epoch.0,
+                    proposers = distinct_proposers,
+                    "Pre-Conway protocol parameter update applied"
+                );
+            } else {
+                debug!(
+                    epoch = new_epoch.0,
+                    proposers = distinct_proposers,
+                    quorum = self.update_quorum,
+                    "Pre-Conway protocol parameter update: insufficient quorum"
+                );
+            }
+        }
+        // Clean up proposals targeting past epochs
+        self.pending_pp_updates
+            .retain(|epoch, _| *epoch > new_epoch);
 
         // Ratify governance proposals that have met their voting thresholds
         self.ratify_proposals();
@@ -1753,146 +1984,7 @@ impl LedgerState {
                 protocol_param_update,
                 ..
             } => {
-                // Apply all protocol parameter updates
-                let update = protocol_param_update.as_ref();
-                if let Some(v) = update.min_fee_a {
-                    self.protocol_params.min_fee_a = v;
-                }
-                if let Some(v) = update.min_fee_b {
-                    self.protocol_params.min_fee_b = v;
-                }
-                if let Some(v) = update.max_block_body_size {
-                    self.protocol_params.max_block_body_size = v;
-                }
-                if let Some(v) = update.max_tx_size {
-                    self.protocol_params.max_tx_size = v;
-                }
-                if let Some(v) = update.max_block_header_size {
-                    self.protocol_params.max_block_header_size = v;
-                }
-                if let Some(v) = update.key_deposit {
-                    self.protocol_params.key_deposit = v;
-                }
-                if let Some(v) = update.pool_deposit {
-                    self.protocol_params.pool_deposit = v;
-                }
-                if let Some(v) = update.e_max {
-                    self.protocol_params.e_max = v;
-                }
-                if let Some(v) = update.n_opt {
-                    self.protocol_params.n_opt = v;
-                }
-                if let Some(ref v) = update.a0 {
-                    self.protocol_params.a0 = v.clone();
-                }
-                if let Some(ref v) = update.rho {
-                    self.protocol_params.rho = v.clone();
-                }
-                if let Some(ref v) = update.tau {
-                    self.protocol_params.tau = v.clone();
-                }
-                if let Some(v) = update.min_pool_cost {
-                    self.protocol_params.min_pool_cost = v;
-                }
-                if let Some(v) = update.ada_per_utxo_byte {
-                    self.protocol_params.ada_per_utxo_byte = v;
-                }
-                if let Some(ref v) = update.cost_models {
-                    // Merge cost models: only update languages that are specified
-                    if let Some(ref v1) = v.plutus_v1 {
-                        self.protocol_params.cost_models.plutus_v1 = Some(v1.clone());
-                    }
-                    if let Some(ref v2) = v.plutus_v2 {
-                        self.protocol_params.cost_models.plutus_v2 = Some(v2.clone());
-                    }
-                    if let Some(ref v3) = v.plutus_v3 {
-                        self.protocol_params.cost_models.plutus_v3 = Some(v3.clone());
-                    }
-                }
-                if let Some(ref v) = update.execution_costs {
-                    self.protocol_params.execution_costs = v.clone();
-                }
-                if let Some(v) = update.max_tx_ex_units {
-                    self.protocol_params.max_tx_ex_units = v;
-                }
-                if let Some(v) = update.max_block_ex_units {
-                    self.protocol_params.max_block_ex_units = v;
-                }
-                if let Some(v) = update.max_val_size {
-                    self.protocol_params.max_val_size = v;
-                }
-                if let Some(v) = update.collateral_percentage {
-                    self.protocol_params.collateral_percentage = v;
-                }
-                if let Some(v) = update.max_collateral_inputs {
-                    self.protocol_params.max_collateral_inputs = v;
-                }
-                if let Some(v) = update.min_fee_ref_script_cost_per_byte {
-                    self.protocol_params.min_fee_ref_script_cost_per_byte = v;
-                }
-                if let Some(v) = update.drep_deposit {
-                    self.protocol_params.drep_deposit = v;
-                }
-                if let Some(v) = update.gov_action_lifetime {
-                    self.protocol_params.gov_action_lifetime = v;
-                }
-                if let Some(v) = update.gov_action_deposit {
-                    self.protocol_params.gov_action_deposit = v;
-                }
-                if let Some(ref v) = update.dvt_pp_network_group {
-                    self.protocol_params.dvt_pp_network_group = v.clone();
-                }
-                if let Some(ref v) = update.dvt_pp_economic_group {
-                    self.protocol_params.dvt_pp_economic_group = v.clone();
-                }
-                if let Some(ref v) = update.dvt_pp_technical_group {
-                    self.protocol_params.dvt_pp_technical_group = v.clone();
-                }
-                if let Some(ref v) = update.dvt_pp_gov_group {
-                    self.protocol_params.dvt_pp_gov_group = v.clone();
-                }
-                if let Some(ref v) = update.dvt_hard_fork {
-                    self.protocol_params.dvt_hard_fork = v.clone();
-                }
-                if let Some(ref v) = update.dvt_no_confidence {
-                    self.protocol_params.dvt_no_confidence = v.clone();
-                }
-                if let Some(ref v) = update.dvt_committee_normal {
-                    self.protocol_params.dvt_committee_normal = v.clone();
-                }
-                if let Some(ref v) = update.dvt_committee_no_confidence {
-                    self.protocol_params.dvt_committee_no_confidence = v.clone();
-                }
-                if let Some(ref v) = update.dvt_constitution {
-                    self.protocol_params.dvt_constitution = v.clone();
-                }
-                if let Some(ref v) = update.dvt_treasury_withdrawal {
-                    self.protocol_params.dvt_treasury_withdrawal = v.clone();
-                }
-                if let Some(ref v) = update.pvt_motion_no_confidence {
-                    self.protocol_params.pvt_motion_no_confidence = v.clone();
-                }
-                if let Some(ref v) = update.pvt_committee_normal {
-                    self.protocol_params.pvt_committee_normal = v.clone();
-                }
-                if let Some(ref v) = update.pvt_committee_no_confidence {
-                    self.protocol_params.pvt_committee_no_confidence = v.clone();
-                }
-                if let Some(ref v) = update.pvt_hard_fork {
-                    self.protocol_params.pvt_hard_fork = v.clone();
-                }
-                if let Some(ref v) = update.pvt_pp_security_group {
-                    self.protocol_params.pvt_pp_security_group = v.clone();
-                }
-                if let Some(v) = update.min_committee_size {
-                    self.protocol_params.committee_min_size = v;
-                }
-                if let Some(v) = update.committee_term_limit {
-                    self.protocol_params.committee_max_term_length = v;
-                }
-                if let Some(v) = update.drep_activity {
-                    self.protocol_params.drep_activity = v;
-                }
+                self.apply_protocol_param_update(protocol_param_update);
                 info!("Protocol parameters updated via governance action");
             }
             GovAction::HardForkInitiation {
@@ -4912,5 +5004,163 @@ mod tests {
             vrf_keyhash: Hash32::from_bytes([0x33; 32]),
         });
         // No state change expected — just ensures it doesn't crash
+    }
+
+    #[test]
+    fn test_pre_conway_pp_update_quorum_met() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.update_quorum = 2; // Require 2 distinct proposers
+        state.epoch = EpochNo(4);
+        state.epoch_length = 100;
+
+        // Original values
+        assert_eq!(state.protocol_params.min_fee_a, 44);
+        assert_eq!(state.protocol_params.max_block_body_size, 90112);
+
+        // Two distinct genesis delegates propose updates for epoch 5
+        let hash1 = Hash32::from_bytes([0x01; 32]);
+        let hash2 = Hash32::from_bytes([0x02; 32]);
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(55),
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        state
+            .pending_pp_updates
+            .entry(EpochNo(5))
+            .or_default()
+            .push((hash1, update.clone()));
+        state
+            .pending_pp_updates
+            .entry(EpochNo(5))
+            .or_default()
+            .push((hash2, update));
+
+        // Trigger epoch transition to epoch 5
+        state.process_epoch_transition(EpochNo(5));
+
+        // Updates should be applied
+        assert_eq!(state.protocol_params.min_fee_a, 55);
+        assert_eq!(state.protocol_params.max_block_body_size, 65536);
+        // pending_pp_updates should be empty
+        assert!(state.pending_pp_updates.is_empty());
+    }
+
+    #[test]
+    fn test_pre_conway_pp_update_quorum_not_met() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.update_quorum = 3; // Require 3 distinct proposers
+        state.epoch = EpochNo(4);
+        state.epoch_length = 100;
+
+        let original_fee = state.protocol_params.min_fee_a;
+
+        // Only 2 proposers (quorum is 3)
+        let hash1 = Hash32::from_bytes([0x01; 32]);
+        let hash2 = Hash32::from_bytes([0x02; 32]);
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(999),
+            ..Default::default()
+        };
+        state
+            .pending_pp_updates
+            .entry(EpochNo(5))
+            .or_default()
+            .push((hash1, update.clone()));
+        state
+            .pending_pp_updates
+            .entry(EpochNo(5))
+            .or_default()
+            .push((hash2, update));
+
+        state.process_epoch_transition(EpochNo(5));
+
+        // Updates should NOT be applied
+        assert_eq!(state.protocol_params.min_fee_a, original_fee);
+        // Proposals should be cleaned up
+        assert!(state.pending_pp_updates.is_empty());
+    }
+
+    #[test]
+    fn test_pre_conway_pp_update_protocol_version() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.update_quorum = 1;
+        state.epoch = EpochNo(9);
+        state.epoch_length = 100;
+
+        let hash1 = Hash32::from_bytes([0x01; 32]);
+        let update = ProtocolParamUpdate {
+            protocol_version_major: Some(7),
+            protocol_version_minor: Some(0),
+            ..Default::default()
+        };
+        state
+            .pending_pp_updates
+            .entry(EpochNo(10))
+            .or_default()
+            .push((hash1, update));
+
+        state.process_epoch_transition(EpochNo(10));
+
+        assert_eq!(state.protocol_params.protocol_version_major, 7);
+        assert_eq!(state.protocol_params.protocol_version_minor, 0);
+    }
+
+    #[test]
+    fn test_apply_protocol_param_update_all_fields() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(55),
+            min_fee_b: Some(200000),
+            max_block_body_size: Some(65536),
+            max_tx_size: Some(32768),
+            key_deposit: Some(Lovelace(3_000_000)),
+            pool_deposit: Some(Lovelace(600_000_000)),
+            ada_per_utxo_byte: Some(Lovelace(5000)),
+            ..Default::default()
+        };
+
+        state.apply_protocol_param_update(&update);
+
+        assert_eq!(state.protocol_params.min_fee_a, 55);
+        assert_eq!(state.protocol_params.min_fee_b, 200000);
+        assert_eq!(state.protocol_params.max_block_body_size, 65536);
+        assert_eq!(state.protocol_params.max_tx_size, 32768);
+        assert_eq!(state.protocol_params.key_deposit, Lovelace(3_000_000));
+        assert_eq!(state.protocol_params.pool_deposit, Lovelace(600_000_000));
+        assert_eq!(state.protocol_params.ada_per_utxo_byte, Lovelace(5000));
+        // Unchanged fields should remain at defaults
+        assert_eq!(state.protocol_params.max_block_header_size, 1100);
+    }
+
+    #[test]
+    fn test_pre_conway_pp_update_past_epochs_cleaned() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.update_quorum = 5;
+        state.epoch = EpochNo(9);
+        state.epoch_length = 100;
+
+        // Add proposals for past epochs that were never applied
+        let hash1 = Hash32::from_bytes([0x01; 32]);
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(999),
+            ..Default::default()
+        };
+        state
+            .pending_pp_updates
+            .entry(EpochNo(3))
+            .or_default()
+            .push((hash1, update.clone()));
+        state
+            .pending_pp_updates
+            .entry(EpochNo(7))
+            .or_default()
+            .push((hash1, update));
+
+        state.process_epoch_transition(EpochNo(10));
+
+        // All past proposals should be cleaned up
+        assert!(state.pending_pp_updates.is_empty());
     }
 }

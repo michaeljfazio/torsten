@@ -383,6 +383,7 @@ impl Node {
                     if let Some(ref genesis) = shelley_genesis {
                         state.epoch_length = genesis.epoch_length;
                         state.set_slot_config(genesis.slot_config());
+                        state.set_update_quorum(genesis.update_quorum);
                     }
                     if let Some(hash) = shelley_genesis_hash {
                         state.genesis_hash = hash;
@@ -401,6 +402,7 @@ impl Node {
                     if let Some(ref genesis) = shelley_genesis {
                         ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
                         ledger.set_slot_config(genesis.slot_config());
+                        ledger.set_update_quorum(genesis.update_quorum);
                     }
                     if let Some(hash) = shelley_genesis_hash {
                         ledger.set_genesis_hash(hash);
@@ -414,6 +416,7 @@ impl Node {
             if let Some(ref genesis) = shelley_genesis {
                 ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
                 ledger.set_slot_config(genesis.slot_config());
+                ledger.set_update_quorum(genesis.update_quorum);
             }
             if let Some(hash) = shelley_genesis_hash {
                 ledger.set_genesis_hash(hash);
@@ -547,6 +550,11 @@ impl Node {
         // This happens after a Mithril snapshot import — blocks are in storage
         // but the ledger hasn't processed them yet.
         self.replay_ledger_from_storage().await;
+
+        // Initialize query state from current ledger so N2C queries
+        // work immediately (before we reach chain tip or the periodic timer fires)
+        self.update_query_state().await;
+        info!("Query state initialized from current ledger state");
 
         // Setup shutdown signal
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -1095,19 +1103,32 @@ impl Node {
             ls.tip.block_number.0
         });
 
-        // If the gap is very large (>50k blocks), skip the replay — it would
-        // take too long without an up-to-date ledger snapshot. The ledger state
-        // was already loaded from any existing snapshot before reaching here,
-        // so blocks_behind reflects the snapshot's position (or genesis if none).
-        if blocks_behind > 50_000 {
+        // Check if the user wants to limit replay via environment variable.
+        // Default: no limit — replay all blocks to build correct ledger state.
+        let replay_limit: u64 = std::env::var("TORSTEN_REPLAY_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u64::MAX);
+
+        if blocks_behind > replay_limit {
             warn!(
                 blocks_behind,
+                replay_limit,
                 db_tip_slot,
                 ledger_slot,
-                "Skipping ledger replay: gap too large. \
-                 The node will sync from peers and build ledger state incrementally."
+                "Skipping ledger replay: gap exceeds TORSTEN_REPLAY_LIMIT. \
+                 Set TORSTEN_REPLAY_LIMIT to a higher value or remove it to replay all blocks."
             );
             return;
+        }
+
+        if blocks_behind > 100_000 {
+            info!(
+                blocks_behind,
+                "Large ledger replay starting — this may take a while. \
+                 Snapshots will be saved every 100k blocks. \
+                 Set TORSTEN_REPLAY_LIMIT=0 to skip replay."
+            );
         }
 
         info!(

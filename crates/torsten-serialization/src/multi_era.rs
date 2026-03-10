@@ -1029,7 +1029,8 @@ fn convert_pallas_ppup_alonzo(
             numerator: r.numerator,
             denominator: r.denominator,
         }),
-        // protocol_version is not in our ProtocolParamUpdate (handled via hard forks)
+        protocol_version_major: ppu.protocol_version.as_ref().map(|v| v.0),
+        protocol_version_minor: ppu.protocol_version.as_ref().map(|v| v.1),
         min_pool_cost: ppu.min_pool_cost.map(Lovelace),
         ada_per_utxo_byte: ppu.ada_per_utxo_byte.map(Lovelace),
         max_tx_ex_units: ppu.max_tx_ex_units.as_ref().map(|eu| ExUnits {
@@ -1073,7 +1074,8 @@ fn convert_pallas_ppup_babbage(
             numerator: r.numerator,
             denominator: r.denominator,
         }),
-        // protocol_version is not in our ProtocolParamUpdate (handled via hard forks)
+        protocol_version_major: ppu.protocol_version.as_ref().map(|v| v.0),
+        protocol_version_minor: ppu.protocol_version.as_ref().map(|v| v.1),
         min_pool_cost: ppu.min_pool_cost.map(Lovelace),
         ada_per_utxo_byte: ppu.ada_per_utxo_byte.map(Lovelace),
         max_tx_ex_units: ppu.max_tx_ex_units.as_ref().map(|eu| ExUnits {
@@ -1349,6 +1351,9 @@ fn convert_pallas_protocol_param_update(
         min_committee_size: update.min_committee_size,
         committee_term_limit: update.committee_term_limit,
         drep_activity: update.drep_inactivity_period,
+        // Conway doesn't have protocol_version in PPU (uses HardForkInitiation instead)
+        protocol_version_major: None,
+        protocol_version_minor: None,
     }
 }
 
