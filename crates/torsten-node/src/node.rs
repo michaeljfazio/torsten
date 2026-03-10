@@ -2643,9 +2643,23 @@ impl Node {
             "Elected as slot leader!"
         );
 
-        // Collect transactions from mempool (up to limits)
-        let transactions = self.mempool.get_txs_for_block(500, 90112);
-        let config = crate::forge::BlockProducerConfig::default();
+        // Collect transactions from mempool using protocol params limits
+        let ls = self.ledger_state.read().await;
+        let max_block_body_size = ls.protocol_params.max_block_body_size;
+        let protocol_version_major = ls.protocol_params.protocol_version_major;
+        let protocol_version_minor = ls.protocol_params.protocol_version_minor;
+        drop(ls);
+        let transactions = self
+            .mempool
+            .get_txs_for_block(500, max_block_body_size as usize);
+        let config = crate::forge::BlockProducerConfig {
+            protocol_version: torsten_primitives::block::ProtocolVersion {
+                major: protocol_version_major,
+                minor: protocol_version_minor,
+            },
+            max_block_body_size,
+            max_txs_per_block: 500,
+        };
 
         match crate::forge::forge_block(
             creds,
