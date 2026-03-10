@@ -559,6 +559,17 @@ pub struct NodeStateSnapshot {
     pub vote_delegatees: Vec<VoteDelegateeEntry>,
     /// Era summaries for GetEraHistory query
     pub era_summaries: Vec<EraSummary>,
+    /// Active slots coefficient as numerator/denominator
+    pub active_slots_coeff_num: u64,
+    pub active_slots_coeff_den: u64,
+    /// Slots per KES period (genesis value)
+    pub slots_per_kes_period: u64,
+    /// Maximum KES evolutions (genesis value)
+    pub max_kes_evolutions: u64,
+    /// Update quorum (genesis value)
+    pub update_quorum: u64,
+    /// Maximum lovelace supply (genesis value)
+    pub max_lovelace_supply: u64,
 }
 
 impl Default for NodeStateSnapshot {
@@ -596,6 +607,12 @@ impl Default for NodeStateSnapshot {
             drep_stake_distr: Vec::new(),
             vote_delegatees: Vec::new(),
             era_summaries: Vec::new(),
+            active_slots_coeff_num: 1,
+            active_slots_coeff_den: 20,
+            slots_per_kes_period: 129600,
+            max_kes_evolutions: 62,
+            update_quorum: 5,
+            max_lovelace_supply: 45_000_000_000_000_000,
         }
     }
 }
@@ -1028,7 +1045,7 @@ impl QueryHandler {
                 if let Some(ref gc) = self.state.genesis_config {
                     QueryResult::GenesisConfig(Box::new(gc.clone()))
                 } else {
-                    // Fallback: minimal genesis config from node state fields
+                    // Fallback: genesis config from node state fields
                     QueryResult::GenesisConfig(Box::new(GenesisConfigSnapshot {
                         system_start: self.state.system_start.clone(),
                         network_magic: self.state.network_magic,
@@ -1037,15 +1054,15 @@ impl QueryHandler {
                         } else {
                             0
                         },
-                        active_slots_coeff_num: 1,
-                        active_slots_coeff_den: 20,
+                        active_slots_coeff_num: self.state.active_slots_coeff_num,
+                        active_slots_coeff_den: self.state.active_slots_coeff_den,
                         security_param: self.state.security_param,
                         epoch_length: self.state.epoch_length,
-                        slots_per_kes_period: 129600,
-                        max_kes_evolutions: 62,
+                        slots_per_kes_period: self.state.slots_per_kes_period,
+                        max_kes_evolutions: self.state.max_kes_evolutions,
                         slot_length_micros: self.state.slot_length_secs * 1_000_000,
-                        update_quorum: 5,
-                        max_lovelace_supply: 45_000_000_000_000_000,
+                        update_quorum: self.state.update_quorum,
+                        max_lovelace_supply: self.state.max_lovelace_supply,
                         protocol_params: ShelleyPParamsSnapshot {
                             min_fee_a: self.state.protocol_params.min_fee_a,
                             min_fee_b: self.state.protocol_params.min_fee_b,

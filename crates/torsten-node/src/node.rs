@@ -2275,6 +2275,27 @@ impl Node {
             drep_stake_distr,
             vote_delegatees,
             era_summaries: self.build_era_summaries(&ls),
+            active_slots_coeff_num: self.shelley_genesis.as_ref().map_or(1, |g| {
+                let (n, _) = float_to_rational(g.active_slots_coeff);
+                n
+            }),
+            active_slots_coeff_den: self.shelley_genesis.as_ref().map_or(20, |g| {
+                let (_, d) = float_to_rational(g.active_slots_coeff);
+                d
+            }),
+            slots_per_kes_period: self
+                .shelley_genesis
+                .as_ref()
+                .map_or(129600, |g| g.slots_per_k_e_s_period),
+            max_kes_evolutions: self
+                .shelley_genesis
+                .as_ref()
+                .map_or(62, |g| g.max_k_e_s_evolutions),
+            update_quorum: self.shelley_genesis.as_ref().map_or(5, |g| g.update_quorum),
+            max_lovelace_supply: self
+                .shelley_genesis
+                .as_ref()
+                .map_or(45_000_000_000_000_000, |g| g.max_lovelace_supply),
             genesis_config: self.shelley_genesis.as_ref().map(|g| {
                 let gp = &g.protocol_params;
                 // Convert a0 from f64 to rational

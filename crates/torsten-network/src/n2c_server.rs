@@ -128,6 +128,16 @@ struct ChainSyncCursor {
     has_intersection: bool,
 }
 
+/// Per-client LocalTxMonitor cursor state
+struct TxMonitorCursor {
+    /// Snapshot of mempool tx hashes taken at MsgAcquire
+    snapshot: Vec<torsten_primitives::hash::TransactionHash>,
+    /// Current position within the snapshot for NextTx iteration
+    position: usize,
+    /// Whether the client has acquired a mempool snapshot
+    acquired: bool,
+}
+
 /// Handle a single N2C client connection
 async fn handle_n2c_connection(
     mut stream: tokio::net::UnixStream,
@@ -142,6 +152,11 @@ async fn handle_n2c_connection(
     let mut chainsync_cursor = ChainSyncCursor {
         cursor_slot: 0,
         has_intersection: false,
+    };
+    let mut tx_monitor_cursor = TxMonitorCursor {
+        snapshot: Vec::new(),
+        position: 0,
+        acquired: false,
     };
 
     loop {
@@ -172,6 +187,7 @@ async fn handle_n2c_connection(
                         &tx_validator,
                         &block_provider,
                         &mut chainsync_cursor,
+                        &mut tx_monitor_cursor,
                     )
                     .await?;
                     if let Some(resp_segment) = response {
@@ -200,6 +216,7 @@ async fn process_segment(
     tx_validator: &Option<Arc<dyn TxValidator>>,
     block_provider: &Option<Arc<dyn BlockProvider>>,
     chainsync_cursor: &mut ChainSyncCursor,
+    tx_monitor_cursor: &mut TxMonitorCursor,
 ) -> Result<Option<Segment>, N2CServerError> {
     match segment.protocol_id {
         MINI_PROTOCOL_HANDSHAKE => handle_handshake(&segment.payload),
@@ -208,7 +225,7 @@ async fn process_segment(
             handle_tx_submission(&segment.payload, mempool, tx_validator)
         }
         MINI_PROTOCOL_TX_MONITOR => {
-            handle_tx_monitor(&segment.payload, mempool, query_handler).await
+            handle_tx_monitor(&segment.payload, mempool, query_handler, tx_monitor_cursor).await
         }
         MINI_PROTOCOL_CHAINSYNC => {
             handle_local_chainsync(
@@ -461,6 +478,7 @@ async fn handle_tx_monitor(
     payload: &[u8],
     mempool: &Arc<Mempool>,
     query_handler: &Arc<RwLock<QueryHandler>>,
+    cursor: &mut TxMonitorCursor,
 ) -> Result<Option<Segment>, N2CServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
 
@@ -486,11 +504,19 @@ async fn handle_tx_monitor(
         }
         1 => {
             // MsgAcquire / MsgAwaitAcquire → MsgAcquired(slot_no)
+            // Take a snapshot of the mempool for cursor-based iteration
+            cursor.snapshot = mempool.tx_hashes_ordered();
+            cursor.position = 0;
+            cursor.acquired = true;
             let tip_slot = {
                 let handler = query_handler.read().await;
                 handler.state().tip.point.slot().map(|s| s.0).unwrap_or(0)
             };
-            debug!(tip_slot, "LocalTxMonitor: MsgAcquire");
+            debug!(
+                tip_slot,
+                snapshot_size = cursor.snapshot.len(),
+                "LocalTxMonitor: MsgAcquire"
+            );
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
             enc.array(2)
@@ -507,7 +533,10 @@ async fn handle_tx_monitor(
             }))
         }
         3 => {
-            // MsgRelease
+            // MsgRelease — clear the acquired snapshot
+            cursor.snapshot.clear();
+            cursor.position = 0;
+            cursor.acquired = false;
             debug!("LocalTxMonitor: MsgRelease");
             Ok(None)
         }
@@ -541,15 +570,22 @@ async fn handle_tx_monitor(
         }
         5 => {
             // MsgNextTx → MsgReplyNextTx(null | [era_id, tx_bytes])
-            debug!("LocalTxMonitor: MsgNextTx");
+            // Iterate through the snapshot taken at MsgAcquire
+            debug!(
+                position = cursor.position,
+                snapshot_len = cursor.snapshot.len(),
+                "LocalTxMonitor: MsgNextTx"
+            );
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
 
-            // Try to return the first transaction from the mempool
-            if let Some(tx_hash) = mempool.first_tx_hash() {
+            // Find the next tx in the snapshot that still exists in the mempool
+            let mut found = false;
+            while cursor.position < cursor.snapshot.len() {
+                let tx_hash = cursor.snapshot[cursor.position];
+                cursor.position += 1;
                 if let Some(tx_cbor) = mempool.get_tx_cbor(&tx_hash) {
                     debug!("LocalTxMonitor: MsgReplyNextTx with tx {}", tx_hash);
-                    // MsgReplyNextTx [6, [era_id, tx_bytes]]
                     enc.array(2)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.u32(6)
@@ -560,17 +596,14 @@ async fn handle_tx_monitor(
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // era 6 = Conway
                     enc.bytes(&tx_cbor)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                } else {
-                    // Tx exists but no CBOR — return null
-                    enc.array(2)
-                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                    enc.u32(6)
-                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                    enc.null()
-                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    found = true;
+                    break;
                 }
-            } else {
-                // Empty mempool — return null
+                // Tx was removed from mempool since snapshot — skip it
+            }
+
+            if !found {
+                // End of snapshot or empty — return null
                 enc.array(2)
                     .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                 enc.u32(6)
@@ -2469,6 +2502,11 @@ mod tests {
     async fn test_handle_tx_monitor_acquire() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
 
         // MsgAcquire: [1]
         let mut payload = Vec::new();
@@ -2476,7 +2514,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(1).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2496,6 +2534,11 @@ mod tests {
     async fn test_handle_tx_monitor_has_tx() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
         let tx_hash = Hash32::from_bytes([0xAA; 32]);
         let tx = torsten_primitives::transaction::Transaction::empty_with_hash(tx_hash);
         mempool.add_tx(tx_hash, tx, 100).unwrap();
@@ -2507,7 +2550,7 @@ mod tests {
         enc.u32(7).unwrap();
         enc.bytes(tx_hash.as_bytes()).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2523,6 +2566,11 @@ mod tests {
     async fn test_handle_tx_monitor_has_tx_missing() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
 
         // MsgHasTx for non-existent tx
         let tx_hash = Hash32::from_bytes([0xBB; 32]);
@@ -2532,7 +2580,7 @@ mod tests {
         enc.u32(7).unwrap();
         enc.bytes(tx_hash.as_bytes()).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2548,6 +2596,11 @@ mod tests {
     async fn test_handle_tx_monitor_get_sizes() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
         let tx_hash = Hash32::from_bytes([0xAA; 32]);
         let tx = torsten_primitives::transaction::Transaction::empty_with_hash(tx_hash);
         mempool.add_tx(tx_hash, tx, 500).unwrap();
@@ -2558,7 +2611,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(9).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2580,6 +2633,11 @@ mod tests {
     async fn test_handle_tx_monitor_next_tx() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
 
         // MsgNextTx: [5]
         let mut payload = Vec::new();
@@ -2587,7 +2645,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(5).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -2600,9 +2658,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_tx_monitor_cursor_iteration() {
+        let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
+        let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
+
+        // Add 3 transactions to the mempool
+        let h1 = Hash32::from_bytes([0x01; 32]);
+        let h2 = Hash32::from_bytes([0x02; 32]);
+        let h3 = Hash32::from_bytes([0x03; 32]);
+        let mut tx1 = torsten_primitives::transaction::Transaction::empty_with_hash(h1);
+        tx1.raw_cbor = Some(vec![0x01; 10]);
+        let mut tx2 = torsten_primitives::transaction::Transaction::empty_with_hash(h2);
+        tx2.raw_cbor = Some(vec![0x02; 10]);
+        let mut tx3 = torsten_primitives::transaction::Transaction::empty_with_hash(h3);
+        tx3.raw_cbor = Some(vec![0x03; 10]);
+        mempool.add_tx(h1, tx1, 100).unwrap();
+        mempool.add_tx(h2, tx2, 100).unwrap();
+        mempool.add_tx(h3, tx3, 100).unwrap();
+
+        // MsgAcquire to take a snapshot
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(1).unwrap();
+        let _ = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
+            .await
+            .unwrap();
+        assert!(cursor.acquired);
+        assert_eq!(cursor.snapshot.len(), 3);
+        assert_eq!(cursor.position, 0);
+
+        // MsgNextTx should return tx1
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(5).unwrap();
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut d = minicbor::Decoder::new(&result.payload);
+        let _ = d.array();
+        assert_eq!(d.u32().unwrap(), 6); // MsgReplyNextTx
+        let _ = d.array(); // [era, bytes] — not null, so a tx was returned
+        assert_eq!(cursor.position, 1);
+
+        // MsgNextTx should return tx2
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(5).unwrap();
+        let _ = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(cursor.position, 2);
+
+        // MsgNextTx should return tx3
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(5).unwrap();
+        let _ = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(cursor.position, 3);
+
+        // MsgNextTx should return null (end of snapshot)
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(5).unwrap();
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut d = minicbor::Decoder::new(&result.payload);
+        let _ = d.array();
+        assert_eq!(d.u32().unwrap(), 6);
+        assert!(d.null().is_ok()); // null = end of snapshot
+    }
+
+    #[tokio::test]
     async fn test_handle_tx_monitor_done() {
         let mempool = Arc::new(Mempool::new(torsten_mempool::MempoolConfig::default()));
         let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let mut cursor = TxMonitorCursor {
+            snapshot: Vec::new(),
+            position: 0,
+            acquired: false,
+        };
 
         // MsgDone: [0]
         let mut payload = Vec::new();
@@ -2610,7 +2759,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(0).unwrap();
 
-        let result = handle_tx_monitor(&payload, &mempool, &handler)
+        let result = handle_tx_monitor(&payload, &mempool, &handler, &mut cursor)
             .await
             .unwrap();
         assert!(result.is_none());

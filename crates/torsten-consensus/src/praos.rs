@@ -52,6 +52,12 @@ pub enum ConsensusError {
     UnknownBlockIssuer(Hash28),
     #[error("Operational cert counter over-incremented: got {got}, last seen {last_seen} (max increment is 1)")]
     OpcertCounterOverIncremented { got: u64, last_seen: u64 },
+    #[error("Unsupported protocol version: {major}.{minor} (max supported: {max_major})")]
+    UnsupportedProtocolVersion {
+        major: u64,
+        minor: u64,
+        max_major: u64,
+    },
 }
 
 /// Information about a registered pool needed for full block validation.
@@ -268,6 +274,23 @@ impl OuroborosPraos {
         }
         if header.vrf_vkey.is_empty() {
             return Err(ConsensusError::EmptyVrfKey);
+        }
+
+        // 1b. Protocol version check — reject blocks from unsupported protocol versions
+        // Currently we support up to protocol version 10 (Conway).
+        const MAX_SUPPORTED_PROTOCOL_MAJOR: u64 = 10;
+        if header.protocol_version.major > MAX_SUPPORTED_PROTOCOL_MAJOR {
+            warn!(
+                slot = header.slot.0,
+                major = header.protocol_version.major,
+                minor = header.protocol_version.minor,
+                "Praos: block uses unsupported protocol version"
+            );
+            return Err(ConsensusError::UnsupportedProtocolVersion {
+                major: header.protocol_version.major,
+                minor: header.protocol_version.minor,
+                max_major: MAX_SUPPORTED_PROTOCOL_MAJOR,
+            });
         }
 
         // 2. Pool-aware checks (only when issuer info is available)

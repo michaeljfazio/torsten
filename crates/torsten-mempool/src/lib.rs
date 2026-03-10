@@ -256,6 +256,11 @@ impl Mempool {
         self.order.read().front().copied()
     }
 
+    /// Get all transaction hashes in FIFO order (for TxMonitor snapshot cursor)
+    pub fn tx_hashes_ordered(&self) -> Vec<TransactionHash> {
+        self.order.read().iter().copied().collect()
+    }
+
     /// Snapshot of current mempool state
     pub fn snapshot(&self) -> MempoolSnapshot {
         MempoolSnapshot {
