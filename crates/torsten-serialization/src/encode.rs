@@ -1620,15 +1620,63 @@ fn encode_language_views(
     buf
 }
 
-/// Compute the block body hash from the transaction bodies.
+/// Compute the block body hash using the Alonzo+ segregated witness structure.
 ///
-/// This is blake2b-256 of the concatenated CBOR-encoded transaction bodies array.
+/// Per Haskell cardano-ledger, the block body hash is:
+///   blake2b_256(h1 || h2 || h3 || h4)
+/// where:
+///   h1 = blake2b_256(CBOR array of transaction bodies)
+///   h2 = blake2b_256(CBOR array of witness sets)
+///   h3 = blake2b_256(CBOR map of {tx_index: auxiliary_data})
+///   h4 = blake2b_256(CBOR array of invalid tx indices)
 pub fn compute_block_body_hash(transactions: &[Transaction]) -> Hash32 {
-    let mut body = encode_array_header(transactions.len());
+    // 1. Transaction bodies
+    let mut bodies_cbor = encode_array_header(transactions.len());
     for tx in transactions {
-        body.extend(encode_transaction_body(&tx.body));
+        bodies_cbor.extend(encode_transaction_body(&tx.body));
     }
-    blake2b_256(&body)
+    let h1 = blake2b_256(&bodies_cbor);
+
+    // 2. Transaction witness sets
+    let mut wits_cbor = encode_array_header(transactions.len());
+    for tx in transactions {
+        wits_cbor.extend(encode_witness_set(&tx.witness_set));
+    }
+    let h2 = blake2b_256(&wits_cbor);
+
+    // 3. Auxiliary data map: {tx_index: aux_data} for txs that have auxiliary data
+    let aux_entries: Vec<_> = transactions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, tx)| tx.auxiliary_data.as_ref().map(|aux| (i, aux)))
+        .collect();
+    let mut aux_cbor = encode_map_header(aux_entries.len());
+    for (idx, aux) in &aux_entries {
+        aux_cbor.extend(encode_uint(*idx as u64));
+        aux_cbor.extend(encode_auxiliary_data(aux));
+    }
+    let h3 = blake2b_256(&aux_cbor);
+
+    // 4. Invalid transaction indices (txs with is_valid=false)
+    let invalid_indices: Vec<_> = transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, tx)| !tx.is_valid)
+        .map(|(i, _)| i)
+        .collect();
+    let mut isvalid_cbor = encode_array_header(invalid_indices.len());
+    for idx in &invalid_indices {
+        isvalid_cbor.extend(encode_uint(*idx as u64));
+    }
+    let h4 = blake2b_256(&isvalid_cbor);
+
+    // Combine: blake2b_256(h1 || h2 || h3 || h4)
+    let mut combined = Vec::with_capacity(128);
+    combined.extend_from_slice(h1.as_bytes());
+    combined.extend_from_slice(h2.as_bytes());
+    combined.extend_from_slice(h3.as_bytes());
+    combined.extend_from_slice(h4.as_bytes());
+    blake2b_256(&combined)
 }
 
 #[cfg(test)]

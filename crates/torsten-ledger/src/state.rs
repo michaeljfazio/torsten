@@ -1135,6 +1135,10 @@ impl LedgerState {
         self.snapshots.set = self.snapshots.mark.take();
 
         // Take a new "mark" snapshot of current stake distribution.
+        // Recompute stake_map from the full UTxO set for correctness (matching Haskell).
+        // The incremental tracking can drift after snapshot load or Mithril import.
+        self.rebuild_stake_distribution();
+
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
         for (cred_hash, pool_id) in &self.delegations {
@@ -1160,6 +1164,23 @@ impl LedgerState {
                 *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
             }
         }
+
+        let total_utxo_stake: u64 = self
+            .stake_distribution
+            .stake_map
+            .values()
+            .map(|l| l.0)
+            .sum();
+        let total_pool_stake: u64 = pool_stake.values().map(|l| l.0).sum();
+        info!(
+            epoch = new_epoch.0,
+            credentials = self.stake_distribution.stake_map.len(),
+            delegations = self.delegations.len(),
+            pools = pool_stake.len(),
+            total_utxo_stake_ada = total_utxo_stake / 1_000_000,
+            total_pool_stake_ada = total_pool_stake / 1_000_000,
+            "Epoch snapshot: stake distribution rebuilt from UTxO set"
+        );
 
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
@@ -1669,6 +1690,25 @@ impl LedgerState {
             "Rewards distributed: {} lovelace to accounts, {} to treasury (expansion: {}, fees: {})",
             total_distributed, treasury_cut + undistributed, expansion, self.epoch_fees.0
         );
+    }
+
+    /// Rebuild stake_distribution.stake_map from the full UTxO set.
+    ///
+    /// This recomputes per-credential UTxO stake by scanning all UTxOs,
+    /// matching Haskell's behavior at epoch boundaries. This corrects any
+    /// drift from incremental tracking (e.g., after snapshot load or Mithril import).
+    fn rebuild_stake_distribution(&mut self) {
+        let mut new_map: HashMap<Hash32, Lovelace> = HashMap::new();
+        for (_, output) in self.utxo_set.iter() {
+            if let Some(cred_hash) = stake_credential_hash(&output.address) {
+                *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+            }
+        }
+        // Also ensure all registered stake credentials have entries (even with 0 stake)
+        for cred_hash in self.delegations.keys() {
+            new_map.entry(*cred_hash).or_insert(Lovelace(0));
+        }
+        self.stake_distribution.stake_map = new_map;
     }
 
     /// Convert a reward account (raw bytes with network header) to a Hash32 key
@@ -2913,10 +2953,43 @@ pub enum LedgerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torsten_primitives::address::{Address, ByronAddress};
+    use torsten_primitives::address::{Address, BaseAddress, ByronAddress};
     use torsten_primitives::hash::Hash28;
+    use torsten_primitives::network::NetworkId;
     use torsten_primitives::transaction::*;
     use torsten_primitives::value::Value;
+
+    /// Counter for unique UTxO inputs in tests.
+    static UTXO_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    /// Add a UTxO with a Base address for the given stake credential and amount.
+    /// This ensures `rebuild_stake_distribution` will find the stake.
+    fn add_stake_utxo(state: &mut LedgerState, cred: &Credential, amount: u64) {
+        let payment_cred = Credential::VerificationKey(Hash28::from_bytes([0xFFu8; 28]));
+        let addr = Address::Base(BaseAddress {
+            network: NetworkId::Mainnet,
+            payment: payment_cred,
+            stake: cred.clone(),
+        });
+        let counter = UTXO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tx_id_bytes = [0u8; 32];
+        tx_id_bytes[..8].copy_from_slice(&counter.to_be_bytes());
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes(tx_id_bytes),
+            index: 0,
+        };
+        let output = TransactionOutput {
+            address: addr,
+            value: Value {
+                coin: Lovelace(amount),
+                multi_asset: Default::default(),
+            },
+            datum: torsten_primitives::transaction::OutputDatum::None,
+            script_ref: None,
+            raw_cbor: None,
+        };
+        state.utxo_set.insert(input, output);
+    }
 
     fn make_test_block(
         slot: u64,
@@ -3249,11 +3322,7 @@ mod tests {
 
         // Register stake and delegate
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-        let key = credential_to_hash(&cred);
-        state
-            .stake_distribution
-            .stake_map
-            .insert(key, Lovelace(1_000_000));
+        add_stake_utxo(&mut state, &cred, 1_000_000);
 
         // Register pool
         state.process_certificate(&Certificate::PoolRegistration(PoolParams {
@@ -3411,7 +3480,6 @@ mod tests {
         let owner_hash = Hash28::from_bytes([42u8; 28]);
         let cred = Credential::VerificationKey(owner_hash);
         let pool_id = Hash28::from_bytes([1u8; 28]);
-        let key = credential_to_hash(&cred);
 
         // Build reward account from owner credential
         let mut reward_account = vec![0xE0u8];
@@ -3420,10 +3488,7 @@ mod tests {
         // Register stake, pool, and delegate
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
         // Realistic pool stake: 50 million ADA (large pool)
-        state
-            .stake_distribution
-            .stake_map
-            .insert(key, Lovelace(50_000_000_000_000));
+        add_stake_utxo(&mut state, &cred, 50_000_000_000_000);
 
         state.process_certificate(&Certificate::PoolRegistration(PoolParams {
             operator: pool_id,
@@ -3609,17 +3674,13 @@ mod tests {
         let owner_hash = Hash28::from_bytes([42u8; 28]);
         let cred = Credential::VerificationKey(owner_hash);
         let pool_id = Hash28::from_bytes([1u8; 28]);
-        let key = credential_to_hash(&cred);
 
         // Reward account uses the owner's credential
         let mut reward_account = vec![0xE0u8];
         reward_account.extend_from_slice(owner_hash.as_bytes());
 
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-        state
-            .stake_distribution
-            .stake_map
-            .insert(key, Lovelace(50_000_000_000_000));
+        add_stake_utxo(&mut state, &cred, 50_000_000_000_000);
 
         state.process_certificate(&Certificate::PoolRegistration(PoolParams {
             operator: pool_id,
