@@ -1,6 +1,6 @@
-#[cfg(not(feature = "lsm"))]
+#[cfg(feature = "rocksdb")]
 use crate::immutable_db::ImmutableDB;
-#[cfg(feature = "lsm")]
+#[cfg(not(feature = "rocksdb"))]
 use crate::lsm::LsmImmutableDB;
 use crate::volatile_db::VolatileDB;
 use std::path::Path;
@@ -13,10 +13,10 @@ use tracing::{info, trace, warn};
 #[derive(Error, Debug)]
 pub enum ChainDBError {
     #[error("Immutable DB error: {0}")]
-    #[cfg(not(feature = "lsm"))]
+    #[cfg(feature = "rocksdb")]
     Immutable(#[from] crate::immutable_db::ImmutableDBError),
     #[error("Immutable DB error (LSM): {0}")]
-    #[cfg(feature = "lsm")]
+    #[cfg(not(feature = "rocksdb"))]
     Immutable(#[from] crate::lsm::LsmImmutableDBError),
     #[error("Volatile DB error: {0}")]
     Volatile(#[from] crate::volatile_db::VolatileDBError),
@@ -33,12 +33,12 @@ pub const SECURITY_PARAM_K: usize = 2160;
 /// Blocks older than k slots are in ImmutableDB (permanent).
 ///
 /// The immutable backend is selected at compile time:
-/// - Default: RocksDB-backed `ImmutableDB`
-/// - `lsm` feature: `cardano-lsm`-backed `LsmImmutableDB`
+/// - Default: `cardano-lsm`-backed `LsmImmutableDB`
+/// - `rocksdb` feature: RocksDB-backed `ImmutableDB`
 pub struct ChainDB {
-    #[cfg(not(feature = "lsm"))]
+    #[cfg(feature = "rocksdb")]
     immutable: ImmutableDB,
-    #[cfg(feature = "lsm")]
+    #[cfg(not(feature = "rocksdb"))]
     immutable: LsmImmutableDB,
     volatile: VolatileDB,
 }
@@ -48,9 +48,9 @@ impl ChainDB {
         info!(path = %db_path.display(), k = SECURITY_PARAM_K, "Opening ChainDB");
         let immutable_path = db_path.join("immutable");
 
-        #[cfg(not(feature = "lsm"))]
+        #[cfg(feature = "rocksdb")]
         let immutable = ImmutableDB::open(&immutable_path)?;
-        #[cfg(feature = "lsm")]
+        #[cfg(not(feature = "rocksdb"))]
         let immutable = LsmImmutableDB::open(&immutable_path)?;
 
         let volatile = VolatileDB::new(SECURITY_PARAM_K * 2);

@@ -1,14 +1,14 @@
 //! Manual benchmark runner that outputs timing data for both backends.
-//! Run with: cargo test -p torsten-storage --test bench_runner --release -- --nocapture
-//! For LSM: cargo test -p torsten-storage --test bench_runner --release --features lsm -- --nocapture
+//! Run with default (LSM): cargo test -p torsten-storage --test bench_runner --release -- --nocapture
+//! For RocksDB: cargo test -p torsten-storage --test bench_runner --release --features rocksdb -- --nocapture
 
 use std::time::{Duration, Instant};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{BlockNo, SlotNo};
 
-#[cfg(not(feature = "lsm"))]
+#[cfg(feature = "rocksdb")]
 use torsten_storage::immutable_db::ImmutableDB as DB;
-#[cfg(feature = "lsm")]
+#[cfg(not(feature = "rocksdb"))]
 use torsten_storage::lsm::LsmImmutableDB as DB;
 
 const NUM_BLOCKS: u64 = 5_000;
@@ -61,12 +61,12 @@ fn generate_blocks(count: u64) -> Vec<(SlotNo, Hash32, BlockNo, Vec<u8>)> {
         .collect()
 }
 
-#[cfg(not(feature = "lsm"))]
+#[cfg(feature = "rocksdb")]
 fn backend_name() -> &'static str {
     "rocksdb"
 }
 
-#[cfg(feature = "lsm")]
+#[cfg(not(feature = "rocksdb"))]
 fn backend_name() -> &'static str {
     "lsm"
 }

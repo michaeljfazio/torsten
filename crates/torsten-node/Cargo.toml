@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "Torsten Cardano node - main entry point"
 
+[features]
+default = []
+rocksdb = ["torsten-storage/rocksdb"]
+
 [[bin]]
 name = "torsten-node"
 path = "src/main.rs"

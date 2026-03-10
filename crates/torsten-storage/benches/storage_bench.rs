@@ -1,15 +1,15 @@
 //! Criterion benchmarks comparing RocksDB vs cardano-lsm ImmutableDB backends.
 //!
-//! Run with default (RocksDB):  cargo bench -p torsten-storage
-//! Run with LSM:                cargo bench -p torsten-storage --features lsm
+//! Run with default (LSM):        cargo bench -p torsten-storage
+//! Run with RocksDB:              cargo bench -p torsten-storage --features rocksdb
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{BlockNo, SlotNo};
 
-#[cfg(not(feature = "lsm"))]
+#[cfg(feature = "rocksdb")]
 use torsten_storage::immutable_db::ImmutableDB as DB;
-#[cfg(feature = "lsm")]
+#[cfg(not(feature = "rocksdb"))]
 use torsten_storage::lsm::LsmImmutableDB as DB;
 
 const NUM_BLOCKS: u64 = 5_000;
@@ -67,12 +67,12 @@ fn generate_blocks(count: u64) -> Vec<(SlotNo, Hash32, BlockNo, Vec<u8>)> {
         .collect()
 }
 
-#[cfg(not(feature = "lsm"))]
+#[cfg(feature = "rocksdb")]
 fn backend_name() -> &'static str {
     "rocksdb"
 }
 
-#[cfg(feature = "lsm")]
+#[cfg(not(feature = "rocksdb"))]
 fn backend_name() -> &'static str {
     "lsm"
 }

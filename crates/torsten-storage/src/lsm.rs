@@ -1,12 +1,11 @@
 //! LSM-tree based ImmutableDB backend using `cardano-lsm`.
 //!
-//! This module provides `LsmImmutableDB`, an alternative to the RocksDB-backed
-//! `ImmutableDB`. It uses the `cardano-lsm` crate — a pure Rust LSM tree
-//! designed for Cardano blockchain indexing workloads.
+//! This is the **default** storage backend. It uses the `cardano-lsm` crate —
+//! a pure Rust LSM tree designed for Cardano blockchain indexing workloads.
 //!
-//! Enable with the `lsm` feature flag:
+//! To use the legacy RocksDB backend instead, enable the `rocksdb` feature:
 //! ```toml
-//! torsten-storage = { path = "...", features = ["lsm"] }
+//! torsten-storage = { path = "...", features = ["rocksdb"] }
 //! ```
 
 use std::path::{Path, PathBuf};
