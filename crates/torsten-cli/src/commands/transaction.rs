@@ -540,6 +540,78 @@ fn parse_json_script_list(
         .collect::<Result<Vec<_>>>()
 }
 
+/// Decode and print a summary of a transaction output from CBOR.
+/// Handles both legacy array format and post-Alonzo map format.
+fn decode_output_summary(decoder: &mut minicbor::Decoder<'_>) {
+    let pos = decoder.position();
+    // Try map format first (post-Alonzo: {0: addr, 1: value, ...})
+    if let Ok(Some(_map_len)) = decoder.map() {
+        let mut addr_hex = String::new();
+        let mut lovelace = 0u64;
+        let mut has_tokens = false;
+        loop {
+            let Ok(key) = decoder.u32() else { break };
+            match key {
+                0 => {
+                    addr_hex = decoder.bytes().map(hex::encode).unwrap_or_default();
+                }
+                1 => {
+                    // Value: either uint (pure ADA) or [uint, multiasset_map]
+                    if let Ok(coin) = decoder.u64() {
+                        lovelace = coin;
+                    } else {
+                        // Array: [coin, multiasset]
+                        decoder.set_position(decoder.position());
+                        if decoder.array().is_ok() {
+                            lovelace = decoder.u64().unwrap_or(0);
+                            has_tokens = true;
+                            decoder.skip().ok(); // skip multiasset
+                        }
+                    }
+                }
+                _ => {
+                    decoder.skip().ok();
+                }
+            }
+        }
+        let ada = lovelace as f64 / 1_000_000.0;
+        let token_info = if has_tokens { " + tokens" } else { "" };
+        println!("{lovelace} lovelace ({ada:.6} ADA){token_info}");
+        if !addr_hex.is_empty() {
+            println!(
+                "      addr: {}",
+                &addr_hex[..std::cmp::min(40, addr_hex.len())]
+            );
+        }
+        return;
+    }
+
+    // Fallback: try array format [addr, value, ...]
+    decoder.set_position(pos);
+    if let Ok(Some(_arr_len)) = decoder.array() {
+        let addr_hex = decoder.bytes().map(hex::encode).unwrap_or_default();
+        let lovelace = decoder.u64().unwrap_or(0);
+        let ada = lovelace as f64 / 1_000_000.0;
+        println!("{lovelace} lovelace ({ada:.6} ADA)");
+        if !addr_hex.is_empty() {
+            println!(
+                "      addr: {}",
+                &addr_hex[..std::cmp::min(40, addr_hex.len())]
+            );
+        }
+        // Skip remaining elements (datum, script_ref)
+        for _ in 2.._arr_len {
+            decoder.skip().ok();
+        }
+        return;
+    }
+
+    // Can't decode — skip
+    decoder.set_position(pos);
+    decoder.skip().ok();
+    println!("<unable to decode>");
+}
+
 /// Load certificate CBOR from a text envelope file
 fn load_certificate_cbor(path: &PathBuf) -> Result<Vec<u8>> {
     let content = std::fs::read_to_string(path)?;
@@ -930,31 +1002,42 @@ impl TransactionCmd {
                 let hash = torsten_crypto::signing::hash_transaction(&body_cbor);
                 println!("Transaction hash: {hash}");
 
-                // Try to decode and display basic info
+                // Decode and display transaction body fields
                 let mut decoder = minicbor::Decoder::new(&body_cbor);
                 if let Ok(Some(map_len)) = decoder.map() {
                     for _ in 0..map_len {
                         if let Ok(key) = decoder.u32() {
                             match key {
                                 0 => {
+                                    // Inputs: array of [tx_hash, index]
                                     if let Ok(Some(arr_len)) = decoder.array() {
-                                        println!("Inputs: {arr_len}");
+                                        println!("Inputs ({arr_len}):");
                                         for _ in 0..arr_len {
-                                            decoder.skip().ok();
+                                            if decoder.array().is_ok() {
+                                                let tx_hash = decoder
+                                                    .bytes()
+                                                    .map(hex::encode)
+                                                    .unwrap_or_default();
+                                                let idx = decoder.u32().unwrap_or(0);
+                                                println!("  {tx_hash}#{idx}");
+                                            }
                                         }
                                     }
                                 }
                                 1 => {
+                                    // Outputs
                                     if let Ok(Some(arr_len)) = decoder.array() {
-                                        println!("Outputs: {arr_len}");
-                                        for _ in 0..arr_len {
-                                            decoder.skip().ok();
+                                        println!("Outputs ({arr_len}):");
+                                        for i in 0..arr_len {
+                                            print!("  [{i}] ");
+                                            decode_output_summary(&mut decoder);
                                         }
                                     }
                                 }
                                 2 => {
                                     if let Ok(fee) = decoder.u64() {
-                                        println!("Fee: {fee} lovelace");
+                                        let ada = fee as f64 / 1_000_000.0;
+                                        println!("Fee: {fee} lovelace ({ada:.6} ADA)");
                                     }
                                 }
                                 3 => {
@@ -962,7 +1045,123 @@ impl TransactionCmd {
                                         println!("TTL: slot {ttl}");
                                     }
                                 }
+                                4 => {
+                                    // Certificates
+                                    if let Ok(Some(arr_len)) = decoder.array() {
+                                        println!("Certificates: {arr_len}");
+                                        for _ in 0..arr_len {
+                                            decoder.skip().ok();
+                                        }
+                                    }
+                                }
+                                5 => {
+                                    // Withdrawals
+                                    if let Ok(Some(map_len)) = decoder.map() {
+                                        println!("Withdrawals: {map_len}");
+                                        for _ in 0..map_len {
+                                            decoder.skip().ok();
+                                            decoder.skip().ok();
+                                        }
+                                    }
+                                }
+                                7 => {
+                                    // Auxiliary data hash
+                                    if let Ok(h) = decoder.bytes() {
+                                        println!("Auxiliary data hash: {}", hex::encode(h));
+                                    }
+                                }
+                                8 => {
+                                    // Validity interval start
+                                    if let Ok(slot) = decoder.u64() {
+                                        println!("Valid from: slot {slot}");
+                                    }
+                                }
+                                9 => {
+                                    // Mint
+                                    if let Ok(Some(policy_count)) = decoder.map() {
+                                        println!("Mint ({policy_count} policies):");
+                                        for _ in 0..policy_count {
+                                            let pid = decoder
+                                                .bytes()
+                                                .map(hex::encode)
+                                                .unwrap_or_default();
+                                            if let Ok(Some(asset_count)) = decoder.map() {
+                                                for _ in 0..asset_count {
+                                                    let name = decoder
+                                                        .bytes()
+                                                        .map(hex::encode)
+                                                        .unwrap_or_default();
+                                                    // Could be positive or negative
+                                                    let qty = decoder.i64().unwrap_or(0);
+                                                    let sign = if qty >= 0 { "+" } else { "" };
+                                                    println!("  {pid}.{name} {sign}{qty}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                11 => {
+                                    // Script data hash
+                                    if let Ok(h) = decoder.bytes() {
+                                        println!("Script data hash: {}", hex::encode(h));
+                                    }
+                                }
+                                13 => {
+                                    // Collateral inputs
+                                    if let Ok(Some(arr_len)) = decoder.array() {
+                                        println!("Collateral inputs ({arr_len}):");
+                                        for _ in 0..arr_len {
+                                            if decoder.array().is_ok() {
+                                                let tx_hash = decoder
+                                                    .bytes()
+                                                    .map(hex::encode)
+                                                    .unwrap_or_default();
+                                                let idx = decoder.u32().unwrap_or(0);
+                                                println!("  {tx_hash}#{idx}");
+                                            }
+                                        }
+                                    }
+                                }
+                                14 => {
+                                    // Required signers
+                                    if let Ok(Some(arr_len)) = decoder.array() {
+                                        println!("Required signers ({arr_len}):");
+                                        for _ in 0..arr_len {
+                                            if let Ok(h) = decoder.bytes() {
+                                                println!("  {}", hex::encode(h));
+                                            }
+                                        }
+                                    }
+                                }
+                                16 => {
+                                    // Collateral return
+                                    print!("Collateral return: ");
+                                    decode_output_summary(&mut decoder);
+                                }
+                                17 => {
+                                    // Total collateral
+                                    if let Ok(c) = decoder.u64() {
+                                        println!("Total collateral: {c} lovelace");
+                                    }
+                                }
+                                18 => {
+                                    // Reference inputs
+                                    if let Ok(Some(arr_len)) = decoder.array() {
+                                        println!("Reference inputs ({arr_len}):");
+                                        for _ in 0..arr_len {
+                                            if decoder.array().is_ok() {
+                                                let tx_hash = decoder
+                                                    .bytes()
+                                                    .map(hex::encode)
+                                                    .unwrap_or_default();
+                                                let idx = decoder.u32().unwrap_or(0);
+                                                println!("  {tx_hash}#{idx}");
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {
+                                    println!("Field {key}: <present>");
                                     decoder.skip().ok();
                                 }
                             }
