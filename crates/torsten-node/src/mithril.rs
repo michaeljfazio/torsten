@@ -287,8 +287,8 @@ async fn download_snapshot(
 ///
 /// Reproduces the Mithril aggregator's digest algorithm:
 ///   1. beacon_hash = hex(SHA256(network || epoch_be || immutable_file_number_be))
-///   2. For each file in immutable/ (sorted by number then path): file_hash = SHA256(contents)
-///   3. digest = hex(SHA256(beacon_hash_hex_bytes || file_hash_1 || file_hash_2 || ...))
+///   2. For each file in immutable/ (sorted by number then path): file_hash = hex(SHA256(contents))
+///   3. digest = hex(SHA256(beacon_hash_hex_bytes || file_hash_hex_1 || file_hash_hex_2 || ...))
 fn verify_snapshot_digest(
     extract_dir: &Path,
     network_name: &str,
@@ -374,7 +374,8 @@ fn verify_snapshot_digest(
             }
             file_hasher.update(&buf[..n]);
         }
-        final_hasher.update(file_hasher.finalize());
+        let file_hash_hex = hex::encode(file_hasher.finalize());
+        final_hasher.update(file_hash_hex.as_bytes());
         pb.inc(1);
     }
 
@@ -1006,7 +1007,8 @@ mod tests {
         let mut final_hasher = Sha256::new();
         final_hasher.update(beacon_hash.as_bytes());
         for (_, _, content) in &sorted {
-            final_hasher.update(Sha256::digest(content));
+            let file_hash_hex = hex::encode(Sha256::digest(content));
+            final_hasher.update(file_hash_hex.as_bytes());
         }
         hex::encode(final_hasher.finalize())
     }
@@ -1274,6 +1276,64 @@ mod tests {
         let mut failures = 0;
         let blocks = parse_chunk_with_index(&chunk_path, &secondary_path, &mut failures).unwrap();
         assert!(blocks.is_empty()); // should skip the invalid entry
+    }
+
+    #[test]
+    fn test_beacon_hash_matches_mithril_test_vector() {
+        // Test vector from Mithril source: compute_beacon_hash("testnet", {epoch: 10, immutable: 100})
+        let mut hasher = Sha256::new();
+        hasher.update("testnet".as_bytes());
+        hasher.update(10u64.to_be_bytes());
+        hasher.update(100u64.to_be_bytes());
+        let beacon_hash = hex::encode(hasher.finalize());
+        assert_eq!(
+            beacon_hash,
+            "48cbf709b56204d8315aefd3a416b45398094f6fd51785c5b7dcaf7f35aacbfb"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_digest_end_to_end() {
+        // Create a fake immutable directory with known content
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path().join("immutable");
+        fs::create_dir_all(&immutable).unwrap();
+
+        // Create two chunk files with known content
+        fs::write(immutable.join("00001.chunk"), b"chunk1data").unwrap();
+        fs::write(immutable.join("00001.primary"), b"primary1data").unwrap();
+        fs::write(immutable.join("00001.secondary"), b"secondary1data").unwrap();
+
+        let network_name = "testnet";
+        let beacon = SnapshotBeacon {
+            epoch: 10,
+            immutable_file_number: 1,
+        };
+
+        // Compute expected digest manually using the Mithril algorithm
+        let beacon_hash = {
+            let mut h = Sha256::new();
+            h.update(network_name.as_bytes());
+            h.update(10u64.to_be_bytes());
+            h.update(1u64.to_be_bytes());
+            hex::encode(h.finalize())
+        };
+
+        // File hashes in order: chunk, primary, secondary (lexicographic path order)
+        let chunk_hash = hex::encode(Sha256::digest(b"chunk1data"));
+        let primary_hash = hex::encode(Sha256::digest(b"primary1data"));
+        let secondary_hash = hex::encode(Sha256::digest(b"secondary1data"));
+
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(beacon_hash.as_bytes());
+        final_hasher.update(chunk_hash.as_bytes());
+        final_hasher.update(primary_hash.as_bytes());
+        final_hasher.update(secondary_hash.as_bytes());
+        let expected_digest = hex::encode(final_hasher.finalize());
+
+        // Now verify using our function
+        let result = verify_snapshot_digest(dir.path(), network_name, &beacon, &expected_digest);
+        assert!(result.is_ok(), "Digest verification failed: {result:?}");
     }
 
     #[test]
