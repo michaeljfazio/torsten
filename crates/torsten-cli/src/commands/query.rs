@@ -293,6 +293,14 @@ impl QueryCmd {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
 
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
+
                 let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
 
                 if arr_len == 0 {
@@ -379,8 +387,13 @@ impl QueryCmd {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
 
-                // HFC wrapper
-                let _ = decoder.array();
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
 
                 let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
 
@@ -688,6 +701,14 @@ impl QueryCmd {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
 
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
+
                 // Parse Map<Credential, DRepState>
                 // Credential: [type, hash(28)], DRepState: array(4) [expiry, maybe_anchor, deposit, delegators]
                 let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
@@ -768,8 +789,13 @@ impl QueryCmd {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
 
-                // HFC wrapper
-                let _ = decoder.array();
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
+                }
 
                 // CommitteeMembersState array(3)
                 let _ = decoder.array();
@@ -1254,6 +1280,14 @@ impl QueryCmd {
                 let tag = decoder.u32().unwrap_or(999);
                 if tag != 4 {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                // Strip HFC wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // consumed wrapper
+                } else {
+                    decoder.set_position(pos);
                 }
 
                 let _ = decoder.array();
