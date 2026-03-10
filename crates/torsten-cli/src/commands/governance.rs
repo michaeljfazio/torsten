@@ -884,12 +884,37 @@ impl GovernanceCmd {
                     anchor_data_hash,
                     deposit,
                     return_addr,
-                    funds_receiving_stake_verification_key_file: _,
+                    funds_receiving_stake_verification_key_file,
                     transfer,
                     out_file,
                 } => {
                     let anchor_hash = hex::decode(&anchor_data_hash)?;
                     let (_, return_addr_bytes) = bech32::decode(&return_addr)?;
+
+                    // Load the funds-receiving stake verification key and build reward address
+                    let stake_vkey_json: serde_json::Value = serde_json::from_str(
+                        &std::fs::read_to_string(&funds_receiving_stake_verification_key_file)?,
+                    )?;
+                    let stake_vkey_hex = stake_vkey_json["cborHex"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing cborHex in stake vkey file"))?;
+                    let stake_vkey_cbor = hex::decode(stake_vkey_hex)?;
+                    // Strip CBOR wrapper (2 bytes for 32-byte key)
+                    let stake_vkey_raw = if stake_vkey_cbor.len() > 32 {
+                        &stake_vkey_cbor[stake_vkey_cbor.len() - 32..]
+                    } else {
+                        &stake_vkey_cbor
+                    };
+                    let stake_hash = torsten_primitives::hash::blake2b_224(stake_vkey_raw);
+                    // Reward address: 0xe0 (testnet) or 0xe1 (mainnet) + 28-byte key hash
+                    // Use testnet by default (matches return_addr network)
+                    let network_byte = if return_addr_bytes.first().is_some_and(|b| b & 0x01 == 1) {
+                        0xe1u8 // mainnet
+                    } else {
+                        0xe0u8 // testnet
+                    };
+                    let mut withdrawal_addr = vec![network_byte];
+                    withdrawal_addr.extend_from_slice(stake_hash.as_ref());
 
                     let mut action_cbor = Vec::new();
                     let mut enc = minicbor::Encoder::new(&mut action_cbor);
@@ -899,9 +924,9 @@ impl GovernanceCmd {
                     // TreasuryWithdrawals = tag 2
                     enc.array(3)?;
                     enc.u32(2)?;
-                    // Withdrawals map
+                    // Withdrawals map: reward_address → amount
                     enc.map(1)?;
-                    enc.bytes(&return_addr_bytes)?;
+                    enc.bytes(&withdrawal_addr)?;
                     enc.u64(transfer)?;
                     enc.null()?; // policy_hash
                                  // Anchor

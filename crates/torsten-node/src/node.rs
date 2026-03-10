@@ -2268,7 +2268,7 @@ impl Node {
             stake_snapshots,
             pool_params_entries,
             epoch_length: ls.epoch_length,
-            slot_length_secs: 1, // Shelley slot length is always 1 second
+            slot_length_secs: self.shelley_genesis.as_ref().map_or(1, |g| g.slot_length),
             network_magic: self.network_magic as u32,
             security_param: self.consensus.security_param,
             stake_deleg_deposits,

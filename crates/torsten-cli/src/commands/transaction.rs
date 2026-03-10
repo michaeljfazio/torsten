@@ -37,6 +37,15 @@ enum TxSubcommand {
         /// Metadata JSON file
         #[arg(long)]
         metadata_json_file: Option<PathBuf>,
+        /// Collateral inputs for Plutus scripts (format: tx_hash#index)
+        #[arg(long)]
+        tx_in_collateral: Vec<String>,
+        /// Required signers (key hash hex)
+        #[arg(long)]
+        required_signer_hash: Vec<String>,
+        /// Mint/burn tokens (format: policy_id.asset_name+quantity or policy_id.asset_name-quantity)
+        #[arg(long)]
+        mint: Vec<String>,
         /// Output file for the transaction body
         #[arg(long)]
         out_file: PathBuf,
@@ -210,6 +219,7 @@ fn parse_tx_output(s: &str) -> Result<ParsedTxOutput> {
 }
 
 /// Build a CBOR transaction body
+#[allow(clippy::too_many_arguments)]
 fn build_tx_body_cbor(
     inputs: &[(Hash32, u32)],
     outputs: &[ParsedTxOutput],
@@ -218,12 +228,16 @@ fn build_tx_body_cbor(
     certificates: &[Vec<u8>],
     withdrawals: &[(Vec<u8>, u64)],
     auxiliary_data: Option<&[u8]>,
+    collateral_inputs: &[(Hash32, u32)],
+    required_signers: &[Vec<u8>],
+    mint: &[MintEntry],
 ) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
 
-    // Transaction body is a map with fields:
-    // 0: inputs, 1: outputs, 2: fee, 3: ttl, 4: certificates, 5: withdrawals, 7: auxiliary_data_hash
+    // Transaction body map fields:
+    // 0: inputs, 1: outputs, 2: fee, 3: ttl, 4: certificates, 5: withdrawals,
+    // 7: auxiliary_data_hash, 9: mint, 13: collateral, 14: required_signers
     let mut field_count = 3u64; // inputs + outputs + fee
     if ttl.is_some() {
         field_count += 1;
@@ -235,6 +249,15 @@ fn build_tx_body_cbor(
         field_count += 1;
     }
     if auxiliary_data.is_some() {
+        field_count += 1;
+    }
+    if !mint.is_empty() {
+        field_count += 1;
+    }
+    if !collateral_inputs.is_empty() {
+        field_count += 1;
+    }
+    if !required_signers.is_empty() {
         field_count += 1;
     }
     enc.map(field_count)?;
@@ -331,7 +354,108 @@ fn build_tx_body_cbor(
         enc.bytes(aux_hash.as_bytes())?;
     }
 
+    // Field 9: mint (optional) — map { policy_id: { asset_name: quantity } }
+    if !mint.is_empty() {
+        enc.u32(9)?;
+        enc.map(mint.len() as u64)?;
+        for (policy_bytes, assets) in mint {
+            enc.bytes(policy_bytes)?;
+            enc.map(assets.len() as u64)?;
+            for (asset_name, qty) in assets {
+                enc.bytes(asset_name)?;
+                // Mint quantities can be negative (burning)
+                if *qty >= 0 {
+                    enc.u64(*qty as u64)?;
+                } else {
+                    // CBOR negative integer: encode as -(1+n) → major type 1
+                    let neg = (-1 - *qty) as u64;
+                    // Manual CBOR major type 1 encoding
+                    let neg_bytes = minicbor::to_vec(neg)?;
+                    // Set major type to 1 (negative)
+                    let mut neg_cbor = neg_bytes;
+                    neg_cbor[0] = (neg_cbor[0] & 0x1f) | 0x20;
+                    enc.writer_mut().extend_from_slice(&neg_cbor);
+                }
+            }
+        }
+    }
+
+    // Field 13: collateral inputs (optional)
+    if !collateral_inputs.is_empty() {
+        enc.u32(13)?;
+        enc.array(collateral_inputs.len() as u64)?;
+        for (hash, index) in collateral_inputs {
+            enc.array(2)?;
+            enc.bytes(hash.as_bytes())?;
+            enc.u32(*index)?;
+        }
+    }
+
+    // Field 14: required signers (optional)
+    if !required_signers.is_empty() {
+        enc.u32(14)?;
+        enc.array(required_signers.len() as u64)?;
+        for signer_hash in required_signers {
+            enc.bytes(signer_hash)?;
+        }
+    }
+
     Ok(buf)
+}
+
+/// Mint entry: (policy_id_bytes, Vec<(asset_name_bytes, quantity)>)
+type MintEntry = (Vec<u8>, Vec<(Vec<u8>, i64)>);
+
+/// Parse mint arguments into grouped policy -> [(asset_name, quantity)] structure.
+/// Format: "policy_id.asset_name_hex+quantity" or "policy_id.asset_name_hex-quantity" (for burn)
+fn parse_mint_args(mint_args: &[String]) -> Result<Vec<MintEntry>> {
+    use std::collections::BTreeMap;
+    let mut policy_map: BTreeMap<Vec<u8>, Vec<(Vec<u8>, i64)>> = BTreeMap::new();
+
+    for arg in mint_args {
+        // Split on '+' or find '-' for negative quantities
+        let (policy_asset, qty_str, sign) = if let Some(idx) = arg.rfind('+') {
+            (&arg[..idx], &arg[idx + 1..], 1i64)
+        } else if let Some(idx) = arg.rfind('-') {
+            // Make sure '-' is not in the policy_id part (hex chars)
+            if idx > 0 {
+                (&arg[..idx], &arg[idx + 1..], -1i64)
+            } else {
+                bail!("Invalid mint format: '{arg}'. Expected policy_id.asset_name+quantity");
+            }
+        } else {
+            bail!("Invalid mint format: '{arg}'. Expected policy_id.asset_name+quantity");
+        };
+
+        let qty: i64 = qty_str
+            .trim()
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("Invalid mint quantity '{qty_str}': {e}"))?
+            * sign;
+
+        // Split policy_asset on '.'
+        let (policy_hex, asset_hex) = if let Some(dot_idx) = policy_asset.find('.') {
+            (&policy_asset[..dot_idx], &policy_asset[dot_idx + 1..])
+        } else {
+            (policy_asset, "")
+        };
+
+        let policy_bytes = hex::decode(policy_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid policy ID hex '{policy_hex}': {e}"))?;
+        let asset_bytes = if asset_hex.is_empty() {
+            vec![]
+        } else {
+            hex::decode(asset_hex)
+                .map_err(|e| anyhow::anyhow!("Invalid asset name hex '{asset_hex}': {e}"))?
+        };
+
+        policy_map
+            .entry(policy_bytes)
+            .or_default()
+            .push((asset_bytes, qty));
+    }
+
+    Ok(policy_map.into_iter().collect())
 }
 
 /// Load certificate CBOR from a text envelope file
@@ -435,6 +559,9 @@ impl TransactionCmd {
                 certificate_file,
                 withdrawal,
                 metadata_json_file,
+                tx_in_collateral,
+                required_signer_hash,
+                mint,
                 out_file,
             } => {
                 if tx_in.is_empty() {
@@ -452,6 +579,20 @@ impl TransactionCmd {
                     .iter()
                     .map(|s| parse_tx_output(s))
                     .collect::<Result<_>>()?;
+
+                let collateral_inputs: Vec<(Hash32, u32)> = tx_in_collateral
+                    .iter()
+                    .map(|s| parse_tx_input(s))
+                    .collect::<Result<_>>()?;
+
+                let required_signers: Vec<Vec<u8>> = required_signer_hash
+                    .iter()
+                    .map(|s| {
+                        hex::decode(s).map_err(|e| anyhow::anyhow!("Invalid signer hash: {e}"))
+                    })
+                    .collect::<Result<_>>()?;
+
+                let parsed_mint = parse_mint_args(&mint)?;
 
                 let certificates: Vec<Vec<u8>> = certificate_file
                     .iter()
@@ -479,6 +620,9 @@ impl TransactionCmd {
                     &certificates,
                     &withdrawals,
                     auxiliary_data.as_deref(),
+                    &collateral_inputs,
+                    &required_signers,
+                    &parsed_mint,
                 )?;
 
                 // Write as text envelope (cardano-cli compatible format)
@@ -943,7 +1087,18 @@ mod tests {
     fn test_build_tx_body_cbor() {
         let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
         let outputs = vec![];
-        let result = build_tx_body_cbor(&inputs, &outputs, 200000, None, &[], &[], None);
+        let result = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        );
         assert!(result.is_ok());
     }
 
@@ -960,7 +1115,18 @@ mod tests {
             lovelace: 2_000_000,
             tokens: vec![(policy, "deadbeef".to_string(), 100)],
         }];
-        let result = build_tx_body_cbor(&inputs, &outputs, 200000, None, &[], &[], None);
+        let result = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        );
         assert!(result.is_ok());
     }
 
@@ -971,7 +1137,18 @@ mod tests {
         // A simple cert CBOR: [0, [0, bytes(28)]]
         let cert = vec![0x82, 0x00, 0x82, 0x00, 0x58, 0x1c];
         let certs = vec![cert];
-        let result = build_tx_body_cbor(&inputs, &outputs, 200000, None, &certs, &[], None);
+        let result = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200000,
+            None,
+            &certs,
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        );
         assert!(result.is_ok());
         let cbor = result.unwrap();
         // Should have 4 fields: inputs, outputs, fee, certificates
