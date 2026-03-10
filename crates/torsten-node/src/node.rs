@@ -404,17 +404,26 @@ impl Node {
                     let snapshot_valid = match state.tip.point {
                         Point::Origin => true,
                         Point::Specific(_, ref hash) => {
-                            let db = chain_db.blocking_read();
-                            let exists = db.has_block(hash);
-                            if !exists {
-                                let db_tip = db.get_tip();
-                                warn!(
-                                    snapshot_tip = %state.tip,
-                                    chain_db_tip = %db_tip,
-                                    "Ledger snapshot tip not found in ChainDB — snapshot is stale"
-                                );
+                            // Use try_read() since we're in a sync context within tokio.
+                            // The lock was just created so this will always succeed.
+                            match chain_db.try_read() {
+                                Ok(db) => {
+                                    let exists = db.has_block(hash);
+                                    if !exists {
+                                        let db_tip = db.get_tip();
+                                        warn!(
+                                            snapshot_tip = %state.tip,
+                                            chain_db_tip = %db_tip,
+                                            "Ledger snapshot tip not found in ChainDB — snapshot is stale"
+                                        );
+                                    }
+                                    exists
+                                }
+                                Err(_) => {
+                                    warn!("Could not acquire ChainDB lock during snapshot validation — assuming valid");
+                                    true
+                                }
                             }
-                            exists
                         }
                     };
 
@@ -2905,6 +2914,7 @@ impl Node {
 
         // Don't forge if epoch nonce isn't established yet (e.g., post-Mithril import)
         if !self.consensus.nonce_established {
+            debug!("Forge: skipping — epoch nonce not yet established");
             return;
         }
 
@@ -2928,9 +2938,10 @@ impl Node {
             .hash()
             .copied()
             .unwrap_or(torsten_primitives::hash::Hash32::ZERO);
+        let slots_per_kes_period = self.consensus.slots_per_kes_period;
 
         // Calculate relative stake from the "set" snapshot (used for leader election)
-        let relative_stake = if let Some(set_snapshot) = &ls.snapshots.set {
+        let (relative_stake, pool_stake_lovelace) = if let Some(set_snapshot) = &ls.snapshots.set {
             let total_stake: u64 = set_snapshot.pool_stake.values().map(|s| s.0).sum();
             let pool_stake = set_snapshot
                 .pool_stake
@@ -2938,17 +2949,30 @@ impl Node {
                 .map(|s| s.0)
                 .unwrap_or(0);
             if total_stake > 0 {
-                pool_stake as f64 / total_stake as f64
+                (pool_stake as f64 / total_stake as f64, pool_stake)
             } else {
-                0.0
+                (0.0, 0)
             }
         } else {
-            0.0
+            debug!(
+                pool_id = %creds.pool_id,
+                "Forge: skipping — no 'set' snapshot available"
+            );
+            (0.0, 0)
         };
         drop(ls);
 
         if relative_stake == 0.0 {
-            return; // No stake, can't be leader
+            // Log periodically so the operator knows stake hasn't activated yet
+            if next_slot.0 % 100 == 0 {
+                debug!(
+                    slot = next_slot.0,
+                    pool_id = %creds.pool_id,
+                    pool_stake = pool_stake_lovelace,
+                    "Forge: pool has zero relative stake in 'set' snapshot — waiting for delegation"
+                );
+            }
+            return;
         }
 
         // Check if we are the slot leader
@@ -2986,6 +3010,7 @@ impl Node {
             max_block_body_size,
             max_txs_per_block: 500,
             era: current_era,
+            slots_per_kes_period,
         };
 
         match crate::forge::forge_block(

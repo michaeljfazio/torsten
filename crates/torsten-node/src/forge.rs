@@ -146,6 +146,8 @@ pub struct BlockProducerConfig {
     pub max_txs_per_block: usize,
     /// Current era for the forged block
     pub era: Era,
+    /// Slots per KES period (from genesis config)
+    pub slots_per_kes_period: u64,
 }
 
 impl Default for BlockProducerConfig {
@@ -155,6 +157,7 @@ impl Default for BlockProducerConfig {
             max_block_body_size: 90112,
             max_txs_per_block: 500,
             era: Era::Conway,
+            slots_per_kes_period: 129600,
         }
     }
 }
@@ -212,7 +215,7 @@ pub fn forge_block(
     let header_hash = blake2b_256(&header_body_cbor);
 
     // KES signing: evolve key to the correct period and sign the header body
-    let current_slot_kes_period = torsten_crypto::kes::kes_period_for_slot(slot.0);
+    let current_slot_kes_period = slot.0 / config.slots_per_kes_period;
     let kes_period_offset = current_slot_kes_period.saturating_sub(creds.opcert_kes_period);
 
     // Validate KES period offset is within bounds (Sum6Kes supports 62 evolutions)
