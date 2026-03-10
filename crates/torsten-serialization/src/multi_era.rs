@@ -811,12 +811,14 @@ fn convert_conway_certificate(
             pool_hash: pallas_hash_to_torsten28(pool_hash),
             deposit: Lovelace(*deposit),
         }),
-        CC::Reg(cred, _deposit) => Some(Certificate::StakeRegistration(
-            convert_pallas_stake_credential(cred),
-        )),
-        CC::UnReg(cred, _refund) => Some(Certificate::StakeDeregistration(
-            convert_pallas_stake_credential(cred),
-        )),
+        CC::Reg(cred, deposit) => Some(Certificate::ConwayStakeRegistration {
+            credential: convert_pallas_stake_credential(cred),
+            deposit: Lovelace(*deposit),
+        }),
+        CC::UnReg(cred, refund) => Some(Certificate::ConwayStakeDeregistration {
+            credential: convert_pallas_stake_credential(cred),
+            refund: Lovelace(*refund),
+        }),
         CC::VoteDeleg(cred, drep) => Some(Certificate::VoteDelegation {
             credential: convert_pallas_stake_credential(cred),
             drep: convert_pallas_drep(drep),

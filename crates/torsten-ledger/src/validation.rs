@@ -753,6 +753,12 @@ fn calculate_deposits_and_refunds(
             Certificate::StakeDeregistration(_) => {
                 refunds += params.key_deposit.0;
             }
+            Certificate::ConwayStakeRegistration { deposit, .. } => {
+                deposits += deposit.0;
+            }
+            Certificate::ConwayStakeDeregistration { refund, .. } => {
+                refunds += refund.0;
+            }
             Certificate::PoolRegistration(_) => {
                 deposits += params.pool_deposit.0;
             }

@@ -555,6 +555,30 @@ impl LedgerState {
                 self.reward_accounts.remove(&key);
                 debug!("Stake key deregistered: {}", key.to_hex());
             }
+            Certificate::ConwayStakeRegistration {
+                credential,
+                deposit: _,
+            } => {
+                // Conway cert tag 7: same behavior as StakeRegistration
+                let key = credential_to_hash(credential);
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                debug!("Stake key registered (Conway): {}", key.to_hex());
+            }
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: _,
+            } => {
+                // Conway cert tag 8: same behavior as StakeDeregistration
+                let key = credential_to_hash(credential);
+                self.stake_distribution.stake_map.remove(&key);
+                self.delegations.remove(&key);
+                self.reward_accounts.remove(&key);
+                debug!("Stake key deregistered (Conway): {}", key.to_hex());
+            }
             Certificate::StakeDelegation {
                 credential,
                 pool_hash,

@@ -334,6 +334,25 @@ pub fn encode_certificate(cert: &Certificate) -> Vec<u8> {
             buf.extend(encode_credential(cred));
             buf
         }
+        Certificate::ConwayStakeRegistration {
+            credential,
+            deposit,
+        } => {
+            // Conway cert tag 7: Reg
+            let mut buf = encode_array_header(3);
+            buf.extend(encode_uint(7));
+            buf.extend(encode_credential(credential));
+            buf.extend(encode_uint(deposit.0));
+            buf
+        }
+        Certificate::ConwayStakeDeregistration { credential, refund } => {
+            // Conway cert tag 8: UnReg
+            let mut buf = encode_array_header(3);
+            buf.extend(encode_uint(8));
+            buf.extend(encode_credential(credential));
+            buf.extend(encode_uint(refund.0));
+            buf
+        }
         Certificate::StakeDelegation {
             credential,
             pool_hash,

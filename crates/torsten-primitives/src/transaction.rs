@@ -103,6 +103,16 @@ pub struct ExUnits {
 pub enum Certificate {
     StakeRegistration(Credential),
     StakeDeregistration(Credential),
+    /// Conway-era stake registration with explicit deposit (cert tag 7)
+    ConwayStakeRegistration {
+        credential: Credential,
+        deposit: Lovelace,
+    },
+    /// Conway-era stake deregistration with explicit refund (cert tag 8)
+    ConwayStakeDeregistration {
+        credential: Credential,
+        refund: Lovelace,
+    },
     StakeDelegation {
         credential: Credential,
         pool_hash: Hash28,
