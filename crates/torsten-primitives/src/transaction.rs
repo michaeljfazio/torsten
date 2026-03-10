@@ -251,12 +251,50 @@ pub struct Rational {
 }
 
 impl Rational {
-    /// Convert to f64
+    /// Convert to f64 (for display/logging only — use exact comparison methods for decisions)
     pub fn as_f64(&self) -> f64 {
         if self.denominator == 0 {
             return 0.0;
         }
         self.numerator as f64 / self.denominator as f64
+    }
+
+    /// Check if `value_num / value_den >= self` using exact integer cross-multiplication.
+    /// Returns false if either denominator is zero.
+    ///
+    /// Matches Haskell's exact rational comparison for governance thresholds.
+    pub fn is_met_by(&self, value_num: u64, value_den: u64) -> bool {
+        if self.denominator == 0 || value_den == 0 {
+            return false;
+        }
+        // value_num / value_den >= numerator / denominator
+        // ⟺ value_num * denominator >= numerator * value_den
+        // Use u128 to avoid overflow
+        (value_num as u128) * (self.denominator as u128)
+            >= (self.numerator as u128) * (value_den as u128)
+    }
+
+    /// Check if this rational is zero.
+    pub fn is_zero(&self) -> bool {
+        self.numerator == 0
+    }
+
+    /// Compare two Rationals: self >= other (exact).
+    pub fn ge(&self, other: &Rational) -> bool {
+        if self.denominator == 0 || other.denominator == 0 {
+            return false;
+        }
+        (self.numerator as u128) * (other.denominator as u128)
+            >= (other.numerator as u128) * (self.denominator as u128)
+    }
+
+    /// Compare two Rationals: self > other (exact).
+    pub fn gt(&self, other: &Rational) -> bool {
+        if self.denominator == 0 || other.denominator == 0 {
+            return false;
+        }
+        (self.numerator as u128) * (other.denominator as u128)
+            > (other.numerator as u128) * (self.denominator as u128)
     }
 }
 

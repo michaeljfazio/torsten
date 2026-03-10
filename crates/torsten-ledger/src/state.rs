@@ -1963,14 +1963,18 @@ impl LedgerState {
                 // DRep threshold = max of applicable DRep group thresholds (0 during bootstrap)
                 // SPO threshold = pvtPPSecurityGroup if any param is security-relevant
                 // CC approval required
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 let drep_threshold = if bootstrap {
-                    0.0
+                    rational_zero.clone()
                 } else {
                     pp_change_drep_threshold(protocol_param_update, &self.protocol_params)
                 };
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let spo_met = if let Some(spo_threshold) =
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
+                let spo_met = if let Some(ref spo_threshold) =
                     pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
                 {
                     check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold)
@@ -1989,15 +1993,19 @@ impl LedgerState {
             GovAction::HardForkInitiation {
                 protocol_version, ..
             } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 // DRep + SPO + CC all required
                 let drep_threshold = if bootstrap {
-                    0.0
+                    rational_zero
                 } else {
-                    self.protocol_params.dvt_hard_fork.as_f64()
+                    self.protocol_params.dvt_hard_fork.clone()
                 };
-                let spo_threshold = self.protocol_params.pvt_hard_fork.as_f64();
+                let spo_threshold = &self.protocol_params.pvt_hard_fork;
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
                 let spo_met =
                     check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 let cc_met = check_cc_approval(
@@ -2012,64 +2020,76 @@ impl LedgerState {
                     version = ?protocol_version,
                     bootstrap,
                     drep_yes, drep_total = drep_total.max(total_drep_stake),
-                    drep_threshold, drep_met,
+                    drep_threshold = drep_threshold.as_f64(), drep_met,
                     spo_yes, spo_total = spo_total.max(total_spo_stake),
-                    spo_threshold, spo_met,
+                    spo_threshold = spo_threshold.as_f64(), spo_met,
                     cc_met,
                     "HardForkInitiation ratification check"
                 );
                 drep_met && spo_met && cc_met
             }
             GovAction::NoConfidence { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 // DRep + SPO, no CC (CC cannot vote on NoConfidence)
                 let drep_threshold = if bootstrap {
-                    0.0
+                    rational_zero
                 } else {
-                    self.protocol_params.dvt_no_confidence.as_f64()
+                    self.protocol_params.dvt_no_confidence.clone()
                 };
-                let spo_threshold = self.protocol_params.pvt_motion_no_confidence.as_f64();
+                let spo_threshold = &self.protocol_params.pvt_motion_no_confidence;
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
                 let spo_met =
                     check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 drep_met && spo_met
             }
             GovAction::UpdateCommittee { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 // DRep + SPO, no CC (CC cannot vote on UpdateCommittee)
                 let (drep_threshold, spo_threshold) = if self.governance.no_confidence {
                     (
                         if bootstrap {
-                            0.0
+                            rational_zero
                         } else {
-                            self.protocol_params.dvt_committee_no_confidence.as_f64()
+                            self.protocol_params.dvt_committee_no_confidence.clone()
                         },
-                        self.protocol_params.pvt_committee_no_confidence.as_f64(),
+                        &self.protocol_params.pvt_committee_no_confidence,
                     )
                 } else {
                     (
                         if bootstrap {
-                            0.0
+                            rational_zero
                         } else {
-                            self.protocol_params.dvt_committee_normal.as_f64()
+                            self.protocol_params.dvt_committee_normal.clone()
                         },
-                        self.protocol_params.pvt_committee_normal.as_f64(),
+                        &self.protocol_params.pvt_committee_normal,
                     )
                 };
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
                 let spo_met =
                     check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
                 drep_met && spo_met
             }
             GovAction::NewConstitution { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 // DRep + CC, no SPO
                 let drep_threshold = if bootstrap {
-                    0.0
+                    rational_zero
                 } else {
-                    self.protocol_params.dvt_constitution.as_f64()
+                    self.protocol_params.dvt_constitution.clone()
                 };
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
                 let cc_met = check_cc_approval(
                     action_id,
                     &self.governance,
@@ -2080,14 +2100,18 @@ impl LedgerState {
                 drep_met && cc_met
             }
             GovAction::TreasuryWithdrawals { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
                 // DRep + CC, no SPO
                 let drep_threshold = if bootstrap {
-                    0.0
+                    rational_zero
                 } else {
-                    self.protocol_params.dvt_treasury_withdrawal.as_f64()
+                    self.protocol_params.dvt_treasury_withdrawal.clone()
                 };
                 let drep_met =
-                    check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
+                    check_threshold(drep_yes, drep_total.max(total_drep_stake), &drep_threshold);
                 let cc_met = check_cc_approval(
                     action_id,
                     &self.governance,
@@ -2609,18 +2633,21 @@ fn modified_pp_groups(ppu: &ProtocolParamUpdate) -> Vec<PPGroup> {
 ///
 /// Per Haskell `pparamsUpdateThreshold`: takes the maximum DRep group threshold
 /// across all modified parameter groups.
-fn pp_change_drep_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> f64 {
+fn pp_change_drep_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> Rational {
     let groups = modified_pp_groups(ppu);
-    let mut max_threshold = 0.0_f64;
+    let mut max_threshold = Rational {
+        numerator: 0,
+        denominator: 1,
+    };
     for (drep_group, _) in &groups {
         let t = match drep_group {
-            DRepPPGroup::Network => params.dvt_pp_network_group.as_f64(),
-            DRepPPGroup::Economic => params.dvt_pp_economic_group.as_f64(),
-            DRepPPGroup::Technical => params.dvt_pp_technical_group.as_f64(),
-            DRepPPGroup::Gov => params.dvt_pp_gov_group.as_f64(),
+            DRepPPGroup::Network => &params.dvt_pp_network_group,
+            DRepPPGroup::Economic => &params.dvt_pp_economic_group,
+            DRepPPGroup::Technical => &params.dvt_pp_technical_group,
+            DRepPPGroup::Gov => &params.dvt_pp_gov_group,
         };
-        if t > max_threshold {
-            max_threshold = t;
+        if t.gt(&max_threshold) {
+            max_threshold = t.clone();
         }
     }
     max_threshold
@@ -2630,23 +2657,28 @@ fn pp_change_drep_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParamete
 ///
 /// Per Haskell `votingStakePoolThresholdInternal`: SPOs vote with pvtPPSecurityGroup
 /// if ANY modified parameter is tagged SecurityGroup. Otherwise SPOs cannot vote.
-fn pp_change_spo_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> Option<f64> {
+fn pp_change_spo_threshold(
+    ppu: &ProtocolParamUpdate,
+    params: &ProtocolParameters,
+) -> Option<Rational> {
     let groups = modified_pp_groups(ppu);
     let has_security = groups
         .iter()
         .any(|(_, spo)| *spo == StakePoolPPGroup::Security);
     if has_security {
-        Some(params.pvt_pp_security_group.as_f64())
+        Some(params.pvt_pp_security_group.clone())
     } else {
         None
     }
 }
 
-fn check_threshold(yes: u64, total: u64, threshold: f64) -> bool {
+fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> bool {
     if total == 0 {
         return false;
     }
-    (yes as f64 / total as f64) >= threshold
+    // Exact integer comparison: yes/total >= numerator/denominator
+    // ⟺ yes * denominator >= numerator * total (using u128 to avoid overflow)
+    threshold.is_met_by(yes, total)
 }
 
 /// Check if the constitutional committee has approved a governance action.
@@ -2672,7 +2704,7 @@ fn check_cc_approval(
 ) -> bool {
     // Get committee quorum threshold
     let threshold = match &governance.committee_threshold {
-        Some(t) => t.as_f64(),
+        Some(t) => t,
         None => {
             // No committee exists — CC vote fails (blocks ratification)
             return false;
@@ -2680,7 +2712,7 @@ fn check_cc_approval(
     };
 
     // If threshold is 0, auto-approve
-    if threshold == 0.0 {
+    if threshold.is_zero() {
         return true;
     }
 
@@ -2749,7 +2781,8 @@ fn check_cc_approval(
     if total_excluding_abstain == 0 {
         debug!(
             action = %action_id.transaction_id.to_hex(),
-            active_size, yes_count, total_excluding_abstain, threshold,
+            active_size, yes_count, total_excluding_abstain,
+            threshold = threshold.as_f64(),
             cc_voters = cc_votes.len(),
             committee_members = governance.committee_expiration.len(),
             hot_keys = governance.committee_hot_keys.len(),
@@ -2758,13 +2791,15 @@ fn check_cc_approval(
         return false;
     }
 
-    let ratio = yes_count as f64 / total_excluding_abstain as f64;
-    let result = ratio >= threshold;
+    // Exact comparison: yes_count / total_excluding_abstain >= threshold
+    let result = threshold.is_met_by(yes_count, total_excluding_abstain);
     if !result {
         debug!(
             action = %action_id.transaction_id.to_hex(),
-            active_size, yes_count, total_excluding_abstain, threshold,
-            ratio, result,
+            active_size, yes_count, total_excluding_abstain,
+            threshold = threshold.as_f64(),
+            ratio = yes_count as f64 / total_excluding_abstain as f64,
+            result,
             cc_voters = cc_votes.len(),
             committee_members = governance.committee_expiration.len(),
             hot_keys = governance.committee_hot_keys.len(),
@@ -4687,11 +4722,27 @@ mod tests {
 
     #[test]
     fn test_check_threshold_helper() {
-        assert!(check_threshold(7, 10, 0.67)); // 70% >= 67%
-        assert!(!check_threshold(6, 10, 0.67)); // 60% < 67%
-        assert!(check_threshold(1, 1, 0.51)); // 100% >= 51%
-        assert!(!check_threshold(0, 10, 0.01)); // 0% < 1%
-        assert!(!check_threshold(0, 0, 0.5)); // no votes = not met
+        let r67 = Rational {
+            numerator: 67,
+            denominator: 100,
+        };
+        let r51 = Rational {
+            numerator: 51,
+            denominator: 100,
+        };
+        let r01 = Rational {
+            numerator: 1,
+            denominator: 100,
+        };
+        let r50 = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!(check_threshold(7, 10, &r67)); // 70% >= 67%
+        assert!(!check_threshold(6, 10, &r67)); // 60% < 67%
+        assert!(check_threshold(1, 1, &r51)); // 100% >= 51%
+        assert!(!check_threshold(0, 10, &r01)); // 0% < 1%
+        assert!(!check_threshold(0, 0, &r50)); // no votes = not met
     }
 
     /// Helper to create a CC-compatible hot key Hash32 from a Hash28 byte value.
@@ -5392,7 +5443,7 @@ mod tests {
             ..Default::default()
         };
         let threshold = pp_change_drep_threshold(&ppu, &params);
-        assert_eq!(threshold, params.dvt_pp_network_group.as_f64());
+        assert_eq!(threshold, params.dvt_pp_network_group);
     }
 
     #[test]
@@ -5409,11 +5460,14 @@ mod tests {
             ..Default::default()
         };
         let threshold = pp_change_drep_threshold(&ppu, &params);
-        let expected = params
-            .dvt_pp_network_group
-            .as_f64()
-            .max(params.dvt_pp_economic_group.as_f64())
-            .max(params.dvt_pp_technical_group.as_f64());
+        // Should be max of network, economic, technical groups
+        let mut expected = params.dvt_pp_network_group.clone();
+        if params.dvt_pp_economic_group.gt(&expected) {
+            expected = params.dvt_pp_economic_group.clone();
+        }
+        if params.dvt_pp_technical_group.gt(&expected) {
+            expected = params.dvt_pp_technical_group.clone();
+        }
         assert_eq!(threshold, expected);
     }
 
@@ -5425,7 +5479,7 @@ mod tests {
             ..Default::default()
         };
         let spo = pp_change_spo_threshold(&ppu, &params);
-        assert_eq!(spo, Some(params.pvt_pp_security_group.as_f64()));
+        assert_eq!(spo, Some(params.pvt_pp_security_group.clone()));
     }
 
     #[test]
@@ -5452,7 +5506,7 @@ mod tests {
             ..Default::default()
         };
         let spo = pp_change_spo_threshold(&ppu, &params);
-        assert_eq!(spo, Some(params.pvt_pp_security_group.as_f64()));
+        assert_eq!(spo, Some(params.pvt_pp_security_group.clone()));
     }
 
     #[test]
