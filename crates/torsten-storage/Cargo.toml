@@ -26,3 +26,9 @@ crc32fast = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "storage_bench"
+harness = false
