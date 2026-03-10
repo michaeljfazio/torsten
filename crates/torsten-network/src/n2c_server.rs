@@ -260,7 +260,15 @@ fn handle_handshake(payload: &[u8]) -> Result<Option<Segment>, N2CServerError> {
     let mut encoder = minicbor::Encoder::new(&mut response_buf);
 
     // Try to parse the proposed versions to extract network magic
-    let network_magic = parse_handshake_magic(payload).unwrap_or(764824073); // mainnet default
+    let network_magic = match parse_handshake_magic(payload) {
+        Some(magic) => magic,
+        None => {
+            warn!("N2C handshake: could not parse network magic from client proposal, rejecting");
+            return Err(N2CServerError::HandshakeFailed(
+                "could not parse network magic from handshake proposal".into(),
+            ));
+        }
+    };
     let (version, wire_version) = parse_highest_version(payload).unwrap_or((16, 16));
 
     debug!(
@@ -691,9 +699,38 @@ async fn handle_local_chainsync(
 
     match msg_tag {
         0 => {
-            // MsgRequestNext → MsgRollForward or MsgAwaitReply
+            // MsgRequestNext → MsgRollForward, MsgRollBackward, or MsgAwaitReply
             if let Some(provider) = block_provider {
                 if cursor.has_intersection {
+                    // Check for rollback: if client cursor is ahead of the chain tip,
+                    // a rollback has occurred and we need to notify the client
+                    let (tip_slot, tip_hash, tip_block_no) = provider.get_tip();
+                    if cursor.cursor_slot > tip_slot {
+                        debug!(
+                            cursor_slot = cursor.cursor_slot,
+                            tip_slot, "LocalChainSync: MsgRollBackward (chain rolled back)"
+                        );
+                        cursor.cursor_slot = tip_slot;
+
+                        let mut buf = Vec::new();
+                        let mut enc = minicbor::Encoder::new(&mut buf);
+                        // MsgRollBackward [3, point, tip]
+                        enc.array(3)
+                            .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                        enc.u32(3)
+                            .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                        let tip_h = Hash32::from_bytes(tip_hash);
+                        encode_point(&mut enc, tip_slot, &tip_h)?;
+                        encode_tip(&mut enc, tip_slot, &tip_h, tip_block_no)?;
+
+                        return Ok(Some(Segment {
+                            transmission_time: 0,
+                            protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                            is_responder: true,
+                            payload: buf,
+                        }));
+                    }
+
                     if let Some((slot, _hash, cbor)) =
                         provider.get_next_block_after_slot(cursor.cursor_slot)
                     {
@@ -2950,6 +2987,84 @@ mod tests {
         let mut decoder = minicbor::Decoder::new(&segment.payload);
         let _ = decoder.array();
         assert_eq!(decoder.u32().unwrap(), 1); // MsgAwaitReply
+    }
+
+    #[tokio::test]
+    async fn test_handle_local_chainsync_rollback() {
+        use crate::n2n_server::BlockProvider;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct RollbackProvider {
+            tip_slot: AtomicU64,
+        }
+
+        impl BlockProvider for RollbackProvider {
+            fn get_block(&self, _hash: &[u8; 32]) -> Option<Vec<u8>> {
+                None
+            }
+            fn has_block(&self, hash: &[u8; 32]) -> bool {
+                *hash == [0xbb; 32]
+            }
+            fn get_tip(&self) -> (u64, [u8; 32], u64) {
+                let slot = self.tip_slot.load(Ordering::Relaxed);
+                (slot, [0xcc; 32], slot / 10)
+            }
+            fn get_next_block_after_slot(
+                &self,
+                after_slot: u64,
+            ) -> Option<(u64, [u8; 32], Vec<u8>)> {
+                let tip = self.tip_slot.load(Ordering::Relaxed);
+                if after_slot < tip {
+                    Some((after_slot + 10, [0xdd; 32], vec![0x82, 0x00, 0x80]))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let handler = Arc::new(RwLock::new(QueryHandler::new()));
+        let provider_inner = Arc::new(RollbackProvider {
+            tip_slot: AtomicU64::new(200),
+        });
+        let provider: Option<Arc<dyn BlockProvider>> =
+            Some(provider_inner.clone() as Arc<dyn BlockProvider>);
+        let mut cursor = ChainSyncCursor {
+            cursor_slot: 150,
+            has_intersection: true,
+        };
+
+        // Normal MsgRequestNext — should get MsgRollForward
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(0).unwrap();
+
+        let result = handle_local_chainsync(&payload, &handler, &provider, &mut cursor)
+            .await
+            .unwrap();
+        let segment = result.unwrap();
+        let mut decoder = minicbor::Decoder::new(&segment.payload);
+        let _ = decoder.array();
+        assert_eq!(decoder.u32().unwrap(), 2); // MsgRollForward
+        assert_eq!(cursor.cursor_slot, 160);
+
+        // Simulate rollback: tip moves back to 100
+        provider_inner.tip_slot.store(100, Ordering::Relaxed);
+
+        // MsgRequestNext — cursor at 160 > tip at 100, should get MsgRollBackward
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(1).unwrap();
+        enc.u32(0).unwrap();
+
+        let result = handle_local_chainsync(&payload, &handler, &provider, &mut cursor)
+            .await
+            .unwrap();
+        let segment = result.unwrap();
+        let mut decoder = minicbor::Decoder::new(&segment.payload);
+        let _ = decoder.array();
+        assert_eq!(decoder.u32().unwrap(), 3); // MsgRollBackward
+        assert_eq!(cursor.cursor_slot, 100); // cursor moved back to tip
     }
 
     #[test]
