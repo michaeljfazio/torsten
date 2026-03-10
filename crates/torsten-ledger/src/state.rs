@@ -605,15 +605,27 @@ impl LedgerState {
                 self.pool_params.insert(params.operator, pool_reg);
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
-                debug!(
-                    "Pool retirement scheduled at epoch {}: {}",
-                    epoch,
-                    pool_hash.to_hex()
-                );
-                self.pending_retirements
-                    .entry(EpochNo(*epoch))
-                    .or_default()
-                    .push(*pool_hash);
+                // Validate: retirement epoch must be <= current_epoch + e_max
+                let max_retirement_epoch = self.epoch.0 + self.protocol_params.e_max;
+                if *epoch > max_retirement_epoch {
+                    warn!(
+                        pool = %pool_hash.to_hex(),
+                        retirement_epoch = epoch,
+                        current_epoch = self.epoch.0,
+                        e_max = self.protocol_params.e_max,
+                        "Pool retirement epoch exceeds e_max bound, ignoring"
+                    );
+                } else {
+                    debug!(
+                        "Pool retirement scheduled at epoch {}: {}",
+                        epoch,
+                        pool_hash.to_hex()
+                    );
+                    self.pending_retirements
+                        .entry(EpochNo(*epoch))
+                        .or_default()
+                        .push(*pool_hash);
+                }
             }
             Certificate::RegStakeDeleg {
                 credential,
@@ -1876,17 +1888,20 @@ impl LedgerState {
     fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
         let key = Self::reward_account_to_hash(reward_account);
         if let Some(balance) = self.reward_accounts.get_mut(&key) {
-            if balance.0 >= amount.0 {
-                balance.0 -= amount.0;
-            } else {
+            // Per Cardano spec, withdrawal amount must exactly equal the reward balance.
+            // During sync from genesis, we may not have accumulated all rewards yet,
+            // so we only warn and process as best-effort.
+            if balance.0 != amount.0 {
                 debug!(
                     account = %key.to_hex(),
                     balance = balance.0,
                     withdrawal = amount.0,
-                    "Withdrawal exceeds reward balance"
+                    "Withdrawal amount does not match reward balance"
                 );
-                balance.0 = 0;
             }
+            // Always process the withdrawal: set balance to 0
+            // (rewards were consumed in the on-chain transaction)
+            balance.0 = 0;
         }
     }
 
@@ -4689,5 +4704,63 @@ mod tests {
             payload: vec![0u8; 32],
         });
         assert!(stake_credential_hash(&byron).is_none());
+    }
+
+    #[test]
+    fn test_pool_retirement_within_emax() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.e_max = 18;
+        let mut state = LedgerState::new(params);
+        state.epoch = EpochNo(10);
+        state.epoch_length = 432000;
+
+        let pool_hash = Hash28::from_bytes([0xAA; 28]);
+        let cert = Certificate::PoolRetirement {
+            pool_hash,
+            epoch: 28, // 10 + 18 = within bounds
+        };
+        state.process_certificate(&cert);
+        assert!(state
+            .pending_retirements
+            .get(&EpochNo(28))
+            .is_some_and(|v| v.contains(&pool_hash)));
+    }
+
+    #[test]
+    fn test_pool_retirement_exceeds_emax() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.e_max = 18;
+        let mut state = LedgerState::new(params);
+        state.epoch = EpochNo(10);
+        state.epoch_length = 432000;
+
+        let pool_hash = Hash28::from_bytes([0xBB; 28]);
+        let cert = Certificate::PoolRetirement {
+            pool_hash,
+            epoch: 29, // 10 + 18 + 1 = exceeds e_max
+        };
+        state.process_certificate(&cert);
+        // Should NOT have been added
+        assert!(!state.pending_retirements.contains_key(&EpochNo(29)));
+    }
+
+    #[test]
+    fn test_withdrawal_sets_balance_to_zero() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.e_max = 18;
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 432000;
+
+        // Build a raw reward account address: e0 (testnet) + 28-byte key hash
+        let key_bytes = [0xCC; 28];
+        let mut reward_account = vec![0xE0u8];
+        reward_account.extend_from_slice(&key_bytes);
+
+        // reward_account_to_hash pads 28 bytes to Hash32
+        let hash_key = LedgerState::reward_account_to_hash(&reward_account);
+        state.reward_accounts.insert(hash_key, Lovelace(5_000_000));
+
+        state.process_withdrawal(&reward_account, Lovelace(5_000_000));
+        assert_eq!(state.reward_accounts.get(&hash_key), Some(&Lovelace(0)));
     }
 }
