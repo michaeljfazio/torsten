@@ -66,6 +66,7 @@ curve25519-dalek-fork = { package = "curve25519-dalek", git = "https://github.co
 
 # Storage
 rocksdb = "0.22"
+cardano-lsm = "1.0.1"
 tempfile = "3"
 
 # Logging & diagnostics

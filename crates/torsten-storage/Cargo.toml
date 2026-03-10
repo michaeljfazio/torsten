@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 description = "Block and chain storage for Torsten (ImmutableDB + VolatileDB)"
 
+[features]
+default = []
+lsm = ["dep:cardano-lsm"]
+
 [dependencies]
 torsten-primitives = { workspace = true }
 torsten-serialization = { workspace = true }
 torsten-crypto = { workspace = true }
 rocksdb = { workspace = true }
+cardano-lsm = { workspace = true, optional = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
