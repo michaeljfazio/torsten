@@ -14,6 +14,7 @@
 - [Networks](./running/networks.md)
 - [Mithril Snapshot Import](./running/mithril.md)
 - [Monitoring](./running/monitoring.md)
+- [Relay Node](./running/relay.md)
 - [Block Producer](./running/block-producer.md)
 - [Kubernetes Deployment](./running/kubernetes.md)
 

@@ -74,6 +74,9 @@ torsten_peers_connected 8
 | `torsten_blocks_forged_total` | counter | Total blocks forged by this node |
 | `torsten_delegation_count` | gauge | Number of active stake delegations |
 | `torsten_treasury_lovelace` | gauge | Total lovelace in the treasury |
+| `torsten_drep_count` | gauge | Number of registered DReps |
+| `torsten_proposal_count` | gauge | Number of active governance proposals |
+| `torsten_pool_count` | gauge | Number of registered stake pools |
 
 ## Prometheus Configuration
 
@@ -92,21 +95,115 @@ scrape_configs:
 
 ## Grafana Dashboard
 
-You can create a Grafana dashboard to visualize Torsten metrics. Key panels to consider:
+Torsten ships with a pre-built Grafana dashboard at `config/grafana-dashboard.json`. The dashboard covers all node metrics organized into six sections:
 
-- **Sync Progress:** `torsten_sync_progress_percent / 100` (percentage)
-- **Block Height:** `torsten_block_number`
-- **Current Epoch:** `torsten_epoch_number`
-- **Blocks/sec throughput:** `rate(torsten_blocks_applied_total[5m])`
-- **UTxO Set Size:** `torsten_utxo_count`
-- **Mempool Size:** `torsten_mempool_tx_count`
-- **Connected Peers:** `torsten_peers_connected`
-- **Peer States:** `torsten_peers_cold`, `torsten_peers_warm`, `torsten_peers_hot`
-- **Transaction Rejection Rate:** `rate(torsten_transactions_rejected_total[5m])`
-- **Blocks Forged:** `torsten_blocks_forged_total`
-- **Rollback Count:** `torsten_rollback_count_total`
-- **Active Delegations:** `torsten_delegation_count`
-- **Treasury Balance:** `torsten_treasury_lovelace / 1e6` (in ADA)
+- **Overview** -- Sync progress gauge, block height, epoch, slot, connected peers, blocks forged
+- **Sync & Throughput** -- Sync progress over time, block apply/receive rate (blk/s), block height, rollbacks
+- **Peers** -- Connected peer count over time, peer state breakdown (hot/warm/cold stacked)
+- **Mempool & Transactions** -- Mempool tx count, mempool size (bytes), transaction rate (received/validated/rejected)
+- **Ledger State** -- UTxO set size, stake delegations, treasury balance (ADA), registered stake pools
+- **Governance** -- Registered DReps, active governance proposals
+- **Block Production** -- Total blocks forged, block forge rate (blk/h)
+
+### Importing the Dashboard
+
+1. Open Grafana and go to **Dashboards > Import**
+2. Click **Upload JSON file** and select `config/grafana-dashboard.json`
+3. Select your Prometheus data source when prompted
+4. Click **Import**
+
+The dashboard includes an `instance` template variable so you can monitor multiple Torsten nodes (relays + block producer) from a single dashboard. It auto-refreshes every 30 seconds.
+
+### Provisioning
+
+To auto-provision the dashboard, copy it into your Grafana provisioning directory:
+
+```bash
+cp config/grafana-dashboard.json /etc/grafana/provisioning/dashboards/torsten.json
+```
+
+Add a dashboard provider in `/etc/grafana/provisioning/dashboards/torsten.yaml`:
+
+```yaml
+apiVersion: 1
+providers:
+  - name: Torsten
+    folder: Cardano
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
+```
+
+### Quick Start (macOS)
+
+To quickly preview the dashboard locally with Homebrew:
+
+```bash
+# Install Prometheus and Grafana
+brew install prometheus grafana
+
+# Configure Prometheus to scrape Torsten
+cat > /opt/homebrew/etc/prometheus.yml << 'EOF'
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: torsten
+    static_configs:
+      - targets: ['localhost:12798']
+EOF
+
+# Provision the datasource
+cat > "$(brew --prefix)/opt/grafana/share/grafana/conf/provisioning/datasources/torsten.yaml" << 'EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    uid: DS_PROMETHEUS
+EOF
+
+# Provision the dashboard
+cat > "$(brew --prefix)/opt/grafana/share/grafana/conf/provisioning/dashboards/torsten.yaml" << 'EOF'
+apiVersion: 1
+providers:
+  - name: Torsten
+    folder: Cardano
+    type: file
+    options:
+      path: /opt/homebrew/var/lib/grafana/dashboards
+EOF
+
+mkdir -p /opt/homebrew/var/lib/grafana/dashboards
+sed 's/${DS_PROMETHEUS}/DS_PROMETHEUS/g' config/grafana-dashboard.json \
+  > /opt/homebrew/var/lib/grafana/dashboards/torsten.json
+
+# Start services
+brew services start prometheus
+brew services start grafana
+
+# Open the dashboard (default login: admin/admin)
+open "http://localhost:3000/d/torsten-node/torsten-node"
+```
+
+To stop:
+
+```bash
+brew services stop prometheus grafana
+```
+
+### Key Queries
+
+| Panel | PromQL |
+|-------|--------|
+| Sync progress | `torsten_sync_progress_percent / 100` |
+| Block throughput | `rate(torsten_blocks_applied_total[5m])` |
+| Transaction rejection rate | `rate(torsten_transactions_rejected_total[5m])` |
+| Treasury balance (ADA) | `torsten_treasury_lovelace / 1e6` |
+| Block forge rate (per hour) | `rate(torsten_blocks_forged_total[1h]) * 3600` |
 
 ## Console Logging
 

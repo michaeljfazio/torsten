@@ -13,3 +13,4 @@ db-*/
 keys/
 *.skey
 *.vkey
+docs/book/
