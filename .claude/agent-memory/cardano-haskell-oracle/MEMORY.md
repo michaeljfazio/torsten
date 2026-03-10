@@ -30,6 +30,7 @@
 - [peer-sharing-protocol.md](peer-sharing-protocol.md) - PeerSharing mini-protocol: wire format, address encoding, policy constants, governor integration
 - [gov-state-cbor-encoding.md](gov-state-cbor-encoding.md) - GetGovState (tag 24) response: ConwayGovState array(7), Proposals, GovActionState, Committee, Constitution, DRepPulsingState encoding
 - [shelley-genesis-cbor.md](shelley-genesis-cbor.md) - GetGenesisConfig (tag 11): CompactGenesis array(15), UTCTime encoding, legacy vs new PParams, activeSlotsCoeff NO tag(30)
+- [era-history-wire-format.md](era-history-wire-format.md) - GetInterpreter/GetEraHistory: query=[2,0,[2,2,[1,0]]], response=list of EraSummary (no HFC wrapper), Bound/EraParams/SafeZone encoding, RelativeTime=Pico integer, SlotLength=milliseconds
 
 ## N2C Key Facts
 - Shelley query CBOR tags: 40 queries (0-39), see n2c-protocol-details.md
