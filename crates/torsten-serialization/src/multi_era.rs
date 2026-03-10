@@ -221,6 +221,7 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         collateral_return: tx.collateral_return().and_then(|o| convert_output(&o).ok()),
         total_collateral: tx.total_collateral().map(Lovelace),
         reference_inputs,
+        update: convert_update_proposal(tx),
         voting_procedures: convert_voting_procedures(tx),
         proposal_procedures: convert_proposal_procedures(tx),
         treasury_value: tx
@@ -960,6 +961,134 @@ fn convert_withdrawals(tx: &PallasTx) -> BTreeMap<Vec<u8>, Lovelace> {
         _ => {}
     }
     result
+}
+
+/// Extract pre-Conway update proposal from a transaction (field 6 in CDDL)
+fn convert_update_proposal(tx: &PallasTx) -> Option<UpdateProposal> {
+    let update = tx.update()?;
+    match update {
+        pallas_traverse::MultiEraUpdate::AlonzoCompatible(u) => {
+            let proposed_updates = u
+                .proposed_protocol_parameter_updates
+                .iter()
+                .map(|(genesis_hash, ppu)| {
+                    (
+                        bytes_to_hash32(genesis_hash),
+                        convert_pallas_ppup_alonzo(ppu),
+                    )
+                })
+                .collect();
+            Some(UpdateProposal {
+                proposed_updates,
+                epoch: u.epoch,
+            })
+        }
+        pallas_traverse::MultiEraUpdate::Babbage(u) => {
+            let proposed_updates = u
+                .proposed_protocol_parameter_updates
+                .iter()
+                .map(|(genesis_hash, ppu)| {
+                    (
+                        bytes_to_hash32(genesis_hash),
+                        convert_pallas_ppup_babbage(ppu),
+                    )
+                })
+                .collect();
+            Some(UpdateProposal {
+                proposed_updates,
+                epoch: u.epoch,
+            })
+        }
+        _ => None, // Byron/Conway handled differently
+    }
+}
+
+/// Convert Alonzo-era ProtocolParamUpdate to our type
+fn convert_pallas_ppup_alonzo(
+    ppu: &pallas_primitives::alonzo::ProtocolParamUpdate,
+) -> ProtocolParamUpdate {
+    ProtocolParamUpdate {
+        min_fee_a: ppu.minfee_a.map(|v| v as u64),
+        min_fee_b: ppu.minfee_b.map(|v| v as u64),
+        max_block_body_size: ppu.max_block_body_size.map(|v| v as u64),
+        max_tx_size: ppu.max_transaction_size.map(|v| v as u64),
+        max_block_header_size: ppu.max_block_header_size.map(|v| v as u64),
+        key_deposit: ppu.key_deposit.map(Lovelace),
+        pool_deposit: ppu.pool_deposit.map(Lovelace),
+        e_max: ppu.maximum_epoch,
+        n_opt: ppu.desired_number_of_stake_pools.map(|v| v as u64),
+        a0: ppu.pool_pledge_influence.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        rho: ppu.expansion_rate.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        tau: ppu.treasury_growth_rate.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        // protocol_version is not in our ProtocolParamUpdate (handled via hard forks)
+        min_pool_cost: ppu.min_pool_cost.map(Lovelace),
+        ada_per_utxo_byte: ppu.ada_per_utxo_byte.map(Lovelace),
+        max_tx_ex_units: ppu.max_tx_ex_units.as_ref().map(|eu| ExUnits {
+            mem: eu.mem,
+            steps: eu.steps,
+        }),
+        max_block_ex_units: ppu.max_block_ex_units.as_ref().map(|eu| ExUnits {
+            mem: eu.mem,
+            steps: eu.steps,
+        }),
+        max_val_size: ppu.max_value_size.map(|v| v as u64),
+        collateral_percentage: ppu.collateral_percentage.map(|v| v as u64),
+        max_collateral_inputs: ppu.max_collateral_inputs.map(|v| v as u64),
+        ..Default::default()
+    }
+}
+
+/// Convert Babbage-era ProtocolParamUpdate to our type
+fn convert_pallas_ppup_babbage(
+    ppu: &pallas_primitives::babbage::ProtocolParamUpdate,
+) -> ProtocolParamUpdate {
+    ProtocolParamUpdate {
+        min_fee_a: ppu.minfee_a.map(|v| v as u64),
+        min_fee_b: ppu.minfee_b.map(|v| v as u64),
+        max_block_body_size: ppu.max_block_body_size.map(|v| v as u64),
+        max_tx_size: ppu.max_transaction_size.map(|v| v as u64),
+        max_block_header_size: ppu.max_block_header_size.map(|v| v as u64),
+        key_deposit: ppu.key_deposit.map(Lovelace),
+        pool_deposit: ppu.pool_deposit.map(Lovelace),
+        e_max: ppu.maximum_epoch,
+        n_opt: ppu.desired_number_of_stake_pools.map(|v| v as u64),
+        a0: ppu.pool_pledge_influence.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        rho: ppu.expansion_rate.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        tau: ppu.treasury_growth_rate.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
+        // protocol_version is not in our ProtocolParamUpdate (handled via hard forks)
+        min_pool_cost: ppu.min_pool_cost.map(Lovelace),
+        ada_per_utxo_byte: ppu.ada_per_utxo_byte.map(Lovelace),
+        max_tx_ex_units: ppu.max_tx_ex_units.as_ref().map(|eu| ExUnits {
+            mem: eu.mem,
+            steps: eu.steps,
+        }),
+        max_block_ex_units: ppu.max_block_ex_units.as_ref().map(|eu| ExUnits {
+            mem: eu.mem,
+            steps: eu.steps,
+        }),
+        max_val_size: ppu.max_value_size.map(|v| v as u64),
+        collateral_percentage: ppu.collateral_percentage.map(|v| v as u64),
+        max_collateral_inputs: ppu.max_collateral_inputs.map(|v| v as u64),
+        ..Default::default()
+    }
 }
 
 fn convert_voting_procedures(

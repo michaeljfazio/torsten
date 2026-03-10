@@ -132,6 +132,9 @@ pub struct LedgerState {
     pub prev_epoch_first_block_hash: Option<Hash32>,
     /// Shelley genesis hash (used to initialize rolling nonce)
     pub genesis_hash: Hash32,
+    /// Pending protocol parameter update proposals (pre-Conway):
+    /// Maps target_epoch -> [(genesis_delegate_hash, proposed_update)]
+    pub pending_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
     /// Conway governance state
     pub governance: GovernanceState,
     /// Slot configuration for Plutus time conversion
@@ -273,6 +276,7 @@ impl LedgerState {
             first_block_hash_of_epoch: None,
             prev_epoch_first_block_hash: None,
             genesis_hash: Hash32::ZERO,
+            pending_pp_updates: BTreeMap::new(),
             governance: GovernanceState::default(),
             slot_config: SlotConfig::default(),
         }
@@ -503,6 +507,21 @@ impl LedgerState {
             // Process treasury donations
             if let Some(donation) = tx.body.donation {
                 self.treasury += donation;
+            }
+
+            // Collect pre-Conway protocol parameter update proposals
+            if let Some(ref update) = tx.body.update {
+                for (genesis_hash, ppu) in &update.proposed_updates {
+                    debug!(
+                        genesis_hash = %genesis_hash.to_hex(),
+                        target_epoch = update.epoch,
+                        "Collected protocol parameter update proposal"
+                    );
+                    self.pending_pp_updates
+                        .entry(EpochNo(update.epoch))
+                        .or_default()
+                        .push((*genesis_hash, ppu.clone()));
+                }
             }
         }
 
@@ -2411,6 +2430,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,
@@ -2486,6 +2506,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,
@@ -2770,6 +2791,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,
@@ -3651,6 +3673,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,
@@ -4711,6 +4734,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: std::collections::BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,

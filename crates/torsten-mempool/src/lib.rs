@@ -456,6 +456,7 @@ mod tests {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,

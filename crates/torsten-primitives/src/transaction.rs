@@ -203,6 +203,16 @@ pub enum MIRTarget {
     OtherAccountingPot(u64),
 }
 
+/// Pre-Conway protocol parameter update proposal (Shelley-Babbage)
+/// Contains proposed updates keyed by genesis delegate key hash, targeting a specific epoch
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProposal {
+    /// Proposed updates: genesis_delegate_hash -> proposed_params
+    pub proposed_updates: Vec<(Hash32, ProtocolParamUpdate)>,
+    /// Target epoch for the update
+    pub epoch: u64,
+}
+
 /// Delegated Representative
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DRep {
@@ -507,6 +517,7 @@ impl Transaction {
                 collateral_return: None,
                 total_collateral: None,
                 reference_inputs: vec![],
+                update: None,
                 voting_procedures: std::collections::BTreeMap::new(),
                 proposal_procedures: vec![],
                 treasury_value: None,
@@ -548,6 +559,8 @@ pub struct TransactionBody {
     pub collateral_return: Option<TransactionOutput>,
     pub total_collateral: Option<Lovelace>,
     pub reference_inputs: Vec<TransactionInput>,
+    // Pre-Conway: update proposals (field 6 in CDDL)
+    pub update: Option<UpdateProposal>,
     // Conway governance
     pub voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>>,
     pub proposal_procedures: Vec<ProposalProcedure>,
