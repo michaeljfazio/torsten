@@ -1976,11 +1976,15 @@ impl Node {
         {
             let current_epoch = self.ledger_state.read().await.epoch.0;
             if current_epoch > *last_snapshot_epoch {
+                // Count ALL epoch transitions (batches may span multiple epochs)
+                let epochs_crossed = (current_epoch - *last_snapshot_epoch) as u32;
                 info!(
                     epoch = current_epoch,
+                    epochs_crossed,
                     "Epoch transition — saving ledger snapshot"
                 );
-                self.epoch_transitions_observed = self.epoch_transitions_observed.saturating_add(1);
+                self.epoch_transitions_observed =
+                    self.epoch_transitions_observed.saturating_add(epochs_crossed);
                 self.save_ledger_snapshot().await;
                 *last_snapshot_epoch = current_epoch;
             }

@@ -319,21 +319,37 @@ impl OuroborosPraos {
             // Uses exact 34-digit fixed-point arithmetic (dashu IBig) matching
             // Haskell's taylorExpCmp / pallas-math implementation.
             if header.vrf_result.output.len() == 64 {
-                let leader_value = crate::slot_leader::vrf_leader_value(&header.vrf_result.output);
-                if !torsten_crypto::vrf::check_leader_value(
-                    &leader_value,
-                    info.relative_stake,
-                    self.active_slot_coeff,
-                ) {
+                // Praos (Babbage/Conway, protocol >= 7): Blake2b-256("L" || vrf_output), certNatMax = 2^256
+                // TPraos (Shelley-Alonzo, protocol < 7): raw 64-byte vrf_output, certNatMax = 2^512
+                let is_praos = header.protocol_version.major >= 7;
+                let is_leader = if is_praos {
+                    let leader_value =
+                        crate::slot_leader::vrf_leader_value(&header.vrf_result.output);
+                    torsten_crypto::vrf::check_leader_value(
+                        &leader_value,
+                        info.relative_stake,
+                        self.active_slot_coeff,
+                    )
+                } else {
+                    // TPraos: raw VRF output directly
+                    torsten_crypto::vrf::check_leader_value_tpraos(
+                        &header.vrf_result.output,
+                        info.relative_stake,
+                        self.active_slot_coeff,
+                    )
+                };
+                if !is_leader {
                     if self.strict_verification {
                         return Err(ConsensusError::InvalidBlock(format!(
-                            "VRF leader eligibility check failed: slot={}, relative_stake={}",
-                            header.slot.0, info.relative_stake
+                            "VRF leader eligibility check failed: slot={}, sigma={}, proto={}",
+                            header.slot.0, info.relative_stake, header.protocol_version.major,
                         )));
                     } else {
-                        warn!(
+                        debug!(
                             slot = header.slot.0,
                             relative_stake = info.relative_stake,
+                            proto = header.protocol_version.major,
+                            praos = is_praos,
                             "Praos: VRF leader eligibility check failed (non-strict, skipping)"
                         );
                     }

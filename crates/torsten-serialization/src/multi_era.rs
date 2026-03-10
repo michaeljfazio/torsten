@@ -113,8 +113,8 @@ fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, Serialization
             let hb = &alonzo.header_body;
             (
                 VrfOutput {
-                    output: hb.nonce_vrf.0.to_vec(),
-                    proof: hb.nonce_vrf.1.to_vec(),
+                    output: hb.leader_vrf.0.to_vec(),
+                    proof: hb.leader_vrf.1.to_vec(),
                 },
                 pallas_hash_to_torsten32(&hb.block_body_hash),
                 OperationalCert {

@@ -90,6 +90,16 @@ pub fn check_leader_value(vrf_output: &[u8], relative_stake: f64, active_slot_co
     leader_check::check_leader_value_exact(vrf_output, relative_stake, active_slot_coeff)
 }
 
+/// TPraos leader check: uses raw VRF output bytes directly with certNatMax = 2^512.
+/// Used for Shelley/Allegra/Mary/Alonzo eras (protocol versions 2-6).
+pub fn check_leader_value_tpraos(
+    vrf_output: &[u8],
+    relative_stake: f64,
+    active_slot_coeff: f64,
+) -> bool {
+    leader_check::check_leader_value_tpraos(vrf_output, relative_stake, active_slot_coeff)
+}
+
 /// Check leader value with exact rational active_slot_coeff (e.g., 1/20 for 0.05).
 /// This avoids f64 precision loss when converting the protocol parameter.
 pub fn check_leader_value_rational(
@@ -432,6 +442,60 @@ mod leader_check {
 
         let (f_num, f_den) = f64_to_rational(active_slot_coeff);
         check_leader_value_with_rational_coeff(vrf_output, relative_stake, f_num, f_den)
+    }
+
+    /// TPraos leader check: raw VRF output (64 bytes) with certNatMax = 2^512.
+    /// Used for Shelley/Allegra/Mary/Alonzo eras.
+    pub fn check_leader_value_tpraos(
+        vrf_output: &[u8],
+        relative_stake: f64,
+        active_slot_coeff: f64,
+    ) -> bool {
+        if relative_stake <= 0.0 {
+            return false;
+        }
+        if active_slot_coeff >= 1.0 {
+            return true;
+        }
+
+        let (f_num, f_den) = f64_to_rational(active_slot_coeff);
+        if f_den == 0 || f_num >= f_den {
+            return true;
+        }
+
+        // TPraos: certNatMax = 2^512, certNat from raw 64-byte VRF output
+        let cert_nat_max = IBig::from(2).pow(512);
+        let cert_nat = if vrf_output.len() >= 64 {
+            IBig::from(dashu_int::UBig::from_be_bytes(&vrf_output[..64]))
+        } else {
+            IBig::from(dashu_int::UBig::from_be_bytes(vrf_output))
+        };
+
+        let q = &cert_nat_max - &cert_nat;
+        if q <= *ZERO {
+            return false;
+        }
+
+        let mut recip_q = IBig::from(0);
+        fp_div(&mut recip_q, &cert_nat_max, &q);
+
+        let one_minus_f_fp = IBig::from(f_den - f_num)
+            * &*PRECISION
+            / IBig::from(f_den);
+
+        let mut ln_one_minus_f = IBig::from(0);
+        ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
+        let c = -&ln_one_minus_f;
+
+        let sigma_fp = float_to_fixed(relative_stake);
+        let mut x = &sigma_fp * &c;
+        fp_scale(&mut x);
+
+        match ref_exp_cmp(1000, &x, 3, &recip_q) {
+            ExpCmpResult::LT => true,
+            ExpCmpResult::GT => false,
+            ExpCmpResult::Unknown => false,
+        }
     }
 
     /// Exact VRF leader eligibility check with rational active_slot_coeff.
@@ -906,6 +970,154 @@ mod leader_check {
                 ExpCmpResult::LT,
                 "1.04 should be below exp(0.05)"
             );
+        }
+
+        #[test]
+        fn test_leader_check_diagnostic() {
+            // Simulate the EXACT computation path used for received blocks.
+            // For a pool with ~4% relative stake and f=0.05:
+            // phi_f(sigma) = 1 - (1-f)^sigma = 1 - 0.95^0.04 ≈ 0.002052
+            // A block produced by this pool must have certNat/certNatMax < 0.002052
+            // This means the leader_value first byte must be 0x00.
+            let sigma = 0.039146;
+            let f = 0.05;
+            let (f_num, f_den) = f64_to_rational(f);
+            assert_eq!((f_num, f_den), (1, 20), "f=0.05 should be 1/20");
+
+            // Expected threshold: phi_f(sigma) = 1 - (1-f)^sigma
+            let phi = 1.0 - (1.0 - f).powf(sigma);
+            eprintln!("phi_f({}) = {}", sigma, phi);
+
+            // A leader_value that SHOULD pass (certNat = 0, minimum possible)
+            let leader_value_zero = [0u8; 32];
+            assert!(
+                check_leader_value_exact(&leader_value_zero, sigma, f),
+                "certNat=0 must always be leader"
+            );
+
+            // A leader_value that SHOULD pass (certNat just below threshold)
+            // threshold = phi * 2^256
+            // Use leader_value starting with 0x00, 0x00 (certNat < 2^240)
+            let mut leader_just_below = [0u8; 32];
+            leader_just_below[2] = 0x01; // certNat = 2^232, ratio = 2^232/2^256 = 2^-24 ≈ 5.96e-8
+            eprintln!(
+                "Testing certNat ratio = 2^-24 ≈ {:.2e} vs phi = {:.6e}",
+                1.0 / (1u64 << 24) as f64,
+                phi
+            );
+            assert!(
+                check_leader_value_exact(&leader_just_below, sigma, f),
+                "certNat = 2^-24 should be well below phi = {:.6e}",
+                phi
+            );
+
+            // A leader_value that SHOULD FAIL (certNat well above threshold)
+            let mut leader_above = [0u8; 32];
+            leader_above[0] = 0x10; // certNat/certNatMax ≈ 16/256 = 0.0625 >> phi
+            assert!(
+                !check_leader_value_exact(&leader_above, sigma, f),
+                "certNat ratio 0.0625 should NOT be leader (phi = {:.6})",
+                phi
+            );
+
+            // Now trace intermediate values for the passing case
+            let cert_nat_max = cert_nat_max();
+            let cert_nat =
+                IBig::from(dashu_int::UBig::from_be_bytes(&leader_just_below));
+            let q = &cert_nat_max - &cert_nat;
+            let mut recip_q = IBig::from(0);
+            fp_div(&mut recip_q, &cert_nat_max, &q);
+            let recip_q_f64 = ibig_to_f64(&recip_q);
+            eprintln!("recip_q (1/(1-a)) = {:.15}", recip_q_f64);
+
+            let one_minus_f_fp = IBig::from(f_den - f_num)
+                * &*PRECISION
+                / IBig::from(f_den);
+            let mut ln_one_minus_f = IBig::from(0);
+            ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
+            let c = -&ln_one_minus_f;
+            let c_f64 = ibig_to_f64(&c);
+            eprintln!("|ln(1-f)| = {:.15} (expected {:.15})", c_f64, -(1.0 - f).ln());
+
+            let sigma_fp = float_to_fixed(sigma);
+            let sigma_roundtrip = ibig_to_f64(&sigma_fp);
+            eprintln!(
+                "sigma fixed-point roundtrip = {:.15} (input = {:.15})",
+                sigma_roundtrip, sigma
+            );
+
+            let mut x = &sigma_fp * &c;
+            fp_scale(&mut x);
+            let x_f64 = ibig_to_f64(&x);
+            let expected_x = sigma * (-(1.0 - f).ln());
+            eprintln!("x = sigma * |ln(1-f)| = {:.15} (expected {:.15})", x_f64, expected_x);
+
+            let mut exp_x = IBig::from(0);
+            ref_exp(&mut exp_x, &x);
+            let exp_x_f64 = ibig_to_f64(&exp_x);
+            eprintln!(
+                "exp(x) = {:.15} (expected {:.15})",
+                exp_x_f64,
+                expected_x.exp()
+            );
+            eprintln!(
+                "recip_q < exp(x)? {} < {} = {}",
+                recip_q_f64,
+                exp_x_f64,
+                recip_q_f64 < exp_x_f64
+            );
+
+            // Also test via ref_exp_cmp
+            let cmp_result = ref_exp_cmp(1000, &x, 3, &recip_q);
+            eprintln!("ref_exp_cmp result = {:?}", cmp_result);
+            assert_eq!(
+                cmp_result,
+                ExpCmpResult::LT,
+                "recip_q ({:.10}) should be LT exp(x) ({:.10})",
+                recip_q_f64,
+                exp_x_f64
+            );
+        }
+
+        #[test]
+        fn test_leader_check_real_stakes() {
+            // Test with exact relative_stake values from actual preview testnet pools
+            let stakes = [0.039145993077029484, 0.0009393015339035087, 0.0009173133273195841];
+            let f = 0.05;
+
+            for sigma in &stakes {
+                // A VRF output of all zeros MUST pass (certNat = 0)
+                let zero_output = [0u8; 32];
+                assert!(
+                    check_leader_value_exact(&zero_output, *sigma, f),
+                    "certNat=0 must always pass for sigma={}",
+                    sigma
+                );
+
+                // A VRF output starting with 0x10 (certNat/max ≈ 6.25%) should fail
+                // since phi_f(sigma) < 0.003 for all these stakes
+                let mut high_output = [0u8; 32];
+                high_output[0] = 0x10;
+                assert!(
+                    !check_leader_value_exact(&high_output, *sigma, f),
+                    "certNat ≈ 6.25% should NOT pass for sigma={}",
+                    sigma
+                );
+            }
+        }
+
+        #[test]
+        fn test_tpraos_leader_check() {
+            // TPraos: raw 64-byte output, certNatMax = 2^512
+            // With sigma=1.0, f=0.05: phi = 0.05
+            // certNat=0 should always pass
+            assert!(check_leader_value_tpraos(&[0u8; 64], 1.0, 0.05));
+
+            // High output should fail
+            assert!(!check_leader_value_tpraos(&[0xFFu8; 64], 1.0, 0.05));
+
+            // Zero stake never passes
+            assert!(!check_leader_value_tpraos(&[0u8; 64], 0.0, 0.05));
         }
 
         #[test]
