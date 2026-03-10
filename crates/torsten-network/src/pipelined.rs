@@ -49,6 +49,8 @@ pub struct PipelinedPeerClient {
     /// drained (e.g. after AwaitReply with many pending MsgRequestNext).
     /// The caller should reconnect before using this client again.
     stale: bool,
+    /// TxSubmission2 channel (available for taking by a background tx fetcher)
+    txsub_channel: Option<pallas_network::multiplexer::AgentChannel>,
 }
 
 impl PipelinedPeerClient {
@@ -68,7 +70,7 @@ impl PipelinedPeerClient {
         let hs_channel = plexer.subscribe_client(PROTOCOL_N2N_HANDSHAKE);
         let cs_channel = plexer.subscribe_client(PROTOCOL_N2N_CHAIN_SYNC);
         let bf_channel = plexer.subscribe_client(PROTOCOL_N2N_BLOCK_FETCH);
-        let _txsub_channel = plexer.subscribe_client(PROTOCOL_N2N_TX_SUBMISSION);
+        let txsub_channel = plexer.subscribe_client(PROTOCOL_N2N_TX_SUBMISSION);
         let _peersharing_channel = plexer.subscribe_client(PROTOCOL_N2N_PEER_SHARING);
         let ka_channel = plexer.subscribe_client(PROTOCOL_N2N_KEEP_ALIVE);
 
@@ -110,6 +112,7 @@ impl PipelinedPeerClient {
             remote_addr,
             in_flight: 0,
             stale: false,
+            txsub_channel: Some(txsub_channel),
         })
     }
 
@@ -360,6 +363,13 @@ impl PipelinedPeerClient {
     /// reconnected before further use.
     pub fn is_stale(&self) -> bool {
         self.stale
+    }
+
+    /// Take the TxSubmission2 agent channel for use by a background tx fetcher.
+    ///
+    /// Returns `None` if the channel has already been taken.
+    pub fn take_txsub_channel(&mut self) -> Option<pallas_network::multiplexer::AgentChannel> {
+        self.txsub_channel.take()
     }
 
     /// Abort the connection.

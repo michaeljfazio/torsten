@@ -1027,8 +1027,46 @@ impl Node {
             let pipelined_client = {
                 let target = peer_addr.to_string();
                 match PipelinedPeerClient::connect(&*target, network_magic).await {
-                    Ok(pc) => {
+                    Ok(mut pc) => {
                         info!("Pipelined ChainSync client connected to {target}");
+                        // Take the TxSubmission channel and spawn a background tx fetcher
+                        if let Some(txsub_channel) = pc.take_txsub_channel() {
+                            let mempool = self.mempool.clone();
+                            let ledger = self.ledger_state.clone();
+                            let slot_config = self.ledger_state.read().await.slot_config;
+                            let shutdown = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                let validator: Option<Arc<dyn TxValidator>> =
+                                    Some(Arc::new(LedgerTxValidator {
+                                        ledger,
+                                        slot_config,
+                                    }));
+                                let mut client =
+                                    torsten_network::TxSubmissionClient::new(txsub_channel);
+                                let mut shutdown = shutdown;
+                                tokio::select! {
+                                    result = client.run(mempool, validator) => {
+                                        match result {
+                                            Ok(stats) => {
+                                                info!(
+                                                    received = stats.received,
+                                                    accepted = stats.accepted,
+                                                    rejected = stats.rejected,
+                                                    duplicate = stats.duplicate,
+                                                    "TxSubmission2 client session ended"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                debug!("TxSubmission2 client error: {e}");
+                                            }
+                                        }
+                                    }
+                                    _ = shutdown.changed() => {
+                                        debug!("TxSubmission2 client: shutdown");
+                                    }
+                                }
+                            });
+                        }
                         Some(pc)
                     }
                     Err(e) => {
