@@ -458,6 +458,88 @@ fn parse_mint_args(mint_args: &[String]) -> Result<Vec<MintEntry>> {
     Ok(policy_map.into_iter().collect())
 }
 
+/// Parse a cardano-cli JSON native script into our NativeScript type.
+///
+/// Supported JSON "type" values:
+/// - "sig" / "ScriptPubkey": requires a key hash
+/// - "all" / "ScriptAll": requires all sub-scripts
+/// - "any" / "ScriptAny": requires any sub-script
+/// - "atLeast" / "ScriptNOfK": requires N of K sub-scripts
+/// - "after" / "InvalidBefore": valid after slot
+/// - "before" / "InvalidHereafter": valid before slot
+fn parse_json_native_script(
+    json: &serde_json::Value,
+) -> Result<torsten_primitives::transaction::NativeScript> {
+    use torsten_primitives::hash::Hash32;
+    use torsten_primitives::transaction::NativeScript;
+
+    let script_type = json["type"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Native script missing 'type' field"))?;
+
+    match script_type {
+        "sig" | "ScriptPubkey" => {
+            let key_hash_hex = json["keyHash"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("sig script missing 'keyHash'"))?;
+            let key_hash_bytes = hex::decode(key_hash_hex)
+                .map_err(|e| anyhow::anyhow!("Invalid keyHash hex: {e}"))?;
+            if key_hash_bytes.len() != 28 {
+                bail!("keyHash must be 28 bytes, got {}", key_hash_bytes.len());
+            }
+            // Pad 28-byte key hash to Hash32 (our internal representation)
+            let mut bytes = [0u8; 32];
+            bytes[..28].copy_from_slice(&key_hash_bytes);
+            Ok(NativeScript::ScriptPubkey(Hash32::from_bytes(bytes)))
+        }
+        "all" | "ScriptAll" => {
+            let scripts = parse_json_script_list(json)?;
+            Ok(NativeScript::ScriptAll(scripts))
+        }
+        "any" | "ScriptAny" => {
+            let scripts = parse_json_script_list(json)?;
+            Ok(NativeScript::ScriptAny(scripts))
+        }
+        "atLeast" | "ScriptNOfK" => {
+            let required = json["required"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("atLeast script missing 'required'"))?
+                as u32;
+            let scripts = parse_json_script_list(json)?;
+            Ok(NativeScript::ScriptNOfK(required, scripts))
+        }
+        "after" | "InvalidBefore" => {
+            let slot = json["slot"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("after script missing 'slot'"))?;
+            Ok(NativeScript::InvalidBefore(
+                torsten_primitives::time::SlotNo(slot),
+            ))
+        }
+        "before" | "InvalidHereafter" => {
+            let slot = json["slot"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("before script missing 'slot'"))?;
+            Ok(NativeScript::InvalidHereafter(
+                torsten_primitives::time::SlotNo(slot),
+            ))
+        }
+        _ => bail!("Unknown native script type: '{script_type}'"),
+    }
+}
+
+fn parse_json_script_list(
+    json: &serde_json::Value,
+) -> Result<Vec<torsten_primitives::transaction::NativeScript>> {
+    let scripts_arr = json["scripts"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Script missing 'scripts' array"))?;
+    scripts_arr
+        .iter()
+        .map(parse_json_native_script)
+        .collect::<Result<Vec<_>>>()
+}
+
 /// Load certificate CBOR from a text envelope file
 fn load_certificate_cbor(path: &PathBuf) -> Result<Vec<u8>> {
     let content = std::fs::read_to_string(path)?;
@@ -1008,12 +1090,16 @@ impl TransactionCmd {
             }
             TxSubcommand::Policyid { script_file } => {
                 let content = std::fs::read_to_string(&script_file)?;
-                let script: serde_json::Value = serde_json::from_str(&content)?;
+                let json: serde_json::Value = serde_json::from_str(&content)?;
 
-                // Serialize the native script to CBOR and hash it
-                // For simplicity, hash the JSON representation
-                let script_bytes = serde_json::to_vec(&script)?;
-                let hash = torsten_primitives::hash::blake2b_224(&script_bytes);
+                let native_script = parse_json_native_script(&json)?;
+                let script_cbor =
+                    torsten_serialization::encode::encode_native_script(&native_script);
+                // Script hash = blake2b_224(prefix_tag || cbor_bytes)
+                // Native script prefix tag = 0x00 (PlutusV1=0x01, V2=0x02, V3=0x03)
+                let mut hash_input = vec![0x00];
+                hash_input.extend_from_slice(&script_cbor);
+                let hash = torsten_primitives::hash::blake2b_224(&hash_input);
                 println!("{}", hash.to_hex());
                 Ok(())
             }
@@ -1204,5 +1290,176 @@ mod tests {
         let body = extract_tx_body(&buf).unwrap();
         // Body should be the CBOR for map(0) = 0xa0
         assert_eq!(body, vec![0xa0]);
+    }
+
+    #[test]
+    fn test_parse_mint_args_single_mint() {
+        let policy = "a".repeat(56); // 28-byte policy ID
+        let args = vec![format!("{policy}.deadbeef+100")];
+        let result = parse_mint_args(&args).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, hex::decode(&policy).unwrap());
+        assert_eq!(result[0].1.len(), 1);
+        assert_eq!(result[0].1[0].0, hex::decode("deadbeef").unwrap());
+        assert_eq!(result[0].1[0].1, 100);
+    }
+
+    #[test]
+    fn test_parse_mint_args_burn() {
+        let policy = "b".repeat(56);
+        let args = vec![format!("{policy}.cafe-50")];
+        let result = parse_mint_args(&args).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1[0].1, -50);
+    }
+
+    #[test]
+    fn test_parse_mint_args_multiple_assets_same_policy() {
+        let policy = "c".repeat(56);
+        let args = vec![format!("{policy}.aabb+200"), format!("{policy}.ccdd+300")];
+        let result = parse_mint_args(&args).unwrap();
+        assert_eq!(result.len(), 1); // grouped under same policy
+        assert_eq!(result[0].1.len(), 2);
+        assert_eq!(result[0].1[0].1, 200);
+        assert_eq!(result[0].1[1].1, 300);
+    }
+
+    #[test]
+    fn test_parse_mint_args_no_asset_name() {
+        let policy = "d".repeat(56);
+        let args = vec![format!("{policy}+1000")];
+        let result = parse_mint_args(&args).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].1[0].0.is_empty()); // empty asset name
+        assert_eq!(result[0].1[0].1, 1000);
+    }
+
+    #[test]
+    fn test_parse_mint_args_invalid_format() {
+        let args = vec!["noplusorminussign".to_string()];
+        assert!(parse_mint_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_parse_mint_args_invalid_hex() {
+        let args = vec!["gggg.aabb+100".to_string()];
+        assert!(parse_mint_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_parse_json_native_script_sig() {
+        let json = serde_json::json!({
+            "type": "sig",
+            "keyHash": "e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8ece6f3d3"
+        });
+        let script = parse_json_native_script(&json).unwrap();
+        match script {
+            torsten_primitives::transaction::NativeScript::ScriptPubkey(hash) => {
+                let expected =
+                    hex::decode("e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8ece6f3d3")
+                        .unwrap();
+                assert_eq!(&hash.as_ref()[..28], &expected[..]);
+            }
+            _ => panic!("Expected ScriptPubkey"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_native_script_all() {
+        let json = serde_json::json!({
+            "type": "all",
+            "scripts": [
+                { "type": "sig", "keyHash": "a".repeat(56) },
+                { "type": "after", "slot": 1000 }
+            ]
+        });
+        let script = parse_json_native_script(&json).unwrap();
+        match script {
+            torsten_primitives::transaction::NativeScript::ScriptAll(scripts) => {
+                assert_eq!(scripts.len(), 2);
+            }
+            _ => panic!("Expected ScriptAll"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_native_script_time_locks() {
+        let json = serde_json::json!({ "type": "after", "slot": 500 });
+        let script = parse_json_native_script(&json).unwrap();
+        assert_eq!(
+            script,
+            torsten_primitives::transaction::NativeScript::InvalidBefore(
+                torsten_primitives::time::SlotNo(500)
+            )
+        );
+
+        let json = serde_json::json!({ "type": "before", "slot": 999 });
+        let script = parse_json_native_script(&json).unwrap();
+        assert_eq!(
+            script,
+            torsten_primitives::transaction::NativeScript::InvalidHereafter(
+                torsten_primitives::time::SlotNo(999)
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_json_native_script_at_least() {
+        let json = serde_json::json!({
+            "type": "atLeast",
+            "required": 2,
+            "scripts": [
+                { "type": "sig", "keyHash": "a".repeat(56) },
+                { "type": "sig", "keyHash": "b".repeat(56) },
+                { "type": "sig", "keyHash": "c".repeat(56) }
+            ]
+        });
+        let script = parse_json_native_script(&json).unwrap();
+        match script {
+            torsten_primitives::transaction::NativeScript::ScriptNOfK(n, scripts) => {
+                assert_eq!(n, 2);
+                assert_eq!(scripts.len(), 3);
+            }
+            _ => panic!("Expected ScriptNOfK"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_native_script_invalid() {
+        let json = serde_json::json!({ "type": "unknown" });
+        assert!(parse_json_native_script(&json).is_err());
+
+        let json = serde_json::json!({ "no_type": true });
+        assert!(parse_json_native_script(&json).is_err());
+    }
+
+    #[test]
+    fn test_policyid_cbor_hash() {
+        // A simple sig script — verify it matches cardano-cli output
+        let json = serde_json::json!({
+            "type": "sig",
+            "keyHash": "e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8ece6f3d3"
+        });
+        let script = parse_json_native_script(&json).unwrap();
+        let cbor = torsten_serialization::encode::encode_native_script(&script);
+
+        // The CBOR should be: [0, h'e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8ece6f3d3']
+        assert_eq!(cbor[0], 0x82); // array(2)
+        assert_eq!(cbor[1], 0x00); // uint(0)
+        assert_eq!(cbor[2], 0x58); // bytes(28) - 1-byte length prefix
+        assert_eq!(cbor[3], 0x1c); // 28
+        assert_eq!(cbor.len(), 4 + 28); // header + 28-byte hash
+
+        // Script hash = blake2b_224(0x00 || cbor) — must include native script prefix tag
+        let mut hash_input = vec![0x00];
+        hash_input.extend_from_slice(&cbor);
+        let hash = torsten_primitives::hash::blake2b_224(&hash_input);
+
+        // Verified against cardano-cli 10.15.0:
+        // cardano-cli hash script --script-file <(echo '{"type":"sig","keyHash":"e09d..."}')
+        assert_eq!(
+            hash.to_hex(),
+            "9574ec47eece19ba26900b524f9945d69a28df4fb386522365bf342d"
+        );
     }
 }

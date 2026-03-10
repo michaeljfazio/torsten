@@ -203,23 +203,41 @@ impl Mempool {
         self.txs.contains_key(tx_hash)
     }
 
-    /// Get transactions for block production (up to max count/size)
+    /// Get transactions for block production (up to max count/size).
+    /// Transactions are sorted by fee density (fee/byte) descending to maximize block revenue.
     pub fn get_txs_for_block(&self, max_count: usize, max_size: usize) -> Vec<Transaction> {
-        let order = self.order.read();
+        // Collect all entries with fee density for sorting
+        let mut candidates: Vec<(Transaction, usize, u64)> = self
+            .txs
+            .iter()
+            .map(|entry| {
+                (
+                    entry.tx.clone(),
+                    entry.size_bytes,
+                    entry
+                        .fee
+                        .0
+                        .checked_div(entry.size_bytes as u64)
+                        .unwrap_or(0),
+                )
+            })
+            .collect();
+
+        // Sort by fee density (fee/byte) descending
+        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+
         let mut result = Vec::new();
         let mut total_size = 0;
 
-        for hash in order.iter() {
+        for (tx, size, _) in candidates {
             if result.len() >= max_count {
                 break;
             }
-            if let Some(entry) = self.txs.get(hash) {
-                if total_size + entry.size_bytes > max_size {
-                    continue;
-                }
-                result.push(entry.tx.clone());
-                total_size += entry.size_bytes;
+            if total_size + size > max_size {
+                continue;
             }
+            result.push(tx);
+            total_size += size;
         }
 
         result
@@ -726,5 +744,48 @@ mod tests {
             .unwrap();
         assert!(matches!(result, MempoolAddResult::Added));
         assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_get_txs_for_block_fee_priority() {
+        let mempool = Mempool::new(MempoolConfig::default());
+
+        // Add 3 transactions with different fee densities
+        // tx1: low fee density (100_000 fee / 500 bytes = 200 per byte)
+        let mut tx1 = make_dummy_tx();
+        tx1.body.fee = Lovelace(100_000);
+        let h1 = Hash32::from_bytes([1u8; 32]);
+        mempool
+            .add_tx_with_fee(h1, tx1, 500, Lovelace(100_000))
+            .unwrap();
+
+        // tx2: high fee density (500_000 fee / 500 bytes = 1000 per byte)
+        let mut tx2 = make_dummy_tx();
+        tx2.body.fee = Lovelace(500_000);
+        let h2 = Hash32::from_bytes([2u8; 32]);
+        mempool
+            .add_tx_with_fee(h2, tx2, 500, Lovelace(500_000))
+            .unwrap();
+
+        // tx3: medium fee density (200_000 fee / 500 bytes = 400 per byte)
+        let mut tx3 = make_dummy_tx();
+        tx3.body.fee = Lovelace(200_000);
+        let h3 = Hash32::from_bytes([3u8; 32]);
+        mempool
+            .add_tx_with_fee(h3, tx3, 500, Lovelace(200_000))
+            .unwrap();
+
+        // Get txs — should be sorted by fee density: tx2, tx3, tx1
+        let txs = mempool.get_txs_for_block(10, 100_000);
+        assert_eq!(txs.len(), 3);
+        assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest fee density
+        assert_eq!(txs[1].body.fee, Lovelace(200_000)); // medium
+        assert_eq!(txs[2].body.fee, Lovelace(100_000)); // lowest
+
+        // With size limit, only highest-fee txs should be included
+        let txs = mempool.get_txs_for_block(10, 1000);
+        assert_eq!(txs.len(), 2); // only room for 2 x 500 bytes
+        assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest priority first
+        assert_eq!(txs[1].body.fee, Lovelace(200_000)); // second highest
     }
 }

@@ -134,7 +134,9 @@ pub fn encode_native_script(script: &NativeScript) -> Vec<u8> {
         NativeScript::ScriptPubkey(hash) => {
             let mut buf = encode_array_header(2);
             buf.extend(encode_uint(0));
-            buf.extend(encode_hash32(hash));
+            // Native script key hashes are 28 bytes (AddrKeyhash) on the wire
+            // Our type stores them padded to Hash32, so truncate back to 28
+            buf.extend(encode_bytes(&hash.as_ref()[..28]));
             buf
         }
         NativeScript::ScriptAll(scripts) => {
@@ -1664,6 +1666,10 @@ mod tests {
         let encoded = encode_native_script(&script);
         assert_eq!(encoded[0], 0x82); // array of 2
         assert_eq!(encoded[1], 0x00); // type 0
+                                      // Key hash should be encoded as 28 bytes (AddrKeyhash), not 32
+        assert_eq!(encoded[2], 0x58); // bytes with 1-byte length
+        assert_eq!(encoded[3], 0x1c); // 28 bytes
+        assert_eq!(encoded.len(), 4 + 28); // header(4) + keyhash(28)
     }
 
     #[test]
