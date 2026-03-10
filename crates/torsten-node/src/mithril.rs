@@ -208,7 +208,21 @@ pub async fn import_snapshot(
     );
     import_chunk_files(&extract_dir, database_path)?;
 
-    // Step 7: Cleanup
+    // Step 7: Move immutable chunk files to database path for fast replay.
+    // The node will read these sequentially during ledger replay (much faster
+    // than random LSM reads), then delete them when replay is complete.
+    let immutable_dir = find_immutable_dir(&extract_dir);
+    let replay_dir = database_path.join("immutable-replay");
+    if let Some(ref imm) = immutable_dir {
+        info!("Moving chunk files to database for fast ledger replay");
+        if let Err(e) = fs::rename(imm, &replay_dir) {
+            // rename may fail across filesystems, fall back to copy
+            warn!(error = %e, "rename failed, falling back to copy");
+            copy_dir_recursive(imm, &replay_dir)?;
+        }
+    }
+
+    // Step 8: Cleanup
     info!("Cleaning up temporary files");
     if let Err(e) = fs::remove_file(&archive_path) {
         warn!(error = %e, "Failed to remove archive file");
@@ -612,6 +626,85 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     info!("Import persisted successfully (compaction will run on next node start)");
 
     Ok(())
+}
+
+/// Copy a directory recursively (fallback when rename fails across filesystems).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Iterate blocks from cardano-node immutable chunk files in sequential order.
+///
+/// This is used for fast ledger replay after Mithril import. Reading chunk files
+/// sequentially is orders of magnitude faster than random LSM lookups because
+/// chunk files are already laid out in block order on disk.
+///
+/// Calls the provided callback for each block in order. The callback receives
+/// the raw CBOR bytes. Returns the total number of blocks iterated.
+pub fn replay_from_chunk_files<F>(immutable_dir: &Path, mut on_block: F) -> Result<u64>
+where
+    F: FnMut(&[u8]) -> Result<()>,
+{
+    let mut chunk_numbers: Vec<u64> = Vec::new();
+    for entry in fs::read_dir(immutable_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if let Some(num_str) = name_str.strip_suffix(".chunk") {
+            if let Ok(num) = num_str.parse::<u64>() {
+                chunk_numbers.push(num);
+            }
+        }
+    }
+    chunk_numbers.sort();
+
+    let total_chunks = chunk_numbers.len() as u64;
+    let pb = ProgressBar::new(total_chunks);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} chunks ({per_sec}, {eta})")
+            .expect("invalid template")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
+
+    let mut total_blocks = 0u64;
+    let mut checksum_failures = 0u64;
+
+    for chunk_num in &chunk_numbers {
+        let chunk_path = immutable_dir.join(format!("{chunk_num:05}.chunk"));
+        let secondary_path = immutable_dir.join(format!("{chunk_num:05}.secondary"));
+
+        let mut blocks = if secondary_path.exists() {
+            parse_chunk_with_index(&chunk_path, &secondary_path, &mut checksum_failures)?
+        } else {
+            Vec::new()
+        };
+
+        if blocks.is_empty() {
+            blocks = parse_chunk_sequential(&chunk_path)?;
+        }
+
+        for (_slot, _hash, _block_no, cbor) in &blocks {
+            on_block(cbor)?;
+            total_blocks += 1;
+        }
+
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("Replay complete");
+    Ok(total_blocks)
 }
 
 /// A parsed block: (slot, hash, block_number, raw_cbor)

@@ -1218,11 +1218,19 @@ impl Node {
         }
     }
 
-    /// Replay blocks from local ChainDB to catch the ledger up to storage tip.
+    /// Replay blocks from local storage to catch the ledger up to the chain tip.
     ///
     /// After a Mithril snapshot import, ChainDB contains millions of blocks
     /// but the ledger state starts from genesis. This replays blocks locally
-    /// (no network needed) which is much faster than re-downloading from peers.
+    /// (no network needed).
+    ///
+    /// Two replay modes:
+    /// 1. **Chunk file replay** (fast path): If `immutable-replay/` exists in the
+    ///    database directory (left by Mithril import), reads blocks sequentially
+    ///    from chunk files. This is ~100x faster than LSM lookups because chunk
+    ///    files are laid out sequentially on disk.
+    /// 2. **LSM replay** (fallback): Reads blocks by block number from the LSM tree.
+    ///    Slower due to random I/O but works when chunk files aren't available.
     async fn replay_ledger_from_storage(&self) {
         let db_tip = self.chain_db.read().await.get_tip();
         let ledger_slot = {
@@ -1241,7 +1249,6 @@ impl Node {
         });
 
         // Check if the user wants to limit replay via environment variable.
-        // Default: no limit — replay all blocks to build correct ledger state.
         let replay_limit: u64 = std::env::var("TORSTEN_REPLAY_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1275,52 +1282,157 @@ impl Node {
             "Ledger is behind ChainDB — replaying blocks from local storage"
         );
 
+        // Try fast path: replay from chunk files left by Mithril import
+        let replay_dir = self.database_path.join("immutable-replay");
+        if replay_dir.is_dir() {
+            info!("Found immutable-replay directory, using fast chunk-file replay");
+            self.replay_from_chunk_files(&replay_dir).await;
+            // Clean up chunk files after successful replay
+            if let Err(e) = std::fs::remove_dir_all(&replay_dir) {
+                warn!(error = %e, "Failed to remove immutable-replay directory");
+            } else {
+                info!("Cleaned up immutable-replay directory");
+            }
+            return;
+        }
+
+        // Fallback: replay from LSM tree by block number
+        info!("No chunk files found, replaying from LSM tree (slower)");
+        self.replay_from_lsm(db_tip).await;
+    }
+
+    /// Fast replay: read blocks sequentially from chunk files.
+    ///
+    /// Runs in a blocking thread since chunk file I/O and ledger application
+    /// are CPU-bound synchronous work.
+    async fn replay_from_chunk_files(&self, replay_dir: &std::path::Path) {
+        let ledger_state = self.ledger_state.clone();
+        let snapshot_path = self.database_path.join("ledger-snapshot.bin");
+        let replay_dir = replay_dir.to_path_buf();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            let mut replayed = 0u64;
+            let mut last_log = std::time::Instant::now();
+
+            let result = crate::mithril::replay_from_chunk_files(&replay_dir, |cbor| {
+                match torsten_serialization::multi_era::decode_block(cbor) {
+                    Ok(block) => {
+                        let mut ls_guard = ledger_state.blocking_write();
+                        if let Err(e) = ls_guard.apply_block(&block) {
+                            warn!(slot = block.slot().0, "Ledger replay apply failed: {e}");
+                        }
+                        replayed += 1;
+
+                        if last_log.elapsed().as_secs() >= 5 {
+                            let elapsed = start.elapsed().as_secs_f64();
+                            let speed = replayed as f64 / elapsed;
+                            let slot = ls_guard.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                            let utxos = ls_guard.utxo_set.len();
+                            info!(
+                                "Replaying | {replayed} blocks | slot {slot} \
+                                 | {speed:.0} blocks/s | {utxos} UTxOs"
+                            );
+                            last_log = std::time::Instant::now();
+                        }
+
+                        if replayed.is_multiple_of(100_000) {
+                            if let Err(e) = ls_guard.save_snapshot(&snapshot_path) {
+                                warn!("Failed to save ledger snapshot during replay: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to decode block during chunk replay: {e}");
+                    }
+                }
+                Ok(())
+            });
+
+            match &result {
+                Ok(total) => {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let speed = if elapsed > 0.0 {
+                        *total as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        total,
+                        elapsed_secs = elapsed as u64,
+                        speed = speed as u64,
+                        "Chunk-file replay complete"
+                    );
+                }
+                Err(e) => {
+                    error!("Chunk-file replay failed: {e}");
+                }
+            }
+
+            // Save final snapshot
+            {
+                let ls = ledger_state.blocking_read();
+                if let Err(e) = ls.save_snapshot(&snapshot_path) {
+                    error!("Failed to save ledger snapshot after replay: {e}");
+                }
+            }
+
+            result
+        })
+        .await;
+
+        if let Err(e) = result {
+            error!("Chunk-file replay task panicked: {e}");
+        }
+    }
+
+    /// Fallback replay: read blocks from LSM tree by block number.
+    async fn replay_from_lsm(&self, db_tip: torsten_primitives::block::Tip) {
         let start = std::time::Instant::now();
-        let mut current_slot = ledger_slot;
         let mut replayed = 0u64;
         let mut last_log = std::time::Instant::now();
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
 
-        loop {
-            // Read block from ChainDB
+        let start_block_no = {
+            let ls = self.ledger_state.read().await;
+            ls.tip.block_number.0 + 1
+        };
+        let end_block_no = db_tip.block_number.0;
+
+        for block_no in start_block_no..=end_block_no {
             let block_data = {
                 let db = self.chain_db.read().await;
-                db.get_next_block_after_slot(torsten_primitives::time::SlotNo(current_slot))
+                db.get_block_by_number(torsten_primitives::time::BlockNo(block_no))
             };
 
             match block_data {
-                Ok(Some((next_slot, _hash, cbor))) => {
-                    if next_slot.0 > db_tip_slot {
-                        break;
-                    }
+                Ok(Some((slot, _hash, cbor))) => {
                     match torsten_serialization::multi_era::decode_block(&cbor) {
                         Ok(block) => {
                             let mut ls = self.ledger_state.write().await;
                             if let Err(e) = ls.apply_block(&block) {
-                                warn!(slot = next_slot.0, "Ledger replay apply failed: {e}");
+                                warn!(slot = slot.0, block_no, "Ledger replay apply failed: {e}");
                             }
                             replayed += 1;
-                            current_slot = next_slot.0;
 
-                            // Log progress every 5 seconds
                             if last_log.elapsed().as_secs() >= 5 {
                                 let elapsed = start.elapsed().as_secs_f64();
                                 let speed = replayed as f64 / elapsed;
-                                let pct = if db_tip_slot > 0 {
-                                    current_slot as f64 / db_tip_slot as f64 * 100.0
+                                let pct = if end_block_no > 0 {
+                                    block_no as f64 / end_block_no as f64 * 100.0
                                 } else {
                                     0.0
                                 };
                                 info!(
-                                    "Replaying {pct:.2}% | slot {current_slot}/{db_tip_slot} \
-                                     | {replayed} blocks | {speed:.0} blocks/s \
+                                    "Replaying {pct:.2}% | block {block_no}/{end_block_no} \
+                                     | slot {} | {speed:.0} blocks/s \
                                      | {} UTxOs",
+                                    slot.0,
                                     ls.utxo_set.len()
                                 );
                                 last_log = std::time::Instant::now();
                             }
 
-                            // Save ledger snapshot every epoch (~100k blocks on preview, 432k on mainnet)
                             if replayed.is_multiple_of(100_000) {
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
@@ -1328,17 +1440,16 @@ impl Node {
                             }
                         }
                         Err(e) => {
-                            warn!(
-                                slot = next_slot.0,
-                                "Failed to decode block during replay: {e}"
-                            );
-                            current_slot = next_slot.0;
+                            warn!(block_no, "Failed to decode block during replay: {e}");
                         }
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    warn!(block_no, "Block not found in ChainDB during replay");
+                    break;
+                }
                 Err(e) => {
-                    warn!("Failed to read from ChainDB during replay: {e}");
+                    warn!(block_no, "Failed to read from ChainDB during replay: {e}");
                     break;
                 }
             }
@@ -1354,7 +1465,7 @@ impl Node {
             replayed,
             elapsed_secs = elapsed as u64,
             speed = speed as u64,
-            "Ledger replay from local storage complete"
+            "LSM replay from local storage complete"
         );
 
         // Save final snapshot after replay

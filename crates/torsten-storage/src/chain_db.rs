@@ -86,6 +86,7 @@ fn bulk_import_config() -> LsmConfig {
 // | hash:         | 37   | 32-byte hash     | 8-byte BE slot          |
 // | slot_hash:    | 18   | 8-byte BE slot   | 32-byte hash            |
 // | prev:         | 37   | 32-byte hash     | 32-byte prev_hash       |
+// | blkn:         | 13   | 8-byte BE blk_no | 8-byte BE slot          |
 // | meta:tip      |  8   | —                | TipMetadata (48 B)      |
 
 #[inline]
@@ -117,6 +118,14 @@ fn make_prev_hash_key(hash: &BlockHeaderHash) -> Key {
     let mut buf = [0u8; 37];
     buf[..5].copy_from_slice(b"prev:");
     buf[5..].copy_from_slice(hash.as_bytes());
+    Key::from(buf.as_slice())
+}
+
+#[inline]
+fn make_block_no_key(block_no: BlockNo) -> Key {
+    let mut buf = [0u8; 13];
+    buf[..5].copy_from_slice(b"blkn:");
+    buf[5..].copy_from_slice(&block_no.0.to_be_bytes());
     Key::from(buf.as_slice())
 }
 
@@ -263,7 +272,7 @@ impl ChainDB {
             "ChainDB: adding block"
         );
 
-        let mut batch = Vec::with_capacity(5);
+        let mut batch = Vec::with_capacity(6);
         batch.push((make_slot_key(slot), Value::from(cbor.as_slice())));
         batch.push((
             make_hash_key(&hash),
@@ -271,6 +280,10 @@ impl ChainDB {
         ));
         batch.push((make_slot_hash_key(slot), Value::from(hash.as_bytes())));
         batch.push((make_prev_hash_key(&hash), Value::from(prev_hash.as_bytes())));
+        batch.push((
+            make_block_no_key(block_no),
+            Value::from(slot.0.to_be_bytes().as_slice()),
+        ));
 
         if self.tip.is_none_or(|t| slot > t.slot) {
             let meta = TipMetadata {
@@ -298,7 +311,7 @@ impl ChainDB {
             return Ok(());
         }
 
-        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 4 + 1);
+        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 5 + 1);
 
         for (hash, slot, block_no, prev_hash, cbor) in &blocks {
             // Skip blocks that already exist
@@ -318,6 +331,10 @@ impl ChainDB {
             ));
             batch.push((make_slot_hash_key(*slot), Value::from(hash.as_bytes())));
             batch.push((make_prev_hash_key(hash), Value::from(prev_hash.as_bytes())));
+            batch.push((
+                make_block_no_key(*block_no),
+                Value::from(slot.0.to_be_bytes().as_slice()),
+            ));
 
             if self.tip.is_none_or(|t| *slot > t.slot) {
                 self.tip = Some(TipMetadata {
@@ -353,7 +370,7 @@ impl ChainDB {
             return Ok(());
         }
 
-        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 3 + 1);
+        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 4 + 1);
         let mut new_tip: Option<TipMetadata> = None;
 
         for &(slot, hash, block_no, cbor) in blocks {
@@ -363,6 +380,10 @@ impl ChainDB {
                 Value::from(slot.0.to_be_bytes().as_slice()),
             ));
             batch.push((make_slot_hash_key(slot), Value::from(hash.as_bytes())));
+            batch.push((
+                make_block_no_key(block_no),
+                Value::from(slot.0.to_be_bytes().as_slice()),
+            ));
 
             let dominated = match (&new_tip, &self.tip) {
                 (Some(nt), _) => slot > nt.slot,
@@ -430,6 +451,50 @@ impl ChainDB {
     /// Check if a block exists by hash (bloom-filter accelerated, no CBOR read).
     pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
         self.tree.get(&make_hash_key(hash)).ok().flatten().is_some()
+    }
+
+    /// Get block CBOR by block number.
+    ///
+    /// O(1) lookup using the `blkn:` index. Used for sequential replay
+    /// after Mithril import to avoid expensive range scans.
+    pub fn get_block_by_number(
+        &self,
+        block_no: BlockNo,
+    ) -> Result<Option<(SlotNo, BlockHeaderHash, Vec<u8>)>, ChainDBError> {
+        // blkn -> slot
+        let slot_value = match self.tree.get(&make_block_no_key(block_no))? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let slot_bytes: &[u8] = slot_value.as_ref();
+        if slot_bytes.len() != 8 {
+            return Ok(None);
+        }
+        let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+
+        // slot -> hash
+        let hash = self
+            .tree
+            .get(&make_slot_hash_key(slot))?
+            .map(|v| {
+                let hb = v.as_ref();
+                if hb.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(hb);
+                    Hash32::from_bytes(h)
+                } else {
+                    Hash32::ZERO
+                }
+            })
+            .unwrap_or(Hash32::ZERO);
+
+        // slot -> CBOR
+        let cbor = match self.tree.get(&make_slot_key(slot))? {
+            Some(v) => v.as_ref().to_vec(),
+            None => return Ok(None),
+        };
+
+        Ok(Some((slot, hash, cbor)))
     }
 
     /// Get blocks in a slot range `[from, to]` inclusive, in slot order.
