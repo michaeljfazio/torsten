@@ -123,19 +123,37 @@ pub struct LedgerState {
     pub epoch_blocks_by_pool: HashMap<Hash28, u64>,
     /// Total blocks in the current epoch
     pub epoch_block_count: u64,
-    /// Rolling nonce (eta_v): accumulated hash of VRF outputs in the nonce contribution window
-    pub rolling_nonce: Hash32,
-    /// Current epoch nonce
+    /// Evolving nonce (eta_v): accumulated hash of ALL VRF outputs (never reset).
+    /// Matches Haskell's `praosStateEvolvingNonce`.
+    pub evolving_nonce: Hash32,
+    /// Candidate nonce: snapshot of evolving_nonce that freezes in the last
+    /// randomness_stabilisation_window (4k/f) slots of each epoch.
+    /// Matches Haskell's `praosStateCandidateNonce`.
+    pub candidate_nonce: Hash32,
+    /// Current epoch nonce: hash(candidate_nonce || last_epoch_block_nonce) at epoch boundary.
+    /// Matches Haskell's `praosStateEpochNonce`.
     pub epoch_nonce: Hash32,
-    /// Nonce contribution window: first stability_window slots of each epoch
-    /// (3k/f = 129600 slots on mainnet)
-    pub stability_window: u64,
-    /// Hash of the first block in the current epoch (needed for next epoch's nonce)
-    pub first_block_hash_of_epoch: Option<Hash32>,
-    /// Hash of the first block in the previous epoch (used in epoch nonce calculation)
-    pub prev_epoch_first_block_hash: Option<Hash32>,
-    /// Shelley genesis hash (used to initialize rolling nonce)
+    /// LAB nonce: prev_hash of the most recent block (type-cast, no hashing).
+    /// Matches Haskell's `praosStateLabNonce`.
+    pub lab_nonce: Hash32,
+    /// Snapshot of lab_nonce at epoch boundary.
+    /// Matches Haskell's `praosStateLastEpochBlockNonce`.
+    pub last_epoch_block_nonce: Hash32,
+    /// Randomness stabilisation window: 4k/f slots (NOT 3k/f).
+    /// Blocks in the last randomness_stabilisation_window slots of an epoch
+    /// do NOT update the candidate nonce.
+    pub randomness_stabilisation_window: u64,
+    /// Shelley genesis hash (used for initial nonce state)
     pub genesis_hash: Hash32,
+    // Legacy fields kept for serde backwards compatibility with existing snapshots
+    #[serde(default)]
+    rolling_nonce: Hash32,
+    #[serde(default)]
+    stability_window: u64,
+    #[serde(default)]
+    first_block_hash_of_epoch: Option<Hash32>,
+    #[serde(default)]
+    prev_epoch_first_block_hash: Option<Hash32>,
     /// Pending protocol parameter update proposals (pre-Conway):
     /// Maps target_epoch -> [(genesis_delegate_hash, proposed_update)]
     pub pending_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
@@ -291,12 +309,18 @@ impl LedgerState {
             epoch_fees: Lovelace(0),
             epoch_blocks_by_pool: HashMap::new(),
             epoch_block_count: 0,
-            rolling_nonce: Hash32::ZERO,
+            evolving_nonce: Hash32::ZERO,
+            candidate_nonce: Hash32::ZERO,
             epoch_nonce: Hash32::ZERO,
-            stability_window: 129600, // 3k/f on mainnet
+            lab_nonce: Hash32::ZERO,
+            last_epoch_block_nonce: Hash32::ZERO,
+            randomness_stabilisation_window: 172800, // 4k/f on mainnet
+            genesis_hash: Hash32::ZERO,
+            // Legacy fields (serde compat)
+            rolling_nonce: Hash32::ZERO,
+            stability_window: 0,
             first_block_hash_of_epoch: None,
             prev_epoch_first_block_hash: None,
-            genesis_hash: Hash32::ZERO,
             pending_pp_updates: BTreeMap::new(),
             update_quorum: default_update_quorum(),
             governance: GovernanceState::default(),
@@ -318,12 +342,12 @@ impl LedgerState {
     /// Configure the epoch length (from Shelley genesis)
     pub fn set_epoch_length(&mut self, epoch_length: u64, security_param: u64) {
         self.epoch_length = epoch_length;
-        // stability_window = 3k/f where f = active_slot_coeff
+        // randomness_stabilisation_window = ceiling(4k/f) per Haskell StabilityWindow.hs
         let f = self.protocol_params.active_slot_coeff();
-        self.stability_window = (3.0 * security_param as f64 / f) as u64;
+        self.randomness_stabilisation_window = (4.0 * security_param as f64 / f).ceil() as u64;
         info!(
             epoch_length,
-            stability_window = self.stability_window,
+            randomness_stabilisation_window = self.randomness_stabilisation_window,
             security_param,
             "Ledger: epoch length configured"
         );
@@ -331,16 +355,16 @@ impl LedgerState {
 
     /// Set the Shelley genesis hash.
     ///
-    /// The rolling nonce is initialized from this hash (the Blake2b-256 hash of
-    /// the canonical Shelley genesis JSON). This matches the Cardano reference
-    /// implementation where eta_v starts from the genesis hash.
+    /// Initializes the Praos nonce state machine. In Haskell, the initial
+    /// evolving nonce and candidate nonce are derived from the genesis hash.
     pub fn set_genesis_hash(&mut self, hash: Hash32) {
         self.genesis_hash = hash;
-        // Initialize rolling nonce from genesis hash (not ZERO)
-        self.rolling_nonce = hash;
+        // Initialize nonce state from genesis hash
+        self.evolving_nonce = hash;
+        self.candidate_nonce = hash;
         info!(
             genesis_hash = %hash.to_hex(),
-            "Ledger: rolling nonce initialized from genesis hash"
+            "Ledger: nonce state initialized from genesis hash"
         );
     }
 
@@ -765,16 +789,26 @@ impl LedgerState {
         }
         self.epoch_block_count += 1;
 
-        // Track first block hash of the current epoch (for epoch nonce calculation)
-        if self.first_block_hash_of_epoch.is_none() {
-            self.first_block_hash_of_epoch = Some(block.header.header_hash);
+        // Praos nonce state machine (matches Haskell reupdateChainDepState):
+        //
+        // 1. lab_nonce = block.prev_hash (type cast, no hashing)
+        // 2. evolving_nonce is ALWAYS updated with every block's VRF output
+        // 3. candidate_nonce copies evolving_nonce UNLESS we're in the last
+        //    randomness_stabilisation_window (4k/f) slots of the epoch
+        if !block.header.vrf_result.output.is_empty() {
+            // Update evolving nonce unconditionally
+            self.update_evolving_nonce(&block.header.vrf_result.output);
+
+            // Update candidate nonce only if NOT in the stabilisation window
+            // (i.e., if slot + rsw < first_slot_of_next_epoch)
+            let first_slot_of_next_epoch = (self.epoch.0 + 1) * self.epoch_length;
+            if block.slot().0 + self.randomness_stabilisation_window < first_slot_of_next_epoch {
+                self.candidate_nonce = self.evolving_nonce;
+            }
         }
 
-        // Accumulate VRF output into rolling nonce (only in nonce contribution window)
-        let slot_in_epoch = block.slot().0 % self.epoch_length;
-        if slot_in_epoch < self.stability_window && !block.header.vrf_result.output.is_empty() {
-            self.update_rolling_nonce(&block.header.vrf_result.output);
-        }
+        // Update LAB nonce = prev_hash of this block (simple assignment)
+        self.lab_nonce = block.header.prev_hash;
 
         // Update tip
         self.tip = block.tip();
@@ -1350,34 +1384,34 @@ impl LedgerState {
             );
         }
 
-        // Compute new epoch nonce per Cardano spec:
-        // epoch_nonce = hash(rolling_nonce || first_block_hash_prev_epoch [|| extra_entropy])
-        // nc = rolling nonce (eta_v accumulated through stability window)
-        // nh = hash of first block from the previous epoch
-        let nh = self
-            .prev_epoch_first_block_hash
-            .unwrap_or(self.genesis_hash);
+        // Compute new epoch nonce per Haskell tickChainDepState:
+        //   epoch_nonce = hash(candidate_nonce || last_epoch_block_nonce)
+        //
+        // The candidate_nonce was frozen 4k/f slots before epoch end.
+        // The last_epoch_block_nonce is the lab_nonce snapshot from the previous epoch boundary.
+        let prev_epoch_nonce = self.epoch_nonce;
+        self.last_epoch_block_nonce = self.lab_nonce;
+
         let mut nonce_input = Vec::with_capacity(64);
-        nonce_input.extend_from_slice(self.rolling_nonce.as_bytes());
-        nonce_input.extend_from_slice(nh.as_bytes());
+        nonce_input.extend_from_slice(self.candidate_nonce.as_bytes());
+        nonce_input.extend_from_slice(self.last_epoch_block_nonce.as_bytes());
         self.epoch_nonce = torsten_primitives::hash::blake2b_256(&nonce_input);
 
         info!(
-            "New epoch nonce: {} (from eta_v {} + nh {})",
+            "New epoch nonce: {} (candidate {} ⋄ lab {}), prev: {}",
             self.epoch_nonce.to_hex(),
-            self.rolling_nonce.to_hex(),
-            nh.to_hex()
+            self.candidate_nonce.to_hex(),
+            self.last_epoch_block_nonce.to_hex(),
+            prev_epoch_nonce.to_hex(),
         );
 
-        // Rotate first block hash: current becomes previous for next transition
-        self.prev_epoch_first_block_hash = self.first_block_hash_of_epoch.take();
+        // evolving_nonce and candidate_nonce carry forward unchanged
+        // (they are NOT reset at epoch boundaries)
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
         self.epoch_blocks_by_pool.clear();
         self.epoch_block_count = 0;
-        // Reset rolling nonce from genesis hash (not ZERO)
-        self.rolling_nonce = self.genesis_hash;
 
         self.epoch = new_epoch;
     }
@@ -1647,21 +1681,23 @@ impl LedgerState {
         Hash32::from_bytes(key_bytes)
     }
 
-    /// Update the rolling nonce with a new VRF output.
+    /// Update the evolving nonce with a new VRF output.
     ///
-    /// rolling_nonce = hash(rolling_nonce || hash(vrf_output))
-    fn update_rolling_nonce(&mut self, vrf_output: &[u8]) {
-        // Per Praos spec: nonce contribution = Blake2b-256(Blake2b-256("N" || raw_vrf_output))
-        // Domain-separated, double-hashed nonce value
+    /// evolving_nonce = hash(evolving_nonce || hash(hash("N" || vrf_output)))
+    ///
+    /// Matches Haskell's reupdateChainDepState → hashVRF → vrfNonceValue pipeline.
+    fn update_evolving_nonce(&mut self, vrf_output: &[u8]) {
+        // eta = blake2b_256(blake2b_256("N" || raw_vrf_output))
         let mut prefixed = Vec::with_capacity(1 + vrf_output.len());
         prefixed.push(b'N');
         prefixed.extend_from_slice(vrf_output);
         let first_hash = torsten_primitives::hash::blake2b_256(&prefixed);
-        let nonce_value = torsten_primitives::hash::blake2b_256(first_hash.as_ref());
+        let eta = torsten_primitives::hash::blake2b_256(first_hash.as_ref());
+        // evolving_nonce' = blake2b_256(evolving_nonce || eta)
         let mut data = Vec::with_capacity(64);
-        data.extend_from_slice(self.rolling_nonce.as_bytes());
-        data.extend_from_slice(nonce_value.as_bytes());
-        self.rolling_nonce = torsten_primitives::hash::blake2b_256(&data);
+        data.extend_from_slice(self.evolving_nonce.as_bytes());
+        data.extend_from_slice(eta.as_bytes());
+        self.evolving_nonce = torsten_primitives::hash::blake2b_256(&data);
     }
 
     /// Process a governance proposal.
@@ -3691,41 +3727,45 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.stability_window = 60; // First 60 slots contribute to nonce
+        // randomness_stabilisation_window = 4k/f; use 40 for testing
+        // (so slots 0-59 update candidate, slots 60-99 freeze candidate)
+        state.randomness_stabilisation_window = 40;
 
-        // Set a genesis hash to initialize rolling nonce
+        // Set a genesis hash to initialize nonce state
         let genesis_hash = Hash32::from_bytes([0xAB; 32]);
         state.set_genesis_hash(genesis_hash);
 
-        // Rolling nonce starts from genesis hash
-        assert_eq!(state.rolling_nonce, genesis_hash);
+        // Evolving nonce starts from genesis hash
+        assert_eq!(state.evolving_nonce, genesis_hash);
+        assert_eq!(state.candidate_nonce, genesis_hash);
         // Epoch nonce starts at ZERO
         assert_eq!(state.epoch_nonce, Hash32::ZERO);
 
-        // Apply a block with a VRF output in the nonce window
+        // Apply a block BEFORE the stabilisation window (slot 10 + 40 < 100)
         let mut block = make_test_block(10, 1, Hash32::ZERO, vec![]);
         block.header.vrf_result.output = vec![42u8; 32];
         block.header.issuer_vkey = vec![1u8; 32];
         state.apply_block(&block).unwrap();
 
-        // Rolling nonce should have been updated from genesis_hash
-        assert_ne!(state.rolling_nonce, genesis_hash);
+        // Evolving nonce should have been updated
+        assert_ne!(state.evolving_nonce, genesis_hash);
+        // Candidate nonce should track evolving (not in stabilisation window)
+        assert_eq!(state.candidate_nonce, state.evolving_nonce);
+        // LAB nonce should be the block's prev_hash
+        assert_eq!(state.lab_nonce, block.header.prev_hash);
 
-        // First block hash of epoch should be tracked
-        assert_eq!(
-            state.first_block_hash_of_epoch,
-            Some(block.header.header_hash)
-        );
-
-        // Apply a block outside the nonce window (slot 70 % 100 = 70 > 60)
-        let rolling_before = state.rolling_nonce;
+        // Apply a block INSIDE the stabilisation window (slot 70 + 40 >= 100)
+        let evolving_before = state.evolving_nonce;
+        let candidate_before = state.candidate_nonce;
         let mut block2 = make_test_block(70, 2, *block.hash(), vec![]);
         block2.header.vrf_result.output = vec![99u8; 32];
         block2.header.issuer_vkey = vec![1u8; 32];
         state.apply_block(&block2).unwrap();
 
-        // Rolling nonce should NOT have changed (outside window)
-        assert_eq!(state.rolling_nonce, rolling_before);
+        // Evolving nonce should STILL update (always updates)
+        assert_ne!(state.evolving_nonce, evolving_before);
+        // Candidate nonce should be FROZEN (in stabilisation window)
+        assert_eq!(state.candidate_nonce, candidate_before);
 
         // Trigger epoch transition
         let nonce_before_transition = state.epoch_nonce;
@@ -3733,12 +3773,10 @@ mod tests {
 
         // Epoch nonce should have been updated
         assert_ne!(state.epoch_nonce, nonce_before_transition);
-        // Rolling nonce should be reset to genesis hash (not ZERO)
-        assert_eq!(state.rolling_nonce, genesis_hash);
-        // Previous epoch's first block hash should be set
-        assert!(state.prev_epoch_first_block_hash.is_some());
-        // Current epoch's first block hash should be cleared
-        assert!(state.first_block_hash_of_epoch.is_none());
+        // Evolving nonce should carry forward (NOT reset)
+        assert_ne!(state.evolving_nonce, genesis_hash);
+        // last_epoch_block_nonce should be the lab_nonce at transition
+        assert_eq!(state.last_epoch_block_nonce, state.lab_nonce);
     }
 
     #[test]

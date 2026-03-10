@@ -2743,6 +2743,11 @@ impl Node {
             None => return, // relay-only mode
         };
 
+        // Don't forge if epoch nonce isn't established yet (e.g., post-Mithril import)
+        if !self.consensus.nonce_established {
+            return;
+        }
+
         // Compute current slot from wall-clock time
         let wall_clock_slot = self.current_wall_clock_slot();
 
@@ -2808,6 +2813,7 @@ impl Node {
         let max_block_body_size = ls.protocol_params.max_block_body_size;
         let protocol_version_major = ls.protocol_params.protocol_version_major;
         let protocol_version_minor = ls.protocol_params.protocol_version_minor;
+        let current_era = ls.era;
         drop(ls);
         let transactions = self
             .mempool
@@ -2819,6 +2825,7 @@ impl Node {
             },
             max_block_body_size,
             max_txs_per_block: 500,
+            era: current_era,
         };
 
         match crate::forge::forge_block(

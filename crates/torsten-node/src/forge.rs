@@ -144,6 +144,8 @@ pub struct BlockProducerConfig {
     pub max_block_body_size: u64,
     /// Maximum number of transactions per block
     pub max_txs_per_block: usize,
+    /// Current era for the forged block
+    pub era: Era,
 }
 
 impl Default for BlockProducerConfig {
@@ -152,6 +154,7 @@ impl Default for BlockProducerConfig {
             protocol_version: ProtocolVersion { major: 9, minor: 0 },
             max_block_body_size: 90112,
             max_txs_per_block: 500,
+            era: Era::Conway,
         }
     }
 }
@@ -212,6 +215,19 @@ pub fn forge_block(
     let current_slot_kes_period = torsten_crypto::kes::kes_period_for_slot(slot.0);
     let kes_period_offset = current_slot_kes_period.saturating_sub(creds.opcert_kes_period);
 
+    // Validate KES period offset is within bounds (Sum6Kes supports 62 evolutions)
+    const MAX_KES_EVOLUTIONS: u64 = 62;
+    if kes_period_offset > MAX_KES_EVOLUTIONS {
+        anyhow::bail!(
+            "KES key expired: current period {} - opcert period {} = offset {} > max {}. \
+             Rotate your KES key and issue a new operational certificate.",
+            current_slot_kes_period,
+            creds.opcert_kes_period,
+            kes_period_offset,
+            MAX_KES_EVOLUTIONS
+        );
+    }
+
     let kes_signature = if !creds.kes_skey.is_empty() {
         let evolved_kes =
             torsten_crypto::kes::kes_evolve_to_period(&creds.kes_skey, kes_period_offset as u32)
@@ -236,7 +252,7 @@ pub fn forge_block(
     let mut block = Block {
         header,
         transactions,
-        era: Era::Conway,
+        era: config.era,
         raw_cbor: None,
     };
     block.header.header_hash = header_hash;
