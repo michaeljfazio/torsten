@@ -8,6 +8,7 @@
   "TargetNumberOfActivePeers": 20,
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
+  "ByronGenesisFile": "mainnet-byron-genesis.json",
   "ShelleyGenesisFile": "mainnet-shelley-genesis.json",
   "AlonzoGenesisFile": "mainnet-alonzo-genesis.json",
   "ConwayGenesisFile": "mainnet-conway-genesis.json",

@@ -336,6 +336,59 @@ impl LedgerState {
         info!(update_quorum = quorum, "Ledger: update quorum configured");
     }
 
+    /// Seed the UTxO set with genesis UTxOs (from Byron genesis nonAvvmBalances).
+    ///
+    /// Each genesis UTxO is assigned a deterministic transaction hash derived from
+    /// blake2b-256 of the address bytes, with sequential output indices.
+    /// This MUST be called before replaying blocks from genesis.
+    pub fn seed_genesis_utxos(&mut self, entries: &[(Vec<u8>, u64)]) {
+        let mut seeded = 0u64;
+        let mut total_lovelace = 0u64;
+
+        for (address, lovelace) in entries {
+            if *lovelace == 0 {
+                continue;
+            }
+
+            // Derive a deterministic tx hash from the address (matches Byron genesis UTxO format)
+            let tx_hash = torsten_primitives::hash::blake2b_256(address);
+
+            let input = torsten_primitives::transaction::TransactionInput {
+                transaction_id: tx_hash,
+                index: 0,
+            };
+
+            // Parse the address bytes, or fall back to Byron if parsing fails
+            let addr = torsten_primitives::Address::from_bytes(address).unwrap_or(
+                torsten_primitives::Address::Byron(torsten_primitives::address::ByronAddress {
+                    payload: address.clone(),
+                }),
+            );
+
+            let output = torsten_primitives::transaction::TransactionOutput {
+                address: addr,
+                value: torsten_primitives::value::Value {
+                    coin: Lovelace(*lovelace),
+                    multi_asset: std::collections::BTreeMap::new(),
+                },
+                datum: torsten_primitives::transaction::OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            };
+
+            self.utxo_set.insert(input, output);
+            seeded += 1;
+            total_lovelace += lovelace;
+        }
+
+        info!(
+            seeded,
+            total_lovelace,
+            utxo_count = self.utxo_set.len(),
+            "Ledger: genesis UTxOs seeded"
+        );
+    }
+
     /// Apply a single ProtocolParamUpdate to the current protocol parameters.
     /// Each field in the update, if Some, overwrites the corresponding parameter.
     /// Used by both pre-Conway update proposals and Conway governance actions.
@@ -626,19 +679,21 @@ impl LedgerState {
                     .apply_transaction(&tx.hash, &tx.body.inputs, &tx.body.outputs)
             {
                 // During initial sync without full history, inputs won't be found.
-                // Skip UTxO changes entirely to avoid phantom outputs that inflate
-                // the UTxO set. Fees and certificates are still processed.
+                // Skip UTxO changes AND stake crediting to avoid phantom state.
+                // Fees and certificates are still processed.
                 debug!("UTxO application skipped (missing inputs): {e}");
-            }
-
-            // Update stake distribution from new outputs (add)
-            for output in &tx.body.outputs {
-                if let Some(cred_hash) = stake_credential_hash(&output.address) {
-                    *self
-                        .stake_distribution
-                        .stake_map
-                        .entry(cred_hash)
-                        .or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+            } else {
+                // Update stake distribution from new outputs (add)
+                // Only credit stake when UTxO application succeeded to avoid
+                // phantom stake from outputs that don't actually exist in the set.
+                for output in &tx.body.outputs {
+                    if let Some(cred_hash) = stake_credential_hash(&output.address) {
+                        *self
+                            .stake_distribution
+                            .stake_map
+                            .entry(cred_hash)
+                            .or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+                    }
                 }
             }
 

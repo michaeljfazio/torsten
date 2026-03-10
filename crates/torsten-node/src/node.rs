@@ -296,23 +296,28 @@ impl Node {
 
         // Load Byron genesis if configured
         let config_dir = args.config_dir.clone();
-        if let Some(ref genesis_path) = args.config.byron_genesis_file {
-            let genesis_path = config_dir.join(genesis_path);
-            match ByronGenesis::load(&genesis_path) {
-                Ok(genesis) => {
-                    let utxos = genesis.initial_utxos();
-                    info!(
-                        protocol_magic = genesis.protocol_magic(),
-                        security_param = genesis.security_param(),
-                        initial_utxos = utxos.len(),
-                        "Byron genesis loaded"
-                    );
+        let byron_genesis_utxos: Vec<(Vec<u8>, u64)> =
+            if let Some(ref genesis_path) = args.config.byron_genesis_file {
+                let genesis_path = config_dir.join(genesis_path);
+                match ByronGenesis::load(&genesis_path) {
+                    Ok(genesis) => {
+                        let utxos = genesis.initial_utxos();
+                        info!(
+                            protocol_magic = genesis.protocol_magic(),
+                            security_param = genesis.security_param(),
+                            initial_utxos = utxos.len(),
+                            "Byron genesis loaded"
+                        );
+                        utxos.into_iter().map(|e| (e.address, e.lovelace)).collect()
+                    }
+                    Err(e) => {
+                        warn!("Failed to load Byron genesis: {e}");
+                        Vec::new()
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to load Byron genesis: {e}");
-                }
-            }
-        }
+            } else {
+                Vec::new()
+            };
 
         // Load Shelley genesis if configured (with hash for nonce initialization)
         let (shelley_genesis, shelley_genesis_hash) =
@@ -407,6 +412,9 @@ impl Node {
                     if let Some(hash) = shelley_genesis_hash {
                         ledger.set_genesis_hash(hash);
                     }
+                    if !byron_genesis_utxos.is_empty() {
+                        ledger.seed_genesis_utxos(&byron_genesis_utxos);
+                    }
                     ledger
                 }
             }
@@ -417,6 +425,9 @@ impl Node {
                 ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
                 ledger.set_slot_config(genesis.slot_config());
                 ledger.set_update_quorum(genesis.update_quorum);
+            }
+            if !byron_genesis_utxos.is_empty() {
+                ledger.seed_genesis_utxos(&byron_genesis_utxos);
             }
             if let Some(hash) = shelley_genesis_hash {
                 ledger.set_genesis_hash(hash);

@@ -5,6 +5,7 @@
   "TargetNumberOfActivePeers": 20,
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
+  "ByronGenesisFile": "preprod-byron-genesis.json",
   "ShelleyGenesisFile": "preprod-shelley-genesis.json",
   "AlonzoGenesisFile": "preprod-alonzo-genesis.json",
   "ConwayGenesisFile": "preprod-conway-genesis.json",
