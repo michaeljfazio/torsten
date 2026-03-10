@@ -1,0 +1,16 @@
+apiVersion: v2
+name: torsten-node
+description: A Helm chart for deploying Torsten, a Rust implementation of the Cardano node
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - cardano
+  - blockchain
+  - relay
+  - block-producer
+home: https://github.com/michaeljfazio/torsten
+sources:
+  - https://github.com/michaeljfazio/torsten
+maintainers:
+  - name: Michael Fazio

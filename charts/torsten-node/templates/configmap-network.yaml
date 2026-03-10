@@ -1,0 +1,25 @@
+{{/*
+  Network-specific node configuration.
+  Genesis files are bundled in the container image at /opt/torsten/config/.
+  The config file references genesis files using absolute paths to the image's config dir.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "torsten-node.fullname" . }}-network
+  labels:
+    {{- include "torsten-node.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "Network": {{ if eq .Values.network.name "mainnet" }}"Mainnet"{{ else }}"Testnet"{{ end }},
+      "NetworkMagic": {{ include "torsten-node.networkMagic" . }},
+      "EnableP2P": true,
+      "TargetNumberOfActivePeers": 20,
+      "TargetNumberOfEstablishedPeers": 40,
+      "TargetNumberOfKnownPeers": 100,
+      "ShelleyGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-shelley-genesis.json",
+      "AlonzoGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-alonzo-genesis.json",
+      "ConwayGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-conway-genesis.json",
+      "MinSeverity": "Info"
+    }

@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "torsten-node.fullname" . }}-config
+  labels:
+    {{- include "torsten-node.labels" . | nindent 4 }}
+data:
+  topology.json: |
+    {
+      "bootstrapPeers": {{ .Values.topology.bootstrapPeers | toJson }},
+      "localRoots": [
+        {{- range $i, $root := .Values.topology.localRoots }}
+        {{- if $i }},{{ end }}
+        {
+          "accessPoints": {{ $root.accessPoints | toJson }},
+          "advertise": {{ $root.advertise | default false }},
+          "trustable": {{ $root.trustable | default false }},
+          "valency": {{ $root.valency | default 1 }}
+        }
+        {{- end }}
+      ],
+      "publicRoots": {{ .Values.topology.publicRoots | toJson }},
+      "useLedgerAfterSlot": {{ .Values.topology.useLedgerAfterSlot | int64 }}
+    }

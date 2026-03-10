@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "torsten-node.fullname" . }}
+  labels:
+    {{- include "torsten-node.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "torsten-node.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/network: {{ include (print $.Template.BasePath "/configmap-network.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "torsten-node.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "torsten-node.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.mithril.enabled }}
+      initContainers:
+        - name: mithril-import
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - torsten-node
+          args:
+            - mithril-import
+            - --network-magic
+            - {{ include "torsten-node.networkMagic" . | quote }}
+            - --database-path
+            - /data/db
+            - --temp-dir
+            - /tmp/mithril
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - run
+            - --config
+            - /etc/torsten/config.json
+            - --topology
+            - /etc/torsten/topology.json
+            - --database-path
+            - /data/db
+            - --socket-path
+            - /ipc/node.sock
+            - --host-addr
+            - {{ .Values.network.hostAddr | quote }}
+            - --port
+            - {{ .Values.network.port | quote }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-port
+            - {{ .Values.metrics.port | quote }}
+            {{- else }}
+            - --metrics-port
+            - "0"
+            {{- end }}
+            {{- if eq .Values.role "producer" }}
+            - --shelley-kes-key
+            - /keys/kes.skey
+            - --shelley-vrf-key
+            - /keys/vrf.skey
+            - --shelley-operational-certificate
+            - /keys/node.cert
+            {{- end }}
+          env:
+            - name: RUST_LOG
+              value: "info"
+            {{- if .Values.ledger.pipelineDepth }}
+            - name: TORSTEN_PIPELINE_DEPTH
+              value: {{ .Values.ledger.pipelineDepth | quote }}
+            {{- end }}
+            {{- if .Values.ledger.replayLimit }}
+            - name: TORSTEN_REPLAY_LIMIT
+              value: {{ .Values.ledger.replayLimit | quote }}
+            {{- end }}
+          ports:
+            - name: n2n
+              containerPort: {{ .Values.network.port }}
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: ipc
+              mountPath: /ipc
+            - name: topology
+              mountPath: /etc/torsten/topology.json
+              subPath: topology.json
+              readOnly: true
+            - name: node-config
+              mountPath: /etc/torsten/config.json
+              subPath: config.json
+              readOnly: true
+            {{- if eq .Values.role "producer" }}
+            - name: producer-keys
+              mountPath: /keys
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "torsten-node.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: ipc
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: topology
+          configMap:
+            name: {{ include "torsten-node.fullname" . }}-config
+        - name: node-config
+          configMap:
+            name: {{ include "torsten-node.fullname" . }}-network
+        {{- if eq .Values.role "producer" }}
+        - name: producer-keys
+          secret:
+            secretName: {{ .Values.producer.existingSecret | default (printf "%s-producer-keys" (include "torsten-node.fullname" .)) }}
+            defaultMode: 0400
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

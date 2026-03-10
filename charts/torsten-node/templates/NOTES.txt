@@ -1,0 +1,41 @@
+Torsten Node deployed as {{ .Values.role }} on {{ .Values.network.name }}!
+
+{{- if eq .Values.role "relay" }}
+
+  RELAY NODE
+  ----------
+  Your relay node will sync with the {{ .Values.network.name }} network.
+  {{- if .Values.mithril.enabled }}
+  Initial sync uses a Mithril snapshot for fast bootstrap.
+  {{- end }}
+
+{{- else if eq .Values.role "producer" }}
+
+  BLOCK PRODUCER
+  --------------
+  Your block producer is configured with KES/VRF keys.
+  A NetworkPolicy restricts N2N connections to relay pods only.
+
+  IMPORTANT: Ensure your relay is configured with this producer as a local root:
+    topology.localRoots:
+      - accessPoints:
+          - address: {{ include "torsten-node.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port: {{ .Values.network.port }}
+        advertise: false
+        trustable: true
+        valency: 1
+
+{{- end }}
+
+  Get the node status:
+    kubectl exec -it deploy/{{ include "torsten-node.fullname" . }} -- torsten-cli query tip --testnet-magic {{ include "torsten-node.networkMagic" . }}
+
+  View logs:
+    kubectl logs -f deploy/{{ include "torsten-node.fullname" . }}
+
+  {{- if .Values.metrics.enabled }}
+
+  Metrics are available on port {{ .Values.metrics.port }}:
+    kubectl port-forward svc/{{ include "torsten-node.fullname" . }} {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+    curl http://localhost:{{ .Values.metrics.port }}/metrics
+  {{- end }}

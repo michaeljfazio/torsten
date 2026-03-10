@@ -1,0 +1,167 @@
+# -- Node role: "relay" or "producer"
+role: relay
+
+# -- Container image settings
+image:
+  repository: ghcr.io/michaeljfazio/torsten
+  tag: ""  # Defaults to Chart appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Number of replicas (typically 1 per node)
+replicaCount: 1
+
+# -- Cardano network configuration
+network:
+  # -- Network name: mainnet, preview, or preprod
+  name: preview
+  # -- Network magic (auto-set from network.name if not specified)
+  # mainnet=764824073, preview=2, preprod=1
+  magic: null
+  # -- Node-to-node port
+  port: 3001
+  # -- Host address to bind
+  hostAddr: "0.0.0.0"
+
+# -- Prometheus metrics
+metrics:
+  enabled: true
+  port: 12798
+  serviceMonitor:
+    # -- Create a ServiceMonitor for Prometheus Operator
+    enabled: false
+    interval: 30s
+    labels: {}
+
+# -- Topology configuration
+topology:
+  # -- Bootstrap peers for initial connection
+  bootstrapPeers:
+    - address: preview-node.play.dev.cardano.org
+      port: 3001
+  # -- Local roots (e.g., your own block producer)
+  localRoots: []
+  #  - accessPoints:
+  #      - address: producer.internal
+  #        port: 3001
+  #    advertise: false
+  #    trustable: true
+  #    valency: 1
+  # -- Public roots for peer discovery
+  publicRoots:
+    - accessPoints:
+        - address: preview-node.play.dev.cardano.org
+          port: 3001
+      advertise: false
+  # -- Slot after which to use ledger-based peer discovery
+  useLedgerAfterSlot: 102729600
+
+# -- Mithril snapshot import for fast initial sync
+mithril:
+  # -- Enable Mithril snapshot import on first startup
+  enabled: true
+
+# -- Ledger replay configuration
+ledger:
+  # -- Max blocks to replay from storage (0 = skip, empty = unlimited)
+  replayLimit: null
+  # -- Pipeline depth for chain sync
+  pipelineDepth: 150
+
+# -- Block producer configuration (only used when role=producer)
+producer:
+  # -- KES signing key (base64-encoded content or reference to secret)
+  kesKey: ""
+  # -- VRF signing key
+  vrfKey: ""
+  # -- Operational certificate
+  operationalCertificate: ""
+  # -- Existing Kubernetes secret containing producer keys
+  # Must have keys: kes.skey, vrf.skey, node.cert
+  existingSecret: ""
+
+# -- Persistent volume for chain database
+persistence:
+  enabled: true
+  # -- Storage class (use "-" for default)
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 100Gi
+  # -- Existing PVC to use
+  existingClaim: ""
+
+# -- Resource requests and limits
+resources:
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    cpu: "4"
+    memory: 16Gi
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+# -- Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Service configuration
+service:
+  type: ClusterIP
+  # -- Annotations for the service
+  annotations: {}
+
+# -- Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# -- Pod annotations
+podAnnotations: {}
+
+# -- Pod labels
+podLabels: {}
+
+# -- Liveness probe
+livenessProbe:
+  httpGet:
+    path: /metrics
+    port: metrics
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+# -- Readiness probe
+readinessProbe:
+  httpGet:
+    path: /metrics
+    port: metrics
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
