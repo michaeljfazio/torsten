@@ -970,18 +970,249 @@ fn encode_proposal_procedure(pp: &ProposalProcedure) -> Vec<u8> {
     buf
 }
 
+/// Encode a ProtocolParamUpdate as a CBOR map with integer keys per Conway CDDL.
+///
+/// Only fields that are `Some` are included in the map (sparse encoding).
+/// Key mapping follows the Conway era protocol_param_update CDDL:
+///   0: min_fee_a, 1: min_fee_b, 2: max_block_body_size, 3: max_tx_size,
+///   4: max_block_header_size, 5: key_deposit, 6: pool_deposit, 7: e_max,
+///   8: n_opt, 9: a0, 10: rho, 11: tau, 13: min_pool_cost,
+///   14: ada_per_utxo_byte, 15: cost_models, 16: execution_costs,
+///   17: max_tx_ex_units, 18: max_block_ex_units, 19: max_val_size,
+///   20: collateral_percentage, 21: max_collateral_inputs,
+///   22: pool_voting_thresholds(5), 23: drep_voting_thresholds(10),
+///   24: min_committee_size, 25: committee_term_limit, 26: gov_action_lifetime,
+///   27: gov_action_deposit, 28: drep_deposit, 29: drep_activity,
+///   30: min_fee_ref_script_cost_per_byte
+fn encode_protocol_param_update(ppu: &ProtocolParamUpdate) -> Vec<u8> {
+    // Count non-None fields to determine map size
+    let mut entries: Vec<(u64, Vec<u8>)> = Vec::new();
+
+    if let Some(v) = ppu.min_fee_a {
+        entries.push((0, encode_uint(v)));
+    }
+    if let Some(v) = ppu.min_fee_b {
+        entries.push((1, encode_uint(v)));
+    }
+    if let Some(v) = ppu.max_block_body_size {
+        entries.push((2, encode_uint(v)));
+    }
+    if let Some(v) = ppu.max_tx_size {
+        entries.push((3, encode_uint(v)));
+    }
+    if let Some(v) = ppu.max_block_header_size {
+        entries.push((4, encode_uint(v)));
+    }
+    if let Some(ref v) = ppu.key_deposit {
+        entries.push((5, encode_uint(v.0)));
+    }
+    if let Some(ref v) = ppu.pool_deposit {
+        entries.push((6, encode_uint(v.0)));
+    }
+    if let Some(v) = ppu.e_max {
+        entries.push((7, encode_uint(v)));
+    }
+    if let Some(v) = ppu.n_opt {
+        entries.push((8, encode_uint(v)));
+    }
+    if let Some(ref v) = ppu.a0 {
+        entries.push((9, encode_rational(v)));
+    }
+    if let Some(ref v) = ppu.rho {
+        entries.push((10, encode_rational(v)));
+    }
+    if let Some(ref v) = ppu.tau {
+        entries.push((11, encode_rational(v)));
+    }
+    // Key 12 is protocol_version — not in ProtocolParamUpdate (it's in HardForkInitiation)
+    if let Some(ref v) = ppu.min_pool_cost {
+        entries.push((13, encode_uint(v.0)));
+    }
+    if let Some(ref v) = ppu.ada_per_utxo_byte {
+        entries.push((14, encode_uint(v.0)));
+    }
+    if let Some(ref v) = ppu.cost_models {
+        entries.push((15, encode_cost_models(v)));
+    }
+    if let Some(ref v) = ppu.execution_costs {
+        let mut buf = encode_array_header(2);
+        buf.extend(encode_rational(&v.mem_price));
+        buf.extend(encode_rational(&v.step_price));
+        entries.push((16, buf));
+    }
+    if let Some(ref v) = ppu.max_tx_ex_units {
+        let mut buf = encode_array_header(2);
+        buf.extend(encode_uint(v.mem));
+        buf.extend(encode_uint(v.steps));
+        entries.push((17, buf));
+    }
+    if let Some(ref v) = ppu.max_block_ex_units {
+        let mut buf = encode_array_header(2);
+        buf.extend(encode_uint(v.mem));
+        buf.extend(encode_uint(v.steps));
+        entries.push((18, buf));
+    }
+    if let Some(v) = ppu.max_val_size {
+        entries.push((19, encode_uint(v)));
+    }
+    if let Some(v) = ppu.collateral_percentage {
+        entries.push((20, encode_uint(v)));
+    }
+    if let Some(v) = ppu.max_collateral_inputs {
+        entries.push((21, encode_uint(v)));
+    }
+    // Key 22: pool_voting_thresholds — 5-element array
+    if ppu.pvt_motion_no_confidence.is_some()
+        || ppu.pvt_committee_normal.is_some()
+        || ppu.pvt_committee_no_confidence.is_some()
+        || ppu.pvt_hard_fork.is_some()
+        || ppu.pvt_pp_security_group.is_some()
+    {
+        let mut buf = encode_array_header(5);
+        let zero = Rational {
+            numerator: 0,
+            denominator: 1,
+        };
+        buf.extend(encode_rational(
+            ppu.pvt_motion_no_confidence.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.pvt_committee_normal.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.pvt_committee_no_confidence.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(ppu.pvt_hard_fork.as_ref().unwrap_or(&zero)));
+        buf.extend(encode_rational(
+            ppu.pvt_pp_security_group.as_ref().unwrap_or(&zero),
+        ));
+        entries.push((22, buf));
+    }
+    // Key 23: drep_voting_thresholds — 10-element array
+    if ppu.dvt_pp_network_group.is_some()
+        || ppu.dvt_pp_economic_group.is_some()
+        || ppu.dvt_pp_technical_group.is_some()
+        || ppu.dvt_pp_gov_group.is_some()
+        || ppu.dvt_hard_fork.is_some()
+        || ppu.dvt_no_confidence.is_some()
+        || ppu.dvt_committee_normal.is_some()
+        || ppu.dvt_committee_no_confidence.is_some()
+        || ppu.dvt_constitution.is_some()
+        || ppu.dvt_treasury_withdrawal.is_some()
+    {
+        let mut buf = encode_array_header(10);
+        let zero = Rational {
+            numerator: 0,
+            denominator: 1,
+        };
+        buf.extend(encode_rational(
+            ppu.dvt_no_confidence.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_committee_normal.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_committee_no_confidence.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(ppu.dvt_hard_fork.as_ref().unwrap_or(&zero)));
+        buf.extend(encode_rational(
+            ppu.dvt_pp_network_group.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_pp_economic_group.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_pp_technical_group.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_pp_gov_group.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_treasury_withdrawal.as_ref().unwrap_or(&zero),
+        ));
+        buf.extend(encode_rational(
+            ppu.dvt_constitution.as_ref().unwrap_or(&zero),
+        ));
+        entries.push((23, buf));
+    }
+    if let Some(v) = ppu.min_committee_size {
+        entries.push((24, encode_uint(v)));
+    }
+    if let Some(v) = ppu.committee_term_limit {
+        entries.push((25, encode_uint(v)));
+    }
+    if let Some(v) = ppu.gov_action_lifetime {
+        entries.push((26, encode_uint(v)));
+    }
+    if let Some(ref v) = ppu.gov_action_deposit {
+        entries.push((27, encode_uint(v.0)));
+    }
+    if let Some(ref v) = ppu.drep_deposit {
+        entries.push((28, encode_uint(v.0)));
+    }
+    if let Some(v) = ppu.drep_activity {
+        entries.push((29, encode_uint(v)));
+    }
+    if let Some(v) = ppu.min_fee_ref_script_cost_per_byte {
+        entries.push((
+            30,
+            encode_rational(&Rational {
+                numerator: v,
+                denominator: 1,
+            }),
+        ));
+    }
+
+    let mut buf = encode_map_header(entries.len());
+    for (key, value) in entries {
+        buf.extend(encode_uint(key));
+        buf.extend(value);
+    }
+    buf
+}
+
+/// Encode CostModels as CBOR map: {0: [v1...], 1: [v2...], 2: [v3...]}
+fn encode_cost_models(cm: &CostModels) -> Vec<u8> {
+    let count = [&cm.plutus_v1, &cm.plutus_v2, &cm.plutus_v3]
+        .iter()
+        .filter(|m| m.is_some())
+        .count();
+    let mut buf = encode_map_header(count);
+    if let Some(ref v1) = cm.plutus_v1 {
+        buf.extend(encode_uint(0));
+        buf.extend(encode_array_header(v1.len()));
+        for cost in v1 {
+            buf.extend(encode_int(*cost as i128));
+        }
+    }
+    if let Some(ref v2) = cm.plutus_v2 {
+        buf.extend(encode_uint(1));
+        buf.extend(encode_array_header(v2.len()));
+        for cost in v2 {
+            buf.extend(encode_int(*cost as i128));
+        }
+    }
+    if let Some(ref v3) = cm.plutus_v3 {
+        buf.extend(encode_uint(2));
+        buf.extend(encode_array_header(v3.len()));
+        for cost in v3 {
+            buf.extend(encode_int(*cost as i128));
+        }
+    }
+    buf
+}
+
 fn encode_gov_action(action: &GovAction) -> Vec<u8> {
     match action {
         GovAction::ParameterChange {
             prev_action_id,
-            protocol_param_update: _,
+            protocol_param_update,
             policy_hash,
         } => {
             let mut buf = encode_array_header(4);
             buf.extend(encode_uint(0));
             buf.extend(encode_optional_gov_action_id(prev_action_id));
-            // Protocol param update encoding is complex; use empty map as placeholder
-            buf.extend(encode_map_header(0));
+            buf.extend(encode_protocol_param_update(protocol_param_update));
             match policy_hash {
                 Some(h) => buf.extend(encode_hash28(h)),
                 None => buf.extend(encode_null()),
@@ -1863,5 +2094,133 @@ mod tests {
         };
         let encoded = encode_language_views(&cost_models, false, false, false);
         assert_eq!(encoded, encode_map_header(0));
+    }
+
+    #[test]
+    fn test_encode_protocol_param_update_empty() {
+        let ppu = ProtocolParamUpdate::default();
+        let encoded = encode_protocol_param_update(&ppu);
+        // Empty update = empty map
+        assert_eq!(encoded, encode_map_header(0));
+    }
+
+    #[test]
+    fn test_encode_protocol_param_update_basic_fields() {
+        let ppu = ProtocolParamUpdate {
+            min_fee_a: Some(44),
+            min_fee_b: Some(155381),
+            max_tx_size: Some(16384),
+            ..Default::default()
+        };
+        let encoded = encode_protocol_param_update(&ppu);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 3); // 3 fields set
+
+        // Key 0: min_fee_a = 44
+        assert_eq!(dec.u64().unwrap(), 0);
+        assert_eq!(dec.u64().unwrap(), 44);
+        // Key 1: min_fee_b = 155381
+        assert_eq!(dec.u64().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 155381);
+        // Key 3: max_tx_size = 16384
+        assert_eq!(dec.u64().unwrap(), 3);
+        assert_eq!(dec.u64().unwrap(), 16384);
+    }
+
+    #[test]
+    fn test_encode_protocol_param_update_governance_thresholds() {
+        let ppu = ProtocolParamUpdate {
+            pvt_motion_no_confidence: Some(Rational {
+                numerator: 51,
+                denominator: 100,
+            }),
+            dvt_hard_fork: Some(Rational {
+                numerator: 3,
+                denominator: 5,
+            }),
+            drep_deposit: Some(Lovelace(500_000_000)),
+            ..Default::default()
+        };
+        let encoded = encode_protocol_param_update(&ppu);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 3); // pvt group (key 22), dvt group (key 23), drep_deposit (key 28)
+    }
+
+    #[test]
+    fn test_encode_protocol_param_update_execution_costs() {
+        let ppu = ProtocolParamUpdate {
+            execution_costs: Some(ExUnitPrices {
+                mem_price: Rational {
+                    numerator: 577,
+                    denominator: 10000,
+                },
+                step_price: Rational {
+                    numerator: 721,
+                    denominator: 10000000,
+                },
+            }),
+            max_tx_ex_units: Some(ExUnits {
+                mem: 14_000_000,
+                steps: 10_000_000_000,
+            }),
+            ..Default::default()
+        };
+        let encoded = encode_protocol_param_update(&ppu);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 2); // keys 16 and 17
+    }
+
+    #[test]
+    fn test_encode_protocol_param_update_cost_models() {
+        let ppu = ProtocolParamUpdate {
+            cost_models: Some(CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![100, 200, 300]),
+                plutus_v3: None,
+            }),
+            ..Default::default()
+        };
+        let encoded = encode_protocol_param_update(&ppu);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1); // key 15 only
+
+        // Key 15
+        assert_eq!(dec.u64().unwrap(), 15);
+        // Cost models map: {1: [100, 200, 300]}
+        let cm_map_len = dec.map().unwrap().unwrap();
+        assert_eq!(cm_map_len, 1);
+        assert_eq!(dec.u64().unwrap(), 1); // plutus v2 key
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 3);
+        assert_eq!(dec.i64().unwrap(), 100);
+        assert_eq!(dec.i64().unwrap(), 200);
+        assert_eq!(dec.i64().unwrap(), 300);
+    }
+
+    #[test]
+    fn test_encode_gov_action_parameter_change() {
+        let action = GovAction::ParameterChange {
+            prev_action_id: None,
+            protocol_param_update: Box::new(ProtocolParamUpdate {
+                min_fee_a: Some(44),
+                key_deposit: Some(Lovelace(2_000_000)),
+                ..Default::default()
+            }),
+            policy_hash: None,
+        };
+        let encoded = encode_gov_action(&action);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 4); // [tag, prev_id, ppu_map, policy_hash]
+        assert_eq!(dec.u64().unwrap(), 0); // ParameterChange tag = 0
     }
 }
