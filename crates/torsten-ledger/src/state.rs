@@ -49,23 +49,42 @@ impl Rat {
     }
 
     fn add(&self, other: &Rat) -> Rat {
-        Rat::new(self.n * other.d + other.n * self.d, self.d * other.d)
+        // Cross-reduce before adding to prevent overflow:
+        // a/b + c/d = (a*(d/g) + c*(b/g)) / (b/g*d)  where g = gcd(b,d)
+        let g = Self::gcd(self.d.unsigned_abs(), other.d.unsigned_abs()) as i128;
+        let bd = self.d / g;
+        Rat::new(self.n * (other.d / g) + other.n * bd, bd * other.d)
     }
 
     fn sub(&self, other: &Rat) -> Rat {
-        Rat::new(self.n * other.d - other.n * self.d, self.d * other.d)
+        let g = Self::gcd(self.d.unsigned_abs(), other.d.unsigned_abs()) as i128;
+        let bd = self.d / g;
+        Rat::new(self.n * (other.d / g) - other.n * bd, bd * other.d)
     }
 
     fn mul(&self, other: &Rat) -> Rat {
-        Rat::new(self.n * other.n, self.d * other.d)
+        // Cross-reduce before multiplying to prevent overflow:
+        // (a/b) * (c/d) = (a/g1 * c/g2) / (b/g2 * d/g1) where g1=gcd(a,d), g2=gcd(b,c)
+        let g1 = Self::gcd(self.n.unsigned_abs(), other.d.unsigned_abs()) as i128;
+        let g2 = Self::gcd(self.d.unsigned_abs(), other.n.unsigned_abs()) as i128;
+        Rat::new(
+            (self.n / g1) * (other.n / g2),
+            (self.d / g2) * (other.d / g1),
+        )
     }
 
     fn div(&self, other: &Rat) -> Rat {
-        Rat::new(self.n * other.d, self.d * other.n)
+        // (a/b) / (c/d) = (a/b) * (d/c)
+        let g1 = Self::gcd(self.n.unsigned_abs(), other.n.unsigned_abs()) as i128;
+        let g2 = Self::gcd(self.d.unsigned_abs(), other.d.unsigned_abs()) as i128;
+        Rat::new(
+            (self.n / g1) * (other.d / g2),
+            (self.d / g2) * (other.n / g1),
+        )
     }
 
     fn min_rat(&self, other: &Rat) -> Rat {
-        // Compare self vs other: self.n/self.d vs other.n/other.d
+        // Compare using cross-multiplication: a/b <= c/d iff a*d <= c*b (when b,d > 0)
         if self.n * other.d <= other.n * self.d {
             *self
         } else {
@@ -2370,17 +2389,27 @@ impl LedgerState {
                 );
             }
             GovAction::TreasuryWithdrawals { withdrawals, .. } => {
+                // Compute total first and cap at available treasury
+                let requested: u64 = withdrawals.values().map(|a| a.0).sum();
+                let available = self.treasury.0;
+                if requested > available {
+                    warn!(
+                        "Treasury withdrawal capped: requested {} but only {} available",
+                        requested, available
+                    );
+                }
                 let mut total = 0u64;
                 for (reward_addr, amount) in withdrawals {
-                    self.treasury.0 = self.treasury.0.saturating_sub(amount.0);
-                    total += amount.0;
+                    let actual = amount.0.min(self.treasury.0);
+                    self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                    total += actual;
                     // Credit the withdrawal to the recipient's reward account
-                    if reward_addr.len() >= 29 {
+                    if actual > 0 && reward_addr.len() >= 29 {
                         let mut key_bytes = [0u8; 32];
                         let copy_len = (reward_addr.len() - 1).min(32);
                         key_bytes[..copy_len].copy_from_slice(&reward_addr[1..1 + copy_len]);
                         let key = Hash32::from_bytes(key_bytes);
-                        *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += *amount;
+                        *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
                 info!(

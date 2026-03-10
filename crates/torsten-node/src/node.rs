@@ -2109,6 +2109,17 @@ impl Node {
                     .saturating_add(epochs_crossed);
                 self.save_ledger_snapshot().await;
                 *last_snapshot_epoch = current_epoch;
+
+                // Prune opcert counters to only keep active pools (prevents unbounded growth)
+                let active_pools: std::collections::HashSet<_> = self
+                    .ledger_state
+                    .read()
+                    .await
+                    .pool_params
+                    .keys()
+                    .copied()
+                    .collect();
+                self.consensus.prune_opcert_counters(&active_pools);
             }
         }
 

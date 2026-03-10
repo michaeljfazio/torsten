@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use torsten_crypto::keys::PaymentVerificationKey;
 use torsten_primitives::block::{BlockHeader, Tip};
@@ -722,6 +722,22 @@ impl OuroborosPraos {
     /// Maximum rollback depth
     pub fn max_rollback(&self) -> u64 {
         self.security_param
+    }
+
+    /// Prune opcert counters to only keep entries for known active pools.
+    /// Call this during epoch transitions to prevent unbounded memory growth.
+    pub fn prune_opcert_counters(&mut self, active_pool_ids: &HashSet<Hash28>) {
+        let before = self.opcert_counters.len();
+        self.opcert_counters
+            .retain(|pool_id, _| active_pool_ids.contains(pool_id));
+        let pruned = before - self.opcert_counters.len();
+        if pruned > 0 {
+            debug!(
+                pruned,
+                remaining = self.opcert_counters.len(),
+                "Pruned opcert counters for retired pools"
+            );
+        }
     }
 
     /// Update the tip
