@@ -3336,7 +3336,6 @@ name = "torsten-ledger"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "dashmap",
  "minicbor 0.25.1",
  "num-bigint",
  "num-rational",

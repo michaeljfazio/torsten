@@ -1076,17 +1076,19 @@ impl LedgerState {
                 match target {
                     MIRTarget::StakeCredentials(creds) => {
                         for (cred, amount) in creds {
-                            if *amount > 0 {
-                                let key = credential_to_hash(cred);
-                                let entry = self.reward_accounts.entry(key).or_insert(Lovelace(0));
-                                entry.0 += *amount as u64;
-                                debug!(
-                                    "MIR: distributed {} lovelace from {:?} to {}",
-                                    amount,
-                                    source,
-                                    key.to_hex()
-                                );
+                            let key = credential_to_hash(cred);
+                            let entry = self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                            if *amount >= 0 {
+                                entry.0 = entry.0.saturating_add(*amount as u64);
+                            } else {
+                                entry.0 = entry.0.saturating_sub(amount.unsigned_abs());
                             }
+                            debug!(
+                                "MIR: distributed {} lovelace from {:?} to {}",
+                                amount,
+                                source,
+                                key.to_hex()
+                            );
                         }
                     }
                     MIRTarget::OtherAccountingPot(coin) => {

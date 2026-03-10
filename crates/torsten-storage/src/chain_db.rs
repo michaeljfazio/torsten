@@ -675,10 +675,14 @@ impl ChainDB {
                     let slot_bytes: &[u8] = slot_val.as_ref();
                     if slot_bytes.len() == 8 {
                         let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+                        // Derive block_no: old tip block_no minus removed count
+                        let new_block_no = current_tip
+                            .map(|t| BlockNo(t.block_no.0.saturating_sub(removed.len() as u64)))
+                            .unwrap_or(BlockNo(0));
                         self.tip = Some(TipMetadata {
                             slot,
                             hash: th,
-                            block_no: BlockNo(0), // approximate
+                            block_no: new_block_no,
                         });
                         let meta = self.tip.unwrap();
                         let _ = self.tree.insert(

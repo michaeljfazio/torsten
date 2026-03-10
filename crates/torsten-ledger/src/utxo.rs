@@ -1,4 +1,3 @@
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use torsten_primitives::hash::TransactionHash;
@@ -125,50 +124,6 @@ impl UtxoSet {
 }
 
 impl Default for UtxoSet {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Concurrent UTxO set for use in the node (thread-safe)
-#[derive(Debug)]
-pub struct ConcurrentUtxoSet {
-    utxos: DashMap<TransactionInput, TransactionOutput>,
-}
-
-impl ConcurrentUtxoSet {
-    pub fn new() -> Self {
-        ConcurrentUtxoSet {
-            utxos: DashMap::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.utxos.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.utxos.is_empty()
-    }
-
-    pub fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput> {
-        self.utxos.get(input).map(|r| r.value().clone())
-    }
-
-    pub fn insert(&self, input: TransactionInput, output: TransactionOutput) {
-        self.utxos.insert(input, output);
-    }
-
-    pub fn remove(&self, input: &TransactionInput) -> Option<TransactionOutput> {
-        self.utxos.remove(input).map(|(_, v)| v)
-    }
-
-    pub fn contains(&self, input: &TransactionInput) -> bool {
-        self.utxos.contains_key(input)
-    }
-}
-
-impl Default for ConcurrentUtxoSet {
     fn default() -> Self {
         Self::new()
     }
@@ -341,22 +296,5 @@ mod tests {
             utxo_set.lookup(&genesis_input).unwrap().value.coin.0,
             10_000_000
         );
-    }
-
-    #[test]
-    fn test_concurrent_utxo_set() {
-        let utxo_set = ConcurrentUtxoSet::new();
-        let input = TransactionInput {
-            transaction_id: Hash32::ZERO,
-            index: 0,
-        };
-        utxo_set.insert(input.clone(), make_output(1_000_000));
-
-        assert_eq!(utxo_set.len(), 1);
-        assert!(utxo_set.contains(&input));
-        assert_eq!(utxo_set.lookup(&input).unwrap().value.coin.0, 1_000_000);
-
-        utxo_set.remove(&input);
-        assert!(utxo_set.is_empty());
     }
 }

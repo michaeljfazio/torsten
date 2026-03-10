@@ -54,42 +54,36 @@ struct ChainDBBlockProvider {
 impl BlockProvider for ChainDBBlockProvider {
     fn get_block(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let block_hash = torsten_primitives::hash::Hash32::from_bytes(*hash);
-        let db = self.chain_db.try_read().ok()?;
+        let db = self.chain_db.blocking_read();
         db.get_block(&block_hash).ok().flatten()
     }
 
     fn has_block(&self, hash: &[u8; 32]) -> bool {
         let block_hash = torsten_primitives::hash::Hash32::from_bytes(*hash);
-        match self.chain_db.try_read() {
-            Ok(db) => db.has_block(&block_hash),
-            Err(_) => false,
-        }
+        let db = self.chain_db.blocking_read();
+        db.has_block(&block_hash)
     }
 
     fn get_tip(&self) -> (u64, [u8; 32], u64) {
-        match self.chain_db.try_read() {
-            Ok(db) => {
-                let tip = db.get_tip();
-                let slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
-                let hash = tip
-                    .point
-                    .hash()
-                    .map(|h| {
-                        let bytes: &[u8] = h.as_ref();
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(bytes);
-                        arr
-                    })
-                    .unwrap_or([0u8; 32]);
-                let block_no = tip.block_number.0;
-                (slot, hash, block_no)
-            }
-            Err(_) => (0, [0u8; 32], 0),
-        }
+        let db = self.chain_db.blocking_read();
+        let tip = db.get_tip();
+        let slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
+        let hash = tip
+            .point
+            .hash()
+            .map(|h| {
+                let bytes: &[u8] = h.as_ref();
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(bytes);
+                arr
+            })
+            .unwrap_or([0u8; 32]);
+        let block_no = tip.block_number.0;
+        (slot, hash, block_no)
     }
 
     fn get_next_block_after_slot(&self, after_slot: u64) -> Option<(u64, [u8; 32], Vec<u8>)> {
-        let db = self.chain_db.try_read().ok()?;
+        let db = self.chain_db.blocking_read();
         let slot = torsten_primitives::time::SlotNo(after_slot);
         match db.get_next_block_after_slot(slot) {
             Ok(Some((s, hash, cbor))) => {
@@ -2005,10 +1999,18 @@ impl Node {
             }
 
             let ledger_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+            let ledger_tip_hash = ls.tip.point.hash().cloned();
             for block in &blocks {
-                // Skip blocks the ledger has already applied (e.g. replaying from origin)
+                // Skip blocks the ledger has already applied (e.g. replaying from origin).
+                // After a rollback/fork, a block at the same slot but with a different
+                // prev_hash must NOT be skipped — it belongs to the new fork.
                 if block.slot().0 <= ledger_slot {
-                    continue;
+                    let is_fork_block = ledger_tip_hash
+                        .as_ref()
+                        .is_some_and(|tip_hash| tip_hash == block.prev_hash());
+                    if !is_fork_block {
+                        continue;
+                    }
                 }
                 if let Err(e) = ls.apply_block(block) {
                     error!(
