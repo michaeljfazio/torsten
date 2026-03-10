@@ -1086,16 +1086,31 @@ impl LedgerState {
         self.snapshots.go = self.snapshots.set.take();
         self.snapshots.set = self.snapshots.mark.take();
 
-        // Take a new "mark" snapshot of current stake distribution
+        // Take a new "mark" snapshot of current stake distribution.
+        // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
         for (cred_hash, pool_id) in &self.delegations {
-            let stake = self
+            let utxo_stake = self
                 .stake_distribution
                 .stake_map
                 .get(cred_hash)
                 .copied()
                 .unwrap_or(Lovelace(0));
-            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += stake;
+            let reward_balance = self
+                .reward_accounts
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let total_stake = Lovelace(utxo_stake.0 + reward_balance.0);
+            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
+        }
+
+        // Build per-credential stake including reward balances
+        let mut snapshot_stake = self.stake_distribution.stake_map.clone();
+        for (cred_hash, reward) in &self.reward_accounts {
+            if reward.0 > 0 {
+                *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
+            }
         }
 
         self.snapshots.mark = Some(StakeSnapshot {
@@ -1103,7 +1118,7 @@ impl LedgerState {
             delegations: self.delegations.clone(),
             pool_stake,
             pool_params: self.pool_params.clone(),
-            stake_distribution: self.stake_distribution.stake_map.clone(),
+            stake_distribution: snapshot_stake,
         });
 
         // Process pending pool retirements for this epoch
@@ -2028,6 +2043,22 @@ impl LedgerState {
         (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total)
     }
 
+    /// Get the total stake for a credential: UTxO stake + reward account balance.
+    fn credential_stake(&self, cred_hash: &Hash32) -> u64 {
+        let utxo = self
+            .stake_distribution
+            .stake_map
+            .get(cred_hash)
+            .map(|s| s.0)
+            .unwrap_or(0);
+        let reward = self
+            .reward_accounts
+            .get(cred_hash)
+            .map(|s| s.0)
+            .unwrap_or(0);
+        utxo + reward
+    }
+
     /// Compute the voting power of a DRep: sum of stake delegated to them.
     fn compute_drep_voting_power(&self, drep_hash: &Hash32) -> u64 {
         let mut power = 0u64;
@@ -2043,9 +2074,7 @@ impl LedgerState {
                 DRep::Abstain | DRep::NoConfidence => false,
             };
             if matches {
-                if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
-                    power += stake.0;
-                }
+                power += self.credential_stake(stake_cred);
             }
         }
         // Minimum voting power of 1 for registered DReps with no delegated stake
@@ -2063,8 +2092,7 @@ impl LedgerState {
             .governance
             .vote_delegations
             .keys()
-            .filter_map(|stake_cred| self.stake_distribution.stake_map.get(stake_cred))
-            .map(|stake| stake.0)
+            .map(|stake_cred| self.credential_stake(stake_cred))
             .sum();
         total.max(1) // Ensure non-zero to avoid division by zero
     }
@@ -2077,13 +2105,11 @@ impl LedgerState {
                 return stake.0;
             }
         }
-        // Fallback: compute from current delegations
+        // Fallback: compute from current delegations (UTxO + rewards)
         let mut total = 0u64;
         for (stake_cred, delegated_pool) in &self.delegations {
             if delegated_pool == pool_id {
-                if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
-                    total += stake.0;
-                }
+                total += self.credential_stake(stake_cred);
             }
         }
         if total == 0 {
@@ -2101,14 +2127,11 @@ impl LedgerState {
             let total: u64 = snapshot.pool_stake.values().map(|s| s.0).sum();
             return total.max(1);
         }
-        // Fallback: sum all pool stake from current delegations
-        let mut pool_stakes: HashMap<Hash28, u64> = HashMap::new();
-        for (stake_cred, pool_id) in &self.delegations {
-            if let Some(stake) = self.stake_distribution.stake_map.get(stake_cred) {
-                *pool_stakes.entry(*pool_id).or_default() += stake.0;
-            }
+        // Fallback: sum all pool stake from current delegations (UTxO + rewards)
+        let mut total = 0u64;
+        for stake_cred in self.delegations.keys() {
+            total += self.credential_stake(stake_cred);
         }
-        let total: u64 = pool_stakes.values().sum();
         total.max(1)
     }
 
