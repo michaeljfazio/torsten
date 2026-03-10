@@ -361,6 +361,7 @@ impl Node {
         }
 
         // Load Conway genesis if configured
+        let mut conway_committee_threshold: Option<(u64, u64)> = None;
         if let Some(ref genesis_path) = args.config.conway_genesis_file {
             let genesis_path = config_dir.join(genesis_path);
             match ConwayGenesis::load(&genesis_path) {
@@ -371,6 +372,7 @@ impl Node {
                         committee_min_size = genesis.committee_min_size,
                         "Conway genesis loaded"
                     );
+                    conway_committee_threshold = genesis.committee_threshold();
                     genesis.apply_to_protocol_params(&mut protocol_params);
                 }
                 Err(e) => {
@@ -381,7 +383,7 @@ impl Node {
 
         // Try to load existing ledger snapshot
         let snapshot_path = args.database_path.join("ledger-snapshot.bin");
-        let ledger = if snapshot_path.exists() {
+        let mut ledger = if snapshot_path.exists() {
             match LedgerState::load_snapshot(&snapshot_path) {
                 Ok(mut state) => {
                     // Re-apply genesis config in case it changed
@@ -434,6 +436,21 @@ impl Node {
             }
             ledger
         };
+        // Apply Conway genesis committee threshold if not already set
+        if let Some((num, den)) = conway_committee_threshold {
+            if ledger.governance.committee_threshold.is_none() {
+                use torsten_primitives::transaction::Rational;
+                ledger.governance.committee_threshold = Some(Rational {
+                    numerator: num,
+                    denominator: den,
+                });
+                info!(
+                    numerator = num,
+                    denominator = den,
+                    "Applied Conway genesis committee quorum threshold"
+                );
+            }
+        }
         let ledger_state = Arc::new(RwLock::new(ledger));
         info!("Ledger state initialized");
 
@@ -1904,11 +1921,7 @@ impl Node {
                 .get(cred_hash)
                 .map(|l| l.0)
                 .unwrap_or(0);
-            let reward_balance = ls
-                .reward_accounts
-                .get(cred_hash)
-                .map(|l| l.0)
-                .unwrap_or(0);
+            let reward_balance = ls.reward_accounts.get(cred_hash).map(|l| l.0).unwrap_or(0);
             *pool_stake_map.entry(*pool_id).or_default() += utxo_stake + reward_balance;
         }
 

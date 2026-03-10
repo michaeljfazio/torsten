@@ -537,6 +537,16 @@ impl ConwayGenesis {
         params.pvt_hard_fork = float_to_rational(pvt.hard_fork_initiation);
         params.pvt_pp_security_group = float_to_rational(pvt.pp_security_group);
     }
+
+    /// Extract the committee quorum threshold from Conway genesis.
+    /// Returns (numerator, denominator) if the committee section has a threshold.
+    pub fn committee_threshold(&self) -> Option<(u64, u64)> {
+        let committee = self.committee.as_ref()?;
+        let threshold = committee.get("threshold")?;
+        let num = threshold.get("numerator")?.as_u64()?;
+        let den = threshold.get("denominator")?.as_u64()?;
+        Some((num, den))
+    }
 }
 
 /// Convert a float to a rational approximation

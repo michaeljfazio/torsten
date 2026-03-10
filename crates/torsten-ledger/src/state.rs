@@ -11,7 +11,7 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::{BlockNo, EpochNo, SlotNo};
 use torsten_primitives::transaction::{
     Anchor, Certificate, Constitution, DRep, GovAction, GovActionId, MIRSource, MIRTarget,
-    ProposalProcedure, ProtocolParamUpdate, Relay, Vote, Voter, VotingProcedure,
+    ProposalProcedure, ProtocolParamUpdate, Rational, Relay, Vote, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, trace, warn};
@@ -174,6 +174,10 @@ pub struct GovernanceState {
     /// Whether the committee is in a no-confidence state (dissolved by NoConfidence action)
     #[serde(default)]
     pub no_confidence: bool,
+    /// Committee quorum threshold (from genesis or UpdateCommittee action)
+    /// This is the fraction of active CC members that must vote Yes to approve.
+    #[serde(default)]
+    pub committee_threshold: Option<Rational>,
 }
 
 /// Registration state for a DRep
@@ -1858,7 +1862,7 @@ impl LedgerState {
         total_spo_stake: u64,
     ) -> bool {
         // Count votes by voter type
-        let (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total) =
+        let (drep_yes, drep_total, spo_yes, spo_total, _cc_yes, _cc_total) =
             self.count_votes_by_type(action_id);
 
         let bootstrap = self.is_bootstrap_phase();
@@ -1889,7 +1893,13 @@ impl LedgerState {
                 } else {
                     true // No SPO vote required for non-security params
                 };
-                let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance, self.epoch);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
                 drep_met && spo_met && cc_met
             }
             GovAction::HardForkInitiation {
@@ -1906,7 +1916,13 @@ impl LedgerState {
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
                 let spo_met =
                     check_threshold(spo_yes, spo_total.max(total_spo_stake), spo_threshold);
-                let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance, self.epoch);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
                 debug!(
                     action_id = %action_id.transaction_id.to_hex(),
                     version = ?protocol_version,
@@ -1915,7 +1931,7 @@ impl LedgerState {
                     drep_threshold, drep_met,
                     spo_yes, spo_total = spo_total.max(total_spo_stake),
                     spo_threshold, spo_met,
-                    cc_yes, cc_total, cc_met,
+                    cc_met,
                     "HardForkInitiation ratification check"
                 );
                 drep_met && spo_met && cc_met
@@ -1970,7 +1986,13 @@ impl LedgerState {
                 };
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance, self.epoch);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
                 drep_met && cc_met
             }
             GovAction::TreasuryWithdrawals { .. } => {
@@ -1982,7 +2004,13 @@ impl LedgerState {
                 };
                 let drep_met =
                     check_threshold(drep_yes, drep_total.max(total_drep_stake), drep_threshold);
-                let cc_met = check_cc_approval(cc_yes, cc_total, &self.governance, self.epoch);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
                 drep_met && cc_met
             }
         }
@@ -2185,6 +2213,7 @@ impl LedgerState {
             GovAction::UpdateCommittee {
                 members_to_remove,
                 members_to_add,
+                threshold,
                 ..
             } => {
                 // Remove specified members
@@ -2202,12 +2231,16 @@ impl LedgerState {
                         .insert(key, EpochNo(*expiration_epoch));
                     // Hot key auth comes via CommitteeHotAuth certificates
                 }
+                // Store the new committee quorum threshold
+                self.governance.committee_threshold = Some(threshold.clone());
                 // UpdateCommittee restores confidence
                 self.governance.no_confidence = false;
                 info!(
-                    "Committee updated: {} removed, {} added",
+                    "Committee updated: {} removed, {} added, threshold={}/{}",
                     members_to_remove.len(),
-                    members_to_add.len()
+                    members_to_add.len(),
+                    threshold.numerator,
+                    threshold.denominator,
                 );
             }
             GovAction::NewConstitution { constitution, .. } => {
@@ -2532,38 +2565,108 @@ fn check_threshold(yes: u64, total: u64, threshold: f64) -> bool {
     (yes as f64 / total as f64) >= threshold
 }
 
-/// Check if the constitutional committee has approved (majority of active members voted yes).
-/// If there's no active committee (all resigned, or no hot keys), CC approval is not required.
+/// Check if the constitutional committee has approved a governance action.
+///
+/// Per Haskell `committeeAccepted` / `committeeAcceptedRatio`:
+/// - Iterate ALL committee members (from committee_expiration, which tracks membership)
+/// - Expired members: excluded (treated as abstain)
+/// - Members without hot keys (unregistered): excluded (treated as abstain)
+/// - Resigned members: excluded (treated as abstain)
+/// - Active members who didn't vote: counted as NO
+/// - Active members who voted Abstain: excluded from ratio
+/// - Active members who voted Yes: yes / Active members who voted No: no
+/// - Ratio = yes_count / (yes_count + no_count) compared against committee_threshold
+///
+/// During bootstrap (protocol version 9), committeeMinSize check is skipped.
+/// Post-bootstrap, if active_size < committeeMinSize, CC blocks ratification.
 fn check_cc_approval(
-    cc_yes: u64,
-    cc_total: u64,
+    action_id: &GovActionId,
     governance: &GovernanceState,
     current_epoch: EpochNo,
+    committee_min_size: u64,
+    bootstrap: bool,
 ) -> bool {
-    // Count only non-expired, non-resigned committee members with hot keys
-    let active_cc = governance
-        .committee_hot_keys
-        .keys()
-        .filter(|cold| {
-            // Must not be expired
-            if let Some(exp) = governance.committee_expiration.get(*cold) {
-                if *exp <= current_epoch {
-                    return false;
-                }
-            }
-            // Must not be resigned
-            !governance.committee_resigned.contains_key(*cold)
-        })
-        .count() as u64;
-    if active_cc == 0 {
-        // No active committee — CC requirement is waived
+    // Get committee quorum threshold
+    let threshold = match &governance.committee_threshold {
+        Some(t) => t.as_f64(),
+        None => {
+            // No committee exists — CC vote fails (blocks ratification)
+            return false;
+        }
+    };
+
+    // If threshold is 0, auto-approve
+    if threshold == 0.0 {
         return true;
     }
-    // Majority of voting CC members must approve
-    if cc_total == 0 {
+
+    // Collect CC votes for this action indexed by hot credential
+    let mut cc_votes: HashMap<Hash32, Vote> = HashMap::new();
+    let empty = vec![];
+    let action_votes = governance.votes_by_action.get(action_id).unwrap_or(&empty);
+    for (voter, procedure) in action_votes {
+        if let Voter::ConstitutionalCommittee(cred) = voter {
+            let hot_key = credential_to_hash(cred);
+            cc_votes.insert(hot_key, procedure.vote.clone());
+        }
+    }
+
+    // Iterate all committee members and compute the ratio
+    let mut yes_count = 0u64;
+    let mut total_excluding_abstain = 0u64;
+    let mut active_size = 0u64;
+
+    for (cold_key, expiry) in &governance.committee_expiration {
+        // Expired members: excluded (treated as abstain)
+        if *expiry <= current_epoch {
+            continue;
+        }
+
+        // Check if member has a registered hot key
+        let hot_key = match governance.committee_hot_keys.get(cold_key) {
+            Some(hk) => hk,
+            None => continue, // No hot key: excluded (treated as abstain)
+        };
+
+        // Resigned members: excluded (treated as abstain)
+        if governance.committee_resigned.contains_key(cold_key) {
+            continue;
+        }
+
+        active_size += 1;
+
+        // Look up vote by hot credential
+        match cc_votes.get(hot_key) {
+            Some(Vote::Yes) => {
+                yes_count += 1;
+                total_excluding_abstain += 1;
+            }
+            Some(Vote::Abstain) => {
+                // Abstain: excluded from ratio
+            }
+            Some(Vote::No) | None => {
+                // Voted No or didn't vote: counts as No
+                total_excluding_abstain += 1;
+            }
+        }
+    }
+
+    // Check committeeMinSize (skipped during bootstrap per Haskell spec)
+    if !bootstrap && active_size < committee_min_size {
         return false;
     }
-    cc_yes * 2 > cc_total
+
+    // If no committee members exist at all
+    if active_size == 0 {
+        return false;
+    }
+
+    // If all active members abstained, ratio is 0
+    if total_excluding_abstain == 0 {
+        return false;
+    }
+
+    (yes_count as f64 / total_excluding_abstain as f64) >= threshold
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3995,6 +4098,11 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
+        // Set CC threshold to 0 so CC auto-approves (we're testing DRep voting here)
+        state.governance.committee_threshold = Some(Rational {
+            numerator: 0,
+            denominator: 1,
+        });
 
         // Register enough DReps and have them vote yes to meet threshold (67%)
         let drep_count = 10;
@@ -4163,6 +4271,10 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
         state.treasury = Lovelace(10_000_000_000);
+        state.governance.committee_threshold = Some(Rational {
+            numerator: 0,
+            denominator: 1,
+        });
 
         // Register DReps
         for i in 0..10 {
@@ -4340,6 +4452,10 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
+        state.governance.committee_threshold = Some(Rational {
+            numerator: 0,
+            denominator: 1,
+        });
 
         // Register DReps
         for i in 0..10 {
@@ -4420,41 +4536,157 @@ mod tests {
         assert!(!check_threshold(0, 0, 0.5)); // no votes = not met
     }
 
+    /// Helper to create a CC-compatible hot key Hash32 from a Hash28 byte value.
+    /// Matches the format produced by credential_to_hash (padded with zeros).
+    fn make_cc_hot_key(byte_val: u8) -> (Hash28, Hash32) {
+        let h28 = Hash28::from_bytes([byte_val; 28]);
+        let mut h32_bytes = [0u8; 32];
+        h32_bytes[..28].copy_from_slice(&[byte_val; 28]);
+        (h28, Hash32::from_bytes(h32_bytes))
+    }
+
     #[test]
     fn test_cc_approval_no_committee() {
         let governance = GovernanceState::default();
-        // No active committee => CC approval waived
-        assert!(check_cc_approval(0, 0, &governance, EpochNo(10)));
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0u8; 32]),
+            action_index: 0,
+        };
+        // No committee threshold => CC blocks ratification
+        assert!(!check_cc_approval(
+            &action_id,
+            &governance,
+            EpochNo(10),
+            0,
+            false
+        ));
     }
 
     #[test]
     fn test_cc_approval_with_committee() {
-        let mut governance = GovernanceState::default();
+        let mut governance = GovernanceState {
+            committee_threshold: Some(Rational {
+                numerator: 2,
+                denominator: 3,
+            }),
+            ..Default::default()
+        };
         let current_epoch = EpochNo(10);
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            action_index: 0,
+        };
         // Add 3 active CC members with expiration in the future
-        for i in 0..3 {
-            let cold = Hash32::from_bytes([i as u8; 32]);
-            let hot = Hash32::from_bytes([10 + i as u8; 32]);
-            governance.committee_hot_keys.insert(cold, hot);
-            governance.committee_expiration.insert(cold, EpochNo(100)); // expires at epoch 100
+        let mut creds = Vec::new();
+        for i in 0..3u8 {
+            let cold = Hash32::from_bytes([i; 32]);
+            let (h28, h32) = make_cc_hot_key(10 + i);
+            governance.committee_hot_keys.insert(cold, h32);
+            governance.committee_expiration.insert(cold, EpochNo(100));
+            creds.push(Credential::VerificationKey(h28));
         }
-        // 2/3 voted yes => majority
-        assert!(check_cc_approval(2, 3, &governance, current_epoch));
-        // 1/3 voted yes => no majority
-        assert!(!check_cc_approval(1, 3, &governance, current_epoch));
-        // No CC voted at all => not approved
-        assert!(!check_cc_approval(0, 0, &governance, current_epoch));
+        // 2/3 voted yes => meets 2/3 threshold
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::ConstitutionalCommittee(creds[0].clone()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[1].clone()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[2].clone()),
+                    VotingProcedure {
+                        vote: Vote::No,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+        assert!(check_cc_approval(
+            &action_id,
+            &governance,
+            current_epoch,
+            0,
+            false
+        ));
+
+        // 1/3 voted yes => below 2/3 threshold
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::ConstitutionalCommittee(creds[0].clone()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[1].clone()),
+                    VotingProcedure {
+                        vote: Vote::No,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[2].clone()),
+                    VotingProcedure {
+                        vote: Vote::No,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+        assert!(!check_cc_approval(
+            &action_id,
+            &governance,
+            current_epoch,
+            0,
+            false
+        ));
+
+        // No CC voted at all => all count as No, 0/3 < 2/3
+        governance.votes_by_action.remove(&action_id);
+        assert!(!check_cc_approval(
+            &action_id,
+            &governance,
+            current_epoch,
+            0,
+            false
+        ));
     }
 
     #[test]
     fn test_cc_approval_expired_members() {
-        let mut governance = GovernanceState::default();
+        let mut governance = GovernanceState {
+            committee_threshold: Some(Rational {
+                numerator: 1,
+                denominator: 2,
+            }),
+            ..Default::default()
+        };
         let current_epoch = EpochNo(50);
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            action_index: 0,
+        };
         // Add 3 CC members, but 2 are expired
-        for i in 0..3 {
-            let cold = Hash32::from_bytes([i as u8; 32]);
-            let hot = Hash32::from_bytes([10 + i as u8; 32]);
-            governance.committee_hot_keys.insert(cold, hot);
+        let mut creds = Vec::new();
+        for i in 0..3u8 {
+            let cold = Hash32::from_bytes([i; 32]);
+            let (h28, h32) = make_cc_hot_key(10 + i);
+            governance.committee_hot_keys.insert(cold, h32);
+            creds.push(Credential::VerificationKey(h28));
         }
         // Member 0 and 1 expired, member 2 still active
         governance
@@ -4466,8 +4698,163 @@ mod tests {
         governance
             .committee_expiration
             .insert(Hash32::from_bytes([2u8; 32]), EpochNo(100));
-        // Only 1 active member, so 1/1 required for majority
-        assert!(check_cc_approval(1, 1, &governance, current_epoch));
+        // Only 1 active member who voted yes => 1/1 >= 1/2
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![(
+                Voter::ConstitutionalCommittee(creds[2].clone()),
+                VotingProcedure {
+                    vote: Vote::Yes,
+                    anchor: None,
+                },
+            )],
+        );
+        assert!(check_cc_approval(
+            &action_id,
+            &governance,
+            current_epoch,
+            0,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_cc_approval_min_size_check() {
+        let mut governance = GovernanceState {
+            committee_threshold: Some(Rational {
+                numerator: 1,
+                denominator: 2,
+            }),
+            ..Default::default()
+        };
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            action_index: 0,
+        };
+        // 1 active member
+        let cold = Hash32::from_bytes([0u8; 32]);
+        let (h28, h32) = make_cc_hot_key(10);
+        governance.committee_hot_keys.insert(cold, h32);
+        governance.committee_expiration.insert(cold, EpochNo(100));
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![(
+                Voter::ConstitutionalCommittee(Credential::VerificationKey(h28)),
+                VotingProcedure {
+                    vote: Vote::Yes,
+                    anchor: None,
+                },
+            )],
+        );
+        // Post-bootstrap: min_size=3 but only 1 active => CC blocks
+        assert!(!check_cc_approval(
+            &action_id,
+            &governance,
+            EpochNo(10),
+            3,
+            false
+        ));
+        // During bootstrap: min_size check skipped => CC passes
+        assert!(check_cc_approval(
+            &action_id,
+            &governance,
+            EpochNo(10),
+            3,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_cc_approval_abstain_excluded() {
+        let mut governance = GovernanceState {
+            committee_threshold: Some(Rational {
+                numerator: 2,
+                denominator: 3,
+            }),
+            ..Default::default()
+        };
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            action_index: 0,
+        };
+        // 3 active members
+        let mut creds = Vec::new();
+        for i in 0..3u8 {
+            let cold = Hash32::from_bytes([i; 32]);
+            let (h28, h32) = make_cc_hot_key(10 + i);
+            governance.committee_hot_keys.insert(cold, h32);
+            governance.committee_expiration.insert(cold, EpochNo(100));
+            creds.push(Credential::VerificationKey(h28));
+        }
+        // 1 yes, 1 no, 1 abstain => ratio = 1/2 (abstain excluded) < 2/3
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::ConstitutionalCommittee(creds[0].clone()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[1].clone()),
+                    VotingProcedure {
+                        vote: Vote::No,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[2].clone()),
+                    VotingProcedure {
+                        vote: Vote::Abstain,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+        assert!(!check_cc_approval(
+            &action_id,
+            &governance,
+            EpochNo(10),
+            0,
+            false
+        ));
+
+        // 1 yes, 0 no, 2 abstain => ratio = 1/1 (abstains excluded) >= 2/3
+        governance.votes_by_action.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::ConstitutionalCommittee(creds[0].clone()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[1].clone()),
+                    VotingProcedure {
+                        vote: Vote::Abstain,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::ConstitutionalCommittee(creds[2].clone()),
+                    VotingProcedure {
+                        vote: Vote::Abstain,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+        assert!(check_cc_approval(
+            &action_id,
+            &governance,
+            EpochNo(10),
+            0,
+            false
+        ));
     }
 
     #[test]
