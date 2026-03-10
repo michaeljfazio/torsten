@@ -171,8 +171,11 @@ pub fn validate_transaction(
         // Proposal deposits (Conway governance)
         let proposal_deposits = body.proposal_procedures.len() as u64 * params.gov_action_deposit.0;
 
+        // Treasury donation (Conway)
+        let donation = body.donation.map(|d| d.0).unwrap_or(0);
+
         let consumed = input_value.0 + withdrawal_value + total_refunds;
-        let produced = output_value + body.fee.0 + total_deposits + proposal_deposits;
+        let produced = output_value + body.fee.0 + total_deposits + proposal_deposits + donation;
 
         if consumed != produced {
             errors.push(ValidationError::ValueNotConserved {
@@ -2723,5 +2726,35 @@ mod tests {
                     .any(|e| matches!(e, ValidationError::MissingSpendRedeemer { .. })));
             }
         }
+    }
+
+    #[test]
+    fn test_treasury_donation_value_conservation() {
+        // A tx with a donation should pass value conservation when donation is accounted for
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 8_800_000, 200_000);
+        // input = 10M, output = 8.8M, fee = 0.2M, donation = 1M → 10M = 8.8M + 0.2M + 1M
+        tx.body.donation = Some(Lovelace(1_000_000));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_treasury_donation_value_not_conserved() {
+        // Without accounting for donation, value won't be conserved
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        // input = 10M, output = 9.8M, fee = 0.2M, donation = 1M → 10M ≠ 9.8M + 0.2M + 1M = 11M
+        tx.body.donation = Some(Lovelace(1_000_000));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })));
     }
 }
