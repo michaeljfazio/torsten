@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 description = "Block and chain storage for Torsten (ImmutableDB + VolatileDB)"
 
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]
+
 [dependencies]
 torsten-primitives = { workspace = true }
 torsten-serialization = { workspace = true }
 torsten-crypto = { workspace = true }
-rocksdb = { workspace = true }
+rocksdb = { workspace = true, optional = true }
+cardano-lsm = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -21,3 +26,9 @@ crc32fast = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "storage_bench"
+harness = false

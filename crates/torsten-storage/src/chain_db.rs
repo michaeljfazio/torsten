@@ -1,4 +1,7 @@
+#[cfg(feature = "rocksdb")]
 use crate::immutable_db::ImmutableDB;
+#[cfg(not(feature = "rocksdb"))]
+use crate::lsm::LsmImmutableDB;
 use crate::volatile_db::VolatileDB;
 use std::path::Path;
 use thiserror::Error;
@@ -10,7 +13,11 @@ use tracing::{info, trace, warn};
 #[derive(Error, Debug)]
 pub enum ChainDBError {
     #[error("Immutable DB error: {0}")]
+    #[cfg(feature = "rocksdb")]
     Immutable(#[from] crate::immutable_db::ImmutableDBError),
+    #[error("Immutable DB error (LSM): {0}")]
+    #[cfg(not(feature = "rocksdb"))]
+    Immutable(#[from] crate::lsm::LsmImmutableDBError),
     #[error("Volatile DB error: {0}")]
     Volatile(#[from] crate::volatile_db::VolatileDBError),
     #[error("Block not found: {0}")]
@@ -24,8 +31,15 @@ pub const SECURITY_PARAM_K: usize = 2160;
 ///
 /// Blocks within the last k slots are in VolatileDB (can be rolled back).
 /// Blocks older than k slots are in ImmutableDB (permanent).
+///
+/// The immutable backend is selected at compile time:
+/// - Default: `cardano-lsm`-backed `LsmImmutableDB`
+/// - `rocksdb` feature: RocksDB-backed `ImmutableDB`
 pub struct ChainDB {
+    #[cfg(feature = "rocksdb")]
     immutable: ImmutableDB,
+    #[cfg(not(feature = "rocksdb"))]
+    immutable: LsmImmutableDB,
     volatile: VolatileDB,
 }
 
@@ -33,7 +47,12 @@ impl ChainDB {
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
         info!(path = %db_path.display(), k = SECURITY_PARAM_K, "Opening ChainDB");
         let immutable_path = db_path.join("immutable");
+
+        #[cfg(feature = "rocksdb")]
         let immutable = ImmutableDB::open(&immutable_path)?;
+        #[cfg(not(feature = "rocksdb"))]
+        let immutable = LsmImmutableDB::open(&immutable_path)?;
+
         let volatile = VolatileDB::new(SECURITY_PARAM_K * 2);
         info!("ChainDB opened successfully");
 
@@ -285,7 +304,7 @@ impl ChainDB {
     }
 
     /// Flush old blocks from volatile to immutable when chain is long enough.
-    /// Uses batched RocksDB writes for performance.
+    /// Uses batched writes for performance.
     fn maybe_flush_to_immutable(&mut self) -> Result<(), ChainDBError> {
         let volatile_count = self.volatile.block_count();
         if volatile_count <= SECURITY_PARAM_K {
@@ -300,7 +319,7 @@ impl ChainDB {
         );
         let flushed = self.volatile.drain_oldest(to_flush);
 
-        // Use batched write — all blocks in a single atomic RocksDB WriteBatch
+        // Use batched write — all blocks in a single atomic write batch
         let batch: Vec<_> = flushed
             .iter()
             .map(|(hash, slot, block_no, cbor)| (*slot, hash, *block_no, cbor.as_slice()))
