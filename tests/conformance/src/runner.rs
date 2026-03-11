@@ -145,7 +145,7 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
         }
     };
 
-    let tx = match adapters::to_transaction(&test_tx) {
+    let tx = match adapters::to_transaction_with_utxo(&test_tx, Some(&utxo_set)) {
         Ok(t) => t,
         Err(e) => {
             return ConformanceTestResult {

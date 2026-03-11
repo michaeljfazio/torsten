@@ -1,0 +1,1259 @@
+use super::{credential_to_hash, GovernanceState, LedgerState, ProposalState};
+use std::collections::HashMap;
+use std::sync::Arc;
+use torsten_primitives::hash::{Hash28, Hash32};
+use torsten_primitives::time::EpochNo;
+use torsten_primitives::transaction::{
+    DRep, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
+};
+use torsten_primitives::value::Lovelace;
+use tracing::{debug, info, warn};
+
+impl LedgerState {
+    /// Process a governance proposal.
+    /// Validates prev_action_id chain if present.
+    pub(crate) fn process_proposal(
+        &mut self,
+        tx_hash: &Hash32,
+        action_index: u32,
+        proposal: &ProposalProcedure,
+    ) {
+        // Validate prev_action_id: if specified, the referenced action must exist
+        // as an active proposal or must have been previously enacted
+        let prev_id = match &proposal.gov_action {
+            GovAction::ParameterChange { prev_action_id, .. }
+            | GovAction::HardForkInitiation { prev_action_id, .. }
+            | GovAction::NoConfidence { prev_action_id, .. }
+            | GovAction::UpdateCommittee { prev_action_id, .. }
+            | GovAction::NewConstitution { prev_action_id, .. } => prev_action_id.as_ref(),
+            GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
+        };
+        if let Some(prev) = prev_id {
+            if !self.governance.proposals.contains_key(prev) {
+                debug!(
+                    "Governance proposal references unknown prev_action_id {:?} (allowed — may have been enacted)",
+                    prev
+                );
+            }
+        }
+
+        // CIP-1694: Validate policy_hash matches constitution guardrail script
+        // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash
+        let constitution_script = self
+            .governance
+            .constitution
+            .as_ref()
+            .and_then(|c| c.script_hash);
+        match &proposal.gov_action {
+            GovAction::ParameterChange { policy_hash, .. }
+            | GovAction::TreasuryWithdrawals { policy_hash, .. } => {
+                if let Some(required_hash) = constitution_script {
+                    match policy_hash {
+                        Some(provided) if *provided == required_hash => {
+                            // Valid — policy hash matches constitution guardrail
+                        }
+                        Some(provided) => {
+                            warn!(
+                                "Governance proposal policy_hash {} does not match constitution guardrail {}",
+                                provided.to_hex(),
+                                required_hash.to_hex()
+                            );
+                        }
+                        None => {
+                            debug!(
+                                "Governance proposal missing policy_hash (constitution requires {})",
+                                required_hash.to_hex()
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let action_id = GovActionId {
+            transaction_id: *tx_hash,
+            action_index,
+        };
+
+        // Governance action lifetime from protocol parameters
+        let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
+        let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
+
+        let state = ProposalState {
+            procedure: proposal.clone(),
+            proposed_epoch: self.epoch,
+            expires_epoch,
+            yes_votes: 0,
+            no_votes: 0,
+            abstain_votes: 0,
+        };
+
+        debug!(
+            "Governance proposal submitted: {:?} (expires epoch {})",
+            action_id, expires_epoch.0
+        );
+        Arc::make_mut(&mut self.governance)
+            .proposals
+            .insert(action_id, state);
+        Arc::make_mut(&mut self.governance).proposal_count += 1;
+    }
+
+    /// Process a governance vote
+    pub(crate) fn process_vote(
+        &mut self,
+        voter: &Voter,
+        action_id: &GovActionId,
+        procedure: &VotingProcedure,
+    ) {
+        // Update vote tally on the proposal
+        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+            .proposals
+            .get_mut(action_id)
+        {
+            match procedure.vote {
+                Vote::Yes => proposal.yes_votes += 1,
+                Vote::No => proposal.no_votes += 1,
+                Vote::Abstain => proposal.abstain_votes += 1,
+            }
+        }
+
+        // Track DRep activity — voting counts as activity per CIP-1694
+        if let Voter::DRep(cred) = voter {
+            let drep_hash = credential_to_hash(cred);
+            if let Some(drep) = Arc::make_mut(&mut self.governance)
+                .dreps
+                .get_mut(&drep_hash)
+            {
+                drep.last_active_epoch = self.epoch;
+            }
+        }
+
+        // Record the vote (indexed by action_id for efficient ratification)
+        let action_votes = Arc::make_mut(&mut self.governance)
+            .votes_by_action
+            .entry(action_id.clone())
+            .or_default();
+        // Replace existing vote from same voter, or add new
+        if let Some(existing) = action_votes.iter_mut().find(|(v, _)| v == voter) {
+            existing.1 = procedure.clone();
+        } else {
+            action_votes.push((voter.clone(), procedure.clone()));
+        }
+
+        debug!(
+            "Vote cast by {:?} on {:?}: {:?}",
+            voter, action_id, procedure.vote
+        );
+    }
+
+    /// Check all active governance proposals for ratification.
+    ///
+    /// A proposal is ratified when it meets the required voting thresholds.
+    /// Thresholds vary by action type and involve DRep, SPO, and/or CC votes.
+    /// Ratified proposals are enacted (their effects applied) and removed.
+    ///
+    /// Per Haskell Ratify.hs, proposals are processed:
+    /// 1. Sorted by priority (NoConfidence > UpdateCommittee > ... > InfoAction)
+    /// 2. Sequentially with state threading (enacted roots update between proposals)
+    /// 3. With a "delaying action" flag that blocks further ratification
+    /// 4. With prev_action_id chain validation (must match last enacted of same purpose)
+    pub(crate) fn ratify_proposals(&mut self) {
+        let total_drep_stake = self.compute_total_drep_stake();
+        let total_spo_stake = self.compute_total_spo_stake();
+        // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
+        let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
+
+        // Collect all proposals sorted by priority (lower = higher priority)
+        let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = self
+            .governance
+            .proposals
+            .iter()
+            .map(|(id, state)| {
+                (
+                    id.clone(),
+                    state.procedure.gov_action.clone(),
+                    state.expires_epoch,
+                )
+            })
+            .collect();
+        candidates.sort_by_key(|(_, action, _)| gov_action_priority(action));
+
+        let mut ratified = Vec::new();
+        let mut delayed = false;
+
+        for (action_id, action, _expires) in &candidates {
+            // Check prev_action_id chain
+            if !prev_action_as_expected(action, &self.governance) {
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    action_type = ?std::mem::discriminant(action),
+                    "Governance proposal: prev_action_id chain mismatch"
+                );
+                continue;
+            }
+
+            // If a delaying action was already enacted this epoch, skip remaining
+            if delayed {
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    "Governance proposal: delayed by previously enacted action"
+                );
+                continue;
+            }
+
+            // Check voting thresholds
+            if let Some(state) = self.governance.proposals.get(action_id) {
+                let met = self.check_ratification(
+                    action_id,
+                    state,
+                    total_drep_stake,
+                    total_spo_stake,
+                    &drep_power_cache,
+                    no_confidence_stake,
+                );
+                if met {
+                    info!(
+                        action_id = %action_id.transaction_id.to_hex(),
+                        action_type = ?std::mem::discriminant(action),
+                        "Governance proposal ratified"
+                    );
+                    // Enact immediately and update roots (for chain validation of subsequent proposals)
+                    self.enact_gov_action(action);
+                    self.update_enacted_root(action_id, action);
+                    ratified.push(action_id.clone());
+                    if is_delaying_action(action) {
+                        delayed = true;
+                    }
+                } else if !matches!(action, GovAction::InfoAction) {
+                    debug!(
+                        action_id = %action_id.transaction_id.to_hex(),
+                        action_type = ?std::mem::discriminant(action),
+                        "Governance proposal not yet ratified"
+                    );
+                }
+            }
+        }
+
+        // Remove ratified proposals and refund deposits
+        if !ratified.is_empty() {
+            for action_id in &ratified {
+                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                    .proposals
+                    .remove(action_id)
+                {
+                    let deposit = proposal_state.procedure.deposit;
+                    if deposit.0 > 0 {
+                        let return_addr = &proposal_state.procedure.return_addr;
+                        if return_addr.len() >= 29 {
+                            let key = Self::reward_account_to_hash(return_addr);
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
+                        }
+                    }
+                }
+                Arc::make_mut(&mut self.governance)
+                    .votes_by_action
+                    .remove(action_id);
+            }
+            info!(
+                "{} governance proposal(s) ratified and enacted",
+                ratified.len()
+            );
+        }
+    }
+
+    /// Update the enacted governance root for a given purpose after enactment.
+    fn update_enacted_root(&mut self, action_id: &GovActionId, action: &GovAction) {
+        match action {
+            GovAction::ParameterChange { .. } => {
+                Arc::make_mut(&mut self.governance).enacted_pparam_update = Some(action_id.clone());
+            }
+            GovAction::HardForkInitiation { .. } => {
+                Arc::make_mut(&mut self.governance).enacted_hard_fork = Some(action_id.clone());
+            }
+            GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
+                Arc::make_mut(&mut self.governance).enacted_committee = Some(action_id.clone());
+            }
+            GovAction::NewConstitution { .. } => {
+                Arc::make_mut(&mut self.governance).enacted_constitution = Some(action_id.clone());
+            }
+            // TreasuryWithdrawals and InfoAction don't update any root
+            GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {}
+        }
+    }
+
+    /// Whether we are in the Conway bootstrap phase (protocol version 9).
+    /// During bootstrap, all DRep voting thresholds are set to 0 (auto-pass)
+    /// per the Haskell `hardforkConwayBootstrapPhase` function.
+    fn is_bootstrap_phase(&self) -> bool {
+        self.protocol_params.protocol_version_major == 9
+    }
+
+    /// Check whether a proposal has met its voting thresholds for ratification.
+    ///
+    /// CIP-1694 voting thresholds (stake-weighted), matching Haskell cardano-ledger:
+    /// - InfoAction: always ratified (no thresholds)
+    /// - ParameterChange: DRep >= dvt_pp_*_group + SPO >= pvt_pp_security (if security) + CC
+    /// - HardForkInitiation: DRep >= dvt_hard_fork + SPO >= pvt_hard_fork + CC
+    /// - NoConfidence: DRep >= dvt_no_confidence + SPO >= pvt_motion_no_confidence (no CC)
+    /// - UpdateCommittee: DRep >= dvt_committee + SPO >= pvt_committee (no CC)
+    /// - NewConstitution: DRep >= dvt_constitution + CC (no SPO)
+    /// - TreasuryWithdrawals: DRep >= dvt_treasury_withdrawal + CC (no SPO)
+    ///
+    /// During Conway bootstrap phase (protocol version 9), all DRep thresholds are 0.
+    fn check_ratification(
+        &self,
+        action_id: &GovActionId,
+        state: &ProposalState,
+        _total_drep_stake: u64,
+        total_spo_stake: u64,
+        drep_power_cache: &HashMap<Hash32, u64>,
+        no_confidence_stake: u64,
+    ) -> bool {
+        // Count votes by voter type (uses pre-computed DRep power cache)
+        // Per CIP-1694:
+        // - DRep denominator = yes + no voted stake (abstain excluded)
+        // - SPO denominator = total active SPO stake (non-voting SPOs effectively vote No)
+        let (drep_yes, drep_total, spo_yes, _spo_voted, _cc_yes, _cc_total) = self
+            .count_votes_by_type(
+                action_id,
+                &state.procedure.gov_action,
+                drep_power_cache,
+                no_confidence_stake,
+            );
+
+        let bootstrap = self.is_bootstrap_phase();
+
+        match &state.procedure.gov_action {
+            GovAction::InfoAction => {
+                // InfoAction is always ratified (it's informational only)
+                true
+            }
+            GovAction::ParameterChange {
+                protocol_param_update,
+                ..
+            } => {
+                // Per CIP-1694: each affected DRep parameter group must independently
+                // meet its own threshold. ALL affected group thresholds must be met.
+                // SPO threshold = pvtPPSecurityGroup if any param is security-relevant
+                // CC approval required
+                let drep_met = if bootstrap {
+                    true // All DRep thresholds are 0 during bootstrap
+                } else {
+                    pp_change_drep_all_groups_met(
+                        protocol_param_update,
+                        &self.protocol_params,
+                        drep_yes,
+                        drep_total,
+                    )
+                };
+                let spo_met = if let Some(ref spo_threshold) =
+                    pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
+                {
+                    check_threshold(spo_yes, total_spo_stake, spo_threshold)
+                } else {
+                    true // No SPO vote required for non-security params
+                };
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
+                drep_met && spo_met && cc_met
+            }
+            GovAction::HardForkInitiation {
+                protocol_version, ..
+            } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
+                // DRep + SPO + CC all required
+                let drep_threshold = if bootstrap {
+                    rational_zero
+                } else {
+                    self.protocol_params.dvt_hard_fork.clone()
+                };
+                let spo_threshold = &self.protocol_params.pvt_hard_fork;
+                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    version = ?protocol_version,
+                    bootstrap,
+                    drep_yes, drep_total,
+                    drep_threshold = drep_threshold.as_f64(), drep_met,
+                    spo_yes, total_spo_stake,
+                    spo_threshold = spo_threshold.as_f64(), spo_met,
+                    cc_met,
+                    "HardForkInitiation ratification check"
+                );
+                drep_met && spo_met && cc_met
+            }
+            GovAction::NoConfidence { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
+                // DRep + SPO, no CC (CC cannot vote on NoConfidence)
+                let drep_threshold = if bootstrap {
+                    rational_zero
+                } else {
+                    self.protocol_params.dvt_no_confidence.clone()
+                };
+                let spo_threshold = &self.protocol_params.pvt_motion_no_confidence;
+                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                drep_met && spo_met
+            }
+            GovAction::UpdateCommittee { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
+                // DRep + SPO, no CC (CC cannot vote on UpdateCommittee)
+                let (drep_threshold, spo_threshold) = if self.governance.no_confidence {
+                    (
+                        if bootstrap {
+                            rational_zero
+                        } else {
+                            self.protocol_params.dvt_committee_no_confidence.clone()
+                        },
+                        &self.protocol_params.pvt_committee_no_confidence,
+                    )
+                } else {
+                    (
+                        if bootstrap {
+                            rational_zero
+                        } else {
+                            self.protocol_params.dvt_committee_normal.clone()
+                        },
+                        &self.protocol_params.pvt_committee_normal,
+                    )
+                };
+                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                drep_met && spo_met
+            }
+            GovAction::NewConstitution { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
+                // DRep + CC, no SPO
+                let drep_threshold = if bootstrap {
+                    rational_zero
+                } else {
+                    self.protocol_params.dvt_constitution.clone()
+                };
+                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
+                drep_met && cc_met
+            }
+            GovAction::TreasuryWithdrawals { .. } => {
+                let rational_zero = Rational {
+                    numerator: 0,
+                    denominator: 1,
+                };
+                // DRep + CC, no SPO
+                let drep_threshold = if bootstrap {
+                    rational_zero
+                } else {
+                    self.protocol_params.dvt_treasury_withdrawal.clone()
+                };
+                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+                let cc_met = check_cc_approval(
+                    action_id,
+                    &self.governance,
+                    self.epoch,
+                    self.protocol_params.committee_min_size,
+                    bootstrap,
+                );
+                drep_met && cc_met
+            }
+        }
+    }
+
+    /// Count stake-weighted votes by voter type for a specific governance action.
+    ///
+    /// Per CIP-1694:
+    /// - DRep denominator = yes + no voted stake only (abstain excluded)
+    /// - SPO: returns explicit yes votes; total SPO stake used as denominator in check_ratification
+    /// - AlwaysNoConfidence stake counts as Yes for NoConfidence actions, No for others
+    /// - AlwaysAbstain stake is excluded from both numerator and denominator
+    /// - Inactive DReps are excluded (handled by drep_power_cache)
+    pub(crate) fn count_votes_by_type(
+        &self,
+        action_id: &GovActionId,
+        action: &GovAction,
+        drep_power_cache: &HashMap<Hash32, u64>,
+        no_confidence_stake: u64,
+    ) -> (u64, u64, u64, u64, u64, u64) {
+        let mut drep_yes = 0u64;
+        let mut drep_no = 0u64;
+        let mut spo_yes = 0u64;
+        let mut spo_total = 0u64;
+        let mut cc_yes = 0u64;
+        let mut cc_total = 0u64;
+
+        let empty = vec![];
+        let action_votes = self
+            .governance
+            .votes_by_action
+            .get(action_id)
+            .unwrap_or(&empty);
+
+        for (voter, procedure) in action_votes {
+            match voter {
+                Voter::DRep(cred) => {
+                    let drep_hash = credential_to_hash(cred);
+                    let voting_power =
+                        drep_power_cache
+                            .get(&drep_hash)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                // Fallback for DReps not in cache (e.g., voted but not delegated to)
+                                if self
+                                    .governance
+                                    .dreps
+                                    .get(&drep_hash)
+                                    .is_some_and(|d| d.active)
+                                {
+                                    1
+                                } else {
+                                    0
+                                }
+                            });
+                    // Only count yes and no votes in the denominator (abstain excluded)
+                    match procedure.vote {
+                        Vote::Yes => {
+                            drep_yes += voting_power;
+                        }
+                        Vote::No => {
+                            drep_no += voting_power;
+                        }
+                        Vote::Abstain => {
+                            // Excluded from both numerator and denominator
+                        }
+                    }
+                }
+                Voter::StakePool(pool_hash) => {
+                    // Pool IDs are Hash28 (Blake2b-224); convert from Hash32
+                    let pool_id = Hash28::from_bytes({
+                        let mut b = [0u8; 28];
+                        b.copy_from_slice(&pool_hash.as_bytes()[..28]);
+                        b
+                    });
+                    let pool_stake = self.compute_spo_voting_power(&pool_id);
+                    // SPO denominator = total active SPO stake, so only count yes here
+                    // Non-voting SPOs are implicitly No (in denominator but not numerator)
+                    spo_total += pool_stake;
+                    if procedure.vote == Vote::Yes {
+                        spo_yes += pool_stake;
+                    }
+                }
+                Voter::ConstitutionalCommittee(_) => {
+                    cc_total += 1;
+                    if procedure.vote == Vote::Yes {
+                        cc_yes += 1;
+                    }
+                }
+            }
+        }
+
+        // Handle AlwaysNoConfidence stake per CIP-1694:
+        // - For NoConfidence actions: counts as Yes
+        // - For all other actions: counts as No
+        let is_no_confidence = matches!(action, GovAction::NoConfidence { .. });
+        if no_confidence_stake > 0 {
+            if is_no_confidence {
+                drep_yes += no_confidence_stake;
+            } else {
+                drep_no += no_confidence_stake;
+            }
+        }
+
+        let drep_total = drep_yes + drep_no;
+
+        (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total)
+    }
+
+    /// Get the total stake for a credential: UTxO stake + reward account balance.
+    pub(crate) fn credential_stake(&self, cred_hash: &Hash32) -> u64 {
+        let utxo = self
+            .stake_distribution
+            .stake_map
+            .get(cred_hash)
+            .map(|s| s.0)
+            .unwrap_or(0);
+        let reward = self
+            .reward_accounts
+            .get(cred_hash)
+            .map(|s| s.0)
+            .unwrap_or(0);
+        utxo + reward
+    }
+
+    /// Build a cache of DRep voting power (Hash32 -> delegated stake).
+    /// Iterates vote_delegations once, O(n), instead of per-DRep O(n) lookups.
+    /// Only includes active DReps (inactive DReps are excluded from voting power).
+    /// Returns (drep_power_cache, always_no_confidence_stake, always_abstain_stake).
+    pub(crate) fn build_drep_power_cache(&self) -> (HashMap<Hash32, u64>, u64, u64) {
+        let mut cache: HashMap<Hash32, u64> = HashMap::new();
+        let mut no_confidence_stake = 0u64;
+        let mut abstain_stake = 0u64;
+        for (stake_cred, drep) in &self.governance.vote_delegations {
+            let stake = self.credential_stake(stake_cred);
+            match drep {
+                DRep::KeyHash(h) => {
+                    // Only count stake for active DReps
+                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                        *cache.entry(*h).or_default() += stake;
+                    }
+                }
+                DRep::ScriptHash(h) => {
+                    let hash32 = h.to_hash32_padded();
+                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                        *cache.entry(hash32).or_default() += stake;
+                    }
+                }
+                DRep::NoConfidence => {
+                    no_confidence_stake += stake;
+                }
+                DRep::Abstain => {
+                    abstain_stake += stake;
+                }
+            }
+        }
+        // Ensure active registered DReps with no delegated stake have minimum power of 1
+        for (drep_hash, drep) in &self.governance.dreps {
+            if drep.active {
+                cache.entry(*drep_hash).or_insert(1);
+            }
+        }
+        (cache, no_confidence_stake, abstain_stake)
+    }
+
+    /// Compute total active DRep-delegated stake across all DReps.
+    /// Excludes stake delegated to inactive DReps.
+    /// Includes stake delegated to Abstain and NoConfidence (they are part of total DRep ecosystem).
+    pub(crate) fn compute_total_drep_stake(&self) -> u64 {
+        let mut total = 0u64;
+        for (stake_cred, drep) in &self.governance.vote_delegations {
+            let stake = self.credential_stake(stake_cred);
+            match drep {
+                DRep::Abstain | DRep::NoConfidence => {
+                    total += stake;
+                }
+                DRep::KeyHash(h) => {
+                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                        total += stake;
+                    }
+                }
+                DRep::ScriptHash(h) => {
+                    let hash32 = h.to_hash32_padded();
+                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                        total += stake;
+                    }
+                }
+            }
+        }
+        total.max(1) // Ensure non-zero to avoid division by zero
+    }
+
+    /// Compute the voting power of a stake pool: total delegated stake.
+    pub(crate) fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
+        // Use the "set" snapshot (previous epoch) for voting power, falling back to current
+        if let Some(ref snapshot) = self.snapshots.set {
+            if let Some(stake) = snapshot.pool_stake.get(pool_id) {
+                return stake.0;
+            }
+        }
+        // Fallback: compute from current delegations (UTxO + rewards)
+        let mut total = 0u64;
+        for (stake_cred, delegated_pool) in self.delegations.iter() {
+            if delegated_pool == pool_id {
+                total += self.credential_stake(stake_cred);
+            }
+        }
+        if total == 0 {
+            1
+        } else {
+            total
+        }
+    }
+
+    /// Compute total active SPO stake across all pools.
+    /// Used as the denominator for SPO voting thresholds.
+    fn compute_total_spo_stake(&self) -> u64 {
+        // Use "set" snapshot if available (previous epoch), else current pool_stake
+        if let Some(ref snapshot) = self.snapshots.set {
+            let total: u64 = snapshot.pool_stake.values().map(|s| s.0).sum();
+            return total.max(1);
+        }
+        // Fallback: sum all pool stake from current delegations (UTxO + rewards)
+        let mut total = 0u64;
+        for stake_cred in self.delegations.keys() {
+            total += self.credential_stake(stake_cred);
+        }
+        total.max(1)
+    }
+
+    /// Enact a ratified governance action by applying its effects
+    pub(crate) fn enact_gov_action(&mut self, action: &GovAction) {
+        match action {
+            GovAction::ParameterChange {
+                protocol_param_update,
+                ..
+            } => {
+                if let Err(e) = self.apply_protocol_param_update(protocol_param_update) {
+                    warn!(
+                        error = %e,
+                        "Governance protocol parameter update rejected"
+                    );
+                } else {
+                    info!("Protocol parameters updated via governance action");
+                }
+            }
+            GovAction::HardForkInitiation {
+                protocol_version, ..
+            } => {
+                self.protocol_params.protocol_version_major = protocol_version.0;
+                self.protocol_params.protocol_version_minor = protocol_version.1;
+                info!(
+                    "Hard fork initiated: protocol version {}.{}",
+                    protocol_version.0, protocol_version.1
+                );
+            }
+            GovAction::TreasuryWithdrawals { withdrawals, .. } => {
+                // Compute total first and cap at available treasury
+                let requested: u64 = withdrawals.values().map(|a| a.0).sum();
+                let available = self.treasury.0;
+                if requested > available {
+                    warn!(
+                        "Treasury withdrawal capped: requested {} but only {} available",
+                        requested, available
+                    );
+                }
+                let mut total = 0u64;
+                for (reward_addr, amount) in withdrawals {
+                    let actual = amount.0.min(self.treasury.0);
+                    self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                    total += actual;
+                    // Credit the withdrawal to the recipient's reward account
+                    if actual > 0 && reward_addr.len() >= 29 {
+                        let key = Self::reward_account_to_hash(reward_addr);
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(key)
+                            .or_insert(Lovelace(0)) += Lovelace(actual);
+                    }
+                }
+                info!(
+                    "Treasury withdrawal enacted: {} lovelace to {} accounts",
+                    total,
+                    withdrawals.len()
+                );
+            }
+            GovAction::NoConfidence { .. } => {
+                // No confidence motion: remove all committee hot key authorizations and expirations
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_hot_keys.clear();
+                gov.committee_expiration.clear();
+                gov.no_confidence = true;
+                info!("No confidence motion enacted: committee disbanded");
+            }
+            GovAction::UpdateCommittee {
+                members_to_remove,
+                members_to_add,
+                threshold,
+                ..
+            } => {
+                // Remove specified members
+                for cred in members_to_remove {
+                    let key = credential_to_hash(cred);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_hot_keys
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_expiration
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_resigned
+                        .remove(&key);
+                }
+                // Add new members with expiration epochs
+                for (cred, expiration_epoch) in members_to_add {
+                    let key = credential_to_hash(cred);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_expiration
+                        .insert(key, EpochNo(*expiration_epoch));
+                    // Hot key auth comes via CommitteeHotAuth certificates
+                }
+                // Store the new committee quorum threshold
+                Arc::make_mut(&mut self.governance).committee_threshold = Some(threshold.clone());
+                // UpdateCommittee restores confidence
+                Arc::make_mut(&mut self.governance).no_confidence = false;
+                info!(
+                    "Committee updated: {} removed, {} added, threshold={}/{}",
+                    members_to_remove.len(),
+                    members_to_add.len(),
+                    threshold.numerator,
+                    threshold.denominator,
+                );
+            }
+            GovAction::NewConstitution { constitution, .. } => {
+                Arc::make_mut(&mut self.governance).constitution = Some(constitution.clone());
+                info!(
+                    "New constitution enacted (script_hash: {:?})",
+                    constitution.script_hash.as_ref().map(|h| h.to_hex())
+                );
+            }
+            GovAction::InfoAction => {
+                // Info actions have no on-chain effect
+                debug!("Info action ratified (no on-chain effect)");
+            }
+        }
+    }
+}
+
+/// DRep voting group for protocol parameter classification per CIP-1694.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DRepPPGroup {
+    Network,
+    Economic,
+    Technical,
+    Gov,
+}
+
+/// Whether SPOs can vote on a parameter change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum StakePoolPPGroup {
+    Security,
+    NoVote,
+}
+
+/// Classification of a protocol parameter: (DRepPPGroup, StakePoolPPGroup).
+/// Matches Haskell cardano-ledger Conway `PPGroups` exactly.
+pub(crate) type PPGroup = (DRepPPGroup, StakePoolPPGroup);
+
+/// Determine which PP groups are modified by a ProtocolParamUpdate.
+///
+/// Each parameter belongs to exactly one (DRepPPGroup, StakePoolPPGroup) pair.
+/// Classification matches Haskell cardano-ledger Conway ConwayPParams field tags.
+pub(crate) fn modified_pp_groups(
+    ppu: &torsten_primitives::transaction::ProtocolParamUpdate,
+) -> Vec<PPGroup> {
+    use DRepPPGroup::*;
+    use StakePoolPPGroup::*;
+
+    let mut groups = Vec::new();
+
+    // Network + Security
+    if ppu.max_block_body_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_tx_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_block_header_size.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_block_ex_units.is_some() {
+        groups.push((Network, Security));
+    }
+    if ppu.max_val_size.is_some() {
+        groups.push((Network, Security));
+    }
+
+    // Network + NoVote
+    if ppu.max_tx_ex_units.is_some() {
+        groups.push((Network, NoVote));
+    }
+    if ppu.max_collateral_inputs.is_some() {
+        groups.push((Network, NoVote));
+    }
+
+    // Economic + Security
+    if ppu.min_fee_a.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.min_fee_b.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.ada_per_utxo_byte.is_some() {
+        groups.push((Economic, Security));
+    }
+    if ppu.min_fee_ref_script_cost_per_byte.is_some() {
+        groups.push((Economic, Security));
+    }
+
+    // Economic + NoVote
+    if ppu.key_deposit.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.pool_deposit.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.rho.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.tau.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.min_pool_cost.is_some() {
+        groups.push((Economic, NoVote));
+    }
+    if ppu.execution_costs.is_some() {
+        groups.push((Economic, NoVote));
+    }
+
+    // Technical + NoVote
+    if ppu.e_max.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.n_opt.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.a0.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.cost_models.is_some() {
+        groups.push((Technical, NoVote));
+    }
+    if ppu.collateral_percentage.is_some() {
+        groups.push((Technical, NoVote));
+    }
+
+    // Gov + Security
+    if ppu.gov_action_deposit.is_some() {
+        groups.push((Gov, Security));
+    }
+
+    // Gov + NoVote
+    if ppu.dvt_pp_network_group.is_some()
+        || ppu.dvt_pp_economic_group.is_some()
+        || ppu.dvt_pp_technical_group.is_some()
+        || ppu.dvt_pp_gov_group.is_some()
+        || ppu.dvt_hard_fork.is_some()
+        || ppu.dvt_no_confidence.is_some()
+        || ppu.dvt_committee_normal.is_some()
+        || ppu.dvt_committee_no_confidence.is_some()
+        || ppu.dvt_constitution.is_some()
+        || ppu.dvt_treasury_withdrawal.is_some()
+    {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.pvt_motion_no_confidence.is_some()
+        || ppu.pvt_committee_normal.is_some()
+        || ppu.pvt_committee_no_confidence.is_some()
+        || ppu.pvt_hard_fork.is_some()
+        || ppu.pvt_pp_security_group.is_some()
+    {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.min_committee_size.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.committee_term_limit.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.gov_action_lifetime.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.drep_deposit.is_some() {
+        groups.push((Gov, NoVote));
+    }
+    if ppu.drep_activity.is_some() {
+        groups.push((Gov, NoVote));
+    }
+
+    groups
+}
+
+/// Check that ALL affected DRep parameter group thresholds are independently met.
+///
+/// Per CIP-1694 / Haskell `pparamsUpdateThreshold`: each affected parameter group
+/// has its own DRep voting threshold. A ParameterChange is ratified only if the
+/// DRep vote ratio meets the threshold for EVERY affected group independently.
+///
+/// This replaces the previous (incorrect) max-of-all-groups approach.
+pub(crate) fn pp_change_drep_all_groups_met(
+    ppu: &torsten_primitives::transaction::ProtocolParamUpdate,
+    params: &torsten_primitives::protocol_params::ProtocolParameters,
+    drep_yes: u64,
+    drep_total: u64,
+) -> bool {
+    let groups = modified_pp_groups(ppu);
+    // Collect unique DRep groups (avoid checking the same group multiple times)
+    let mut seen = std::collections::HashSet::new();
+    for (drep_group, _) in &groups {
+        if !seen.insert(*drep_group) {
+            continue;
+        }
+        let threshold = match drep_group {
+            DRepPPGroup::Network => &params.dvt_pp_network_group,
+            DRepPPGroup::Economic => &params.dvt_pp_economic_group,
+            DRepPPGroup::Technical => &params.dvt_pp_technical_group,
+            DRepPPGroup::Gov => &params.dvt_pp_gov_group,
+        };
+        if !check_threshold(drep_yes, drep_total, threshold) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compute the maximum DRep voting threshold for a ParameterChange governance action.
+///
+/// Returns the highest DRep group threshold across all affected parameter groups.
+/// Used by tests and for informational purposes. For ratification, use
+/// `pp_change_drep_all_groups_met` which checks each group independently.
+#[cfg(test)]
+pub(crate) fn pp_change_drep_threshold(
+    ppu: &torsten_primitives::transaction::ProtocolParamUpdate,
+    params: &torsten_primitives::protocol_params::ProtocolParameters,
+) -> Rational {
+    let groups = modified_pp_groups(ppu);
+    let mut max_threshold = Rational {
+        numerator: 0,
+        denominator: 1,
+    };
+    for (drep_group, _) in &groups {
+        let t = match drep_group {
+            DRepPPGroup::Network => &params.dvt_pp_network_group,
+            DRepPPGroup::Economic => &params.dvt_pp_economic_group,
+            DRepPPGroup::Technical => &params.dvt_pp_technical_group,
+            DRepPPGroup::Gov => &params.dvt_pp_gov_group,
+        };
+        if t.gt(&max_threshold) {
+            max_threshold = t.clone();
+        }
+    }
+    max_threshold
+}
+
+/// Determine if SPOs can vote on a ParameterChange, and if so, return the threshold.
+///
+/// Per Haskell `votingStakePoolThresholdInternal`: SPOs vote with pvtPPSecurityGroup
+/// if ANY modified parameter is tagged SecurityGroup. Otherwise SPOs cannot vote.
+pub(crate) fn pp_change_spo_threshold(
+    ppu: &torsten_primitives::transaction::ProtocolParamUpdate,
+    params: &torsten_primitives::protocol_params::ProtocolParameters,
+) -> Option<Rational> {
+    let groups = modified_pp_groups(ppu);
+    let has_security = groups
+        .iter()
+        .any(|(_, spo)| *spo == StakePoolPPGroup::Security);
+    if has_security {
+        Some(params.pvt_pp_security_group.clone())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> bool {
+    if total == 0 {
+        return false;
+    }
+    // Exact integer comparison: yes/total >= numerator/denominator
+    // ⟺ yes * denominator >= numerator * total (using u128 to avoid overflow)
+    threshold.is_met_by(yes, total)
+}
+
+/// Check if the constitutional committee has approved a governance action.
+///
+/// Per Haskell `committeeAccepted` / `committeeAcceptedRatio`:
+/// - Iterate ALL committee members (from committee_expiration, which tracks membership)
+/// - Expired members: excluded (treated as abstain)
+/// - Members without hot keys (unregistered): excluded (treated as abstain)
+/// - Resigned members: excluded (treated as abstain)
+/// - Active members who didn't vote: counted as NO
+/// - Active members who voted Abstain: excluded from ratio
+/// - Active members who voted Yes: yes / Active members who voted No: no
+/// - Ratio = yes_count / (yes_count + no_count) compared against committee_threshold
+///
+/// During bootstrap (protocol version 9), committeeMinSize check is skipped.
+/// Post-bootstrap, if active_size < committeeMinSize, CC blocks ratification.
+pub(crate) fn check_cc_approval(
+    action_id: &GovActionId,
+    governance: &GovernanceState,
+    current_epoch: EpochNo,
+    committee_min_size: u64,
+    bootstrap: bool,
+) -> bool {
+    // Get committee quorum threshold
+    let threshold = match &governance.committee_threshold {
+        Some(t) => t,
+        None => {
+            // No committee exists — CC vote fails (blocks ratification)
+            return false;
+        }
+    };
+
+    // If threshold is 0, auto-approve
+    if threshold.is_zero() {
+        return true;
+    }
+
+    // Collect CC votes for this action indexed by hot credential
+    let mut cc_votes: HashMap<Hash32, Vote> = HashMap::new();
+    let empty = vec![];
+    let action_votes = governance.votes_by_action.get(action_id).unwrap_or(&empty);
+    for (voter, procedure) in action_votes {
+        if let Voter::ConstitutionalCommittee(cred) = voter {
+            let hot_key = credential_to_hash(cred);
+            cc_votes.insert(hot_key, procedure.vote.clone());
+        }
+    }
+
+    // Iterate all committee members and compute the ratio
+    let mut yes_count = 0u64;
+    let mut total_excluding_abstain = 0u64;
+    let mut active_size = 0u64;
+
+    for (cold_key, expiry) in &governance.committee_expiration {
+        // Expired members: excluded (treated as abstain)
+        if *expiry <= current_epoch {
+            continue;
+        }
+
+        // Check if member has a registered hot key
+        let hot_key = match governance.committee_hot_keys.get(cold_key) {
+            Some(hk) => hk,
+            None => continue, // No hot key: excluded (treated as abstain)
+        };
+
+        // Resigned members: excluded (treated as abstain)
+        if governance.committee_resigned.contains_key(cold_key) {
+            continue;
+        }
+
+        active_size += 1;
+
+        // Look up vote by hot credential
+        match cc_votes.get(hot_key) {
+            Some(Vote::Yes) => {
+                yes_count += 1;
+                total_excluding_abstain += 1;
+            }
+            Some(Vote::Abstain) => {
+                // Abstain: excluded from ratio
+            }
+            Some(Vote::No) | None => {
+                // Voted No or didn't vote: counts as No
+                total_excluding_abstain += 1;
+            }
+        }
+    }
+
+    // Check committeeMinSize (skipped during bootstrap per Haskell spec)
+    if !bootstrap && active_size < committee_min_size {
+        return false;
+    }
+
+    // If no committee members exist at all
+    if active_size == 0 {
+        return false;
+    }
+
+    // If all active members abstained, ratio is 0
+    if total_excluding_abstain == 0 {
+        debug!(
+            action = %action_id.transaction_id.to_hex(),
+            active_size, yes_count, total_excluding_abstain,
+            threshold = threshold.as_f64(),
+            cc_voters = cc_votes.len(),
+            committee_members = governance.committee_expiration.len(),
+            hot_keys = governance.committee_hot_keys.len(),
+            "CC approval check: all active members abstained"
+        );
+        return false;
+    }
+
+    // Exact comparison: yes_count / total_excluding_abstain >= threshold
+    let result = threshold.is_met_by(yes_count, total_excluding_abstain);
+    if !result {
+        debug!(
+            action = %action_id.transaction_id.to_hex(),
+            active_size, yes_count, total_excluding_abstain,
+            threshold = threshold.as_f64(),
+            ratio = yes_count as f64 / total_excluding_abstain as f64,
+            result,
+            cc_voters = cc_votes.len(),
+            committee_members = governance.committee_expiration.len(),
+            hot_keys = governance.committee_hot_keys.len(),
+            "CC approval check failed"
+        );
+    }
+    result
+}
+
+/// Check that a proposal's `prev_action_id` matches the last enacted action of the same
+/// governance purpose. Per Haskell `prevActionAsExpected` in Ratify.hs.
+///
+/// NoConfidence and UpdateCommittee share the `Committee` purpose.
+/// TreasuryWithdrawals and InfoAction have no prev_action_id chain (always pass).
+pub(crate) fn prev_action_as_expected(action: &GovAction, governance: &GovernanceState) -> bool {
+    match action {
+        GovAction::ParameterChange { prev_action_id, .. } => {
+            *prev_action_id == governance.enacted_pparam_update
+        }
+        GovAction::HardForkInitiation { prev_action_id, .. } => {
+            *prev_action_id == governance.enacted_hard_fork
+        }
+        GovAction::NoConfidence { prev_action_id } => {
+            *prev_action_id == governance.enacted_committee
+        }
+        GovAction::UpdateCommittee { prev_action_id, .. } => {
+            *prev_action_id == governance.enacted_committee
+        }
+        GovAction::NewConstitution { prev_action_id, .. } => {
+            *prev_action_id == governance.enacted_constitution
+        }
+        // TreasuryWithdrawals and InfoAction have no chain requirement
+        GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => true,
+    }
+}
+
+/// Returns the governance action priority for ratification ordering.
+/// Lower number = higher priority, per Haskell's `actionPriority`.
+pub(crate) fn gov_action_priority(action: &GovAction) -> u8 {
+    match action {
+        GovAction::NoConfidence { .. } => 0,
+        GovAction::UpdateCommittee { .. } => 1,
+        GovAction::NewConstitution { .. } => 2,
+        GovAction::HardForkInitiation { .. } => 3,
+        GovAction::ParameterChange { .. } => 4,
+        GovAction::TreasuryWithdrawals { .. } => 5,
+        GovAction::InfoAction => 6,
+    }
+}
+
+/// Whether enacting this action should delay all further ratification for this epoch.
+/// Per Haskell `delayingAction`: NoConfidence, HardFork, UpdateCommittee, NewConstitution.
+pub(crate) fn is_delaying_action(action: &GovAction) -> bool {
+    matches!(
+        action,
+        GovAction::NoConfidence { .. }
+            | GovAction::HardForkInitiation { .. }
+            | GovAction::UpdateCommittee { .. }
+            | GovAction::NewConstitution { .. }
+    )
+}

@@ -30,7 +30,7 @@
           "address": {
             "type": "enterprise",
             "network": 0,
-            "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+            "payment": { "type": "vkey", "hash": "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06" }
           },
           "lovelace": 5000000,
           "assets": {}
@@ -43,7 +43,7 @@
           "address": {
             "type": "enterprise",
             "network": 0,
-            "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+            "payment": { "type": "vkey", "hash": "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06" }
           },
           "lovelace": 8000000,
           "assets": {}
@@ -65,7 +65,7 @@
         "address": {
           "type": "enterprise",
           "network": 0,
-          "payment": { "type": "vkey", "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+          "payment": { "type": "vkey", "hash": "008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079" }
         },
         "lovelace": 10000000,
         "assets": {}
@@ -74,7 +74,7 @@
         "address": {
           "type": "enterprise",
           "network": 0,
-          "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+          "payment": { "type": "vkey", "hash": "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06" }
         },
         "lovelace": 2800000,
         "assets": {}
@@ -107,7 +107,7 @@
             "address": {
               "type": "enterprise",
               "network": 0,
-              "payment": { "type": "vkey", "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+              "payment": { "type": "vkey", "hash": "008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079" }
             },
             "lovelace": 10000000,
             "assets": {}
@@ -120,7 +120,7 @@
             "address": {
               "type": "enterprise",
               "network": 0,
-              "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+              "payment": { "type": "vkey", "hash": "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06" }
             },
             "lovelace": 2800000,
             "assets": {}

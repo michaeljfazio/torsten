@@ -37,7 +37,7 @@
         "address": {
           "type": "enterprise",
           "network": 0,
-          "payment": { "type": "vkey", "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+          "payment": { "type": "vkey", "hash": "008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079" }
         },
         "lovelace": 1000000,
         "assets": {}

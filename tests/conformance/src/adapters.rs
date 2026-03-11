@@ -20,7 +20,7 @@ use torsten_primitives::network::NetworkId;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::{
     self, Certificate, ExUnits, Rational, Transaction, TransactionBody, TransactionInput,
-    TransactionOutput, TransactionWitnessSet,
+    TransactionOutput, TransactionWitnessSet, VKeyWitness,
 };
 use torsten_primitives::value::{AssetName, Lovelace, Value};
 
@@ -251,8 +251,94 @@ pub fn from_utxo_set(utxo_set: &UtxoSet) -> Vec<UtxoEntry> {
 // Transaction conversion
 // ---------------------------------------------------------------------------
 
+/// Deterministic Ed25519 signing keys used in conformance test vectors.
+///
+/// Each key's verification key hash (blake2b_224) is used as the payment
+/// credential in test vector addresses. This allows the adapter to generate
+/// proper Ed25519 signatures that pass witness verification.
+const MOCK_SIGNING_KEYS: &[[u8; 32]] = &[
+    [1u8; 32], // hash: 0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06
+    [2u8; 32], // hash: 008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079
+    [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32], [7u8; 32], [8u8; 32],
+];
+
+/// Generate properly signed VKey witnesses for all VKey-credentialed inputs.
+///
+/// For conformance testing, we generate real Ed25519 signatures using
+/// deterministic signing keys. Each input's payment credential hash is
+/// matched against pre-computed key hashes to find the corresponding
+/// signing key, which then signs the transaction hash.
+fn generate_mock_vkey_witnesses(
+    inputs: &[TransactionInput],
+    utxo_set: &UtxoSet,
+    tx_hash: &Hash32,
+) -> Vec<VKeyWitness> {
+    use torsten_crypto::keys::PaymentSigningKey;
+
+    // Build lookup table: keyhash -> (vkey_bytes, signing_key)
+    let key_table: Vec<(Hash28, Vec<u8>, PaymentSigningKey)> = MOCK_SIGNING_KEYS
+        .iter()
+        .filter_map(|sk_bytes| {
+            let sk = PaymentSigningKey::from_bytes(sk_bytes).ok()?;
+            let vk = sk.verification_key();
+            let hash = vk.hash();
+            Some((hash, vk.to_bytes().to_vec(), sk))
+        })
+        .collect();
+
+    let mut seen_hashes = HashSet::new();
+    let mut witnesses = Vec::new();
+
+    for input in inputs {
+        if let Some(utxo) = utxo_set.lookup(input) {
+            if let Some(Credential::VerificationKey(keyhash)) = utxo.address.payment_credential() {
+                if seen_hashes.insert(*keyhash) {
+                    // Find the signing key whose vkey hashes to this credential
+                    for (hash, vk_bytes, sk) in &key_table {
+                        if hash == keyhash {
+                            let signature = sk.sign(tx_hash.as_bytes());
+                            witnesses.push(VKeyWitness {
+                                vkey: vk_bytes.clone(),
+                                signature,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    witnesses
+}
+
+/// Convert a test transaction to a Torsten transaction.
+///
+/// When `utxo_set` is provided, properly signed VKey witnesses are automatically
+/// generated for all VKey-credentialed inputs to satisfy both witness completeness
+/// and signature verification checks.
+pub fn to_transaction_with_utxo(
+    tx: &TestTransaction,
+    utxo_set: Option<&UtxoSet>,
+) -> Result<Transaction, AdapterError> {
+    let mut transaction = to_transaction_inner(tx)?;
+
+    // Auto-generate signed VKey witnesses if UTxO set is provided
+    if let Some(utxo) = utxo_set {
+        transaction.witness_set.vkey_witnesses =
+            generate_mock_vkey_witnesses(&transaction.body.inputs, utxo, &transaction.hash);
+    }
+
+    Ok(transaction)
+}
+
 /// Convert a test transaction to a Torsten transaction.
 pub fn to_transaction(tx: &TestTransaction) -> Result<Transaction, AdapterError> {
+    to_transaction_inner(tx)
+}
+
+/// Inner transaction conversion logic.
+fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterError> {
     let hash = parse_hash32(&tx.hash)?;
 
     let inputs: Vec<TransactionInput> = tx
@@ -778,4 +864,27 @@ pub fn registered_pool_set(p_state: &PoolSubState) -> Result<HashSet<Hash28>, Ad
         set.insert(parse_hash28(pool_id_hex)?);
     }
     Ok(set)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_mock_signing_key_hashes() {
+        // Verify the mock signing keys produce the expected credential hashes
+        use torsten_crypto::keys::PaymentSigningKey;
+
+        let sk1 = PaymentSigningKey::from_bytes(&[1u8; 32]).unwrap();
+        let hash1 = sk1.verification_key().hash();
+        assert_eq!(
+            hash1.to_hex(),
+            "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06"
+        );
+
+        let sk2 = PaymentSigningKey::from_bytes(&[2u8; 32]).unwrap();
+        let hash2 = sk2.verification_key().hash();
+        assert_eq!(
+            hash2.to_hex(),
+            "008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079"
+        );
+    }
 }

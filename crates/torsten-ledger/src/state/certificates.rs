@@ -1,0 +1,406 @@
+use super::{credential_to_hash, DRepRegistration, LedgerState, PoolRegistration};
+use std::sync::Arc;
+use torsten_primitives::hash::Hash32;
+use torsten_primitives::transaction::{Certificate, MIRSource, MIRTarget};
+use torsten_primitives::value::Lovelace;
+use tracing::{debug, warn};
+
+impl LedgerState {
+    /// Process a certificate and update the ledger state accordingly
+    pub(crate) fn process_certificate(&mut self, cert: &Certificate) {
+        match cert {
+            Certificate::StakeRegistration(credential) => {
+                let key = credential_to_hash(credential);
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                debug!("Stake key registered: {}", key.to_hex());
+            }
+            Certificate::StakeDeregistration(credential) => {
+                let key = credential_to_hash(credential);
+                // Per Shelley ledger spec: deregistration is only valid if reward balance is zero.
+                // If the reward account has a non-zero balance, skip deregistration.
+                let balance = self
+                    .reward_accounts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Lovelace(0));
+                if balance.0 > 0 {
+                    warn!(
+                        key = %key.to_hex(),
+                        balance = balance.0,
+                        "Stake deregistration rejected: non-zero reward balance"
+                    );
+                } else {
+                    self.stake_distribution.stake_map.remove(&key);
+                    Arc::make_mut(&mut self.delegations).remove(&key);
+                    Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                    debug!("Stake key deregistered: {}", key.to_hex());
+                }
+            }
+            Certificate::ConwayStakeRegistration {
+                credential,
+                deposit: _,
+            } => {
+                // Conway cert tag 7: same behavior as StakeRegistration
+                let key = credential_to_hash(credential);
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                debug!("Stake key registered (Conway): {}", key.to_hex());
+            }
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: _,
+            } => {
+                // Conway cert tag 8: deregistration returns remaining reward balance
+                // as part of the deposit refund, so unconditional removal is correct.
+                let key = credential_to_hash(credential);
+                self.stake_distribution.stake_map.remove(&key);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                debug!("Stake key deregistered (Conway): {}", key.to_hex());
+            }
+            Certificate::StakeDelegation {
+                credential,
+                pool_hash,
+            } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                debug!("Stake delegated to pool: {}", pool_hash.to_hex());
+            }
+            Certificate::PoolRegistration(params) => {
+                let pool_reg = PoolRegistration {
+                    pool_id: params.operator,
+                    vrf_keyhash: params.vrf_keyhash,
+                    pledge: params.pledge,
+                    cost: params.cost,
+                    margin_numerator: params.margin.numerator,
+                    margin_denominator: params.margin.denominator,
+                    reward_account: params.reward_account.clone(),
+                    owners: params.pool_owners.clone(),
+                    relays: params.relays.clone(),
+                    metadata_url: params.pool_metadata.as_ref().map(|m| m.url.clone()),
+                    metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
+                };
+                // If the pool is re-registering, cancel any pending retirement
+                if self.pool_params.contains_key(&params.operator) {
+                    for pools in self.pending_retirements.values_mut() {
+                        pools.retain(|id| id != &params.operator);
+                    }
+                    // Remove empty epoch entries
+                    self.pending_retirements
+                        .retain(|_, pools| !pools.is_empty());
+                    debug!(
+                        "Pool re-registered (pending retirement cancelled): {}",
+                        params.operator.to_hex()
+                    );
+                } else {
+                    debug!("Pool registered: {}", params.operator.to_hex());
+                }
+                Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
+            }
+            Certificate::PoolRetirement { pool_hash, epoch } => {
+                // Validate: retirement epoch must be <= current_epoch + e_max
+                let max_retirement_epoch = self.epoch.0.saturating_add(self.protocol_params.e_max);
+                if *epoch > max_retirement_epoch {
+                    warn!(
+                        pool = %pool_hash.to_hex(),
+                        retirement_epoch = epoch,
+                        current_epoch = self.epoch.0,
+                        e_max = self.protocol_params.e_max,
+                        "Pool retirement epoch exceeds e_max bound, ignoring"
+                    );
+                } else {
+                    debug!(
+                        "Pool retirement scheduled at epoch {}: {}",
+                        epoch,
+                        pool_hash.to_hex()
+                    );
+                    self.pending_retirements
+                        .entry(torsten_primitives::time::EpochNo(*epoch))
+                        .or_default()
+                        .push(*pool_hash);
+                }
+            }
+            Certificate::RegStakeDeleg {
+                credential,
+                pool_hash,
+                ..
+            } => {
+                let key = credential_to_hash(credential);
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+            }
+            Certificate::RegDRep {
+                credential,
+                deposit,
+                anchor,
+            } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.governance).dreps.insert(
+                    key,
+                    DRepRegistration {
+                        credential: credential.clone(),
+                        deposit: *deposit,
+                        anchor: anchor.clone(),
+                        registered_epoch: self.epoch,
+                        last_active_epoch: self.epoch,
+                        active: true,
+                    },
+                );
+                Arc::make_mut(&mut self.governance).drep_registration_count += 1;
+                debug!("DRep registered: {}", key.to_hex());
+            }
+            Certificate::UnregDRep {
+                credential,
+                refund: _,
+            } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.governance).dreps.remove(&key);
+                debug!("DRep deregistered: {}", key.to_hex());
+            }
+            Certificate::UpdateDRep { credential, anchor } => {
+                let key = credential_to_hash(credential);
+                if let Some(drep) = Arc::make_mut(&mut self.governance).dreps.get_mut(&key) {
+                    drep.anchor = anchor.clone();
+                    drep.last_active_epoch = self.epoch;
+                    debug!("DRep updated: {}", key.to_hex());
+                }
+            }
+            Certificate::VoteDelegation { credential, drep } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                debug!("Vote delegated to {:?}", drep);
+            }
+            Certificate::StakeVoteDelegation {
+                credential,
+                pool_hash,
+                drep,
+            } => {
+                let key = credential_to_hash(credential);
+                // Stake delegation
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                // Vote delegation
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                debug!(
+                    "Stake+vote delegated to pool {} and drep {:?}",
+                    pool_hash.to_hex(),
+                    drep
+                );
+            }
+            Certificate::CommitteeHotAuth {
+                cold_credential,
+                hot_credential,
+            } => {
+                let cold_key = credential_to_hash(cold_credential);
+                let hot_key = credential_to_hash(hot_credential);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .insert(cold_key, hot_key);
+                // Remove from resigned if re-authorizing
+                Arc::make_mut(&mut self.governance)
+                    .committee_resigned
+                    .remove(&cold_key);
+                debug!(
+                    "Committee hot key authorized: {} -> {}",
+                    cold_key.to_hex(),
+                    hot_key.to_hex()
+                );
+            }
+            Certificate::CommitteeColdResign {
+                cold_credential,
+                anchor,
+            } => {
+                let cold_key = credential_to_hash(cold_credential);
+                Arc::make_mut(&mut self.governance)
+                    .committee_resigned
+                    .insert(cold_key, anchor.clone());
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .remove(&cold_key);
+                debug!("Committee member resigned: {}", cold_key.to_hex());
+            }
+            Certificate::RegStakeVoteDeleg {
+                credential,
+                pool_hash,
+                drep,
+                ..
+            } => {
+                let key = credential_to_hash(credential);
+                // Register stake credential
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                // Stake delegation
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                // Vote delegation
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                debug!(
+                    "Reg+stake+vote delegated: pool={}, drep={:?}",
+                    pool_hash.to_hex(),
+                    drep
+                );
+            }
+            Certificate::VoteRegDeleg {
+                credential, drep, ..
+            } => {
+                let key = credential_to_hash(credential);
+                // Register stake credential
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                // Vote delegation
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                debug!("Reg+vote delegated to {:?}", drep);
+            }
+            Certificate::GenesisKeyDelegation {
+                genesis_hash,
+                genesis_delegate_hash,
+                vrf_keyhash,
+            } => {
+                // Genesis key delegation — update genesis delegate mapping
+                // These are rare (Shelley-era governance by genesis keys)
+                debug!(
+                    "Genesis key delegation: {} -> delegate={}, vrf={}",
+                    genesis_hash.to_hex(),
+                    genesis_delegate_hash.to_hex(),
+                    vrf_keyhash.to_hex()
+                );
+            }
+            Certificate::MoveInstantaneousRewards { source, target } => {
+                // MIR: transfer funds between reserves/treasury or distribute to stake credentials
+                match target {
+                    MIRTarget::StakeCredentials(creds) => {
+                        let mut total_distributed: u64 = 0;
+                        for (cred, amount) in creds {
+                            let key = credential_to_hash(cred);
+                            let entry = Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0));
+                            if *amount >= 0 {
+                                let amt = *amount as u64;
+                                entry.0 = entry.0.saturating_add(amt);
+                                total_distributed = total_distributed.saturating_add(amt);
+                            } else {
+                                entry.0 = entry.0.saturating_sub(amount.unsigned_abs());
+                            }
+                            debug!(
+                                "MIR: distributed {} lovelace from {:?} to {}",
+                                amount,
+                                source,
+                                key.to_hex()
+                            );
+                        }
+                        // Debit the source pot for the total positive amount distributed
+                        if total_distributed > 0 {
+                            match source {
+                                MIRSource::Reserves => {
+                                    self.reserves.0 =
+                                        self.reserves.0.saturating_sub(total_distributed);
+                                }
+                                MIRSource::Treasury => {
+                                    self.treasury.0 =
+                                        self.treasury.0.saturating_sub(total_distributed);
+                                }
+                            }
+                        }
+                    }
+                    MIRTarget::OtherAccountingPot(coin) => {
+                        // Transfer between reserves and treasury
+                        // Use saturating arithmetic to handle compound MIR operations
+                        // where credential distributions and pot transfers interact
+                        match source {
+                            MIRSource::Reserves => {
+                                // Move from reserves to treasury, capped at available
+                                let actual = (*coin).min(self.reserves.0);
+                                self.reserves.0 = self.reserves.0.saturating_sub(actual);
+                                self.treasury.0 = self.treasury.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from reserves to treasury",
+                                    actual
+                                );
+                            }
+                            MIRSource::Treasury => {
+                                // Move from treasury to reserves, capped at available
+                                let actual = (*coin).min(self.treasury.0);
+                                self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                                self.reserves.0 = self.reserves.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from treasury to reserves",
+                                    actual
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process a withdrawal from a reward account.
+    /// Per Cardano spec, the withdrawal amount must exactly match the reward balance.
+    /// After withdrawal, the balance is reduced by the withdrawal amount.
+    pub(crate) fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
+        let key = Self::reward_account_to_hash(reward_account);
+        if let Some(balance) = Arc::make_mut(&mut self.reward_accounts).get_mut(&key) {
+            // Per Cardano spec, withdrawal amount must exactly equal the reward balance.
+            // During sync from genesis, we may not have accumulated all rewards yet,
+            // so we only warn and process as best-effort.
+            if balance.0 != amount.0 {
+                debug!(
+                    account = %key.to_hex(),
+                    balance = balance.0,
+                    withdrawal = amount.0,
+                    "Withdrawal amount does not match reward balance"
+                );
+            }
+            // Always process the withdrawal: set balance to 0
+            // (rewards were consumed in the on-chain transaction)
+            balance.0 = 0;
+        }
+    }
+
+    /// Convert a reward account (raw bytes with network header) to a Hash32 key.
+    ///
+    /// Reward addresses are 29 bytes: 1 byte network header + 28 byte credential hash.
+    /// We extract exactly the 28-byte credential and zero-pad to 32 bytes for Hash32.
+    pub fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
+        let mut key_bytes = [0u8; 32];
+        if reward_account.len() >= 29 {
+            // Copy exactly 28 bytes of the credential (skip the 1-byte header)
+            key_bytes[..28].copy_from_slice(&reward_account[1..29]);
+        }
+        Hash32::from_bytes(key_bytes)
+    }
+}
