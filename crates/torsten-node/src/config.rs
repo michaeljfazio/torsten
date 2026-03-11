@@ -39,6 +39,22 @@ pub struct NodeConfig {
     #[serde(default)]
     pub conway_genesis_file: Option<String>,
 
+    /// Expected Blake2b-256 hash of the Byron genesis file (hex string)
+    #[serde(default)]
+    pub byron_genesis_hash: Option<String>,
+
+    /// Expected Blake2b-256 hash of the Shelley genesis file (hex string)
+    #[serde(default)]
+    pub shelley_genesis_hash: Option<String>,
+
+    /// Expected Blake2b-256 hash of the Alonzo genesis file (hex string)
+    #[serde(default)]
+    pub alonzo_genesis_hash: Option<String>,
+
+    /// Expected Blake2b-256 hash of the Conway genesis file (hex string)
+    #[serde(default)]
+    pub conway_genesis_hash: Option<String>,
+
     /// Enable P2P networking
     #[serde(default)]
     pub enable_p2_p: bool,
@@ -179,6 +195,10 @@ impl Default for NodeConfig {
             byron_genesis_file: None,
             alonzo_genesis_file: None,
             conway_genesis_file: None,
+            byron_genesis_hash: None,
+            shelley_genesis_hash: None,
+            alonzo_genesis_hash: None,
+            conway_genesis_hash: None,
             enable_p2_p: true,
             target_number_of_active_peers: 20,
             target_number_of_established_peers: 40,

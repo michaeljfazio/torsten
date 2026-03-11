@@ -30,7 +30,7 @@ impl LedgerState {
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> = HashMap::new();
-        for (cred_hash, pool_id) in &self.delegations {
+        for (cred_hash, pool_id) in self.delegations.iter() {
             let utxo_stake = self
                 .stake_distribution
                 .stake_map
@@ -48,7 +48,7 @@ impl LedgerState {
 
         // Build per-credential stake including reward balances
         let mut snapshot_stake = self.stake_distribution.stake_map.clone();
-        for (cred_hash, reward) in &self.reward_accounts {
+        for (cred_hash, reward) in self.reward_accounts.iter() {
             if reward.0 > 0 {
                 *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
             }
@@ -73,9 +73,9 @@ impl LedgerState {
 
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
-            delegations: Arc::new(self.delegations.clone()),
+            delegations: Arc::clone(&self.delegations),
             pool_stake,
-            pool_params: Arc::new(self.pool_params.clone()),
+            pool_params: Arc::clone(&self.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
         });
 
@@ -84,9 +84,11 @@ impl LedgerState {
             let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
                 // Refund pool deposit to operator's registered reward account
-                if let Some(pool_reg) = self.pool_params.remove(pool_id) {
+                if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                    *self.reward_accounts.entry(op_key).or_insert(Lovelace(0)) += pool_deposit;
+                    *Arc::make_mut(&mut self.reward_accounts)
+                        .entry(op_key)
+                        .or_insert(Lovelace(0)) += pool_deposit;
                     debug!(
                         "Pool retired at epoch {}: {} (deposit {} refunded)",
                         new_epoch.0,
@@ -218,14 +220,19 @@ impl LedgerState {
             .collect();
         if !expired.is_empty() {
             for action_id in &expired {
-                if let Some(proposal_state) = self.governance.proposals.remove(action_id) {
+                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                    .proposals
+                    .remove(action_id)
+                {
                     // Refund deposit to return address's reward account
                     let deposit = proposal_state.procedure.deposit;
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
                         }
                     }
                     debug!(
@@ -236,7 +243,9 @@ impl LedgerState {
             }
             // Remove all votes for expired proposals
             for id in &expired {
-                self.governance.votes_by_action.remove(id);
+                Arc::make_mut(&mut self.governance)
+                    .votes_by_action
+                    .remove(id);
             }
             debug!(
                 "Expired {} governance proposals at epoch {}",
@@ -252,7 +261,7 @@ impl LedgerState {
         if drep_activity > 0 {
             let mut newly_inactive = 0u64;
             let mut reactivated = 0u64;
-            for drep in self.governance.dreps.values_mut() {
+            for drep in Arc::make_mut(&mut self.governance).dreps.values_mut() {
                 let inactive = new_epoch.0.saturating_sub(drep.last_active_epoch.0) > drep_activity;
                 if inactive && drep.active {
                     drep.active = false;
@@ -283,8 +292,12 @@ impl LedgerState {
             .collect();
         if !expired_members.is_empty() {
             for hash in &expired_members {
-                self.governance.committee_hot_keys.remove(hash);
-                self.governance.committee_expiration.remove(hash);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .remove(hash);
+                Arc::make_mut(&mut self.governance)
+                    .committee_expiration
+                    .remove(hash);
             }
             info!(
                 "Expired {} committee members at epoch {}",
@@ -319,7 +332,7 @@ impl LedgerState {
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
-        self.epoch_blocks_by_pool.clear();
+        Arc::make_mut(&mut self.epoch_blocks_by_pool).clear();
         self.epoch_block_count = 0;
 
         self.epoch = new_epoch;

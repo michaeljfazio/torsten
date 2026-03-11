@@ -1,0 +1,60 @@
+{
+  "rule": "CERT",
+  "description": "Valid stake credential registration (pre-Conway, zero deposit)",
+  "environment": {
+    "epoch": 100,
+    "protocol_params": {
+      "key_deposit": 2000000,
+      "pool_deposit": 500000000,
+      "drep_deposit": 500000000,
+      "min_pool_cost": 170000000,
+      "drep_activity": 20,
+      "e_max": 18
+    },
+    "votes": [],
+    "withdrawals": {}
+  },
+  "input_state": {
+    "d_state": {
+      "registrations": {},
+      "delegations": {},
+      "rewards": {},
+      "vote_delegations": {}
+    },
+    "p_state": {
+      "pools": {},
+      "retiring": {}
+    },
+    "g_state": {
+      "dreps": {},
+      "committee_hot_keys": {}
+    }
+  },
+  "signal": {
+    "type": "stake_registration",
+    "credential": { "type": "vkey", "hash": "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd" }
+  },
+  "expected_output": {
+    "type": "success",
+    "state": {
+      "d_state": {
+        "registrations": {
+          "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd": 0
+        },
+        "delegations": {},
+        "rewards": {
+          "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd": 0
+        },
+        "vote_delegations": {}
+      },
+      "p_state": {
+        "pools": {},
+        "retiring": {}
+      },
+      "g_state": {
+        "dreps": {},
+        "committee_hot_keys": {}
+      }
+    }
+  }
+}

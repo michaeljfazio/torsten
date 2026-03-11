@@ -1,5 +1,6 @@
 use super::{LedgerState, StakeSnapshot, MAX_LOVELACE_SUPPLY};
 use std::collections::HashMap;
+use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, warn};
@@ -319,8 +320,7 @@ impl LedgerState {
                     };
 
                     if member_share > 0 {
-                        *self
-                            .reward_accounts
+                        *Arc::make_mut(&mut self.reward_accounts)
                             .entry(*cred_hash)
                             .or_insert(Lovelace(0)) += Lovelace(member_share);
                         total_distributed += member_share;
@@ -331,8 +331,9 @@ impl LedgerState {
             // Operator reward goes to pool's registered reward account
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                *self.reward_accounts.entry(op_key).or_insert(Lovelace(0)) +=
-                    Lovelace(operator_reward);
+                *Arc::make_mut(&mut self.reward_accounts)
+                    .entry(op_key)
+                    .or_insert(Lovelace(0)) += Lovelace(operator_reward);
                 total_distributed += operator_reward;
             }
         }

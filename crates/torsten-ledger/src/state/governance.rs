@@ -1,5 +1,6 @@
 use super::{credential_to_hash, GovernanceState, LedgerState, ProposalState};
 use std::collections::HashMap;
+use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::transaction::{
@@ -92,8 +93,10 @@ impl LedgerState {
             "Governance proposal submitted: {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        self.governance.proposals.insert(action_id, state);
-        self.governance.proposal_count += 1;
+        Arc::make_mut(&mut self.governance)
+            .proposals
+            .insert(action_id, state);
+        Arc::make_mut(&mut self.governance).proposal_count += 1;
     }
 
     /// Process a governance vote
@@ -104,7 +107,10 @@ impl LedgerState {
         procedure: &VotingProcedure,
     ) {
         // Update vote tally on the proposal
-        if let Some(proposal) = self.governance.proposals.get_mut(action_id) {
+        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+            .proposals
+            .get_mut(action_id)
+        {
             match procedure.vote {
                 Vote::Yes => proposal.yes_votes += 1,
                 Vote::No => proposal.no_votes += 1,
@@ -115,14 +121,16 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
-            if let Some(drep) = self.governance.dreps.get_mut(&drep_hash) {
+            if let Some(drep) = Arc::make_mut(&mut self.governance)
+                .dreps
+                .get_mut(&drep_hash)
+            {
                 drep.last_active_epoch = self.epoch;
             }
         }
 
         // Record the vote (indexed by action_id for efficient ratification)
-        let action_votes = self
-            .governance
+        let action_votes = Arc::make_mut(&mut self.governance)
             .votes_by_action
             .entry(action_id.clone())
             .or_default();
@@ -230,17 +238,24 @@ impl LedgerState {
         // Remove ratified proposals and refund deposits
         if !ratified.is_empty() {
             for action_id in &ratified {
-                if let Some(proposal_state) = self.governance.proposals.remove(action_id) {
+                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                    .proposals
+                    .remove(action_id)
+                {
                     let deposit = proposal_state.procedure.deposit;
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
                         }
                     }
                 }
-                self.governance.votes_by_action.remove(action_id);
+                Arc::make_mut(&mut self.governance)
+                    .votes_by_action
+                    .remove(action_id);
             }
             info!(
                 "{} governance proposal(s) ratified and enacted",
@@ -253,16 +268,16 @@ impl LedgerState {
     fn update_enacted_root(&mut self, action_id: &GovActionId, action: &GovAction) {
         match action {
             GovAction::ParameterChange { .. } => {
-                self.governance.enacted_pparam_update = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_pparam_update = Some(action_id.clone());
             }
             GovAction::HardForkInitiation { .. } => {
-                self.governance.enacted_hard_fork = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_hard_fork = Some(action_id.clone());
             }
             GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
-                self.governance.enacted_committee = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_committee = Some(action_id.clone());
             }
             GovAction::NewConstitution { .. } => {
-                self.governance.enacted_constitution = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_constitution = Some(action_id.clone());
             }
             // TreasuryWithdrawals and InfoAction don't update any root
             GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {}
@@ -673,7 +688,7 @@ impl LedgerState {
         }
         // Fallback: compute from current delegations (UTxO + rewards)
         let mut total = 0u64;
-        for (stake_cred, delegated_pool) in &self.delegations {
+        for (stake_cred, delegated_pool) in self.delegations.iter() {
             if delegated_pool == pool_id {
                 total += self.credential_stake(stake_cred);
             }
@@ -745,7 +760,9 @@ impl LedgerState {
                     // Credit the withdrawal to the recipient's reward account
                     if actual > 0 && reward_addr.len() >= 29 {
                         let key = Self::reward_account_to_hash(reward_addr);
-                        *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += Lovelace(actual);
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(key)
+                            .or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
                 info!(
@@ -756,9 +773,10 @@ impl LedgerState {
             }
             GovAction::NoConfidence { .. } => {
                 // No confidence motion: remove all committee hot key authorizations and expirations
-                self.governance.committee_hot_keys.clear();
-                self.governance.committee_expiration.clear();
-                self.governance.no_confidence = true;
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_hot_keys.clear();
+                gov.committee_expiration.clear();
+                gov.no_confidence = true;
                 info!("No confidence motion enacted: committee disbanded");
             }
             GovAction::UpdateCommittee {
@@ -770,22 +788,28 @@ impl LedgerState {
                 // Remove specified members
                 for cred in members_to_remove {
                     let key = credential_to_hash(cred);
-                    self.governance.committee_hot_keys.remove(&key);
-                    self.governance.committee_expiration.remove(&key);
-                    self.governance.committee_resigned.remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_hot_keys
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_expiration
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_resigned
+                        .remove(&key);
                 }
                 // Add new members with expiration epochs
                 for (cred, expiration_epoch) in members_to_add {
                     let key = credential_to_hash(cred);
-                    self.governance
+                    Arc::make_mut(&mut self.governance)
                         .committee_expiration
                         .insert(key, EpochNo(*expiration_epoch));
                     // Hot key auth comes via CommitteeHotAuth certificates
                 }
                 // Store the new committee quorum threshold
-                self.governance.committee_threshold = Some(threshold.clone());
+                Arc::make_mut(&mut self.governance).committee_threshold = Some(threshold.clone());
                 // UpdateCommittee restores confidence
-                self.governance.no_confidence = false;
+                Arc::make_mut(&mut self.governance).no_confidence = false;
                 info!(
                     "Committee updated: {} removed, {} added, threshold={}/{}",
                     members_to_remove.len(),
@@ -795,7 +819,7 @@ impl LedgerState {
                 );
             }
             GovAction::NewConstitution { constitution, .. } => {
-                self.governance.constitution = Some(constitution.clone());
+                Arc::make_mut(&mut self.governance).constitution = Some(constitution.clone());
                 info!(
                     "New constitution enacted (script_hash: {:?})",
                     constitution.script_hash.as_ref().map(|h| h.to_hex())

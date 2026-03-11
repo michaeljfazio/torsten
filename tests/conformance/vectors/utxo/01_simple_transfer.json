@@ -1,0 +1,121 @@
+{
+  "rule": "UTXO",
+  "description": "Valid simple ADA transfer: spend 10 ADA, send 7 ADA to recipient, 3 ADA change minus fee",
+  "environment": {
+    "slot": 1000,
+    "protocol_params": {
+      "min_fee_a": 44,
+      "min_fee_b": 155381,
+      "max_tx_size": 16384,
+      "key_deposit": 2000000,
+      "pool_deposit": 500000000,
+      "ada_per_utxo_byte": 4310,
+      "max_val_size": 5000,
+      "collateral_percentage": 150,
+      "max_collateral_inputs": 3,
+      "max_tx_ex_mem": 14000000000,
+      "max_tx_ex_steps": 10000000000000,
+      "drep_deposit": 500000000,
+      "gov_action_deposit": 100000000000,
+      "min_fee_ref_script_cost_per_byte": 15
+    },
+    "treasury": 0
+  },
+  "input_state": {
+    "utxo": [
+      {
+        "tx_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "index": 0,
+        "output": {
+          "address": {
+            "type": "enterprise",
+            "network": 0,
+            "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+          },
+          "lovelace": 10000000,
+          "assets": {}
+        }
+      }
+    ],
+    "fees": 0,
+    "deposits": 0,
+    "donations": 0
+  },
+  "signal": {
+    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "inputs": [
+      { "tx_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "index": 0 }
+    ],
+    "outputs": [
+      {
+        "address": {
+          "type": "enterprise",
+          "network": 0,
+          "payment": { "type": "vkey", "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+        },
+        "lovelace": 7000000,
+        "assets": {}
+      },
+      {
+        "address": {
+          "type": "enterprise",
+          "network": 0,
+          "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+        },
+        "lovelace": 2800000,
+        "assets": {}
+      }
+    ],
+    "fee": 200000,
+    "ttl": 2000,
+    "tx_size": 300,
+    "is_valid": true,
+    "certificates": [],
+    "withdrawals": {},
+    "mint": {},
+    "required_signers": [],
+    "collateral": [],
+    "collateral_return": null,
+    "total_collateral": null,
+    "reference_inputs": [],
+    "proposal_procedures": [],
+    "donation": null,
+    "validity_start": null
+  },
+  "expected_output": {
+    "type": "success",
+    "state": {
+      "utxo": [
+        {
+          "tx_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "index": 0,
+          "output": {
+            "address": {
+              "type": "enterprise",
+              "network": 0,
+              "payment": { "type": "vkey", "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+            },
+            "lovelace": 7000000,
+            "assets": {}
+          }
+        },
+        {
+          "tx_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "index": 1,
+          "output": {
+            "address": {
+              "type": "enterprise",
+              "network": 0,
+              "payment": { "type": "vkey", "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+            },
+            "lovelace": 2800000,
+            "assets": {}
+          }
+        }
+      ],
+      "fees": 200000,
+      "deposits": 0,
+      "donations": 0
+    }
+  }
+}

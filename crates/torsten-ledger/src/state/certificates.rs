@@ -1,4 +1,5 @@
 use super::{credential_to_hash, DRepRegistration, LedgerState, PoolRegistration};
+use std::sync::Arc;
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::transaction::{Certificate, MIRSource, MIRTarget};
 use torsten_primitives::value::Lovelace;
@@ -14,7 +15,9 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 debug!("Stake key registered: {}", key.to_hex());
             }
             Certificate::StakeDeregistration(credential) => {
@@ -34,8 +37,8 @@ impl LedgerState {
                     );
                 } else {
                     self.stake_distribution.stake_map.remove(&key);
-                    self.delegations.remove(&key);
-                    self.reward_accounts.remove(&key);
+                    Arc::make_mut(&mut self.delegations).remove(&key);
+                    Arc::make_mut(&mut self.reward_accounts).remove(&key);
                     debug!("Stake key deregistered: {}", key.to_hex());
                 }
             }
@@ -49,7 +52,9 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 debug!("Stake key registered (Conway): {}", key.to_hex());
             }
             Certificate::ConwayStakeDeregistration {
@@ -60,8 +65,8 @@ impl LedgerState {
                 // as part of the deposit refund, so unconditional removal is correct.
                 let key = credential_to_hash(credential);
                 self.stake_distribution.stake_map.remove(&key);
-                self.delegations.remove(&key);
-                self.reward_accounts.remove(&key);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 debug!("Stake key deregistered (Conway): {}", key.to_hex());
             }
             Certificate::StakeDelegation {
@@ -69,7 +74,7 @@ impl LedgerState {
                 pool_hash,
             } => {
                 let key = credential_to_hash(credential);
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 debug!("Stake delegated to pool: {}", pool_hash.to_hex());
             }
             Certificate::PoolRegistration(params) => {
@@ -101,7 +106,7 @@ impl LedgerState {
                 } else {
                     debug!("Pool registered: {}", params.operator.to_hex());
                 }
-                self.pool_params.insert(params.operator, pool_reg);
+                Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
                 // Validate: retirement epoch must be <= current_epoch + e_max
@@ -136,8 +141,10 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
             }
             Certificate::RegDRep {
                 credential,
@@ -145,7 +152,7 @@ impl LedgerState {
                 anchor,
             } => {
                 let key = credential_to_hash(credential);
-                self.governance.dreps.insert(
+                Arc::make_mut(&mut self.governance).dreps.insert(
                     key,
                     DRepRegistration {
                         credential: credential.clone(),
@@ -156,7 +163,7 @@ impl LedgerState {
                         active: true,
                     },
                 );
-                self.governance.drep_registration_count += 1;
+                Arc::make_mut(&mut self.governance).drep_registration_count += 1;
                 debug!("DRep registered: {}", key.to_hex());
             }
             Certificate::UnregDRep {
@@ -164,12 +171,12 @@ impl LedgerState {
                 refund: _,
             } => {
                 let key = credential_to_hash(credential);
-                self.governance.dreps.remove(&key);
+                Arc::make_mut(&mut self.governance).dreps.remove(&key);
                 debug!("DRep deregistered: {}", key.to_hex());
             }
             Certificate::UpdateDRep { credential, anchor } => {
                 let key = credential_to_hash(credential);
-                if let Some(drep) = self.governance.dreps.get_mut(&key) {
+                if let Some(drep) = Arc::make_mut(&mut self.governance).dreps.get_mut(&key) {
                     drep.anchor = anchor.clone();
                     drep.last_active_epoch = self.epoch;
                     debug!("DRep updated: {}", key.to_hex());
@@ -177,7 +184,9 @@ impl LedgerState {
             }
             Certificate::VoteDelegation { credential, drep } => {
                 let key = credential_to_hash(credential);
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!("Vote delegated to {:?}", drep);
             }
             Certificate::StakeVoteDelegation {
@@ -187,9 +196,11 @@ impl LedgerState {
             } => {
                 let key = credential_to_hash(credential);
                 // Stake delegation
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!(
                     "Stake+vote delegated to pool {} and drep {:?}",
                     pool_hash.to_hex(),
@@ -202,9 +213,13 @@ impl LedgerState {
             } => {
                 let cold_key = credential_to_hash(cold_credential);
                 let hot_key = credential_to_hash(hot_credential);
-                self.governance.committee_hot_keys.insert(cold_key, hot_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .insert(cold_key, hot_key);
                 // Remove from resigned if re-authorizing
-                self.governance.committee_resigned.remove(&cold_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_resigned
+                    .remove(&cold_key);
                 debug!(
                     "Committee hot key authorized: {} -> {}",
                     cold_key.to_hex(),
@@ -216,10 +231,12 @@ impl LedgerState {
                 anchor,
             } => {
                 let cold_key = credential_to_hash(cold_credential);
-                self.governance
+                Arc::make_mut(&mut self.governance)
                     .committee_resigned
                     .insert(cold_key, anchor.clone());
-                self.governance.committee_hot_keys.remove(&cold_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .remove(&cold_key);
                 debug!("Committee member resigned: {}", cold_key.to_hex());
             }
             Certificate::RegStakeVoteDeleg {
@@ -234,11 +251,15 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 // Stake delegation
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!(
                     "Reg+stake+vote delegated: pool={}, drep={:?}",
                     pool_hash.to_hex(),
@@ -254,9 +275,13 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!("Reg+vote delegated to {:?}", drep);
             }
             Certificate::GenesisKeyDelegation {
@@ -280,7 +305,9 @@ impl LedgerState {
                         let mut total_distributed: u64 = 0;
                         for (cred, amount) in creds {
                             let key = credential_to_hash(cred);
-                            let entry = self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                            let entry = Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0));
                             if *amount >= 0 {
                                 let amt = *amount as u64;
                                 entry.0 = entry.0.saturating_add(amt);
@@ -346,7 +373,7 @@ impl LedgerState {
     /// After withdrawal, the balance is reduced by the withdrawal amount.
     pub(crate) fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
         let key = Self::reward_account_to_hash(reward_account);
-        if let Some(balance) = self.reward_accounts.get_mut(&key) {
+        if let Some(balance) = Arc::make_mut(&mut self.reward_accounts).get_mut(&key) {
             // Per Cardano spec, withdrawal amount must exactly equal the reward balance.
             // During sync from genesis, we may not have accumulated all rewards yet,
             // so we only warn and process as best-effort.
