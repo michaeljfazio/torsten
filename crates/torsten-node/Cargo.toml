@@ -45,6 +45,7 @@ pallas-traverse = { workspace = true }
 sha2 = { workspace = true }
 memmap2 = { workspace = true }
 crc32fast = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

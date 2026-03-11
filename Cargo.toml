@@ -105,6 +105,7 @@ tar = "0.4"
 indicatif = "0.17"
 futures-util = "0.3"
 memmap2 = "0.9"
+fs2 = "0.4"
 
 [profile.release]
 opt-level = 3

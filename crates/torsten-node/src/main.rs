@@ -1,4 +1,5 @@
 mod config;
+mod disk_monitor;
 mod forge;
 mod genesis;
 mod metrics;
