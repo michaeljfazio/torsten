@@ -12,11 +12,219 @@ use crate::multiplexer::Segment;
 use crate::n2n_server::BlockProvider;
 use crate::query_handler::{ProtocolParamsSnapshot, QueryHandler, QueryResult};
 
+/// Typed error returned by [`TxValidator::validate_tx`].
+///
+/// Each variant represents a distinct failure mode so that callers can
+/// pattern-match and respond appropriately (e.g. return a specific reject
+/// reason over the wire, apply different back-off policies, etc.).
+#[derive(Debug, Error)]
+pub enum TxValidationError {
+    /// The raw bytes could not be decoded into a valid transaction.
+    #[error("Failed to decode transaction: {reason}")]
+    DecodeFailed { reason: String },
+
+    /// The ledger state could not be acquired (e.g. lock contention).
+    #[error("Ledger state unavailable")]
+    LedgerStateUnavailable,
+
+    /// The transaction has no inputs.
+    #[error("No inputs in transaction")]
+    NoInputs,
+
+    /// One or more transaction inputs were not found in the UTxO set.
+    #[error("Input not found in UTxO set: {input}")]
+    InputNotFound { input: String },
+
+    /// The value equation (inputs = outputs + fee) does not balance.
+    #[error("Value not conserved: inputs={inputs}, outputs={outputs}, fee={fee}")]
+    ValueNotConserved { inputs: u64, outputs: u64, fee: u64 },
+
+    /// The fee is below the protocol-mandated minimum.
+    #[error("Fee too small: minimum={minimum}, actual={actual}")]
+    FeeTooSmall { minimum: u64, actual: u64 },
+
+    /// A transaction output is below the minimum UTxO value.
+    #[error("Output too small: minimum={minimum}, actual={actual}")]
+    OutputTooSmall { minimum: u64, actual: u64 },
+
+    /// The serialised transaction exceeds the maximum allowed size.
+    #[error("Transaction too large: maximum={maximum}, actual={actual}")]
+    TxTooLarge { maximum: u64, actual: u64 },
+
+    /// A required signer is missing from the witness set.
+    #[error("Missing required signer: {signer}")]
+    MissingRequiredSigner { signer: String },
+
+    /// A witness for a consumed input is missing.
+    #[error("Missing witness for input: {input}")]
+    MissingWitness { input: String },
+
+    /// The transaction's TTL has expired relative to the current slot.
+    #[error("TTL expired: current_slot={current_slot}, ttl={ttl}")]
+    TtlExpired { current_slot: u64, ttl: u64 },
+
+    /// The transaction is not yet valid (validity interval start is in the future).
+    #[error("Transaction not yet valid: current_slot={current_slot}, valid_from={valid_from}")]
+    NotYetValid { current_slot: u64, valid_from: u64 },
+
+    /// A Plutus script evaluation failed.
+    #[error("Script validation failed: {reason}")]
+    ScriptFailed { reason: String },
+
+    /// Collateral is insufficient to cover the minimum percentage of the fee.
+    #[error("Insufficient collateral")]
+    InsufficientCollateral,
+
+    /// More collateral inputs than the protocol allows.
+    #[error("Too many collateral inputs: max={max}, actual={actual}")]
+    TooManyCollateralInputs { max: u64, actual: u64 },
+
+    /// A collateral input was not found in the UTxO set.
+    #[error("Collateral input not found in UTxO set: {input}")]
+    CollateralNotFound { input: String },
+
+    /// A collateral input contains non-ADA tokens.
+    #[error("Collateral input contains tokens (must be pure ADA): {input}")]
+    CollateralHasTokens { input: String },
+
+    /// The declared `total_collateral` does not match the effective collateral value.
+    #[error("Collateral mismatch: total_collateral={declared}, effective={computed}")]
+    CollateralMismatch { declared: u64, computed: u64 },
+
+    /// A reference input was not found in the UTxO set.
+    #[error("Reference input not found in UTxO set: {input}")]
+    ReferenceInputNotFound { input: String },
+
+    /// A reference input overlaps with a regular (consumed) input.
+    #[error("Reference input overlaps with regular input: {input}")]
+    ReferenceInputOverlapsInput { input: String },
+
+    /// Multi-asset conservation violation for a given policy.
+    #[error("Multi-asset not conserved for policy {policy}: inputs+mint={input_side}, outputs={output_side}")]
+    MultiAssetNotConserved {
+        policy: String,
+        input_side: i128,
+        output_side: i128,
+    },
+
+    /// Minting/burning without the required policy script.
+    #[error("Negative minting without policy script")]
+    InvalidMint,
+
+    /// Transaction execution units exceed the per-tx budget.
+    #[error("Max execution units exceeded")]
+    ExUnitsExceeded,
+
+    /// The declared script data hash does not match the computed hash.
+    #[error("Script data hash mismatch: expected {expected}, got {actual}")]
+    ScriptDataHashMismatch { expected: String, actual: String },
+
+    /// A script data hash is present but there are no scripts or redeemers.
+    #[error("Script data hash present but no scripts or redeemers")]
+    UnexpectedScriptDataHash,
+
+    /// Scripts/redeemers are present but the required script data hash is missing.
+    #[error("Missing script data hash (required when scripts/redeemers present)")]
+    MissingScriptDataHash,
+
+    /// A duplicate input was found in the transaction body.
+    #[error("Duplicate input in transaction: {input}")]
+    DuplicateInput { input: String },
+
+    /// A native (non-Plutus) script evaluation failed.
+    #[error("Native script validation failed")]
+    NativeScriptFailed,
+
+    /// A VKey witness signature failed verification.
+    #[error("Witness signature verification failed for vkey: {vkey}")]
+    InvalidWitnessSignature { vkey: String },
+
+    /// An output address targets the wrong network.
+    #[error("Output address network mismatch: expected {expected}, got {actual}")]
+    NetworkMismatch { expected: String, actual: String },
+
+    /// The body declares an auxiliary data hash but no auxiliary data is present.
+    #[error("Auxiliary data hash declared but no auxiliary data present")]
+    AuxiliaryDataHashWithoutData,
+
+    /// Auxiliary data is present but the body has no auxiliary data hash.
+    #[error("Auxiliary data present but no auxiliary data hash in tx body")]
+    AuxiliaryDataWithoutHash,
+
+    /// Block-level execution unit budget exceeded.
+    #[error("Block execution units exceeded: {resource} limit={limit}, total={total}")]
+    BlockExUnitsExceeded {
+        resource: String,
+        limit: u64,
+        total: u64,
+    },
+
+    /// An output value exceeds the maximum serialised size.
+    #[error("Output value too large: maximum={maximum}, actual={actual}")]
+    OutputValueTooLarge { maximum: u64, actual: u64 },
+
+    /// Plutus evaluation requires raw CBOR but it is unavailable.
+    #[error("Plutus transaction missing raw CBOR for script evaluation")]
+    MissingRawCbor,
+
+    /// Plutus evaluation requires slot configuration but it is unavailable.
+    #[error("Plutus transaction missing slot configuration for script evaluation")]
+    MissingSlotConfig,
+
+    /// A script-locked input has no matching Spend redeemer.
+    #[error("Script-locked input at index {index} has no matching Spend redeemer")]
+    MissingSpendRedeemer { index: u32 },
+
+    /// A redeemer index is out of range for its tag.
+    #[error("Redeemer index out of range: tag={tag}, index={index}, max={max}")]
+    RedeemerIndexOutOfRange { tag: String, index: u32, max: usize },
+
+    /// Multiple validation errors occurred.
+    ///
+    /// Ledger validation can detect several issues in a single pass.
+    /// This variant collects them so that callers can inspect each one.
+    #[error("{}", format_multiple_errors(.0))]
+    Multiple(Vec<TxValidationError>),
+}
+
+/// Format a list of validation errors into a semicolon-separated string.
+fn format_multiple_errors(errors: &[TxValidationError]) -> String {
+    errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+impl TxValidationError {
+    /// Returns `true` if this error represents a decode failure.
+    pub fn is_decode_error(&self) -> bool {
+        matches!(self, TxValidationError::DecodeFailed { .. })
+    }
+
+    /// Returns `true` if this error represents a ledger-state availability issue.
+    pub fn is_availability_error(&self) -> bool {
+        matches!(self, TxValidationError::LedgerStateUnavailable)
+    }
+
+    /// Returns the individual errors if this is a [`Multiple`](TxValidationError::Multiple)
+    /// variant, or a single-element slice containing `self` otherwise.
+    pub fn errors(&self) -> Vec<&TxValidationError> {
+        match self {
+            TxValidationError::Multiple(errors) => errors.iter().collect(),
+            other => vec![other],
+        }
+    }
+}
+
 /// Trait for validating transactions before mempool admission.
 /// Implementors should perform full Phase-1 and Phase-2 (Plutus) validation.
 pub trait TxValidator: Send + Sync + 'static {
-    /// Validate a transaction. Returns Ok(()) if valid, or an error string.
-    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), String>;
+    /// Validate a transaction.
+    ///
+    /// Returns `Ok(())` if the transaction passes all checks, or a typed
+    /// [`TxValidationError`] describing the failure.
+    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), TxValidationError>;
 }
 
 #[derive(Error, Debug)]
@@ -413,7 +621,7 @@ fn handle_tx_submission(
                     if let Some(validator) = tx_validator {
                         if let Err(e) = validator.validate_tx(era_id, &tx_bytes) {
                             warn!("Transaction validation failed: {e}");
-                            return encode_tx_reject(&e);
+                            return encode_tx_reject(&e.to_string());
                         }
                     }
 
@@ -3308,5 +3516,302 @@ mod tests {
         assert_eq!(dec.u32().unwrap(), 4);
         assert_eq!(dec.array().unwrap(), Some(1));
         assert_eq!(dec.map().unwrap(), Some(1));
+    }
+
+    // ---- TxValidationError tests ----
+
+    #[test]
+    fn test_tx_validation_error_display_decode_failed() {
+        let err = TxValidationError::DecodeFailed {
+            reason: "invalid CBOR".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Failed to decode transaction: invalid CBOR"
+        );
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_ledger_unavailable() {
+        let err = TxValidationError::LedgerStateUnavailable;
+        assert_eq!(err.to_string(), "Ledger state unavailable");
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_no_inputs() {
+        let err = TxValidationError::NoInputs;
+        assert_eq!(err.to_string(), "No inputs in transaction");
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_fee_too_small() {
+        let err = TxValidationError::FeeTooSmall {
+            minimum: 200_000,
+            actual: 100_000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Fee too small: minimum=200000, actual=100000"
+        );
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_value_not_conserved() {
+        let err = TxValidationError::ValueNotConserved {
+            inputs: 5_000_000,
+            outputs: 3_000_000,
+            fee: 1_000_000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Value not conserved: inputs=5000000, outputs=3000000, fee=1000000"
+        );
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_ttl_expired() {
+        let err = TxValidationError::TtlExpired {
+            current_slot: 1000,
+            ttl: 500,
+        };
+        assert_eq!(err.to_string(), "TTL expired: current_slot=1000, ttl=500");
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_tx_too_large() {
+        let err = TxValidationError::TxTooLarge {
+            maximum: 16384,
+            actual: 32000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Transaction too large: maximum=16384, actual=32000"
+        );
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_multiple() {
+        let err = TxValidationError::Multiple(vec![
+            TxValidationError::NoInputs,
+            TxValidationError::FeeTooSmall {
+                minimum: 200_000,
+                actual: 100_000,
+            },
+        ]);
+        assert_eq!(
+            err.to_string(),
+            "No inputs in transaction; Fee too small: minimum=200000, actual=100000"
+        );
+    }
+
+    #[test]
+    fn test_tx_validation_error_is_decode_error() {
+        let decode_err = TxValidationError::DecodeFailed {
+            reason: "bad".into(),
+        };
+        assert!(decode_err.is_decode_error());
+        assert!(!TxValidationError::NoInputs.is_decode_error());
+    }
+
+    #[test]
+    fn test_tx_validation_error_is_availability_error() {
+        assert!(TxValidationError::LedgerStateUnavailable.is_availability_error());
+        assert!(!TxValidationError::NoInputs.is_availability_error());
+    }
+
+    #[test]
+    fn test_tx_validation_error_errors_single() {
+        let err = TxValidationError::NoInputs;
+        let errors = err.errors();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], TxValidationError::NoInputs));
+    }
+
+    #[test]
+    fn test_tx_validation_error_errors_multiple() {
+        let err = TxValidationError::Multiple(vec![
+            TxValidationError::NoInputs,
+            TxValidationError::InsufficientCollateral,
+            TxValidationError::NativeScriptFailed,
+        ]);
+        let errors = err.errors();
+        assert_eq!(errors.len(), 3);
+        assert!(matches!(errors[0], TxValidationError::NoInputs));
+        assert!(matches!(errors[1], TxValidationError::InsufficientCollateral));
+        assert!(matches!(errors[2], TxValidationError::NativeScriptFailed));
+    }
+
+    #[test]
+    fn test_tx_validation_error_display_all_variants() {
+        // Ensure every variant has a non-empty Display output
+        let variants: Vec<TxValidationError> = vec![
+            TxValidationError::DecodeFailed {
+                reason: "test".into(),
+            },
+            TxValidationError::LedgerStateUnavailable,
+            TxValidationError::NoInputs,
+            TxValidationError::InputNotFound {
+                input: "tx#0".into(),
+            },
+            TxValidationError::ValueNotConserved {
+                inputs: 1,
+                outputs: 2,
+                fee: 3,
+            },
+            TxValidationError::FeeTooSmall {
+                minimum: 1,
+                actual: 0,
+            },
+            TxValidationError::OutputTooSmall {
+                minimum: 1,
+                actual: 0,
+            },
+            TxValidationError::TxTooLarge {
+                maximum: 1,
+                actual: 2,
+            },
+            TxValidationError::MissingRequiredSigner {
+                signer: "abc".into(),
+            },
+            TxValidationError::MissingWitness {
+                input: "tx#1".into(),
+            },
+            TxValidationError::TtlExpired {
+                current_slot: 10,
+                ttl: 5,
+            },
+            TxValidationError::NotYetValid {
+                current_slot: 5,
+                valid_from: 10,
+            },
+            TxValidationError::ScriptFailed {
+                reason: "eval error".into(),
+            },
+            TxValidationError::InsufficientCollateral,
+            TxValidationError::TooManyCollateralInputs { max: 3, actual: 5 },
+            TxValidationError::CollateralNotFound {
+                input: "col#0".into(),
+            },
+            TxValidationError::CollateralHasTokens {
+                input: "col#1".into(),
+            },
+            TxValidationError::CollateralMismatch {
+                declared: 100,
+                computed: 50,
+            },
+            TxValidationError::ReferenceInputNotFound {
+                input: "ref#0".into(),
+            },
+            TxValidationError::ReferenceInputOverlapsInput {
+                input: "ref#1".into(),
+            },
+            TxValidationError::MultiAssetNotConserved {
+                policy: "abc".into(),
+                input_side: 10,
+                output_side: 20,
+            },
+            TxValidationError::InvalidMint,
+            TxValidationError::ExUnitsExceeded,
+            TxValidationError::ScriptDataHashMismatch {
+                expected: "aaa".into(),
+                actual: "bbb".into(),
+            },
+            TxValidationError::UnexpectedScriptDataHash,
+            TxValidationError::MissingScriptDataHash,
+            TxValidationError::DuplicateInput {
+                input: "dup#0".into(),
+            },
+            TxValidationError::NativeScriptFailed,
+            TxValidationError::InvalidWitnessSignature {
+                vkey: "vk".into(),
+            },
+            TxValidationError::NetworkMismatch {
+                expected: "Testnet".into(),
+                actual: "Mainnet".into(),
+            },
+            TxValidationError::AuxiliaryDataHashWithoutData,
+            TxValidationError::AuxiliaryDataWithoutHash,
+            TxValidationError::BlockExUnitsExceeded {
+                resource: "mem".into(),
+                limit: 100,
+                total: 200,
+            },
+            TxValidationError::OutputValueTooLarge {
+                maximum: 100,
+                actual: 200,
+            },
+            TxValidationError::MissingRawCbor,
+            TxValidationError::MissingSlotConfig,
+            TxValidationError::MissingSpendRedeemer { index: 0 },
+            TxValidationError::RedeemerIndexOutOfRange {
+                tag: "Spend".into(),
+                index: 5,
+                max: 3,
+            },
+            TxValidationError::Multiple(vec![TxValidationError::NoInputs]),
+        ];
+        for variant in &variants {
+            let msg = variant.to_string();
+            assert!(!msg.is_empty(), "Empty display for: {variant:?}");
+        }
+    }
+
+    #[test]
+    fn test_tx_validation_error_implements_std_error() {
+        // Verify the error type implements std::error::Error for backwards compatibility
+        let err: Box<dyn std::error::Error> = Box::new(TxValidationError::NoInputs);
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_tx_validation_error_pattern_matching() {
+        // Demonstrate that callers can pattern-match on typed errors
+        let err = TxValidationError::FeeTooSmall {
+            minimum: 200_000,
+            actual: 100_000,
+        };
+        match &err {
+            TxValidationError::FeeTooSmall { minimum, actual } => {
+                assert_eq!(*minimum, 200_000);
+                assert_eq!(*actual, 100_000);
+            }
+            _ => panic!("Expected FeeTooSmall variant"),
+        }
+    }
+
+    #[test]
+    fn test_tx_validator_trait_with_typed_error() {
+        // Verify that a TxValidator implementation can return typed errors
+        struct RejectingValidator;
+        impl TxValidator for RejectingValidator {
+            fn validate_tx(
+                &self,
+                _era_id: u16,
+                _tx_bytes: &[u8],
+            ) -> Result<(), TxValidationError> {
+                Err(TxValidationError::NoInputs)
+            }
+        }
+        let validator = RejectingValidator;
+        let result = validator.validate_tx(6, &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TxValidationError::NoInputs));
+    }
+
+    #[test]
+    fn test_tx_validator_trait_accepting() {
+        struct AcceptingValidator;
+        impl TxValidator for AcceptingValidator {
+            fn validate_tx(
+                &self,
+                _era_id: u16,
+                _tx_bytes: &[u8],
+            ) -> Result<(), TxValidationError> {
+                Ok(())
+            }
+        }
+        let validator = AcceptingValidator;
+        assert!(validator.validate_tx(6, &[0x80]).is_ok());
     }
 }

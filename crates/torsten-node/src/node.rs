@@ -14,7 +14,7 @@ use torsten_network::server::NodeServerConfig;
 use torsten_network::{
     BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, HeaderBatchResult, N2CServer,
     NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager, PeerManagerConfig,
-    PipelinedPeerClient, QueryHandler, TipInfo, TxValidator,
+    PipelinedPeerClient, QueryHandler, TipInfo, TxValidationError, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -238,11 +238,17 @@ struct LedgerTxValidator {
 }
 
 impl TxValidator for LedgerTxValidator {
-    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), String> {
-        let tx = torsten_serialization::decode_transaction(era_id, tx_bytes)
-            .map_err(|e| format!("Failed to decode transaction: {e}"))?;
+    fn validate_tx(&self, era_id: u16, tx_bytes: &[u8]) -> Result<(), TxValidationError> {
+        let tx = torsten_serialization::decode_transaction(era_id, tx_bytes).map_err(|e| {
+            TxValidationError::DecodeFailed {
+                reason: e.to_string(),
+            }
+        })?;
 
-        let ledger = self.ledger.try_read().map_err(|_| "Ledger state busy")?;
+        let ledger = self
+            .ledger
+            .try_read()
+            .map_err(|_| TxValidationError::LedgerStateUnavailable)?;
         let tx_size = tx_bytes.len() as u64;
         let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
 
@@ -255,12 +261,104 @@ impl TxValidator for LedgerTxValidator {
             Some(&self.slot_config),
         )
         .map_err(|errors| {
-            errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
+            let mapped: Vec<TxValidationError> =
+                errors.into_iter().map(convert_validation_error).collect();
+            if mapped.len() == 1 {
+                mapped.into_iter().next().unwrap()
+            } else {
+                TxValidationError::Multiple(mapped)
+            }
         })
+    }
+}
+
+/// Convert a ledger `ValidationError` into the network-facing `TxValidationError`.
+fn convert_validation_error(e: torsten_ledger::validation::ValidationError) -> TxValidationError {
+    use torsten_ledger::validation::ValidationError as VE;
+    match e {
+        VE::NoInputs => TxValidationError::NoInputs,
+        VE::InputNotFound(input) => TxValidationError::InputNotFound { input },
+        VE::ValueNotConserved {
+            inputs,
+            outputs,
+            fee,
+        } => TxValidationError::ValueNotConserved {
+            inputs,
+            outputs,
+            fee,
+        },
+        VE::FeeTooSmall { minimum, actual } => TxValidationError::FeeTooSmall { minimum, actual },
+        VE::OutputTooSmall { minimum, actual } => {
+            TxValidationError::OutputTooSmall { minimum, actual }
+        }
+        VE::TxTooLarge { maximum, actual } => TxValidationError::TxTooLarge { maximum, actual },
+        VE::MissingRequiredSigner(signer) => TxValidationError::MissingRequiredSigner { signer },
+        VE::MissingWitness(input) => TxValidationError::MissingWitness { input },
+        VE::TtlExpired { current_slot, ttl } => TxValidationError::TtlExpired { current_slot, ttl },
+        VE::NotYetValid {
+            current_slot,
+            valid_from,
+        } => TxValidationError::NotYetValid {
+            current_slot,
+            valid_from,
+        },
+        VE::ScriptFailed(reason) => TxValidationError::ScriptFailed { reason },
+        VE::InsufficientCollateral => TxValidationError::InsufficientCollateral,
+        VE::TooManyCollateralInputs { max, actual } => {
+            TxValidationError::TooManyCollateralInputs { max, actual }
+        }
+        VE::CollateralNotFound(input) => TxValidationError::CollateralNotFound { input },
+        VE::CollateralHasTokens(input) => TxValidationError::CollateralHasTokens { input },
+        VE::CollateralMismatch { declared, computed } => {
+            TxValidationError::CollateralMismatch { declared, computed }
+        }
+        VE::ReferenceInputNotFound(input) => TxValidationError::ReferenceInputNotFound { input },
+        VE::ReferenceInputOverlapsInput(input) => {
+            TxValidationError::ReferenceInputOverlapsInput { input }
+        }
+        VE::MultiAssetNotConserved {
+            policy,
+            input_side,
+            output_side,
+        } => TxValidationError::MultiAssetNotConserved {
+            policy,
+            input_side,
+            output_side,
+        },
+        VE::InvalidMint => TxValidationError::InvalidMint,
+        VE::ExUnitsExceeded => TxValidationError::ExUnitsExceeded,
+        VE::ScriptDataHashMismatch { expected, actual } => {
+            TxValidationError::ScriptDataHashMismatch { expected, actual }
+        }
+        VE::UnexpectedScriptDataHash => TxValidationError::UnexpectedScriptDataHash,
+        VE::MissingScriptDataHash => TxValidationError::MissingScriptDataHash,
+        VE::DuplicateInput(input) => TxValidationError::DuplicateInput { input },
+        VE::NativeScriptFailed => TxValidationError::NativeScriptFailed,
+        VE::InvalidWitnessSignature(vkey) => TxValidationError::InvalidWitnessSignature { vkey },
+        VE::NetworkMismatch { expected, actual } => TxValidationError::NetworkMismatch {
+            expected: format!("{expected:?}"),
+            actual: format!("{actual:?}"),
+        },
+        VE::AuxiliaryDataHashWithoutData => TxValidationError::AuxiliaryDataHashWithoutData,
+        VE::AuxiliaryDataWithoutHash => TxValidationError::AuxiliaryDataWithoutHash,
+        VE::BlockExUnitsExceeded {
+            resource,
+            limit,
+            total,
+        } => TxValidationError::BlockExUnitsExceeded {
+            resource,
+            limit,
+            total,
+        },
+        VE::OutputValueTooLarge { maximum, actual } => {
+            TxValidationError::OutputValueTooLarge { maximum, actual }
+        }
+        VE::MissingRawCbor => TxValidationError::MissingRawCbor,
+        VE::MissingSlotConfig => TxValidationError::MissingSlotConfig,
+        VE::MissingSpendRedeemer { index } => TxValidationError::MissingSpendRedeemer { index },
+        VE::RedeemerIndexOutOfRange { tag, index, max } => {
+            TxValidationError::RedeemerIndexOutOfRange { tag, index, max }
+        }
     }
 }
 
