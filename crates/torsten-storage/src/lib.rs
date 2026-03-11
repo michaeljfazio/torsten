@@ -1,4 +1,5 @@
 pub mod chain_db;
+pub(crate) mod chunk_reader;
 pub mod immutable_db;
 pub mod lsm;
 

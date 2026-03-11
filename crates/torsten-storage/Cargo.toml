@@ -6,7 +6,10 @@ description = "Block and chain storage for Torsten (unified LSM-tree with snapsh
 
 [features]
 default = []
-io-uring = ["cardano-lsm/io-uring"]
+io-uring = ["cardano-lsm/io-uring", "dep:io-uring"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
 
 [dependencies]
 torsten-primitives = { workspace = true }
