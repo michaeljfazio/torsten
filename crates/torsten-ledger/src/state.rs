@@ -1618,18 +1618,22 @@ impl LedgerState {
         //   expected_blocks = floor(active_slot_coeff * epoch_length) (since d=0 in Conway)
         //   eta = min(1, actual_blocks / expected_blocks)
         //   deltaR1 = floor(eta * rho * reserves)
-        let expected_blocks =
+        let raw_expected_blocks =
             (self.protocol_params.active_slot_coeff() * self.epoch_length as f64).floor() as u64;
+        if raw_expected_blocks == 0 {
+            warn!(
+                "expected_blocks rounded to 0 (active_slot_coeff={}, epoch_length={}), clamping to 1",
+                self.protocol_params.active_slot_coeff(),
+                self.epoch_length
+            );
+        }
+        let expected_blocks = raw_expected_blocks.max(1);
         let actual_blocks = self.epoch_block_count;
         // eta = min(1, actual/expected) — applied as rational: min(1, actual/expected)
         // expansion = floor(min(actual, expected) / expected * rho * reserves)
         let effective_blocks = actual_blocks.min(expected_blocks);
-        let expansion = if expected_blocks == 0 {
-            0u64
-        } else {
-            (rho_num * self.reserves.0 as i128 * effective_blocks as i128
-                / (rho_den * expected_blocks as i128)) as u64
-        };
+        let expansion = (rho_num * self.reserves.0 as i128 * effective_blocks as i128
+            / (rho_den * expected_blocks as i128)) as u64;
         let total_rewards_available = expansion + self.epoch_fees.0;
 
         if total_rewards_available == 0 {
@@ -3873,6 +3877,80 @@ mod tests {
         assert_eq!(member_rewards, 0);
         // Treasury gets treasury_cut from fees + undistributed
         assert!(state.treasury.0 > 0);
+    }
+
+    #[test]
+    fn test_expected_blocks_zero_clamped_to_one() {
+        // When active_slot_coeff is extremely small, floor(coeff * epoch_length) can
+        // round to 0.  The fix clamps expected_blocks to at least 1, preventing a
+        // division-by-zero (or silent reward skip) in the expansion calculation.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Tiny coefficient: 1e-10 * 432000 ≈ 0.0000432 → floor = 0
+        params.active_slots_coeff = 1e-10;
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 432000;
+        state.reserves = Lovelace(10_000_000_000_000_000);
+
+        let owner_hash = Hash28::from_bytes([42u8; 28]);
+        let cred = Credential::VerificationKey(owner_hash);
+        let pool_id = Hash28::from_bytes([1u8; 28]);
+
+        let mut reward_account = vec![0xE0u8];
+        reward_account.extend_from_slice(owner_hash.as_bytes());
+
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+        add_stake_utxo(&mut state, &cred, 50_000_000_000_000);
+
+        state.process_certificate(&Certificate::PoolRegistration(PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([2u8; 32]),
+            pledge: Lovelace(1_000_000_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account,
+            pool_owners: vec![owner_hash],
+            relays: vec![],
+            pool_metadata: None,
+        }));
+
+        state.process_certificate(&Certificate::StakeDelegation {
+            credential: cred.clone(),
+            pool_hash: pool_id,
+        });
+
+        // Build snapshots: 3 rotations to populate "go"
+        state.process_epoch_transition(EpochNo(1));
+        state.process_epoch_transition(EpochNo(2));
+        state.process_epoch_transition(EpochNo(3));
+
+        // Simulate 1 block produced and some fees — should NOT panic
+        state.epoch_fees = Lovelace(500_000_000_000);
+        state.epoch_blocks_by_pool.insert(pool_id, 1);
+        state.epoch_block_count = 1;
+
+        let reserves_before = state.reserves.0;
+        let treasury_before = state.treasury.0;
+
+        // This epoch transition would divide by zero without the fix
+        state.process_epoch_transition(EpochNo(4));
+
+        // Verify the system did not panic and rewards were distributed
+        assert!(
+            state.treasury.0 > treasury_before,
+            "Treasury should increase from reward distribution"
+        );
+        assert!(
+            state.reserves.0 < reserves_before,
+            "Reserves should decrease from monetary expansion"
+        );
+        let total_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+        assert!(
+            total_rewards > 0,
+            "Expected rewards > 0 with clamped expected_blocks, got {total_rewards}"
+        );
     }
 
     #[test]
