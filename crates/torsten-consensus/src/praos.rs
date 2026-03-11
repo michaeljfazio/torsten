@@ -717,9 +717,16 @@ impl OuroborosPraos {
         let mut hot_vkey = [0u8; 32];
         hot_vkey.copy_from_slice(&opcert.hot_vkey);
 
+        let kes_period_offset_u32 = u32::try_from(kes_period_offset).map_err(|_| {
+            ConsensusError::InvalidBlock(format!(
+                "KES period offset {} exceeds u32 range",
+                kes_period_offset
+            ))
+        })?;
+
         match torsten_crypto::kes::kes_verify_bytes(
             &hot_vkey,
-            kes_period_offset as u32,
+            kes_period_offset_u32,
             &header.kes_signature,
             &header_body_cbor,
         ) {
@@ -1685,5 +1692,46 @@ mod tests {
             panic!("Should not get UnregisteredPool when issuer_info is Some");
         }
         // Any other result is acceptable (may fail on VRF proof with dummy data)
+    }
+
+    #[test]
+    fn test_kes_period_offset_u32_overflow_rejected() {
+        // When the KES period offset exceeds u32::MAX, verify_kes_signature should
+        // return an InvalidBlock error instead of silently truncating via `as u32`.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        // Set slots_per_kes_period to 1 so that block_kes_period = slot value directly.
+        praos.slots_per_kes_period = 1;
+        // Also set max_kes_evolutions very high so validate_kes_period doesn't reject first.
+        praos.max_kes_evolutions = u64::MAX;
+
+        // Create a header at a slot that produces a kes_period_offset > u32::MAX.
+        // block_kes_period = slot / slots_per_kes_period = slot (since slots_per_kes_period=1)
+        // kes_period_offset = block_kes_period - opcert.kes_period
+        // We need kes_period_offset > u32::MAX, so set slot = u32::MAX as u64 + 1 + opcert.kes_period
+        let opcert_kes_period = 0u64;
+        let overflow_slot = u32::MAX as u64 + 1 + opcert_kes_period;
+
+        let mut header = make_valid_header(overflow_slot);
+        header.operational_cert.kes_period = opcert_kes_period;
+        // Need valid-sized KES signature and hot vkey so we reach the cast
+        header.kes_signature = vec![0u8; 448];
+        header.operational_cert.hot_vkey = vec![0u8; 32];
+
+        let result = praos.verify_kes_signature(&header);
+        match result {
+            Err(ConsensusError::InvalidBlock(msg)) => {
+                assert!(
+                    msg.contains("exceeds u32 range"),
+                    "Error message should mention u32 range, got: {msg}"
+                );
+            }
+            other => {
+                panic!(
+                    "Expected ConsensusError::InvalidBlock for KES period overflow, got: {other:?}"
+                );
+            }
+        }
     }
 }
