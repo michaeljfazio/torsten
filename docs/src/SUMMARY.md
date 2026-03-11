@@ -21,9 +21,13 @@
 # CLI Reference
 
 - [Overview](./cli/overview.md)
+- [torsten-node](./cli/torsten-node.md)
 - [Key Generation](./cli/key-generation.md)
 - [Transactions](./cli/transactions.md)
 - [Queries](./cli/queries.md)
+- [Stake Address](./cli/stake-address.md)
+- [Stake Pool](./cli/stake-pool.md)
+- [Node Commands](./cli/node-commands.md)
 - [Governance](./cli/governance.md)
 
 # Architecture

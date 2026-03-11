@@ -74,7 +74,7 @@ Generate cold keys and an operational certificate issue counter:
 torsten-cli node key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
-  --operational-certificate-issue-counter-file opcert.counter
+  --operational-certificate-counter-file opcert.counter
 ```
 
 ### KES Keys
@@ -82,7 +82,7 @@ torsten-cli node key-gen \
 Generate Key Evolving Signature keys (rotated periodically):
 
 ```bash
-torsten-cli node key-gen-KES \
+torsten-cli node key-gen-kes \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 ```
@@ -92,7 +92,7 @@ torsten-cli node key-gen-KES \
 Generate Verifiable Random Function keys (for slot leader election):
 
 ```bash
-torsten-cli node key-gen-VRF \
+torsten-cli node key-gen-vrf \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 ```
@@ -105,7 +105,7 @@ Issue an operational certificate binding the cold key to the current KES key:
 torsten-cli node issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
-  --operational-certificate-issue-counter-file opcert.counter \
+  --operational-certificate-counter-file opcert.counter \
   --kes-period 400 \
   --out-file opcert.cert
 ```

@@ -28,7 +28,7 @@ Generate cold keys using the CLI:
 torsten-cli node key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
-  --operational-certificate-issue-counter-file opcert.counter
+  --operational-certificate-counter-file opcert.counter
 ```
 
 ### KES Keys (Hot)
@@ -38,7 +38,7 @@ KES (Key Evolving Signature) keys are rotated periodically. Each KES key is vali
 Generate KES keys:
 
 ```bash
-torsten-cli node key-gen-KES \
+torsten-cli node key-gen-kes \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 ```
@@ -50,7 +50,7 @@ VRF (Verifiable Random Function) keys are used for slot leader election. They ar
 Generate VRF keys:
 
 ```bash
-torsten-cli node key-gen-VRF \
+torsten-cli node key-gen-vrf \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 ```
@@ -65,7 +65,7 @@ Issue an operational certificate:
 torsten-cli node issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
-  --operational-certificate-issue-counter-file opcert.counter \
+  --operational-certificate-counter-file opcert.counter \
   --kes-period <current-kes-period> \
   --out-file opcert.cert
 ```
@@ -149,7 +149,7 @@ KES keys must be rotated before they expire. The rotation process:
 
 1. Generate new KES keys:
    ```bash
-   torsten-cli node key-gen-KES \
+   torsten-cli node key-gen-kes \
      --verification-key-file kes-new.vkey \
      --signing-key-file kes-new.skey
    ```
@@ -159,7 +159,7 @@ KES keys must be rotated before they expire. The rotation process:
    torsten-cli node issue-op-cert \
      --kes-verification-key-file kes-new.vkey \
      --cold-signing-key-file cold.skey \
-     --operational-certificate-issue-counter-file opcert.counter \
+     --operational-certificate-counter-file opcert.counter \
      --kes-period <current-kes-period> \
      --out-file opcert-new.cert
    ```
