@@ -1,0 +1,18 @@
+[package]
+name = "torsten-conformance"
+version.workspace = true
+edition.workspace = true
+description = "Formal ledger specification conformance tests for Torsten"
+
+[dependencies]
+torsten-primitives = { workspace = true }
+torsten-crypto = { workspace = true }
+torsten-serialization = { workspace = true }
+torsten-ledger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -3355,6 +3355,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "torsten-conformance"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "torsten-crypto",
+ "torsten-ledger",
+ "torsten-primitives",
+ "torsten-serialization",
+]
+
+[[package]]
 name = "torsten-consensus"
 version = "0.1.0"
 dependencies = [
