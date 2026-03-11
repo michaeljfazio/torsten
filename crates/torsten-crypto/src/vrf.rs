@@ -250,7 +250,11 @@ mod leader_check {
                 let n_exponent = div_round_ceil(x, &PRECISION);
                 let x_ = x / &n_exponent;
                 mp_exp_taylor(rop, 1000, &x_, &EPS);
-                let n_i64: i64 = i64::try_from(&n_exponent).expect("n_exponent overflow");
+                // Safety: n_exponent = ceil(x / PRECISION) is always a small integer
+                // in practice (VRF values produce x ≈ n * PRECISION where n < 10).
+                // Converting to i64 cannot fail for any realistic VRF computation.
+                let n_i64: i64 = i64::try_from(&n_exponent)
+                    .expect("n_exponent exceeds i64::MAX; this should never happen for VRF values");
                 ipow(rop, &rop.clone(), n_i64);
             }
         }

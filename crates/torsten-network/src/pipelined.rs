@@ -104,9 +104,10 @@ impl PipelinedPeerClient {
         let cs_buf = ChannelBuffer::new(cs_channel);
         let bf_client = pallas_network::miniprotocols::blockfetch::Client::new(bf_channel);
 
+        // Safety: "0.0.0.0:0" is a valid SocketAddr constant that always parses
         let remote_addr = format!("{addr}")
             .parse()
-            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("valid constant SocketAddr"));
 
         info!("pipelined client: connected to {remote_addr}");
 

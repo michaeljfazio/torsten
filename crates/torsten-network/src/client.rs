@@ -212,6 +212,8 @@ impl NodeToNodeClient {
 
                     // Flush sub-batch when we hit the threshold
                     if headers_collected % sub_batch_size == 0 && !pending_points.is_empty() {
+                        // Safety: latest_tip is set to Some on every RollForward (line above),
+                        // and pending_points is non-empty only after at least one RollForward
                         let tip_ref = latest_tip.as_ref().expect("tip set by prior RollForward");
                         let fetched = self
                             .fetch_and_decode_range(&pending_points, tip_ref)
@@ -223,6 +225,7 @@ impl NodeToNodeClient {
                 NextResponse::RollBackward(point, tip) => {
                     // Flush any pending blocks before the rollback
                     if !pending_points.is_empty() {
+                        // Safety: pending_points non-empty means at least one RollForward set latest_tip
                         let tip_ref = latest_tip.as_ref().expect("tip set by prior RollForward");
                         let fetched = self
                             .fetch_and_decode_range(&pending_points, tip_ref)
@@ -239,6 +242,7 @@ impl NodeToNodeClient {
                 NextResponse::Await => {
                     // Flush pending blocks, then signal await
                     if !pending_points.is_empty() {
+                        // Safety: pending_points non-empty means at least one RollForward set latest_tip
                         let tip_ref = latest_tip.as_ref().expect("tip set by prior RollForward");
                         let fetched = self
                             .fetch_and_decode_range(&pending_points, tip_ref)
@@ -254,6 +258,7 @@ impl NodeToNodeClient {
 
         // Flush remaining pending blocks
         if !pending_points.is_empty() {
+            // Safety: pending_points non-empty means at least one RollForward set latest_tip
             let tip_ref = latest_tip.as_ref().expect("tip set by prior RollForward");
             let fetched = self
                 .fetch_and_decode_range(&pending_points, tip_ref)
@@ -272,8 +277,15 @@ impl NodeToNodeClient {
         points: &[PallasPoint],
         tip: &PallasTip,
     ) -> Result<Vec<ChainSyncEvent>, ClientError> {
-        let first = points.first().expect("points non-empty").clone();
-        let last = points.last().expect("points non-empty").clone();
+        // Safety: callers only invoke this when pending_points is non-empty
+        let first = points
+            .first()
+            .expect("points is non-empty (caller check)")
+            .clone();
+        let last = points
+            .last()
+            .expect("points is non-empty (caller check)")
+            .clone();
 
         let bodies = self
             .peer
@@ -410,6 +422,7 @@ impl NodeToNodeClient {
                 }
                 NextResponse::Await => {
                     if !headers.is_empty() {
+                        // Safety: headers non-empty means at least one RollForward set latest_tip
                         return Ok(HeaderBatchResult::Headers(
                             headers,
                             latest_tip.expect("tip set by prior RollForward"),
@@ -420,10 +433,11 @@ impl NodeToNodeClient {
             }
         }
 
-        Ok(HeaderBatchResult::Headers(
-            headers,
-            latest_tip.expect("tip set by prior RollForward"),
-        ))
+        match latest_tip {
+            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip)),
+            // batch_size was 0 or no RollForward was received
+            None => Ok(HeaderBatchResult::Await),
+        }
     }
 
     /// Fetch blocks by a list of points using the blockfetch protocol.
@@ -443,7 +457,8 @@ impl NodeToNodeClient {
         // Falls back to individual point fetches if the range request fails (e.g.
         // cross-era ranges, peer doesn't support the range, etc.).
         let first = PallasPoint::Specific(points[0].slot, points[0].hash.to_vec());
-        let last_pt = points.last().expect("points non-empty (checked above)");
+        // Safety: function returns early if points.is_empty()
+        let last_pt = points.last().expect("points is non-empty (checked above)");
         let last = PallasPoint::Specific(last_pt.slot, last_pt.hash.to_vec());
 
         let range_result = self.peer.blockfetch().fetch_range((first, last)).await;

@@ -296,7 +296,8 @@ impl TxSubmissionClient {
                     let size = decoder.u32().map_err(cbor_err)?;
 
                     if tx_hash_bytes.len() == 32 {
-                        let hash_arr: [u8; 32] = tx_hash_bytes.try_into().unwrap();
+                        // Safety: length is checked to be exactly 32 by the enclosing `if`
+                        let hash_arr: [u8; 32] = tx_hash_bytes.try_into().expect("32-byte slice");
                         let tx_hash = Hash32::from_bytes(hash_arr);
                         result.push((tx_hash, size));
                     }

@@ -82,7 +82,8 @@ impl PaymentVerificationKey {
                 got: bytes.len(),
             });
         }
-        let vk = VerifyingKey::from_bytes(bytes.try_into().unwrap())?;
+        // Safety: bytes.len() == 32 is verified above, so try_into cannot fail
+        let vk = VerifyingKey::from_bytes(bytes.try_into().expect("32-byte slice"))?;
         Ok(PaymentVerificationKey { inner: vk })
     }
 
@@ -103,7 +104,8 @@ impl PaymentVerificationKey {
                 got: signature.len(),
             });
         }
-        let sig = Signature::from_bytes(signature.try_into().unwrap());
+        // Safety: signature.len() == 64 is verified above, so try_into cannot fail
+        let sig = Signature::from_bytes(signature.try_into().expect("64-byte slice"));
         self.inner.verify(message, &sig)?;
         Ok(())
     }

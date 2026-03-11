@@ -784,7 +784,8 @@ impl ChainDB {
                             hash: th,
                             block_no: new_block_no,
                         });
-                        let meta = self.tip.unwrap();
+                        // Safety: self.tip was set to Some(...) on the line above
+                        let meta = self.tip.expect("tip just assigned to Some above");
                         let _ = self.tree.insert(
                             &Key::from(META_TIP_KEY),
                             &Value::from(meta.encode().as_slice()),

@@ -1862,8 +1862,9 @@ impl Node {
                                                 header_count = headers.len(),
                                                 first_slot = headers[0].slot,
                                                 first_block = headers[0].block_no,
-                                                last_slot = headers.last().unwrap().slot,
-                                                last_block = headers.last().unwrap().block_no,
+                                                // Safety: inside `if !headers.is_empty()` guard
+                                                last_slot = headers.last().expect("headers is non-empty").slot,
+                                                last_block = headers.last().expect("headers is non-empty").block_no,
                                                 "Headers received from pipelined client"
                                             );
                                         }
@@ -1942,7 +1943,8 @@ impl Node {
                                     // enable strict verification for new blocks
                                     pipeline_depth = 1;
                                     self.enable_strict_verification().await;
-                                    let old = pipelined.take().expect("pipelined client is Some after is_some_and guard");
+                                    // Safety: is_some_and guard above ensures pipelined is Some
+                                    let old = pipelined.take().expect("pipelined is Some (is_some_and guard)");
                                     let addr = old.remote_addr();
                                     old.abort().await;
                                     match PipelinedPeerClient::connect(&addr.to_string() as &str, self.network_magic).await {
@@ -2002,7 +2004,8 @@ impl Node {
                                 }
 
                                 if !forward_blocks.is_empty() {
-                                    let tip = forward_blocks.last().expect("forward_blocks is non-empty").1.clone();
+                                    // Safety: inside `if !forward_blocks.is_empty()` guard
+                                    let tip = forward_blocks.last().expect("forward_blocks is non-empty (checked above)").1.clone();
                                     let blocks: Vec<_> = forward_blocks.into_iter().map(|(b, _)| b).collect();
                                     self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                 }
@@ -2329,6 +2332,7 @@ impl Node {
 
         let last_block = blocks
             .last()
+            // Safety: function returns early if blocks.is_empty()
             .expect("blocks is non-empty (checked at function entry)");
         let slot = last_block.slot().0;
         let block_no = last_block.block_number().0;

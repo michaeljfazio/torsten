@@ -299,7 +299,8 @@ async fn download_snapshot(
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .expect("invalid progress template")
+            // Safety: template string is a compile-time constant known to be valid
+            .expect("progress bar template is a valid constant")
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
@@ -399,7 +400,8 @@ fn verify_snapshot_digest(
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files (verifying digest)",
             )
-            .expect("invalid template")
+            // Safety: template string is a compile-time constant known to be valid
+            .expect("progress bar template is a valid constant")
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
@@ -468,7 +470,8 @@ fn extract_archive(archive_path: &Path, extract_dir: &Path) -> Result<()> {
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .expect("invalid template"),
+            // Safety: template string is a compile-time constant known to be valid
+            .expect("progress bar template is a valid constant"),
     );
 
     let mut entry_count = 0u64;
@@ -607,7 +610,8 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} chunks ({per_sec}, {eta})")
-            .expect("invalid template")
+            // Safety: template string is a compile-time constant known to be valid
+            .expect("progress bar template is a valid constant")
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
@@ -739,7 +743,8 @@ where
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} chunks ({per_sec}, {eta})")
-            .expect("invalid template")
+            // Safety: template string is a compile-time constant known to be valid
+            .expect("progress bar template is a valid constant")
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
