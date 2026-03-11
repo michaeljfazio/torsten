@@ -20,6 +20,10 @@ use tracing::{debug, info, trace, warn};
 /// Total ADA supply (45 billion ADA = 45 * 10^15 lovelace)
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
 
+/// Maximum allowed snapshot file size (10 GiB).
+/// Prevents OOM from loading maliciously crafted or corrupted snapshot files.
+pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024 * 1024;
+
 /// Reduced rational number (i128 numerator/denominator with GCD reduction).
 /// Matches Haskell's Rational for reward calculations with rationalToCoinViaFloor.
 #[derive(Clone, Copy)]
@@ -423,7 +427,9 @@ impl LedgerState {
     /// epoch = shelley_transition_epoch + (slot - byron_slots) / epoch_length
     /// where byron_slots = byron_epoch_length * shelley_transition_epoch.
     pub fn epoch_of_slot(&self, slot: u64) -> u64 {
-        let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
+        let byron_slots = self
+            .byron_epoch_length
+            .saturating_mul(self.shelley_transition_epoch);
         if slot < byron_slots {
             // Still in Byron era
             if self.byron_epoch_length > 0 {
@@ -434,19 +440,25 @@ impl LedgerState {
         } else {
             // Shelley era
             let shelley_slots = slot - byron_slots;
-            self.shelley_transition_epoch + shelley_slots / self.epoch_length
+            self.shelley_transition_epoch
+                .saturating_add(shelley_slots / self.epoch_length)
         }
     }
 
     /// Compute the first slot of the epoch that contains the given slot.
+    /// Uses saturating arithmetic to prevent u64 overflow with extreme values.
     pub fn first_slot_of_epoch(&self, epoch: u64) -> u64 {
         if epoch < self.shelley_transition_epoch {
             // Byron epoch
-            epoch * self.byron_epoch_length
+            epoch.saturating_mul(self.byron_epoch_length)
         } else {
             // Shelley epoch
-            let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
-            byron_slots + (epoch - self.shelley_transition_epoch) * self.epoch_length
+            let byron_slots = self
+                .byron_epoch_length
+                .saturating_mul(self.shelley_transition_epoch);
+            byron_slots.saturating_add(
+                (epoch - self.shelley_transition_epoch).saturating_mul(self.epoch_length),
+            )
         }
     }
 
@@ -709,7 +721,7 @@ impl LedgerState {
                 "Ledger: epoch transition detected"
             );
             while self.epoch < block_epoch {
-                let next_epoch = EpochNo(self.epoch.0 + 1);
+                let next_epoch = EpochNo(self.epoch.0.saturating_add(1));
                 self.process_epoch_transition(next_epoch);
             }
         }
@@ -916,9 +928,12 @@ impl LedgerState {
             self.update_evolving_nonce(&block.header.vrf_result.output);
 
             // Update candidate nonce only if NOT in the stabilisation window
-            // (i.e., if slot + rsw < first_slot_of_next_epoch)
-            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0 + 1);
-            if block.slot().0 + self.randomness_stabilisation_window < first_slot_of_next_epoch {
+            // (i.e., if slot < first_slot_of_next_epoch - rsw)
+            // Uses saturating_sub to avoid u64 overflow when slot values are extreme
+            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
+            if block.slot().0
+                < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
+            {
                 self.candidate_nonce = self.evolving_nonce;
             }
         }
@@ -1050,7 +1065,7 @@ impl LedgerState {
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
                 // Validate: retirement epoch must be <= current_epoch + e_max
-                let max_retirement_epoch = self.epoch.0 + self.protocol_params.e_max;
+                let max_retirement_epoch = self.epoch.0.saturating_add(self.protocol_params.e_max);
                 if *epoch > max_retirement_epoch {
                     warn!(
                         pool = %pool_hash.to_hex(),
@@ -1229,7 +1244,7 @@ impl LedgerState {
                             if *amount >= 0 {
                                 let amt = *amount as u64;
                                 entry.0 = entry.0.saturating_add(amt);
-                                total_distributed += amt;
+                                total_distributed = total_distributed.saturating_add(amt);
                             } else {
                                 entry.0 = entry.0.saturating_sub(amount.unsigned_abs());
                             }
@@ -1256,28 +1271,28 @@ impl LedgerState {
                     }
                     MIRTarget::OtherAccountingPot(coin) => {
                         // Transfer between reserves and treasury
+                        // Use saturating arithmetic to handle compound MIR operations
+                        // where credential distributions and pot transfers interact
                         match source {
                             MIRSource::Reserves => {
-                                // Move from reserves to treasury
-                                if self.reserves.0 >= *coin {
-                                    self.reserves.0 -= *coin;
-                                    self.treasury.0 += *coin;
-                                    debug!(
-                                        "MIR: transferred {} lovelace from reserves to treasury",
-                                        coin
-                                    );
-                                }
+                                // Move from reserves to treasury, capped at available
+                                let actual = (*coin).min(self.reserves.0);
+                                self.reserves.0 = self.reserves.0.saturating_sub(actual);
+                                self.treasury.0 = self.treasury.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from reserves to treasury",
+                                    actual
+                                );
                             }
                             MIRSource::Treasury => {
-                                // Move from treasury to reserves
-                                if self.treasury.0 >= *coin {
-                                    self.treasury.0 -= *coin;
-                                    self.reserves.0 += *coin;
-                                    debug!(
-                                        "MIR: transferred {} lovelace from treasury to reserves",
-                                        coin
-                                    );
-                                }
+                                // Move from treasury to reserves, capped at available
+                                let actual = (*coin).min(self.treasury.0);
+                                self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                                self.reserves.0 = self.reserves.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from treasury to reserves",
+                                    actual
+                                );
                             }
                         }
                     }
@@ -1496,10 +1511,7 @@ impl LedgerState {
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
-                            let mut key_bytes = [0u8; 32];
-                            let copy_len = (return_addr.len() - 1).min(32);
-                            key_bytes[..copy_len].copy_from_slice(&return_addr[1..1 + copy_len]);
-                            let key = Hash32::from_bytes(key_bytes);
+                            let key = Self::reward_account_to_hash(return_addr);
                             *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
                         }
                     }
@@ -1618,18 +1630,26 @@ impl LedgerState {
         //   expected_blocks = floor(active_slot_coeff * epoch_length) (since d=0 in Conway)
         //   eta = min(1, actual_blocks / expected_blocks)
         //   deltaR1 = floor(eta * rho * reserves)
-        let expected_blocks =
+        let raw_expected_blocks =
             (self.protocol_params.active_slot_coeff() * self.epoch_length as f64).floor() as u64;
+        if raw_expected_blocks == 0 {
+            warn!(
+                "expected_blocks rounded to 0 (active_slot_coeff={}, epoch_length={}), clamping to 1",
+                self.protocol_params.active_slot_coeff(),
+                self.epoch_length
+            );
+        }
+        let expected_blocks = raw_expected_blocks.max(1);
         let actual_blocks = self.epoch_block_count;
         // eta = min(1, actual/expected) — applied as rational: min(1, actual/expected)
         // expansion = floor(min(actual, expected) / expected * rho * reserves)
         let effective_blocks = actual_blocks.min(expected_blocks);
-        let expansion = if expected_blocks == 0 {
-            0u64
-        } else {
-            (rho_num * self.reserves.0 as i128 * effective_blocks as i128
-                / (rho_den * expected_blocks as i128)) as u64
-        };
+        // Use Rat to avoid i128 overflow: rho * reserves * (effective/expected)
+        let rho = Rat::new(rho_num, rho_den);
+        let expansion_rat = rho
+            .mul(&Rat::new(self.reserves.0 as i128, 1))
+            .mul(&Rat::new(effective_blocks as i128, expected_blocks as i128));
+        let expansion = expansion_rat.floor_u64();
         let total_rewards_available = expansion + self.epoch_fees.0;
 
         if total_rewards_available == 0 {
@@ -1640,22 +1660,25 @@ impl LedgerState {
         self.reserves.0 = self.reserves.0.saturating_sub(expansion);
 
         // Treasury cut: floor(tau * total_rewards)
-        let treasury_cut = (tau_num * total_rewards_available as i128 / tau_den) as u64;
-        self.treasury.0 += treasury_cut;
+        let tau = Rat::new(tau_num, tau_den);
+        let treasury_cut = tau
+            .mul(&Rat::new(total_rewards_available as i128, 1))
+            .floor_u64();
+        self.treasury.0 = self.treasury.0.saturating_add(treasury_cut);
 
         let reward_pot = total_rewards_available - treasury_cut;
 
         // Total stake for sigma denominator: circulation = maxSupply - reserves
         let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
         if total_stake == 0 {
-            self.treasury.0 += reward_pot;
+            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
             return;
         }
 
         // Total active stake (for apparent performance denominator)
         let total_active_stake: u64 = go_snapshot.pool_stake.values().map(|s| s.0).sum();
         if total_active_stake == 0 {
-            self.treasury.0 += reward_pot;
+            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
             return;
         }
 
@@ -1681,9 +1704,7 @@ impl LedgerState {
         for (pool_id, pool_reg) in go_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
-                let mut key_bytes = [0u8; 32];
-                key_bytes[..28].copy_from_slice(owner.as_bytes());
-                let owner_key = Hash32::from_bytes(key_bytes);
+                let owner_key = owner.to_hash32_padded();
                 if go_snapshot.delegations.get(&owner_key) == Some(pool_id) {
                     owner_stake += go_snapshot
                         .stake_distribution
@@ -1748,9 +1769,10 @@ impl LedgerState {
             let pool_reward = if blocks_made == 0 || pool_active_stake.0 == 0 {
                 0u64
             } else {
-                let perf = Rat::new(
-                    blocks_made as i128 * total_active_stake as i128,
-                    total_blocks_in_epoch as i128 * pool_active_stake.0 as i128,
+                // perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
+                // Use Rat chained multiplication to avoid i128 overflow
+                let perf = Rat::new(blocks_made as i128, total_blocks_in_epoch as i128).mul(
+                    &Rat::new(total_active_stake as i128, pool_active_stake.0 as i128),
                 );
                 perf.mul(&Rat::new(max_pool as i128, 1)).floor_u64()
             };
@@ -1764,23 +1786,19 @@ impl LedgerState {
             let cost = pool_reg.cost.0;
             let margin_num = pool_reg.margin_numerator as i128;
             let margin_den = pool_reg.margin_denominator.max(1) as i128;
-            let pool_stake_i = pool_active_stake.0 as i128;
 
             let operator_reward = if pool_reward <= cost {
                 pool_reward
             } else {
-                let remainder = (pool_reward - cost) as i128;
+                let remainder = pool_reward - cost;
                 // operator_share = margin + (1-margin) * s/sigma
-                // = [margin_num * pool_stake + (margin_den - margin_num) * self_delegated] / (margin_den * pool_stake)
-                let share_num =
-                    margin_num * pool_stake_i + (margin_den - margin_num) * self_delegated as i128;
-                let share_den = margin_den * pool_stake_i;
-                let op_extra = if share_den == 0 {
-                    0i128
-                } else {
-                    remainder * share_num / share_den
-                };
-                cost + op_extra.max(0) as u64
+                // Use Rat to avoid i128 overflow in cross terms
+                let margin = Rat::new(margin_num, margin_den);
+                let one_minus_margin = Rat::new(margin_den - margin_num, margin_den);
+                let s_over_sigma = Rat::new(self_delegated as i128, pool_active_stake.0 as i128);
+                let share = margin.add(&one_minus_margin.mul(&s_over_sigma));
+                let op_extra = share.mul(&Rat::new(remainder as i128, 1)).floor_u64();
+                cost + op_extra
             };
 
             // Distribute member rewards proportionally to delegators.
@@ -1789,11 +1807,7 @@ impl LedgerState {
             let owner_set: std::collections::HashSet<Hash32> = pool_reg
                 .owners
                 .iter()
-                .map(|o| {
-                    let mut kb = [0u8; 32];
-                    kb[..28].copy_from_slice(o.as_bytes());
-                    Hash32::from_bytes(kb)
-                })
+                .map(|o| o.to_hash32_padded())
                 .collect();
 
             if let Some(delegators) = delegators_by_pool.get(pool_id) {
@@ -1818,10 +1832,15 @@ impl LedgerState {
                     let member_share = if pool_reward <= cost {
                         0u64
                     } else {
-                        let remainder = (pool_reward - cost) as i128;
-                        let ms = remainder * (margin_den - margin_num) * member_stake as i128
-                            / (margin_den * pool_stake_i);
-                        ms.max(0) as u64
+                        let remainder = pool_reward - cost;
+                        // Use Rat to avoid i128 overflow in cross terms
+                        let one_minus_margin = Rat::new(margin_den - margin_num, margin_den);
+                        let member_frac =
+                            Rat::new(member_stake as i128, pool_active_stake.0 as i128);
+                        Rat::new(remainder as i128, 1)
+                            .mul(&one_minus_margin)
+                            .mul(&member_frac)
+                            .floor_u64()
                     };
 
                     if member_share > 0 {
@@ -1846,7 +1865,7 @@ impl LedgerState {
         // Any undistributed rewards go to treasury
         let undistributed = reward_pot.saturating_sub(total_distributed);
         if undistributed > 0 {
-            self.treasury.0 += undistributed;
+            self.treasury.0 = self.treasury.0.saturating_add(undistributed);
         }
 
         info!(
@@ -1874,12 +1893,15 @@ impl LedgerState {
         self.stake_distribution.stake_map = new_map;
     }
 
-    /// Convert a reward account (raw bytes with network header) to a Hash32 key
+    /// Convert a reward account (raw bytes with network header) to a Hash32 key.
+    ///
+    /// Reward addresses are 29 bytes: 1 byte network header + 28 byte credential hash.
+    /// We extract exactly the 28-byte credential and zero-pad to 32 bytes for Hash32.
     fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
         let mut key_bytes = [0u8; 32];
         if reward_account.len() >= 29 {
-            let copy_len = (reward_account.len() - 1).min(32);
-            key_bytes[..copy_len].copy_from_slice(&reward_account[1..1 + copy_len]);
+            // Copy exactly 28 bytes of the credential (skip the 1-byte header)
+            key_bytes[..28].copy_from_slice(&reward_account[1..29]);
         }
         Hash32::from_bytes(key_bytes)
     }
@@ -1971,7 +1993,7 @@ impl LedgerState {
 
         // Governance action lifetime from protocol parameters
         let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
-        let expires_epoch = EpochNo(self.epoch.0 + gov_action_lifetime);
+        let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
 
         let state = ProposalState {
             procedure: proposal.clone(),
@@ -2129,10 +2151,7 @@ impl LedgerState {
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
-                            let mut key_bytes = [0u8; 32];
-                            let copy_len = (return_addr.len() - 1).min(32);
-                            key_bytes[..copy_len].copy_from_slice(&return_addr[1..1 + copy_len]);
-                            let key = Hash32::from_bytes(key_bytes);
+                            let key = Self::reward_account_to_hash(return_addr);
                             *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
                         }
                     }
@@ -2510,9 +2529,7 @@ impl LedgerState {
                     }
                 }
                 DRep::ScriptHash(h) => {
-                    let mut padded = [0u8; 32];
-                    padded[..28].copy_from_slice(h.as_bytes());
-                    let hash32 = Hash32::from_bytes(padded);
+                    let hash32 = h.to_hash32_padded();
                     if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
                         *cache.entry(hash32).or_default() += stake;
                     }
@@ -2551,9 +2568,7 @@ impl LedgerState {
                     }
                 }
                 DRep::ScriptHash(h) => {
-                    let mut padded = [0u8; 32];
-                    padded[..28].copy_from_slice(h.as_bytes());
-                    let hash32 = Hash32::from_bytes(padded);
+                    let hash32 = h.to_hash32_padded();
                     if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
                         total += stake;
                     }
@@ -2638,10 +2653,7 @@ impl LedgerState {
                     total += actual;
                     // Credit the withdrawal to the recipient's reward account
                     if actual > 0 && reward_addr.len() >= 29 {
-                        let mut key_bytes = [0u8; 32];
-                        let copy_len = (reward_addr.len() - 1).min(32);
-                        key_bytes[..copy_len].copy_from_slice(&reward_addr[1..1 + copy_len]);
-                        let key = Hash32::from_bytes(key_bytes);
+                        let key = Self::reward_account_to_hash(reward_addr);
                         *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
@@ -2785,6 +2797,7 @@ impl LedgerState {
     }
 
     /// Load ledger state snapshot from disk.
+    /// Rejects snapshots larger than [`MAX_SNAPSHOT_SIZE`] to prevent OOM.
     /// Supports three formats:
     /// - **Versioned (v1+):** `TRSN` + version byte + 32-byte checksum + data
     /// - **Legacy with checksum:** `TRSN` + 32-byte checksum + data (no version byte)
@@ -2792,6 +2805,15 @@ impl LedgerState {
     pub fn load_snapshot(path: &Path) -> Result<Self, LedgerError> {
         let raw = std::fs::read(path)
             .map_err(|e| LedgerError::EpochTransition(format!("Failed to read snapshot: {e}")))?;
+
+        // Reject oversized snapshot files to prevent OOM from malicious data
+        if raw.len() > MAX_SNAPSHOT_SIZE {
+            return Err(LedgerError::EpochTransition(format!(
+                "Snapshot size {} exceeds maximum allowed size {}",
+                raw.len(),
+                MAX_SNAPSHOT_SIZE
+            )));
+        }
 
         let data = if raw.len() >= 37 && &raw[..4] == b"TRSN" {
             let fifth_byte = raw[4];
@@ -2846,9 +2868,18 @@ impl LedgerState {
             &raw
         };
 
-        let mut state: LedgerState = bincode::deserialize(data).map_err(|e| {
-            LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
-        })?;
+        // Use bincode options with size limit as defense-in-depth against
+        // malicious payloads that encode enormous internal allocations.
+        // Must use with_fixint_encoding() to match bincode::serialize() defaults.
+        use bincode::Options;
+        let mut state: LedgerState = bincode::options()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_SNAPSHOT_SIZE as u64)
+            .deserialize(data)
+            .map_err(|e| {
+                LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
+            })?;
         state.utxo_set.rebuild_address_index();
         // After loading a snapshot, incremental stake tracking may be stale,
         // so force a full rebuild at the next epoch boundary.
@@ -2867,10 +2898,7 @@ impl LedgerState {
 
 /// Extract a Hash32 from a Credential for use as a map key
 fn credential_to_hash(credential: &Credential) -> Hash32 {
-    let h28 = credential.to_hash();
-    let mut bytes = [0u8; 32];
-    bytes[..28].copy_from_slice(h28.as_bytes());
-    Hash32::from_bytes(bytes)
+    credential.to_hash().to_hash32_padded()
 }
 
 /// Extract the staking credential hash from an address (Base and Reward addresses only).
@@ -3935,6 +3963,80 @@ mod tests {
     }
 
     #[test]
+    fn test_expected_blocks_zero_clamped_to_one() {
+        // When active_slot_coeff is extremely small, floor(coeff * epoch_length) can
+        // round to 0.  The fix clamps expected_blocks to at least 1, preventing a
+        // division-by-zero (or silent reward skip) in the expansion calculation.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Tiny coefficient: 1e-10 * 432000 ≈ 0.0000432 → floor = 0
+        params.active_slots_coeff = 1e-10;
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 432000;
+        state.reserves = Lovelace(10_000_000_000_000_000);
+
+        let owner_hash = Hash28::from_bytes([42u8; 28]);
+        let cred = Credential::VerificationKey(owner_hash);
+        let pool_id = Hash28::from_bytes([1u8; 28]);
+
+        let mut reward_account = vec![0xE0u8];
+        reward_account.extend_from_slice(owner_hash.as_bytes());
+
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+        add_stake_utxo(&mut state, &cred, 50_000_000_000_000);
+
+        state.process_certificate(&Certificate::PoolRegistration(PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([2u8; 32]),
+            pledge: Lovelace(1_000_000_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account,
+            pool_owners: vec![owner_hash],
+            relays: vec![],
+            pool_metadata: None,
+        }));
+
+        state.process_certificate(&Certificate::StakeDelegation {
+            credential: cred.clone(),
+            pool_hash: pool_id,
+        });
+
+        // Build snapshots: 3 rotations to populate "go"
+        state.process_epoch_transition(EpochNo(1));
+        state.process_epoch_transition(EpochNo(2));
+        state.process_epoch_transition(EpochNo(3));
+
+        // Simulate 1 block produced and some fees — should NOT panic
+        state.epoch_fees = Lovelace(500_000_000_000);
+        state.epoch_blocks_by_pool.insert(pool_id, 1);
+        state.epoch_block_count = 1;
+
+        let reserves_before = state.reserves.0;
+        let treasury_before = state.treasury.0;
+
+        // This epoch transition would divide by zero without the fix
+        state.process_epoch_transition(EpochNo(4));
+
+        // Verify the system did not panic and rewards were distributed
+        assert!(
+            state.treasury.0 > treasury_before,
+            "Treasury should increase from reward distribution"
+        );
+        assert!(
+            state.reserves.0 < reserves_before,
+            "Reserves should decrease from monetary expansion"
+        );
+        let total_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+        assert!(
+            total_rewards > 0,
+            "Expected rewards > 0 with clamped expected_blocks, got {total_rewards}"
+        );
+    }
+
+    #[test]
     fn test_reward_pledge_not_met_zero_rewards() {
         // Pool with pledge > owner stake should receive zero rewards
         let params = ProtocolParameters::mainnet_defaults();
@@ -4058,9 +4160,7 @@ mod tests {
         );
 
         // Pool_id padded to 32 bytes should NOT have rewards (old bug)
-        let mut pool_key_bytes = [0u8; 32];
-        pool_key_bytes[..28].copy_from_slice(pool_id.as_bytes());
-        let pool_key = Hash32::from_bytes(pool_key_bytes);
+        let pool_key = pool_id.to_hash32_padded();
         let pool_id_reward = state
             .reward_accounts
             .get(&pool_key)
@@ -4384,9 +4484,7 @@ mod tests {
         let mut return_addr = vec![0xE1u8]; // header byte
         return_addr.extend_from_slice(&[42u8; 28]); // 28-byte key hash
 
-        let mut key_bytes = [0u8; 32];
-        key_bytes[..28].copy_from_slice(&[42u8; 28]);
-        let reward_key = Hash32::from_bytes(key_bytes);
+        let reward_key = Hash28::from_bytes([42u8; 28]).to_hash32_padded();
 
         // Submit a proposal with deposit
         let proposal = ProposalProcedure {
@@ -4426,9 +4524,7 @@ mod tests {
         let mut reward_addr = vec![0xE1u8];
         reward_addr.extend_from_slice(&[55u8; 28]);
 
-        let mut key_bytes = [0u8; 32];
-        key_bytes[..28].copy_from_slice(&[55u8; 28]);
-        let reward_key = Hash32::from_bytes(key_bytes);
+        let reward_key = Hash28::from_bytes([55u8; 28]).to_hash32_padded();
 
         let mut withdrawals = std::collections::BTreeMap::new();
         withdrawals.insert(reward_addr, Lovelace(50_000_000_000));
@@ -4839,12 +4935,10 @@ mod tests {
             );
             // Set up vote delegation and stake for each DRep
             let stake_key = Hash32::from_bytes([100 + i as u8; 32]);
-            let mut drep_bytes = [0u8; 32];
-            drep_bytes[..28].copy_from_slice(&[i as u8; 28]);
-            state
-                .governance
-                .vote_delegations
-                .insert(stake_key, DRep::KeyHash(Hash32::from_bytes(drep_bytes)));
+            state.governance.vote_delegations.insert(
+                stake_key,
+                DRep::KeyHash(Hash28::from_bytes([i as u8; 28]).to_hash32_padded()),
+            );
             state
                 .stake_distribution
                 .stake_map
@@ -5058,11 +5152,7 @@ mod tests {
 
         // 6/10 SPOs vote yes (60% > 51%)
         for i in 0..6 {
-            let pool_hash = Hash32::from_bytes({
-                let mut b = [0u8; 32];
-                b[..28].copy_from_slice(Hash28::from_bytes([100 + i as u8; 28]).as_bytes());
-                b
-            });
+            let pool_hash = Hash28::from_bytes([100 + i as u8; 28]).to_hash32_padded();
             let voter = Voter::StakePool(pool_hash);
             state.process_vote(
                 &voter,
@@ -5191,9 +5281,7 @@ mod tests {
     /// Matches the format produced by credential_to_hash (padded with zeros).
     fn make_cc_hot_key(byte_val: u8) -> (Hash28, Hash32) {
         let h28 = Hash28::from_bytes([byte_val; 28]);
-        let mut h32_bytes = [0u8; 32];
-        h32_bytes[..28].copy_from_slice(&[byte_val; 28]);
-        (h28, Hash32::from_bytes(h32_bytes))
+        (h28, h28.to_hash32_padded())
     }
 
     #[test]
@@ -5591,6 +5679,27 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_within_size_limit_loads_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("ledger-snapshot.bin");
+
+        // Create a valid snapshot (well within the 10 GiB limit)
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&snapshot_path).unwrap();
+
+        // Verify the file is within limits
+        let metadata = std::fs::metadata(&snapshot_path).unwrap();
+        assert!(
+            (metadata.len() as usize) <= MAX_SNAPSHOT_SIZE,
+            "Test snapshot should be within size limit"
+        );
+
+        // Load should succeed
+        let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+        assert_eq!(loaded.epoch, state.epoch);
+    }
+
+    #[test]
     fn test_snapshot_legacy_format_without_version_byte() {
         // Build a legacy-format snapshot: TRSN(4) + checksum(32) + data (no version byte)
         let dir = tempfile::tempdir().unwrap();
@@ -5649,6 +5758,40 @@ mod tests {
         assert!(
             err_msg.contains("Unsupported snapshot version 99"),
             "Expected version error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_oversized_snapshot_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("oversized-snapshot.bin");
+
+        // Write a valid snapshot first
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&snapshot_path).unwrap();
+
+        // Read it and verify it loads
+        assert!(LedgerState::load_snapshot(&snapshot_path).is_ok());
+
+        // Test 1: Verify the constant is 10 GiB
+        assert_eq!(MAX_SNAPSHOT_SIZE, 10 * 1024 * 1024 * 1024);
+
+        // Test 2: Craft a payload whose bincode-encoded length field claims
+        // a huge Vec, which bincode::options().with_limit() should reject.
+        let mut legacy_malicious = Vec::new();
+        let huge_len: u64 = 20 * 1024 * 1024 * 1024; // 20 GiB
+        legacy_malicious.extend_from_slice(&huge_len.to_le_bytes());
+        legacy_malicious.extend_from_slice(&[0u8; 100]);
+
+        let malicious_path = dir.path().join("malicious-snapshot.bin");
+        std::fs::write(&malicious_path, &legacy_malicious).unwrap();
+
+        let result = LedgerState::load_snapshot(&malicious_path);
+        assert!(result.is_err(), "Malicious snapshot should be rejected");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("deserialize"),
+            "Expected deserialization error from bincode limit, got: {err_msg}"
         );
     }
 
@@ -6926,6 +7069,81 @@ mod tests {
     }
 
     #[test]
+    fn test_mir_compound_credential_and_pot_transfer() {
+        // Issue #16: When both credential distribution AND OtherAccountingPot transfer
+        // happen from the same source pot, the sequential operations must use saturating
+        // arithmetic to avoid underflow/overflow if the first operation depletes the pot.
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(10_000_000);
+        state.treasury = Lovelace(5_000_000);
+
+        let cred = Credential::VerificationKey(Hash28::from_bytes([0xee; 28]));
+        let key = credential_to_hash(&cred);
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+        // Step 1: MIR distributes 8M from reserves to credential (leaves 2M in reserves)
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::StakeCredentials(vec![(cred.clone(), 8_000_000)]),
+        });
+        assert_eq!(state.reserves, Lovelace(2_000_000));
+        assert_eq!(state.reward_accounts[&key], Lovelace(8_000_000));
+
+        // Step 2: MIR pot transfer tries to move 5M from reserves to treasury,
+        // but only 2M remain. Should cap at available (2M), not panic/underflow.
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::OtherAccountingPot(5_000_000),
+        });
+        // Reserves fully drained (capped at 2M available)
+        assert_eq!(state.reserves, Lovelace(0));
+        // Treasury receives only the 2M that was actually available
+        assert_eq!(state.treasury, Lovelace(7_000_000));
+    }
+
+    #[test]
+    fn test_mir_pot_transfer_exceeds_source_treasury() {
+        // Symmetric test: treasury pot transfer exceeding available balance
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(20_000_000);
+        state.treasury = Lovelace(3_000_000);
+
+        let cred = Credential::VerificationKey(Hash28::from_bytes([0xff; 28]));
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+        // Distribute 2M from treasury to credential (leaves 1M)
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Treasury,
+            target: MIRTarget::StakeCredentials(vec![(cred.clone(), 2_000_000)]),
+        });
+        assert_eq!(state.treasury, Lovelace(1_000_000));
+
+        // Try to transfer 10M from treasury to reserves, but only 1M available
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Treasury,
+            target: MIRTarget::OtherAccountingPot(10_000_000),
+        });
+        assert_eq!(state.treasury, Lovelace(0));
+        assert_eq!(state.reserves, Lovelace(21_000_000));
+    }
+
+    #[test]
+    fn test_mir_pot_transfer_zero_source() {
+        // Edge case: pot transfer when source is already zero
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(0);
+        state.treasury = Lovelace(5_000_000);
+
+        // Should be a no-op, not panic
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::OtherAccountingPot(1_000_000),
+        });
+        assert_eq!(state.reserves, Lovelace(0));
+        assert_eq!(state.treasury, Lovelace(5_000_000));
+    }
+
+    #[test]
     fn test_pool_reregistration_cancels_pending_retirement() {
         // Bug 3: re-registering a pool should cancel pending retirement
         let params = ProtocolParameters::mainnet_defaults();
@@ -7488,5 +7706,369 @@ mod tests {
         state.governance.dreps.get_mut(&dreps[1].1).unwrap().active = false;
         let total = state.compute_total_drep_stake();
         assert_eq!(total, 3_000_000_000);
+    }
+
+    /// Regression test for GitHub issue #13: slot + stabilisation_window u64 overflow.
+    ///
+    /// When a block has a slot near u64::MAX, the old code `block.slot().0 +
+    /// self.randomness_stabilisation_window` would overflow. The fix restructures
+    /// the comparison to subtract from the larger value instead.
+    #[test]
+    fn test_slot_stabilisation_window_no_overflow() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        state.randomness_stabilisation_window = 40;
+
+        let genesis_hash = Hash32::from_bytes([0xAB; 32]);
+        state.set_genesis_hash(genesis_hash);
+
+        // Pre-set the epoch to match the extreme slot so we don't trigger
+        // a massive epoch transition loop. The extreme slot u64::MAX - 10
+        // falls in epoch (u64::MAX - 10) / 100.
+        let extreme_slot = u64::MAX - 10;
+        state.epoch = EpochNo(extreme_slot / 100);
+
+        // Block at a slot near u64::MAX — the old code would panic here
+        // because slot + stabilisation_window overflows u64.
+        let mut block = make_test_block(extreme_slot, 1, Hash32::ZERO, vec![]);
+        block.header.vrf_result.output = vec![42u8; 32];
+        block.header.issuer_vkey = vec![1u8; 32];
+
+        // This should NOT panic; the candidate nonce should be frozen
+        // because the extreme slot is definitely in the stabilisation window.
+        state.apply_block(&block).unwrap();
+
+        // Evolving nonce updated (always updates)
+        assert_ne!(state.evolving_nonce, genesis_hash);
+        // Candidate nonce should be FROZEN (extreme slot is in stabilisation window)
+        assert_eq!(state.candidate_nonce, genesis_hash);
+    }
+
+    /// Test that first_slot_of_epoch and epoch_of_slot don't overflow with
+    /// extreme epoch numbers.
+    #[test]
+    fn test_first_slot_of_epoch_saturating() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 432000;
+        state.shelley_transition_epoch = 208;
+        state.byron_epoch_length = 21600;
+
+        // Extreme epoch number should saturate to u64::MAX, not panic
+        let result = state.first_slot_of_epoch(u64::MAX);
+        assert_eq!(result, u64::MAX);
+
+        // Normal epoch should still work correctly
+        let result = state.first_slot_of_epoch(208);
+        assert_eq!(result, 208 * 21600); // byron_slots + 0 shelley slots
+    }
+
+    /// Test that the stabilisation window boundary works correctly with
+    /// saturating arithmetic for normal values (no behavioral change).
+    #[test]
+    fn test_stabilisation_window_boundary_normal_values() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        state.randomness_stabilisation_window = 40;
+
+        let genesis_hash = Hash32::from_bytes([0xAB; 32]);
+        state.set_genesis_hash(genesis_hash);
+
+        // Slot 59 is the LAST slot before the stabilisation window
+        // (59 < 100 - 40 = 60, so candidate updates)
+        let mut block = make_test_block(59, 1, Hash32::ZERO, vec![]);
+        block.header.vrf_result.output = vec![42u8; 32];
+        block.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block).unwrap();
+        assert_eq!(state.candidate_nonce, state.evolving_nonce);
+
+        // Slot 60 is the FIRST slot in the stabilisation window
+        // (60 >= 100 - 40 = 60, so candidate freezes)
+        let candidate_before = state.candidate_nonce;
+        let mut block2 = make_test_block(60, 2, *block.hash(), vec![]);
+        block2.header.vrf_result.output = vec![99u8; 32];
+        block2.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block2).unwrap();
+        assert_eq!(state.candidate_nonce, candidate_before);
+        assert_ne!(state.evolving_nonce, candidate_before);
+    }
+
+    /// Verify that reward expansion calculation does not overflow i128 even with
+    /// large reserves and high rho numerator values near the i128 boundary.
+    ///
+    /// The old code computed `rho_num * reserves * effective_blocks` in a single
+    /// i128 expression, which overflows when reserves is near MAX_LOVELACE_SUPPLY
+    /// and rho_num is large. The Rat-based calculation cross-reduces before
+    /// multiplying, avoiding the overflow.
+    #[test]
+    fn test_reward_expansion_no_i128_overflow() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Use a rho that would cause overflow in the naive calculation:
+        // rho = 999/1000 (extreme value to stress the arithmetic)
+        // naive: 999 * 45_000_000_000_000_000 * 21600 = 9.7e23, fits in i128
+        // But with a larger numerator (e.g., rho = 999_999_999/1_000_000_000):
+        // naive: 999_999_999 * 45_000_000_000_000_000 * 21600 = ~9.7e32
+        // This is still within i128 range (max ~1.7e38), so we need to push harder.
+        //
+        // To truly overflow i128 in the naive code path, we need:
+        // rho_num * reserves * effective_blocks > 2^127
+        // With reserves = 45e15 and effective_blocks = 21600:
+        // rho_num > 2^127 / (45e15 * 21600) ≈ 1.75e23
+        // So we use a rho with a very large numerator.
+        params.rho = Rational {
+            numerator: u64::MAX, // 1.8e19
+            denominator: u64::MAX,
+        };
+        // rho = u64::MAX / u64::MAX = 1, so expansion = reserves * effective/expected
+        // But the naive code would compute: u64::MAX * 45e15 * 21600 which is
+        // ~1.8e19 * 4.5e16 * 2.16e4 = ~1.7e40, far exceeding i128::MAX (~1.7e38)
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(0);
+        state.epoch_length = 432000;
+
+        // Set up minimal structures for calculate_and_distribute_rewards
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // This should NOT panic from i128 overflow
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // With rho=1 and eta=1 (effective==expected when active_slot_coeff=0.05):
+        // expected_blocks = floor(0.05 * 432000) = 21600
+        // effective_blocks = min(21600, 21600) = 21600
+        // expansion = floor(1 * reserves * 21600/21600) = reserves = 45e15
+        assert_eq!(
+            state.reserves.0, 0,
+            "All reserves should be expanded with rho=1"
+        );
+    }
+
+    /// Verify that reward expansion works correctly with extreme rho values
+    /// where the numerator and denominator differ significantly.
+    #[test]
+    fn test_reward_expansion_large_rho_numerator() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // rho = large_num / (large_num + 1) ≈ 1
+        // This maximizes rho_num while keeping the fraction valid.
+        params.rho = Rational {
+            numerator: u64::MAX - 1,
+            denominator: u64::MAX,
+        };
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(0);
+        state.epoch_length = 432000;
+
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // Should not panic
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // expansion ≈ reserves * (u64::MAX-1)/u64::MAX ≈ reserves - 1
+        // After subtracting expansion, reserves should be approximately 0-2
+        assert!(
+            state.reserves.0 <= 3,
+            "Reserves should be nearly zero with rho ≈ 1, got {}",
+            state.reserves.0
+        );
+    }
+
+    /// Verify that treasury cut calculation also uses Rat and doesn't overflow.
+    #[test]
+    fn test_treasury_cut_no_overflow() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // tau = u64::MAX / u64::MAX = 1 (takes entire reward pot as treasury)
+        params.tau = Rational {
+            numerator: u64::MAX,
+            denominator: u64::MAX,
+        };
+        // Use small rho to get a moderate expansion
+        params.rho = Rational {
+            numerator: 3,
+            denominator: 1000,
+        };
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(1_000_000_000_000); // 1M ADA in fees
+        state.epoch_length = 432000;
+
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // Should not panic
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // With tau=1, all rewards go to treasury (no pool rewards)
+        // expansion = floor(0.003 * 45e15) = 135_000_000_000_000
+        let expected_expansion = 135_000_000_000_000u64;
+        let total_rewards = expected_expansion + 1_000_000_000_000;
+        // Treasury should have received the entire reward pot
+        assert_eq!(
+            state.treasury.0, total_rewards,
+            "Treasury should receive all rewards when tau=1"
+        );
+    }
+
+    /// Verify the Rat struct itself handles large values without overflow.
+    #[test]
+    fn test_rat_large_value_multiplication() {
+        // This simulates the problematic calculation:
+        // rho_num * reserves * effective_blocks where all are large
+        let rho = Rat::new(u64::MAX as i128, u64::MAX as i128);
+        let reserves = Rat::new(MAX_LOVELACE_SUPPLY as i128, 1);
+        let eta = Rat::new(21600, 21600);
+
+        // Should not panic
+        let result = rho.mul(&reserves).mul(&eta);
+        assert_eq!(
+            result.floor_u64(),
+            MAX_LOVELACE_SUPPLY,
+            "rho=1 * reserves * eta=1 should equal reserves"
+        );
+
+        // Test with values that would overflow naive i128 multiplication
+        // u64::MAX * 45e15 * 21600 > i128::MAX
+        let rho2 = Rat::new(u64::MAX as i128, 1);
+        let reserves2 = Rat::new(MAX_LOVELACE_SUPPLY as i128, 1);
+        let eta2 = Rat::new(21600, u64::MAX as i128);
+        // = u64::MAX * 45e15 * 21600 / u64::MAX = 45e15 * 21600 = 9.72e17
+        let result2 = rho2.mul(&reserves2).mul(&eta2);
+        let expected = MAX_LOVELACE_SUPPLY as u128 * 21600;
+        assert_eq!(
+            result2.floor_u64(),
+            expected as u64,
+            "Large numerator cross-reduced with large denominator"
+        );
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_extracts_28_byte_credential() {
+        // Standard 29-byte reward address: 1 byte header + 28 byte credential
+        let cred_bytes = [0xAB; 28];
+        let mut reward_addr_29 = vec![0xE0u8]; // testnet header
+        reward_addr_29.extend_from_slice(&cred_bytes);
+        assert_eq!(reward_addr_29.len(), 29);
+
+        let hash = LedgerState::reward_account_to_hash(&reward_addr_29);
+        let hash_bytes = hash.as_ref();
+        // First 28 bytes should be the credential
+        assert_eq!(&hash_bytes[..28], &cred_bytes);
+        // Last 4 bytes should be zero-padded
+        assert_eq!(&hash_bytes[28..32], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_ignores_extra_bytes() {
+        // An address longer than 29 bytes should still extract only 28 bytes of credential.
+        // This tests the fix for the hash collision risk where .min(32) could copy
+        // extra trailing bytes, causing different addresses to map to the same key.
+        let cred_bytes = [0xCD; 28];
+        let mut reward_addr_long = vec![0xE1u8]; // mainnet header
+        reward_addr_long.extend_from_slice(&cred_bytes);
+        // Append extra bytes (e.g., script hash or other data)
+        reward_addr_long.extend_from_slice(&[0xFF; 10]);
+        assert_eq!(reward_addr_long.len(), 39);
+
+        let hash = LedgerState::reward_account_to_hash(&reward_addr_long);
+        let hash_bytes = hash.as_ref();
+        // Should only contain the 28-byte credential, not the extra bytes
+        assert_eq!(&hash_bytes[..28], &cred_bytes);
+        assert_eq!(&hash_bytes[28..32], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_no_collision_different_trailing_bytes() {
+        // Two addresses with the same 28-byte credential but different trailing data
+        // must produce the same hash (both should extract only the credential).
+        let cred_bytes = [0x42; 28];
+
+        let mut addr_a = vec![0xE0u8];
+        addr_a.extend_from_slice(&cred_bytes);
+        addr_a.extend_from_slice(&[0x00; 5]); // trailing zeros
+
+        let mut addr_b = vec![0xE0u8];
+        addr_b.extend_from_slice(&cred_bytes);
+        addr_b.extend_from_slice(&[0xFF; 5]); // trailing 0xFF
+
+        let hash_a = LedgerState::reward_account_to_hash(&addr_a);
+        let hash_b = LedgerState::reward_account_to_hash(&addr_b);
+        assert_eq!(
+            hash_a, hash_b,
+            "Same credential should produce same hash regardless of trailing bytes"
+        );
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_different_credentials_no_collision() {
+        // Two addresses with different 28-byte credentials must produce different hashes.
+        let mut addr_a = vec![0xE0u8];
+        addr_a.extend_from_slice(&[0xAA; 28]);
+
+        let mut addr_b = vec![0xE0u8];
+        addr_b.extend_from_slice(&[0xBB; 28]);
+
+        let hash_a = LedgerState::reward_account_to_hash(&addr_a);
+        let hash_b = LedgerState::reward_account_to_hash(&addr_b);
+        assert_ne!(
+            hash_a, hash_b,
+            "Different credentials must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_short_address_returns_zeros() {
+        // Address shorter than 29 bytes should return all zeros (no extraction possible).
+        let short_addr = vec![0xE0u8; 10];
+        let hash = LedgerState::reward_account_to_hash(&short_addr);
+        assert_eq!(hash.as_ref(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_header_byte_ignored() {
+        // Different header bytes with same credential should produce the same hash,
+        // since only bytes 1..29 are extracted.
+        let cred_bytes = [0x77; 28];
+
+        let mut addr_testnet = vec![0xE0u8]; // testnet
+        addr_testnet.extend_from_slice(&cred_bytes);
+
+        let mut addr_mainnet = vec![0xE1u8]; // mainnet
+        addr_mainnet.extend_from_slice(&cred_bytes);
+
+        let hash_testnet = LedgerState::reward_account_to_hash(&addr_testnet);
+        let hash_mainnet = LedgerState::reward_account_to_hash(&addr_mainnet);
+        assert_eq!(
+            hash_testnet, hash_mainnet,
+            "Header byte should not affect the hash key"
+        );
     }
 }

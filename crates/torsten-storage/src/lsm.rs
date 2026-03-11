@@ -145,10 +145,16 @@ impl TipMetadata {
         if data.len() < TIP_METADATA_SIZE {
             return Err(LsmImmutableDBError::CorruptTipMetadata(data.len()));
         }
-        let slot = SlotNo(u64::from_be_bytes(data[..8].try_into().unwrap()));
+        let slot =
+            SlotNo(u64::from_be_bytes(data[..8].try_into().map_err(|_| {
+                LsmImmutableDBError::CorruptTipMetadata(data.len())
+            })?));
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&data[8..40]);
-        let block_no = BlockNo(u64::from_be_bytes(data[40..48].try_into().unwrap()));
+        let block_no =
+            BlockNo(u64::from_be_bytes(data[40..48].try_into().map_err(
+                |_| LsmImmutableDBError::CorruptTipMetadata(data.len()),
+            )?));
         Ok(TipMetadata {
             slot,
             hash: Hash32::from_bytes(hash_bytes),
@@ -338,10 +344,11 @@ impl LsmImmutableDB {
             None => return Ok(None),
         };
         let slot_bytes: &[u8] = slot_value.as_ref();
-        if slot_bytes.len() != 8 {
-            return Ok(None);
-        }
-        let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+        let slot_arr: [u8; 8] = match slot_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return Ok(None),
+        };
+        let slot = SlotNo(u64::from_be_bytes(slot_arr));
         self.get_block_by_slot(slot)
     }
 
@@ -384,7 +391,11 @@ impl LsmImmutableDB {
             if kb.len() != 13 || !kb.starts_with(b"slot:") {
                 continue;
             }
-            let slot = SlotNo(u64::from_be_bytes(kb[5..13].try_into().unwrap()));
+            let slot_arr: [u8; 8] = match kb[5..13].try_into() {
+                Ok(arr) => arr,
+                Err(_) => continue,
+            };
+            let slot = SlotNo(u64::from_be_bytes(slot_arr));
             let hash = self
                 .tree
                 .get(&make_slot_hash_key(slot))

@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::Transaction;
@@ -49,6 +50,10 @@ pub struct Mempool {
     counter: RwLock<u64>,
     /// Current total size
     total_bytes: RwLock<usize>,
+    /// Atomic transaction count for race-free capacity checks.
+    /// The count is reserved (incremented) before inserting into the DashMap,
+    /// preventing the TOCTOU race between `txs.len()` and `txs.insert()`.
+    tx_count: AtomicUsize,
     /// Configuration
     config: MempoolConfig,
 }
@@ -79,6 +84,7 @@ impl Mempool {
             order: RwLock::new(VecDeque::new()),
             counter: RwLock::new(0),
             total_bytes: RwLock::new(0),
+            tx_count: AtomicUsize::new(0),
             config,
         }
     }
@@ -108,8 +114,11 @@ impl Mempool {
             return Ok(MempoolAddResult::AlreadyExists);
         }
 
-        // Check capacity
-        if self.txs.len() >= self.config.max_transactions {
+        // Atomically reserve a slot: increment tx_count first, then check capacity.
+        // This eliminates the TOCTOU race between checking txs.len() and inserting.
+        let count = self.tx_count.fetch_add(1, Ordering::Relaxed);
+        if count >= self.config.max_transactions {
+            self.tx_count.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 max = self.config.max_transactions,
                 "Mempool: full, rejecting tx"
@@ -121,6 +130,7 @@ impl Mempool {
 
         let total = *self.total_bytes.read();
         if total + size_bytes > self.config.max_bytes {
+            self.tx_count.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 size_bytes,
                 total,
@@ -151,7 +161,7 @@ impl Mempool {
         debug!(
             hash = %tx_hash.to_hex(),
             size_bytes,
-            total_txs = self.txs.len(),
+            total_txs = self.tx_count.load(Ordering::Relaxed),
             "Mempool: transaction added"
         );
 
@@ -161,11 +171,12 @@ impl Mempool {
     /// Remove a transaction (when included in a block)
     pub fn remove_tx(&self, tx_hash: &TransactionHash) -> Option<Transaction> {
         if let Some((_, entry)) = self.txs.remove(tx_hash) {
+            self.tx_count.fetch_sub(1, Ordering::Relaxed);
             self.order.write().retain(|h| h != tx_hash);
             *self.total_bytes.write() -= entry.size_bytes;
             debug!(
                 hash = %tx_hash.to_hex(),
-                remaining = self.txs.len(),
+                remaining = self.tx_count.load(Ordering::Relaxed),
                 "Mempool: transaction removed"
             );
             Some(entry.tx)
@@ -398,7 +409,7 @@ impl Mempool {
 
     /// Clear all transactions
     pub fn clear(&self) {
-        let count = self.txs.len();
+        let count = self.tx_count.swap(0, Ordering::Relaxed);
         self.txs.clear();
         self.order.write().clear();
         *self.total_bytes.write() = 0;
@@ -420,6 +431,7 @@ pub struct MempoolSnapshot {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
     use torsten_primitives::address::{Address, ByronAddress};
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::transaction::*;
@@ -788,6 +800,90 @@ mod tests {
         assert_eq!(txs.len(), 2); // only room for 2 x 500 bytes
         assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest priority first
         assert_eq!(txs[1].body.fee, Lovelace(200_000)); // second highest
+    }
+
+    #[test]
+    fn test_atomic_tx_count_consistency() {
+        let config = MempoolConfig {
+            max_transactions: 5,
+            max_bytes: 1024 * 1024,
+        };
+        let mempool = Mempool::new(config);
+
+        // Verify counter starts at zero
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 0);
+
+        // Add 3 transactions
+        for i in 1..=3u8 {
+            mempool
+                .add_tx(Hash32::from_bytes([i; 32]), make_dummy_tx(), 100)
+                .unwrap();
+        }
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 3);
+        assert_eq!(mempool.len(), 3);
+
+        // Remove one transaction
+        mempool.remove_tx(&Hash32::from_bytes([2u8; 32]));
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 2);
+        assert_eq!(mempool.len(), 2);
+
+        // Removing a non-existent transaction should not change the counter
+        mempool.remove_tx(&Hash32::from_bytes([99u8; 32]));
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 2);
+
+        // Add more transactions up to capacity (5)
+        for i in 4..=6u8 {
+            mempool
+                .add_tx(Hash32::from_bytes([i; 32]), make_dummy_tx(), 100)
+                .unwrap();
+        }
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 5);
+        assert_eq!(mempool.len(), 5);
+
+        // Exceeding capacity should be rejected and counter stays at 5
+        let result = mempool.add_tx(Hash32::from_bytes([7u8; 32]), make_dummy_tx(), 100);
+        assert!(result.is_err());
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 5);
+
+        // Remove one, then adding should succeed again
+        mempool.remove_tx(&Hash32::from_bytes([1u8; 32]));
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 4);
+        mempool
+            .add_tx(Hash32::from_bytes([7u8; 32]), make_dummy_tx(), 100)
+            .unwrap();
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 5);
+
+        // Clear should reset counter to zero
+        mempool.clear();
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 0);
+        assert_eq!(mempool.len(), 0);
+
+        // Adding after clear works correctly
+        mempool
+            .add_tx(Hash32::from_bytes([10u8; 32]), make_dummy_tx(), 100)
+            .unwrap();
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 1);
+        assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_atomic_count_on_size_rejection() {
+        let config = MempoolConfig {
+            max_transactions: 10,
+            max_bytes: 200, // very small byte limit
+        };
+        let mempool = Mempool::new(config);
+
+        // Add one tx that uses most of the byte budget
+        mempool
+            .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 150)
+            .unwrap();
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 1);
+
+        // This tx should be rejected for exceeding max_bytes, counter must stay at 1
+        let result = mempool.add_tx(Hash32::from_bytes([2u8; 32]), make_dummy_tx(), 100);
+        assert!(result.is_err());
+        assert_eq!(mempool.tx_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

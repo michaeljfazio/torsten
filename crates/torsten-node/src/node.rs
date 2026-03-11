@@ -2516,9 +2516,7 @@ impl Node {
                     .filter(|(_, d)| match d {
                         torsten_primitives::transaction::DRep::KeyHash(h) => h == hash,
                         torsten_primitives::transaction::DRep::ScriptHash(h) => {
-                            let mut padded = [0u8; 32];
-                            padded[..28].copy_from_slice(h.as_bytes());
-                            torsten_primitives::hash::Hash32::from_bytes(padded) == *hash
+                            h.to_hash32_padded() == *hash
                         }
                         _ => false,
                     })

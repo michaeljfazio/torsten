@@ -23,6 +23,19 @@ impl<'de, const N: usize> serde::Deserialize<'de> for Hash<N> {
 pub type Hash28 = Hash<28>;
 pub type Hash32 = Hash<32>;
 
+impl Hash28 {
+    /// Convert a 28-byte hash to a 32-byte hash by zero-padding the last 4 bytes.
+    ///
+    /// This is used throughout the codebase when 28-byte credential/key hashes
+    /// (e.g., pool IDs, DRep key hashes, stake key hashes) need to be used as
+    /// Hash32 map keys or compared with Hash32 values.
+    pub fn to_hash32_padded(&self) -> Hash32 {
+        let mut bytes = [0u8; 32];
+        bytes[..28].copy_from_slice(self.as_bytes());
+        Hash32::from_bytes(bytes)
+    }
+}
+
 pub type BlockHeaderHash = Hash32;
 pub type TransactionHash = Hash32;
 pub type ScriptHash = Hash28;
@@ -142,5 +155,38 @@ mod tests {
             hash.to_string(),
             "0000000000000000000000000000000000000000000000000000000000000000"
         );
+    }
+
+    #[test]
+    fn test_hash28_to_hash32_padded_zeros() {
+        let h28 = Hash28::ZERO;
+        let h32 = h28.to_hash32_padded();
+        assert_eq!(h32, Hash32::ZERO);
+    }
+
+    #[test]
+    fn test_hash28_to_hash32_padded_nonzero() {
+        let h28 = Hash28::from_bytes([0xAB; 28]);
+        let h32 = h28.to_hash32_padded();
+        // First 28 bytes should match the original
+        assert_eq!(&h32.as_bytes()[..28], h28.as_bytes());
+        // Last 4 bytes should be zero-padded
+        assert_eq!(&h32.as_bytes()[28..], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_hash28_to_hash32_padded_preserves_content() {
+        let h28 = blake2b_224(b"cardano pool key");
+        let h32 = h28.to_hash32_padded();
+        // Round-trip: the first 28 bytes of h32 should reconstruct h28
+        let recovered = Hash28::try_from(&h32.as_bytes()[..28]).unwrap();
+        assert_eq!(recovered, h28);
+    }
+
+    #[test]
+    fn test_hash28_to_hash32_padded_distinct_inputs() {
+        let h28_a = Hash28::from_bytes([1u8; 28]);
+        let h28_b = Hash28::from_bytes([2u8; 28]);
+        assert_ne!(h28_a.to_hash32_padded(), h28_b.to_hash32_padded());
     }
 }

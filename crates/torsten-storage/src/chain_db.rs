@@ -162,10 +162,18 @@ impl TipMetadata {
         if data.len() < TIP_METADATA_SIZE {
             return Err(ChainDBError::CorruptTipMetadata(data.len()));
         }
-        let slot = SlotNo(u64::from_be_bytes(data[..8].try_into().unwrap()));
+        let slot = SlotNo(u64::from_be_bytes(
+            data[..8]
+                .try_into()
+                .map_err(|_| ChainDBError::CorruptTipMetadata(data.len()))?,
+        ));
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&data[8..40]);
-        let block_no = BlockNo(u64::from_be_bytes(data[40..48].try_into().unwrap()));
+        let block_no = BlockNo(u64::from_be_bytes(
+            data[40..48]
+                .try_into()
+                .map_err(|_| ChainDBError::CorruptTipMetadata(data.len()))?,
+        ));
         Ok(TipMetadata {
             slot,
             hash: Hash32::from_bytes(hash_bytes),
@@ -524,10 +532,11 @@ impl ChainDB {
             None => return Ok(None),
         };
         let slot_bytes: &[u8] = slot_value.as_ref();
-        if slot_bytes.len() != 8 {
-            return Ok(None);
-        }
-        let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+        let slot_arr: [u8; 8] = match slot_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return Ok(None),
+        };
+        let slot = SlotNo(u64::from_be_bytes(slot_arr));
 
         // slot -> hash
         let hash = self
@@ -609,7 +618,11 @@ impl ChainDB {
                 if kb.len() != 18 || !kb.starts_with(b"slot_hash:") {
                     continue;
                 }
-                let slot = SlotNo(u64::from_be_bytes(kb[10..18].try_into().unwrap()));
+                let slot_arr: [u8; 8] = match kb[10..18].try_into() {
+                    Ok(arr) => arr,
+                    Err(_) => continue,
+                };
+                let slot = SlotNo(u64::from_be_bytes(slot_arr));
                 let hb = value.as_ref();
                 if hb.len() != 32 {
                     continue;
@@ -702,8 +715,8 @@ impl ChainDB {
                 // Check if this block's slot is at or before the target
                 if let Ok(Some(slot_val)) = self.tree.get(&make_hash_key(&current_hash)) {
                     let slot_bytes: &[u8] = slot_val.as_ref();
-                    if slot_bytes.len() == 8 {
-                        let block_slot = u64::from_be_bytes(slot_bytes.try_into().unwrap());
+                    if let Ok(arr) = <[u8; 8]>::try_from(slot_bytes) {
+                        let block_slot = u64::from_be_bytes(arr);
                         if block_slot <= target_slot && target_hash.is_none() {
                             break;
                         }
@@ -746,8 +759,8 @@ impl ChainDB {
             for hash in &removed {
                 if let Ok(Some(slot_val)) = self.tree.get(&make_hash_key(hash)) {
                     let slot_bytes: &[u8] = slot_val.as_ref();
-                    if slot_bytes.len() == 8 {
-                        let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+                    if let Ok(arr) = <[u8; 8]>::try_from(slot_bytes) {
+                        let slot = SlotNo(u64::from_be_bytes(arr));
                         let _ = self.tree.delete(&make_slot_hash_key(slot));
                     }
                 }
@@ -760,8 +773,8 @@ impl ChainDB {
             if let Some(th) = target_hash {
                 if let Ok(Some(slot_val)) = self.tree.get(&make_hash_key(&th)) {
                     let slot_bytes: &[u8] = slot_val.as_ref();
-                    if slot_bytes.len() == 8 {
-                        let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
+                    if let Ok(arr) = <[u8; 8]>::try_from(slot_bytes) {
+                        let slot = SlotNo(u64::from_be_bytes(arr));
                         // Derive block_no: old tip block_no minus removed count
                         let new_block_no = current_tip
                             .map(|t| BlockNo(t.block_no.0.saturating_sub(removed.len() as u64)))
