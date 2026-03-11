@@ -722,10 +722,7 @@ pub fn validate_transaction_with_pools(
             .iter()
             .map(|w| {
                 // Hash the vkey to get the 28-byte key hash, then pad to Hash32
-                let kh = torsten_primitives::hash::blake2b_224(&w.vkey);
-                let mut bytes = [0u8; 32];
-                bytes[..28].copy_from_slice(kh.as_bytes());
-                Hash32::from_bytes(bytes)
+                torsten_primitives::hash::blake2b_224(&w.vkey).to_hash32_padded()
             })
             .collect();
         let slot = SlotNo(current_slot);

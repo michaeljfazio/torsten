@@ -1681,9 +1681,7 @@ impl LedgerState {
         for (pool_id, pool_reg) in go_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
-                let mut key_bytes = [0u8; 32];
-                key_bytes[..28].copy_from_slice(owner.as_bytes());
-                let owner_key = Hash32::from_bytes(key_bytes);
+                let owner_key = owner.to_hash32_padded();
                 if go_snapshot.delegations.get(&owner_key) == Some(pool_id) {
                     owner_stake += go_snapshot
                         .stake_distribution
@@ -1789,11 +1787,7 @@ impl LedgerState {
             let owner_set: std::collections::HashSet<Hash32> = pool_reg
                 .owners
                 .iter()
-                .map(|o| {
-                    let mut kb = [0u8; 32];
-                    kb[..28].copy_from_slice(o.as_bytes());
-                    Hash32::from_bytes(kb)
-                })
+                .map(|o| o.to_hash32_padded())
                 .collect();
 
             if let Some(delegators) = delegators_by_pool.get(pool_id) {
@@ -2510,9 +2504,7 @@ impl LedgerState {
                     }
                 }
                 DRep::ScriptHash(h) => {
-                    let mut padded = [0u8; 32];
-                    padded[..28].copy_from_slice(h.as_bytes());
-                    let hash32 = Hash32::from_bytes(padded);
+                    let hash32 = h.to_hash32_padded();
                     if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
                         *cache.entry(hash32).or_default() += stake;
                     }
@@ -2551,9 +2543,7 @@ impl LedgerState {
                     }
                 }
                 DRep::ScriptHash(h) => {
-                    let mut padded = [0u8; 32];
-                    padded[..28].copy_from_slice(h.as_bytes());
-                    let hash32 = Hash32::from_bytes(padded);
+                    let hash32 = h.to_hash32_padded();
                     if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
                         total += stake;
                     }
@@ -2821,10 +2811,7 @@ impl LedgerState {
 
 /// Extract a Hash32 from a Credential for use as a map key
 fn credential_to_hash(credential: &Credential) -> Hash32 {
-    let h28 = credential.to_hash();
-    let mut bytes = [0u8; 32];
-    bytes[..28].copy_from_slice(h28.as_bytes());
-    Hash32::from_bytes(bytes)
+    credential.to_hash().to_hash32_padded()
 }
 
 /// Extract the staking credential hash from an address (Base and Reward addresses only).
@@ -4012,9 +3999,7 @@ mod tests {
         );
 
         // Pool_id padded to 32 bytes should NOT have rewards (old bug)
-        let mut pool_key_bytes = [0u8; 32];
-        pool_key_bytes[..28].copy_from_slice(pool_id.as_bytes());
-        let pool_key = Hash32::from_bytes(pool_key_bytes);
+        let pool_key = pool_id.to_hash32_padded();
         let pool_id_reward = state
             .reward_accounts
             .get(&pool_key)
@@ -4338,9 +4323,7 @@ mod tests {
         let mut return_addr = vec![0xE1u8]; // header byte
         return_addr.extend_from_slice(&[42u8; 28]); // 28-byte key hash
 
-        let mut key_bytes = [0u8; 32];
-        key_bytes[..28].copy_from_slice(&[42u8; 28]);
-        let reward_key = Hash32::from_bytes(key_bytes);
+        let reward_key = Hash28::from_bytes([42u8; 28]).to_hash32_padded();
 
         // Submit a proposal with deposit
         let proposal = ProposalProcedure {
@@ -4380,9 +4363,7 @@ mod tests {
         let mut reward_addr = vec![0xE1u8];
         reward_addr.extend_from_slice(&[55u8; 28]);
 
-        let mut key_bytes = [0u8; 32];
-        key_bytes[..28].copy_from_slice(&[55u8; 28]);
-        let reward_key = Hash32::from_bytes(key_bytes);
+        let reward_key = Hash28::from_bytes([55u8; 28]).to_hash32_padded();
 
         let mut withdrawals = std::collections::BTreeMap::new();
         withdrawals.insert(reward_addr, Lovelace(50_000_000_000));
@@ -4793,12 +4774,10 @@ mod tests {
             );
             // Set up vote delegation and stake for each DRep
             let stake_key = Hash32::from_bytes([100 + i as u8; 32]);
-            let mut drep_bytes = [0u8; 32];
-            drep_bytes[..28].copy_from_slice(&[i as u8; 28]);
-            state
-                .governance
-                .vote_delegations
-                .insert(stake_key, DRep::KeyHash(Hash32::from_bytes(drep_bytes)));
+            state.governance.vote_delegations.insert(
+                stake_key,
+                DRep::KeyHash(Hash28::from_bytes([i as u8; 28]).to_hash32_padded()),
+            );
             state
                 .stake_distribution
                 .stake_map
@@ -5012,11 +4991,7 @@ mod tests {
 
         // 6/10 SPOs vote yes (60% > 51%)
         for i in 0..6 {
-            let pool_hash = Hash32::from_bytes({
-                let mut b = [0u8; 32];
-                b[..28].copy_from_slice(Hash28::from_bytes([100 + i as u8; 28]).as_bytes());
-                b
-            });
+            let pool_hash = Hash28::from_bytes([100 + i as u8; 28]).to_hash32_padded();
             let voter = Voter::StakePool(pool_hash);
             state.process_vote(
                 &voter,
@@ -5145,9 +5120,7 @@ mod tests {
     /// Matches the format produced by credential_to_hash (padded with zeros).
     fn make_cc_hot_key(byte_val: u8) -> (Hash28, Hash32) {
         let h28 = Hash28::from_bytes([byte_val; 28]);
-        let mut h32_bytes = [0u8; 32];
-        h32_bytes[..28].copy_from_slice(&[byte_val; 28]);
-        (h28, Hash32::from_bytes(h32_bytes))
+        (h28, h28.to_hash32_padded())
     }
 
     #[test]
