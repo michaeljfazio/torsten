@@ -1,0 +1,59 @@
+{
+  "rule": "CERT",
+  "description": "Valid DRep registration (Conway governance): register a new DRep with deposit",
+  "environment": {
+    "epoch": 200,
+    "protocol_params": {
+      "key_deposit": 2000000,
+      "pool_deposit": 500000000,
+      "drep_deposit": 500000000,
+      "min_pool_cost": 170000000,
+      "drep_activity": 20,
+      "e_max": 18
+    },
+    "votes": [],
+    "withdrawals": {}
+  },
+  "input_state": {
+    "d_state": {
+      "registrations": {},
+      "delegations": {},
+      "rewards": {},
+      "vote_delegations": {}
+    },
+    "p_state": {
+      "pools": {},
+      "retiring": {}
+    },
+    "g_state": {
+      "dreps": {},
+      "committee_hot_keys": {}
+    }
+  },
+  "signal": {
+    "type": "reg_drep",
+    "credential": { "type": "vkey", "hash": "eeff00112233445566778899aabbccddeeff00112233445566778899" },
+    "deposit": 500000000
+  },
+  "expected_output": {
+    "type": "success",
+    "state": {
+      "d_state": {
+        "registrations": {},
+        "delegations": {},
+        "rewards": {},
+        "vote_delegations": {}
+      },
+      "p_state": {
+        "pools": {},
+        "retiring": {}
+      },
+      "g_state": {
+        "dreps": {
+          "eeff00112233445566778899aabbccddeeff00112233445566778899": 0
+        },
+        "committee_hot_keys": {}
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+-- Cabal project file for the conformance test vector generator.
+--
+-- This project depends on the formal-ledger-specifications compiled output.
+-- Building requires Nix to compile the Agda spec to Haskell.
+--
+-- Setup instructions:
+--
+-- 1. Enter the Nix development shell:
+--    nix develop github:IntersectMBO/formal-ledger-specifications/conway-v1.0
+--
+-- 2. Build and run the generator:
+--    cabal run conformance-generator -- --output-dir ../vectors/
+--
+-- The formal spec provides the cardano-ledger-executable-spec library which
+-- exposes the compiled Agda step functions (utxoStep, certStep, etc.).
+
+packages: .
+
+-- When the formal spec Nix flake is available, add:
+-- source-repository-package
+--   type: git
+--   location: https://github.com/IntersectMBO/formal-ledger-specifications
+--   tag: conway-v1.0
+--   subdir: src/cardano-ledger-executable-spec

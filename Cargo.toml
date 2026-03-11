@@ -11,6 +11,7 @@ members = [
     "crates/torsten-node",
     "crates/torsten-cli",
     "crates/torsten-integration-tests",
+    "tests/conformance",
 ]
 resolver = "2"
 
