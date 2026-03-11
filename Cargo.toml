@@ -35,7 +35,7 @@ torsten-node = { path = "crates/torsten-node" }
 torsten-cli = { path = "crates/torsten-cli" }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 minicbor = { version = "0.25", features = ["std", "derive"] }
 hex = "0.4"

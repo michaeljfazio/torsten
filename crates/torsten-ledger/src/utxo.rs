@@ -15,6 +15,10 @@ pub struct UtxoSet {
     /// Skipped during serialization and rebuilt on load via `rebuild_address_index()`.
     #[serde(skip)]
     address_index: HashMap<Address, Vec<TransactionInput>>,
+    /// When false, address index operations are skipped (for fast replay).
+    /// Call `rebuild_address_index()` after re-enabling.
+    #[serde(skip)]
+    indexing_enabled: bool,
 }
 
 impl UtxoSet {
@@ -22,7 +26,15 @@ impl UtxoSet {
         UtxoSet {
             utxos: HashMap::new(),
             address_index: HashMap::new(),
+            indexing_enabled: true,
         }
+    }
+
+    /// Enable or disable address index maintenance.
+    /// When disabled, `insert()` and `remove()` skip address index updates.
+    /// Call `rebuild_address_index()` after re-enabling.
+    pub fn set_indexing_enabled(&mut self, enabled: bool) {
+        self.indexing_enabled = enabled;
     }
 
     /// Rebuild the address index from the UTxO map.
@@ -52,20 +64,24 @@ impl UtxoSet {
 
     /// Insert a new UTxO
     pub fn insert(&mut self, input: TransactionInput, output: TransactionOutput) {
-        self.address_index
-            .entry(output.address.clone())
-            .or_default()
-            .push(input.clone());
+        if self.indexing_enabled {
+            self.address_index
+                .entry(output.address.clone())
+                .or_default()
+                .push(input.clone());
+        }
         self.utxos.insert(input, output);
     }
 
     /// Remove a UTxO (mark as spent)
     pub fn remove(&mut self, input: &TransactionInput) -> Option<TransactionOutput> {
         if let Some(output) = self.utxos.remove(input) {
-            if let Some(inputs) = self.address_index.get_mut(&output.address) {
-                inputs.retain(|i| i != input);
-                if inputs.is_empty() {
-                    self.address_index.remove(&output.address);
+            if self.indexing_enabled {
+                if let Some(inputs) = self.address_index.get_mut(&output.address) {
+                    inputs.retain(|i| i != input);
+                    if inputs.is_empty() {
+                        self.address_index.remove(&output.address);
+                    }
                 }
             }
             Some(output)

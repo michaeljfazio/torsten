@@ -3,6 +3,7 @@ use crate::utxo::UtxoSet;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 use torsten_primitives::block::{Block, Point, Tip};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
@@ -183,6 +184,11 @@ pub struct LedgerState {
     pub governance: GovernanceState,
     /// Slot configuration for Plutus time conversion
     pub slot_config: SlotConfig,
+    /// When true, `rebuild_stake_distribution()` runs at each epoch boundary.
+    /// Set after loading a snapshot (where incremental tracking may have drifted).
+    /// During replay from genesis, incremental tracking is always correct.
+    #[serde(skip)]
+    pub needs_stake_rebuild: bool,
 }
 
 /// Conway-era governance state (CIP-1694)
@@ -276,19 +282,20 @@ pub struct EpochSnapshots {
     pub go: Option<StakeSnapshot>,
 }
 
-/// A snapshot of the stake distribution at an epoch boundary
+/// A snapshot of the stake distribution at an epoch boundary.
+/// Uses `Arc` for large HashMaps to avoid deep-cloning during epoch rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeSnapshot {
     pub epoch: EpochNo,
     /// stake credential hash -> pool_id delegation
-    pub delegations: HashMap<Hash32, Hash28>,
+    pub delegations: Arc<HashMap<Hash32, Hash28>>,
     /// pool_id -> total active stake delegated to that pool
     pub pool_stake: HashMap<Hash28, Lovelace>,
     /// pool_id -> pool parameters at snapshot time
-    pub pool_params: HashMap<Hash28, PoolRegistration>,
+    pub pool_params: Arc<HashMap<Hash28, PoolRegistration>>,
     /// Individual stake per credential (for reward distribution and pledge verification)
     #[serde(default)]
-    pub stake_distribution: HashMap<Hash32, Lovelace>,
+    pub stake_distribution: Arc<HashMap<Hash32, Lovelace>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,6 +359,7 @@ impl LedgerState {
             update_quorum: default_update_quorum(),
             governance: GovernanceState::default(),
             slot_config: SlotConfig::default(),
+            needs_stake_rebuild: true,
         }
     }
 
@@ -1230,9 +1238,12 @@ impl LedgerState {
         self.snapshots.set = self.snapshots.mark.take();
 
         // Take a new "mark" snapshot of current stake distribution.
-        // Recompute stake_map from the full UTxO set for correctness (matching Haskell).
-        // The incremental tracking can drift after snapshot load or Mithril import.
-        self.rebuild_stake_distribution();
+        // Only do a full UTxO scan if needed (after snapshot load or Mithril import).
+        // During replay from genesis, incremental tracking is always correct.
+        if self.needs_stake_rebuild {
+            self.rebuild_stake_distribution();
+            self.needs_stake_rebuild = false;
+        }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
@@ -1279,10 +1290,10 @@ impl LedgerState {
 
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
-            delegations: self.delegations.clone(),
+            delegations: Arc::new(self.delegations.clone()),
             pool_stake,
-            pool_params: self.pool_params.clone(),
-            stake_distribution: snapshot_stake,
+            pool_params: Arc::new(self.pool_params.clone()),
+            stake_distribution: Arc::new(snapshot_stake),
         });
 
         // Process pending pool retirements for this epoch
@@ -1596,7 +1607,7 @@ impl LedgerState {
 
         // Build delegators-by-pool index for O(n) reward distribution
         let mut delegators_by_pool: HashMap<Hash28, Vec<Hash32>> = HashMap::new();
-        for (cred_hash, pool_id) in &go_snapshot.delegations {
+        for (cred_hash, pool_id) in go_snapshot.delegations.iter() {
             delegators_by_pool
                 .entry(*pool_id)
                 .or_default()
@@ -1605,7 +1616,7 @@ impl LedgerState {
 
         // Build owner-delegated-stake per pool for pledge check
         let mut owner_stake_by_pool: HashMap<Hash28, u64> = HashMap::new();
-        for (pool_id, pool_reg) in &go_snapshot.pool_params {
+        for (pool_id, pool_reg) in go_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
                 let mut key_bytes = [0u8; 32];
@@ -2731,6 +2742,9 @@ impl LedgerState {
             LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
         })?;
         state.utxo_set.rebuild_address_index();
+        // After loading a snapshot, incremental stake tracking may be stale,
+        // so force a full rebuild at the next epoch boundary.
+        state.needs_stake_rebuild = true;
         info!(
             path = %path.display(),
             bytes = raw.len(),

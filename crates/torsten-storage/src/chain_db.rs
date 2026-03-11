@@ -83,7 +83,6 @@ fn bulk_import_config() -> LsmConfig {
 // | Prefix        | Len  | Payload          | Value                   |
 // |---------------|------|------------------|-------------------------|
 // | blk:          | 36   | 32-byte hash     | Block CBOR (primary)    |
-// | slot:         | 13   | 8-byte BE slot   | Block CBOR (range scan) |
 // | hash:         | 37   | 32-byte hash     | 8-byte BE slot          |
 // | slot_hash:    | 18   | 8-byte BE slot   | 32-byte hash            |
 // | prev:         | 37   | 32-byte hash     | 32-byte prev_hash       |
@@ -96,14 +95,6 @@ fn make_blk_key(hash: &BlockHeaderHash) -> Key {
     let mut buf = [0u8; 36];
     buf[..4].copy_from_slice(b"blk:");
     buf[4..].copy_from_slice(hash.as_bytes());
-    Key::from(buf.as_slice())
-}
-
-#[inline]
-fn make_slot_key(slot: SlotNo) -> Key {
-    let mut buf = [0u8; 13];
-    buf[..5].copy_from_slice(b"slot:");
-    buf[5..].copy_from_slice(&slot.0.to_be_bytes());
     Key::from(buf.as_slice())
 }
 
@@ -282,9 +273,8 @@ impl ChainDB {
             "ChainDB: adding block"
         );
 
-        let mut batch = Vec::with_capacity(7);
+        let mut batch = Vec::with_capacity(6);
         batch.push((make_blk_key(&hash), Value::from(cbor.as_slice())));
-        batch.push((make_slot_key(slot), Value::from(cbor.as_slice())));
         batch.push((
             make_hash_key(&hash),
             Value::from(slot.0.to_be_bytes().as_slice()),
@@ -322,7 +312,7 @@ impl ChainDB {
             return Ok(());
         }
 
-        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 6 + 1);
+        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 5 + 1);
 
         for (hash, slot, block_no, prev_hash, cbor) in &blocks {
             // Skip blocks that already exist
@@ -336,7 +326,6 @@ impl ChainDB {
             }
 
             batch.push((make_blk_key(hash), Value::from(cbor.as_slice())));
-            batch.push((make_slot_key(*slot), Value::from(cbor.as_slice())));
             batch.push((
                 make_hash_key(hash),
                 Value::from(slot.0.to_be_bytes().as_slice()),
@@ -382,12 +371,11 @@ impl ChainDB {
             return Ok(());
         }
 
-        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 5 + 1);
+        let mut batch: Vec<(Key, Value)> = Vec::with_capacity(blocks.len() * 4 + 1);
         let mut new_tip: Option<TipMetadata> = None;
 
         for &(slot, hash, block_no, cbor) in blocks {
             batch.push((make_blk_key(hash), Value::from(cbor)));
-            batch.push((make_slot_key(slot), Value::from(cbor)));
             batch.push((
                 make_hash_key(hash),
                 Value::from(slot.0.to_be_bytes().as_slice()),
@@ -507,14 +495,23 @@ impl ChainDB {
         from_slot: SlotNo,
         to_slot: SlotNo,
     ) -> Result<Vec<Vec<u8>>, ChainDBError> {
+        // Two-hop lookup: iterate slot_hash: prefix to get hashes, then fetch CBOR via blk:
         let iter = self
             .tree
-            .range(&make_slot_key(from_slot), &make_slot_key(to_slot));
+            .range(&make_slot_hash_key(from_slot), &make_slot_hash_key(to_slot));
         let mut blocks = Vec::new();
         for (key, value) in iter {
             let kb: &[u8] = key.as_ref();
-            if kb.len() == 13 && kb.starts_with(b"slot:") {
-                blocks.push(value.as_ref().to_vec());
+            if kb.len() == 18 && kb.starts_with(b"slot_hash:") {
+                let hb = value.as_ref();
+                if hb.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(hb);
+                    let hash = Hash32::from_bytes(h);
+                    if let Some(cbor) = self.tree.get(&make_blk_key(&hash))? {
+                        blocks.push(cbor.as_ref().to_vec());
+                    }
+                }
             }
         }
         Ok(blocks)
@@ -525,33 +522,27 @@ impl ChainDB {
         &self,
         after_slot: SlotNo,
     ) -> Result<Option<(SlotNo, BlockHeaderHash, Vec<u8>)>, ChainDBError> {
-        let start = make_slot_key(SlotNo(after_slot.0.saturating_add(1)));
-        let end = make_slot_key(SlotNo(u64::MAX));
+        // Two-hop: iterate slot_hash: to find next slot, then fetch CBOR via blk:
+        let start = make_slot_hash_key(SlotNo(after_slot.0.saturating_add(1)));
+        let end = make_slot_hash_key(SlotNo(u64::MAX));
 
         for (key, value) in self.tree.range(&start, &end) {
             let kb: &[u8] = key.as_ref();
-            if kb.len() != 13 || !kb.starts_with(b"slot:") {
+            if kb.len() != 18 || !kb.starts_with(b"slot_hash:") {
                 continue;
             }
-            let slot = SlotNo(u64::from_be_bytes(kb[5..13].try_into().unwrap()));
-            let hash = self
-                .tree
-                .get(&make_slot_hash_key(slot))
-                .ok()
-                .flatten()
-                .map(|v| {
-                    let hb = v.as_ref();
-                    if hb.len() == 32 {
-                        let mut h = [0u8; 32];
-                        h.copy_from_slice(hb);
-                        Hash32::from_bytes(h)
-                    } else {
-                        Hash32::ZERO
-                    }
-                })
-                .unwrap_or(Hash32::ZERO);
+            let slot = SlotNo(u64::from_be_bytes(kb[10..18].try_into().unwrap()));
+            let hb = value.as_ref();
+            if hb.len() != 32 {
+                continue;
+            }
+            let mut h = [0u8; 32];
+            h.copy_from_slice(hb);
+            let hash = Hash32::from_bytes(h);
 
-            return Ok(Some((slot, hash, value.as_ref().to_vec())));
+            if let Some(cbor) = self.tree.get(&make_blk_key(&hash))? {
+                return Ok(Some((slot, hash, cbor.as_ref().to_vec())));
+            }
         }
         Ok(None)
     }
@@ -665,7 +656,6 @@ impl ChainDB {
                     let slot_bytes: &[u8] = slot_val.as_ref();
                     if slot_bytes.len() == 8 {
                         let slot = SlotNo(u64::from_be_bytes(slot_bytes.try_into().unwrap()));
-                        let _ = self.tree.delete(&make_slot_key(slot));
                         let _ = self.tree.delete(&make_slot_hash_key(slot));
                     }
                 }

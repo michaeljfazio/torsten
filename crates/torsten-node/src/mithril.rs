@@ -66,6 +66,7 @@ struct SnapshotDetail {
 /// Entry from a cardano-node secondary index file.
 /// Each entry is 56 bytes in the secondary index.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SecondaryIndexEntry {
     block_offset: u64,
     _header_offset: u16,
@@ -100,6 +101,7 @@ impl SecondaryIndexEntry {
 }
 
 /// Verify a block's CRC32 checksum against the secondary index entry.
+#[allow(dead_code)]
 fn verify_block_checksum(block_data: &[u8], expected: u32) -> bool {
     crc32fast::hash(block_data) == expected
 }
@@ -201,12 +203,10 @@ pub async fn import_snapshot(
     let network_name = mithril_network_name(network_magic);
     verify_snapshot_digest(&extract_dir, network_name, &latest.beacon, &detail.digest)?;
 
-    // Step 6: Import blocks into ImmutableDB
-    info!(
-        database_path = %database_path.display(),
-        "Importing blocks into ImmutableDB"
-    );
-    import_chunk_files(&extract_dir, database_path)?;
+    // Step 6: Skip ChainDB import — chunk files are the optimal format for sequential
+    // replay. The LSM import (parse → write 5 KV pairs per block → compaction) was
+    // redundant since replay reads from chunk files directly. Blocks will be imported
+    // into ChainDB during normal sync after replay completes.
 
     // Step 7: Move immutable chunk files to database path for fast replay.
     // The node will read these sequentially during ledger replay (much faster
@@ -497,7 +497,9 @@ fn find_immutable_dir(extract_dir: &Path) -> Option<PathBuf> {
 // Block import
 // ---------------------------------------------------------------------------
 
-/// Import cardano-node immutable chunk files into Torsten's ImmutableDB
+/// Import cardano-node immutable chunk files into Torsten's ImmutableDB.
+/// Retained for fallback/testing; Mithril import now skips this step.
+#[allow(dead_code)]
 fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     let immutable_dir = find_immutable_dir(extract_dir)
         .context("Could not find immutable/ directory in extracted snapshot")?;
@@ -650,6 +652,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// sequentially is orders of magnitude faster than random LSM lookups because
 /// chunk files are already laid out in block order on disk.
 ///
+/// Uses secondary index entries for block boundaries to avoid redundant pallas
+/// decode — the callback receives raw CBOR slices that are decoded once by the
+/// caller for ledger application.
+///
 /// Calls the provided callback for each block in order. The callback receives
 /// the raw CBOR bytes. Returns the total number of blocks iterated.
 pub fn replay_from_chunk_files<F>(immutable_dir: &Path, mut on_block: F) -> Result<u64>
@@ -679,27 +685,24 @@ where
     );
 
     let mut total_blocks = 0u64;
-    let mut checksum_failures = 0u64;
 
     for chunk_num in &chunk_numbers {
         let chunk_path = immutable_dir.join(format!("{chunk_num:05}.chunk"));
         let secondary_path = immutable_dir.join(format!("{chunk_num:05}.secondary"));
 
-        let mut blocks = if secondary_path.exists() {
-            parse_chunk_with_index(&chunk_path, &secondary_path, &mut checksum_failures)?
-        } else {
-            Vec::new()
-        };
-
-        if blocks.is_empty() {
-            blocks = parse_chunk_sequential(&chunk_path)?;
+        // Fast path: use secondary index for block boundaries (no pallas decode)
+        if secondary_path.exists() {
+            let count = replay_chunk_with_index(&chunk_path, &secondary_path, &mut on_block)?;
+            if count > 0 {
+                total_blocks += count;
+                pb.inc(1);
+                continue;
+            }
         }
 
-        for (_slot, _hash, _block_no, cbor) in &blocks {
-            on_block(cbor)?;
-            total_blocks += 1;
-        }
-
+        // Fallback: sequential CBOR probe for block boundaries (no pallas decode)
+        let count = replay_chunk_sequential(&chunk_path, &mut on_block)?;
+        total_blocks += count;
         pb.inc(1);
     }
 
@@ -707,13 +710,90 @@ where
     Ok(total_blocks)
 }
 
+/// Replay a single chunk file using secondary index for block boundaries.
+/// Returns raw CBOR slices without pallas decode (the caller decodes once).
+fn replay_chunk_with_index<F>(
+    chunk_path: &Path,
+    secondary_path: &Path,
+    on_block: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(&[u8]) -> Result<()>,
+{
+    let secondary_data = fs::read(secondary_path).context("Failed to read secondary index")?;
+    let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
+
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    while offset + 56 <= secondary_data.len() {
+        if let Some(entry) = SecondaryIndexEntry::from_bytes(&secondary_data[offset..]) {
+            entries.push(entry);
+        }
+        offset += 56;
+    }
+
+    let mut count = 0u64;
+    for i in 0..entries.len() {
+        let entry = &entries[i];
+        let block_start = entry.block_offset as usize;
+        let block_end = if i + 1 < entries.len() {
+            entries[i + 1].block_offset as usize
+        } else {
+            chunk_data.len()
+        };
+
+        if block_start >= chunk_data.len() || block_end > chunk_data.len() {
+            continue;
+        }
+
+        on_block(&chunk_data[block_start..block_end])?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// Replay a single chunk file by sequential CBOR probing (no pallas decode).
+fn replay_chunk_sequential<F>(chunk_path: &Path, on_block: &mut F) -> Result<u64>
+where
+    F: FnMut(&[u8]) -> Result<()>,
+{
+    let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    let chunk_len = chunk_file.metadata()?.len() as usize;
+    if chunk_len == 0 {
+        return Ok(0);
+    }
+    let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
+
+    let mut count = 0u64;
+    let mut offset = 0;
+    while offset < chunk_data.len() {
+        let remaining = &chunk_data[offset..];
+        let item_size = match cbor_item_size(remaining) {
+            Some(size) if size > 0 => size,
+            _ => {
+                offset += 1;
+                continue;
+            }
+        };
+        on_block(&remaining[..item_size])?;
+        count += 1;
+        offset += item_size;
+    }
+
+    Ok(count)
+}
+
 /// A parsed block: (slot, hash, block_number, raw_cbor)
+#[allow(dead_code)]
 type ParsedBlock = (SlotNo, Hash32, BlockNo, Vec<u8>);
 
 /// Parse a chunk file using the secondary index for block boundaries.
 ///
 /// Uses memory-mapped I/O for the chunk file to avoid loading the entire file
 /// into memory. The secondary index is small enough to read directly.
+#[allow(dead_code)]
 fn parse_chunk_with_index(
     chunk_path: &Path,
     secondary_path: &Path,
@@ -806,6 +886,7 @@ fn parse_chunk_with_index(
 ///
 /// Uses memory-mapped I/O and proper CBOR size probing to avoid O(n^2)
 /// byte-by-byte scanning on decode failures.
+#[allow(dead_code)]
 fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
     let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
     let chunk_len = chunk_file.metadata()?.len() as usize;
