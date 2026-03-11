@@ -81,11 +81,29 @@ pub struct GenesisUtxoEntry {
 }
 
 impl ByronGenesis {
+    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read Byron genesis: {}", path.display()))?;
         serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse Byron genesis: {}", path.display()))
+    }
+
+    /// Load the Byron genesis and compute its Blake2b-256 hash.
+    ///
+    /// The hash is computed over the raw file content (canonical JSON), matching
+    /// the Cardano reference implementation.
+    pub fn load_with_hash(path: &Path) -> Result<(Self, torsten_primitives::hash::Hash32)> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read Byron genesis: {}", path.display()))?;
+        let genesis: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Byron genesis: {}", path.display()))?;
+        let hash = torsten_primitives::hash::blake2b_256(content.as_bytes());
+        info!(
+            genesis_hash = %hash.to_hex(),
+            "Byron genesis hash computed"
+        );
+        Ok((genesis, hash))
     }
 
     /// Get the protocol magic from the genesis config
@@ -893,5 +911,128 @@ mod tests {
         assert_eq!(pp.n_opt, 150);
         assert_eq!(pp.min_pool_cost, Lovelace(340000000));
         assert_eq!(pp.max_block_body_size, 65536);
+    }
+
+    #[test]
+    fn test_byron_genesis_load_with_hash() {
+        // Write a temporary Byron genesis JSON file and verify load_with_hash
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("byron-genesis.json");
+        let json = r#"{
+            "avvmDistr": {},
+            "nonAvvmBalances": {},
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1654041600,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": { "summand": "155381000000000", "multiplier": "43946000000" }
+            },
+            "protocolConsts": { "k": 2160, "protocolMagic": 764824073 }
+        }"#;
+        std::fs::write(&path, json).unwrap();
+
+        let (genesis, hash) = ByronGenesis::load_with_hash(&path).unwrap();
+        assert_eq!(genesis.protocol_magic(), 764824073);
+        assert_eq!(genesis.security_param(), 2160);
+
+        // Hash should be deterministic for the same content
+        let expected = torsten_primitives::hash::blake2b_256(json.as_bytes());
+        assert_eq!(hash, expected);
+
+        // Hash should be non-zero
+        assert_ne!(hash, torsten_primitives::hash::Hash32::ZERO);
+    }
+
+    #[test]
+    fn test_shelley_genesis_load_with_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shelley-genesis.json");
+        let json = r#"{
+            "networkMagic": 2,
+            "networkId": "Testnet",
+            "systemStart": "2022-10-25T00:00:00Z",
+            "activeSlotsCoeff": 0.05,
+            "securityParam": 432,
+            "epochLength": 86400,
+            "slotLength": 1,
+            "maxLovelaceSupply": 45000000000000000,
+            "maxKESEvolutions": 62,
+            "slotsPerKESPeriod": 129600,
+            "updateQuorum": 5,
+            "protocolParams": {
+                "minFeeA": 44,
+                "minFeeB": 155381,
+                "maxBlockBodySize": 65536,
+                "maxTxSize": 16384,
+                "maxBlockHeaderSize": 1100,
+                "keyDeposit": 2000000,
+                "poolDeposit": 500000000,
+                "eMax": 18,
+                "nOpt": 150,
+                "a0": 0.3,
+                "rho": 0.003,
+                "tau": 0.2,
+                "minPoolCost": 340000000,
+                "minUTxOValue": 1000000,
+                "protocolVersion": { "major": 6, "minor": 0 }
+            }
+        }"#;
+        std::fs::write(&path, json).unwrap();
+
+        let (genesis, hash) = ShelleyGenesis::load_with_hash(&path).unwrap();
+        assert_eq!(genesis.network_magic, 2);
+
+        // Hash should be deterministic
+        let expected = torsten_primitives::hash::blake2b_256(json.as_bytes());
+        assert_eq!(hash, expected);
+        assert_ne!(hash, torsten_primitives::hash::Hash32::ZERO);
+    }
+
+    #[test]
+    fn test_genesis_hash_differs_between_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let path1 = dir.path().join("genesis1.json");
+        let json1 = r#"{
+            "avvmDistr": {},
+            "nonAvvmBalances": {},
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1654041600,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": { "summand": "155381000000000", "multiplier": "43946000000" }
+            },
+            "protocolConsts": { "k": 2160, "protocolMagic": 764824073 }
+        }"#;
+        std::fs::write(&path1, json1).unwrap();
+
+        let path2 = dir.path().join("genesis2.json");
+        let json2 = r#"{
+            "avvmDistr": {},
+            "nonAvvmBalances": {},
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1654041600,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": { "summand": "155381000000000", "multiplier": "43946000000" }
+            },
+            "protocolConsts": { "k": 2160, "protocolMagic": 1 }
+        }"#;
+        std::fs::write(&path2, json2).unwrap();
+
+        let (_, hash1) = ByronGenesis::load_with_hash(&path1).unwrap();
+        let (_, hash2) = ByronGenesis::load_with_hash(&path2).unwrap();
+
+        // Different genesis files must produce different hashes
+        assert_ne!(hash1, hash2);
     }
 }

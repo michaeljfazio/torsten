@@ -264,6 +264,88 @@ impl TxValidator for LedgerTxValidator {
     }
 }
 
+/// Validate genesis blocks against expected hashes from the configuration.
+///
+/// When syncing from genesis (Origin), the first blocks received are the genesis
+/// blocks for the chain. For Byron-era networks (mainnet, preprod), the first
+/// block is a Byron Epoch Boundary Block (EBB) whose hash must match the
+/// expected Byron genesis hash. For networks that start directly in the Shelley
+/// era (preview), the first block's prev_hash should match the expected Shelley
+/// genesis hash.
+///
+/// This validation is crucial to ensure we are syncing the correct chain and
+/// not connecting to a peer serving a different network's blocks.
+pub fn validate_genesis_blocks(
+    blocks: &[torsten_primitives::block::Block],
+    expected_byron_hash: Option<&torsten_primitives::hash::Hash32>,
+    expected_shelley_hash: Option<&torsten_primitives::hash::Hash32>,
+) -> Result<()> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+
+    let first_block = &blocks[0];
+
+    // Only validate if we're starting from genesis (block 0 at slot 0).
+    // If ChainDB already has blocks, genesis was validated on a prior run.
+    if first_block.block_number().0 != 0 {
+        info!(
+            block_no = first_block.block_number().0,
+            slot = first_block.slot().0,
+            "Skipping genesis validation — not syncing from genesis"
+        );
+        return Ok(());
+    }
+
+    // For Byron-era chains, the first block is the Byron EBB (block 0, slot 0).
+    // Its hash must match the expected Byron genesis hash.
+    if first_block.era == torsten_primitives::era::Era::Byron {
+        if let Some(expected) = expected_byron_hash {
+            let actual = first_block.hash();
+            if actual != expected {
+                return Err(anyhow::anyhow!(
+                    "Byron genesis block hash mismatch: expected {}, got {} — \
+                     this chain does not match the configured genesis. \
+                     Check that you are connecting to the correct network.",
+                    expected.to_hex(),
+                    actual.to_hex()
+                ));
+            }
+            info!(
+                hash = %actual.to_hex(),
+                "Byron genesis block validated successfully"
+            );
+        } else {
+            warn!("No Byron genesis hash configured — skipping Byron genesis block validation");
+        }
+    }
+
+    // For Shelley-first chains (e.g., preview testnet), the first block may be
+    // a Shelley-era block. Its prev_hash points to the Shelley genesis hash.
+    if first_block.era.is_shelley_based() && first_block.block_number().0 == 0 {
+        if let Some(expected) = expected_shelley_hash {
+            let prev_hash = first_block.prev_hash();
+            if prev_hash != expected {
+                return Err(anyhow::anyhow!(
+                    "Shelley genesis hash mismatch: expected {}, but first block's \
+                     prev_hash is {} — this chain does not match the configured genesis. \
+                     Check that you are connecting to the correct network.",
+                    expected.to_hex(),
+                    prev_hash.to_hex()
+                ));
+            }
+            info!(
+                hash = %expected.to_hex(),
+                "Shelley genesis block reference validated successfully"
+            );
+        } else {
+            warn!("No Shelley genesis hash configured — skipping Shelley genesis block validation");
+        }
+    }
+
+    Ok(())
+}
+
 /// The main Torsten node
 pub struct Node {
     config: NodeConfig,
@@ -296,6 +378,12 @@ pub struct Node {
         Option<tokio::sync::broadcast::Sender<torsten_network::RollbackAnnouncement>>,
     /// Prometheus metrics port
     metrics_port: u16,
+    /// Expected Blake2b-256 hash of the Byron genesis block (from config or computed from file)
+    expected_byron_genesis_hash: Option<torsten_primitives::hash::Hash32>,
+    /// Expected Blake2b-256 hash of the Shelley genesis block (from config or computed from file)
+    expected_shelley_genesis_hash: Option<torsten_primitives::hash::Hash32>,
+    /// Whether genesis block validation has been performed (only need to validate once)
+    genesis_validated: bool,
     /// Count of epoch transitions observed since node startup.
     /// Used to determine when the epoch nonce is reliable for VRF verification.
     /// After Mithril import, we need at least 2 epoch transitions for the
@@ -313,11 +401,12 @@ impl Node {
         // Load Byron genesis if configured
         let config_dir = args.config_dir.clone();
         let mut byron_epoch_length: u64 = 0; // 0 = use pallas defaults (mainnet)
+        let mut byron_genesis_file_hash: Option<torsten_primitives::hash::Hash32> = None;
         let byron_genesis_utxos: Vec<(Vec<u8>, u64)> =
             if let Some(ref genesis_path) = args.config.byron_genesis_file {
                 let genesis_path = config_dir.join(genesis_path);
-                match ByronGenesis::load(&genesis_path) {
-                    Ok(genesis) => {
+                match ByronGenesis::load_with_hash(&genesis_path) {
+                    Ok((genesis, hash)) => {
                         let utxos = genesis.initial_utxos();
                         let k = genesis.security_param();
                         byron_epoch_length = 10 * k;
@@ -328,6 +417,7 @@ impl Node {
                             initial_utxos = utxos.len(),
                             "Byron genesis loaded"
                         );
+                        byron_genesis_file_hash = Some(hash);
                         utxos.into_iter().map(|e| (e.address, e.lovelace)).collect()
                     }
                     Err(e) => {
@@ -617,6 +707,29 @@ impl Node {
             }
         };
 
+        // Determine expected genesis hashes for genesis block validation.
+        // Config hash fields take priority (ByronGenesisHash, ShelleyGenesisHash);
+        // fall back to hashes computed from the genesis files themselves.
+        let expected_byron_genesis_hash = args
+            .config
+            .byron_genesis_hash
+            .as_deref()
+            .and_then(|h| torsten_primitives::hash::Hash32::from_hex(h).ok())
+            .or(byron_genesis_file_hash);
+        let expected_shelley_genesis_hash = args
+            .config
+            .shelley_genesis_hash
+            .as_deref()
+            .and_then(|h| torsten_primitives::hash::Hash32::from_hex(h).ok())
+            .or(shelley_genesis_hash);
+
+        if let Some(ref h) = expected_byron_genesis_hash {
+            info!(hash = %h.to_hex(), "Expected Byron genesis hash");
+        }
+        if let Some(ref h) = expected_shelley_genesis_hash {
+            info!(hash = %h.to_hex(), "Expected Shelley genesis hash");
+        }
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -639,6 +752,9 @@ impl Node {
             block_announcement_tx: None,
             rollback_announcement_tx: None,
             metrics_port: args.metrics_port,
+            expected_byron_genesis_hash,
+            expected_shelley_genesis_hash,
+            genesis_validated: false,
             epoch_transitions_observed: 0,
         })
     }
@@ -646,6 +762,12 @@ impl Node {
     pub async fn run(&mut self) -> Result<()> {
         let tip = self.chain_db.read().await.get_tip();
         info!("Current chain tip: {tip}");
+
+        // If ChainDB already has blocks, genesis was validated on a prior run
+        if tip.point != Point::Origin {
+            self.genesis_validated = true;
+        }
+
         {
             let ls = self.ledger_state.read().await;
             info!("UTxO set size: {} entries", ls.utxo_set.len());
@@ -2047,6 +2169,15 @@ impl Node {
         Ok(())
     }
 
+    /// Validate genesis blocks against expected hashes from the configuration.
+    fn validate_genesis_blocks(&self, blocks: &[torsten_primitives::block::Block]) -> Result<()> {
+        validate_genesis_blocks(
+            blocks,
+            self.expected_byron_genesis_hash.as_ref(),
+            self.expected_shelley_genesis_hash.as_ref(),
+        )
+    }
+
     /// Process a batch of forward blocks: store in ChainDB, apply to ledger, validate, log progress.
     /// Returns the number of blocks successfully applied to the ledger (0 if the first block
     /// failed connectivity, indicating a state divergence that the caller should handle).
@@ -2063,6 +2194,18 @@ impl Node {
     ) -> u64 {
         if blocks.is_empty() {
             return 0;
+        }
+
+        // Genesis block validation: on the very first batch of blocks received
+        // during initial sync, verify that the genesis block hash matches the
+        // expected hash from the configuration. This prevents syncing from a
+        // chain with a different genesis (wrong network).
+        if !self.genesis_validated {
+            if let Err(e) = self.validate_genesis_blocks(&blocks) {
+                error!("Genesis block validation failed: {e}");
+                return 0;
+            }
+            self.genesis_validated = true;
         }
 
         // Validate ALL block headers BEFORE storing.
@@ -3460,5 +3603,239 @@ impl Node {
                 error!("Block forging failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use torsten_primitives::block::{
+        Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput,
+    };
+    use torsten_primitives::era::Era;
+    use torsten_primitives::hash::Hash32;
+    use torsten_primitives::time::{BlockNo, SlotNo};
+
+    /// Helper to create a minimal test block with the given era, block number, hash, and prev_hash.
+    fn make_test_block(
+        era: Era,
+        block_no: u64,
+        slot: u64,
+        hash: Hash32,
+        prev_hash: Hash32,
+    ) -> Block {
+        Block {
+            header: BlockHeader {
+                header_hash: hash,
+                prev_hash,
+                issuer_vkey: vec![],
+                vrf_vkey: vec![],
+                vrf_result: VrfOutput {
+                    output: vec![],
+                    proof: vec![],
+                },
+                block_number: BlockNo(block_no),
+                slot: SlotNo(slot),
+                epoch_nonce: Hash32::ZERO,
+                body_size: 0,
+                body_hash: Hash32::ZERO,
+                operational_cert: OperationalCert {
+                    hot_vkey: vec![],
+                    sequence_number: 0,
+                    kes_period: 0,
+                    sigma: vec![],
+                },
+                protocol_version: ProtocolVersion { major: 0, minor: 0 },
+                kes_signature: vec![],
+            },
+            transactions: vec![],
+            era,
+            raw_cbor: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_genesis_empty_blocks() {
+        // Empty block list should pass validation
+        let result = validate_genesis_blocks(&[], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_genesis_skips_non_genesis_block() {
+        // Block with block_number > 0 should skip validation
+        let block = make_test_block(
+            Era::Byron,
+            42,
+            100,
+            Hash32::from_bytes([1u8; 32]),
+            Hash32::from_bytes([2u8; 32]),
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_hash_match() {
+        let expected_hash = Hash32::from_bytes([0xAA; 32]);
+        let block = make_test_block(Era::Byron, 0, 0, expected_hash, Hash32::ZERO);
+        let result = validate_genesis_blocks(&[block], Some(&expected_hash), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_hash_mismatch() {
+        let expected_hash = Hash32::from_bytes([0xAA; 32]);
+        let wrong_hash = Hash32::from_bytes([0xBB; 32]);
+        let block = make_test_block(Era::Byron, 0, 0, wrong_hash, Hash32::ZERO);
+        let result = validate_genesis_blocks(&[block], Some(&expected_hash), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Byron genesis block hash mismatch"));
+        assert!(err.contains(&expected_hash.to_hex()));
+        assert!(err.contains(&wrong_hash.to_hex()));
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_no_expected_hash() {
+        // When no expected hash is configured, validation should pass (with warning)
+        let block = make_test_block(
+            Era::Byron,
+            0,
+            0,
+            Hash32::from_bytes([0xCC; 32]),
+            Hash32::ZERO,
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_prev_hash_match() {
+        // For Shelley-first chains, prev_hash of block 0 is the genesis hash
+        let genesis_hash = Hash32::from_bytes([0xDD; 32]);
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            genesis_hash,
+        );
+        let result = validate_genesis_blocks(&[block], None, Some(&genesis_hash));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_prev_hash_mismatch() {
+        let expected_genesis = Hash32::from_bytes([0xDD; 32]);
+        let wrong_prev = Hash32::from_bytes([0xEE; 32]);
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            wrong_prev,
+        );
+        let result = validate_genesis_blocks(&[block], None, Some(&expected_genesis));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Shelley genesis hash mismatch"));
+        assert!(err.contains(&expected_genesis.to_hex()));
+        assert!(err.contains(&wrong_prev.to_hex()));
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_no_expected_hash() {
+        // When no expected Shelley hash is configured, validation should pass
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            Hash32::from_bytes([0x22; 32]),
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_and_shelley_batch() {
+        // A batch starting with Byron genesis block 0 followed by more blocks
+        let byron_hash = Hash32::from_bytes([0xAA; 32]);
+        let b0 = make_test_block(Era::Byron, 0, 0, byron_hash, Hash32::ZERO);
+        let b1 = make_test_block(Era::Byron, 1, 1, Hash32::from_bytes([0xBB; 32]), byron_hash);
+
+        let result = validate_genesis_blocks(&[b0, b1], Some(&byron_hash), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_conway_genesis_prev_hash() {
+        // Conway era block at genesis (block 0) — still Shelley-based
+        let genesis_hash = Hash32::from_bytes([0xFF; 32]);
+        let block = make_test_block(
+            Era::Conway,
+            0,
+            0,
+            Hash32::from_bytes([0x33; 32]),
+            genesis_hash,
+        );
+        // Conway is Shelley-based, so Shelley genesis hash should be validated
+        let result = validate_genesis_blocks(&[block], None, Some(&genesis_hash));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_conway_genesis_prev_hash_mismatch() {
+        let expected = Hash32::from_bytes([0xFF; 32]);
+        let wrong = Hash32::from_bytes([0x00; 32]);
+        let block = make_test_block(Era::Conway, 0, 0, Hash32::from_bytes([0x33; 32]), wrong);
+        let result = validate_genesis_blocks(&[block], None, Some(&expected));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_genesis_hash_parsing() {
+        let json = r#"{
+            "Network": "Testnet",
+            "NetworkMagic": 2,
+            "ByronGenesisFile": "preview-byron-genesis.json",
+            "ByronGenesisHash": "81cf23542e33d64c541699926c2b5e6e9c286583f0c8a3fb5f22ea7b352dd174",
+            "ShelleyGenesisFile": "preview-shelley-genesis.json",
+            "ShelleyGenesisHash": "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+        }"#;
+
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.byron_genesis_hash.as_deref(),
+            Some("81cf23542e33d64c541699926c2b5e6e9c286583f0c8a3fb5f22ea7b352dd174")
+        );
+        assert_eq!(
+            config.shelley_genesis_hash.as_deref(),
+            Some("363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d")
+        );
+
+        // Verify the hashes parse into Hash32 correctly
+        let byron_hash = Hash32::from_hex(config.byron_genesis_hash.as_ref().unwrap()).unwrap();
+        assert_ne!(byron_hash, Hash32::ZERO);
+
+        let shelley_hash = Hash32::from_hex(config.shelley_genesis_hash.as_ref().unwrap()).unwrap();
+        assert_ne!(shelley_hash, Hash32::ZERO);
+    }
+
+    #[test]
+    fn test_config_without_genesis_hashes() {
+        let json = r#"{
+            "Network": "Testnet",
+            "NetworkMagic": 2,
+            "ByronGenesisFile": "preview-byron-genesis.json",
+            "ShelleyGenesisFile": "preview-shelley-genesis.json"
+        }"#;
+
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.byron_genesis_hash.is_none());
+        assert!(config.shelley_genesis_hash.is_none());
+        assert!(config.alonzo_genesis_hash.is_none());
+        assert!(config.conway_genesis_hash.is_none());
     }
 }
