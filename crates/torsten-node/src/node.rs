@@ -431,53 +431,31 @@ impl Node {
                         state
                     } else {
                         warn!("Discarding stale ledger snapshot — will replay from ChainDB");
-                        let mut ledger = LedgerState::new(protocol_params.clone());
-                        if let Some(ref genesis) = shelley_genesis {
-                            ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
-                            ledger.set_slot_config(genesis.slot_config());
-                            ledger.set_update_quorum(genesis.update_quorum);
-                        }
-                        if let Some(hash) = shelley_genesis_hash {
-                            ledger.set_genesis_hash(hash);
-                        }
-                        if !byron_genesis_utxos.is_empty() {
-                            ledger.seed_genesis_utxos(&byron_genesis_utxos);
-                        }
-                        ledger
+                        Self::init_fresh_ledger(
+                            &protocol_params,
+                            shelley_genesis.as_ref(),
+                            shelley_genesis_hash,
+                            &byron_genesis_utxos,
+                        )
                     }
                 }
                 Err(e) => {
                     warn!("Failed to load ledger snapshot, starting fresh: {e}");
-                    let mut ledger = LedgerState::new(protocol_params.clone());
-                    if let Some(ref genesis) = shelley_genesis {
-                        ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
-                        ledger.set_slot_config(genesis.slot_config());
-                        ledger.set_update_quorum(genesis.update_quorum);
-                    }
-                    if let Some(hash) = shelley_genesis_hash {
-                        ledger.set_genesis_hash(hash);
-                    }
-                    if !byron_genesis_utxos.is_empty() {
-                        ledger.seed_genesis_utxos(&byron_genesis_utxos);
-                    }
-                    ledger
+                    Self::init_fresh_ledger(
+                        &protocol_params,
+                        shelley_genesis.as_ref(),
+                        shelley_genesis_hash,
+                        &byron_genesis_utxos,
+                    )
                 }
             }
         } else {
-            let mut ledger = LedgerState::new(protocol_params.clone());
-            // Apply epoch length and genesis hash from Shelley genesis
-            if let Some(ref genesis) = shelley_genesis {
-                ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
-                ledger.set_slot_config(genesis.slot_config());
-                ledger.set_update_quorum(genesis.update_quorum);
-            }
-            if !byron_genesis_utxos.is_empty() {
-                ledger.seed_genesis_utxos(&byron_genesis_utxos);
-            }
-            if let Some(hash) = shelley_genesis_hash {
-                ledger.set_genesis_hash(hash);
-            }
-            ledger
+            Self::init_fresh_ledger(
+                &protocol_params,
+                shelley_genesis.as_ref(),
+                shelley_genesis_hash,
+                &byron_genesis_utxos,
+            )
         };
         // Apply Conway genesis committee threshold and members if not already set
         if let Some((num, den)) = conway_committee_threshold {
@@ -1205,11 +1183,156 @@ impl Node {
 
     /// Save a ledger state snapshot to the database directory
     async fn save_ledger_snapshot(&self) {
-        let snapshot_path = self.database_path.join("ledger-snapshot.bin");
         let ls = self.ledger_state.read().await;
-        if let Err(e) = ls.save_snapshot(&snapshot_path) {
+        let epoch = ls.epoch.0;
+
+        // Save epoch-numbered snapshot for rollback safety
+        let epoch_path = self
+            .database_path
+            .join(format!("ledger-snapshot-epoch{epoch}.bin"));
+        if let Err(e) = ls.save_snapshot(&epoch_path) {
             error!("Failed to save ledger snapshot: {e}");
+            return;
         }
+
+        // Also save as the "latest" snapshot for fast startup
+        let latest_path = self.database_path.join("ledger-snapshot.bin");
+        if let Err(e) = ls.save_snapshot(&latest_path) {
+            error!("Failed to save latest ledger snapshot: {e}");
+        }
+
+        drop(ls);
+
+        // Prune old snapshots — keep only the 3 most recent
+        self.prune_old_snapshots(3);
+    }
+
+    /// Create a fresh ledger state with genesis configuration applied.
+    fn init_fresh_ledger(
+        protocol_params: &ProtocolParameters,
+        shelley_genesis: Option<&ShelleyGenesis>,
+        shelley_genesis_hash: Option<torsten_primitives::Hash32>,
+        byron_genesis_utxos: &[(Vec<u8>, u64)],
+    ) -> LedgerState {
+        let mut ledger = LedgerState::new(protocol_params.clone());
+        if let Some(genesis) = shelley_genesis {
+            ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+            ledger.set_slot_config(genesis.slot_config());
+            ledger.set_update_quorum(genesis.update_quorum);
+        }
+        if let Some(hash) = shelley_genesis_hash {
+            ledger.set_genesis_hash(hash);
+        }
+        if !byron_genesis_utxos.is_empty() {
+            ledger.seed_genesis_utxos(byron_genesis_utxos);
+        }
+        ledger
+    }
+
+    /// Remove old epoch snapshots, keeping only the N most recent.
+    fn prune_old_snapshots(&self, keep: usize) {
+        let mut snapshots: Vec<(u64, std::path::PathBuf)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.database_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if let Some(rest) = name_str.strip_prefix("ledger-snapshot-epoch") {
+                    if let Some(epoch_str) = rest.strip_suffix(".bin") {
+                        if let Ok(epoch) = epoch_str.parse::<u64>() {
+                            snapshots.push((epoch, entry.path()));
+                        }
+                    }
+                }
+            }
+        }
+        if snapshots.len() > keep {
+            snapshots.sort_by_key(|(epoch, _)| *epoch);
+            let to_remove = snapshots.len() - keep;
+            for (epoch, path) in snapshots.into_iter().take(to_remove) {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!(epoch, "Failed to remove old snapshot: {e}");
+                } else {
+                    debug!(epoch, "Pruned old ledger snapshot");
+                }
+            }
+        }
+    }
+
+    /// Find the best epoch snapshot for a rollback to the given slot.
+    /// Returns the path to the most recent snapshot whose ledger tip is at or before `rollback_slot`.
+    /// Falls back to `ledger-snapshot.bin` if no epoch snapshot qualifies.
+    fn find_best_snapshot_for_rollback(&self, rollback_slot: u64) -> Option<std::path::PathBuf> {
+        // Collect all epoch-numbered snapshots (sorted newest first)
+        let mut epoch_snapshots: Vec<(u64, std::path::PathBuf)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.database_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if let Some(rest) = name_str.strip_prefix("ledger-snapshot-epoch") {
+                    if let Some(epoch_str) = rest.strip_suffix(".bin") {
+                        if let Ok(epoch) = epoch_str.parse::<u64>() {
+                            epoch_snapshots.push((epoch, entry.path()));
+                        }
+                    }
+                }
+            }
+        }
+        // Sort by epoch descending (newest first)
+        epoch_snapshots.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Try each epoch snapshot to find one at or before the rollback slot.
+        // We need to actually load the snapshot to check its slot (epoch number alone
+        // isn't enough since the snapshot slot could be anywhere in the epoch).
+        // To avoid loading huge snapshots just to check, use a heuristic:
+        // epoch * epoch_length gives approximate slot. If epoch is clearly too new, skip.
+        let epoch_length = {
+            // Use a rough estimate; we don't need exact precision here
+            if let Some(ref genesis) = self.shelley_genesis {
+                genesis.epoch_length
+            } else {
+                86400
+            }
+        };
+
+        for (epoch, path) in &epoch_snapshots {
+            // Heuristic: if epoch * epoch_length > rollback_slot + epoch_length, skip
+            // (snapshot is definitely beyond the rollback point)
+            let approx_slot = epoch * epoch_length;
+            if approx_slot > rollback_slot + epoch_length {
+                continue;
+            }
+
+            // This snapshot might work — try loading to check exact slot
+            match torsten_ledger::LedgerState::load_snapshot(path) {
+                Ok(state) => {
+                    let snap_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    if snap_slot <= rollback_slot {
+                        debug!(
+                            epoch,
+                            snap_slot, rollback_slot, "Found suitable epoch snapshot for rollback"
+                        );
+                        return Some(path.clone());
+                    }
+                }
+                Err(e) => {
+                    warn!(epoch, "Failed to load epoch snapshot: {e}");
+                }
+            }
+        }
+
+        // Fall back to latest snapshot
+        let latest = self.database_path.join("ledger-snapshot.bin");
+        if latest.exists() {
+            // Check if it's usable (at or before rollback point)
+            if let Ok(state) = torsten_ledger::LedgerState::load_snapshot(&latest) {
+                let snap_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                if snap_slot <= rollback_slot {
+                    return Some(latest);
+                }
+            }
+        }
+
+        None
     }
 
     /// Replay blocks from local storage to catch the ledger up to the chain tip.
@@ -2935,84 +3058,74 @@ impl Node {
             }
         }
 
-        // 2. Reload ledger state from the last snapshot
-        let snapshot_path = self.database_path.join("ledger-snapshot.bin");
-        if snapshot_path.exists() {
+        // 2. Find the best ledger snapshot at or before the rollback point.
+        //    Try epoch-numbered snapshots first (newest that's <= rollback_slot),
+        //    then fall back to the latest snapshot.
+        let best_snapshot = self.find_best_snapshot_for_rollback(rollback_slot);
+
+        if let Some(snapshot_path) = best_snapshot {
             match torsten_ledger::LedgerState::load_snapshot(&snapshot_path) {
                 Ok(snapshot_state) => {
                     let snapshot_slot = snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
-                    let rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);
 
-                    if snapshot_slot <= rollback_slot {
-                        // Snapshot is at or before the rollback point — replay forward
-                        let mut ls = self.ledger_state.write().await;
-                        *ls = snapshot_state;
-                        let replay_from = snapshot_slot;
+                    // Restore from snapshot and replay forward to rollback point
+                    let mut ls = self.ledger_state.write().await;
+                    *ls = snapshot_state;
+                    let replay_from = snapshot_slot;
 
-                        // 3. Replay blocks from snapshot tip to rollback point
-                        let db = self.chain_db.read().await;
-                        let mut current_slot = replay_from;
-                        let mut replayed = 0u64;
-                        while current_slot < rollback_slot {
-                            match db.get_next_block_after_slot(torsten_primitives::time::SlotNo(
-                                current_slot,
-                            )) {
-                                Ok(Some((next_slot, _hash, cbor))) => {
-                                    if next_slot.0 > rollback_slot {
-                                        break;
-                                    }
-                                    match torsten_serialization::multi_era::decode_block(&cbor) {
-                                        Ok(block) => {
-                                            if let Err(e) = ls.apply_block(&block) {
-                                                error!(
-                                                    slot = next_slot.0,
-                                                    "Ledger apply failed during rollback replay: {e} — aborting replay"
-                                                );
-                                                break;
-                                            }
-                                            replayed += 1;
-                                            current_slot = next_slot.0;
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to decode block during replay: {e}");
-                                            break;
-                                        }
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(e) => {
-                                    warn!("Failed to read block during replay: {e}");
+                    // 3. Replay blocks from snapshot tip to rollback point
+                    let db = self.chain_db.read().await;
+                    let mut current_slot = replay_from;
+                    let mut replayed = 0u64;
+                    while current_slot < rollback_slot {
+                        match db.get_next_block_after_slot(torsten_primitives::time::SlotNo(
+                            current_slot,
+                        )) {
+                            Ok(Some((next_slot, _hash, cbor))) => {
+                                if next_slot.0 > rollback_slot {
                                     break;
                                 }
+                                match torsten_serialization::multi_era::decode_block(&cbor) {
+                                    Ok(block) => {
+                                        if let Err(e) = ls.apply_block(&block) {
+                                            error!(
+                                                slot = next_slot.0,
+                                                "Ledger apply failed during rollback replay: {e} — aborting replay"
+                                            );
+                                            break;
+                                        }
+                                        replayed += 1;
+                                        current_slot = next_slot.0;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to decode block during replay: {e}");
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                warn!("Failed to read block during replay: {e}");
+                                break;
                             }
                         }
-                        info!(
-                            snapshot_slot,
-                            rollback_slot,
-                            replayed,
-                            "Ledger state restored from snapshot and replayed"
-                        );
-                    } else {
-                        // Snapshot is ahead of rollback point — can't use it, reset to genesis
-                        warn!(
-                            snapshot_slot,
-                            rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0),
-                            "Snapshot is ahead of rollback point, resetting ledger state"
-                        );
-                        let mut ls = self.ledger_state.write().await;
-                        *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
                     }
+                    info!(
+                        snapshot_slot,
+                        rollback_slot,
+                        replayed,
+                        snapshot = %snapshot_path.display(),
+                        "Ledger state restored from snapshot and replayed"
+                    );
                 }
                 Err(e) => {
                     error!("Failed to load ledger snapshot for rollback: {e}");
-                    // Reset to empty ledger state as fallback
                     let mut ls = self.ledger_state.write().await;
                     *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
                 }
             }
         } else {
-            // No snapshot — reset to empty ledger state
-            warn!("No ledger snapshot found for rollback, resetting ledger state");
+            warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
             let mut ls = self.ledger_state.write().await;
             *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
         }

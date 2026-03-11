@@ -1905,6 +1905,8 @@ impl LedgerState {
     fn ratify_proposals(&mut self) {
         let total_drep_stake = self.compute_total_drep_stake();
         let total_spo_stake = self.compute_total_spo_stake();
+        // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
+        let drep_power_cache = self.build_drep_power_cache();
 
         // Collect all proposals sorted by priority (lower = higher priority)
         let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = self
@@ -1946,8 +1948,13 @@ impl LedgerState {
 
             // Check voting thresholds
             if let Some(state) = self.governance.proposals.get(action_id) {
-                let met =
-                    self.check_ratification(action_id, state, total_drep_stake, total_spo_stake);
+                let met = self.check_ratification(
+                    action_id,
+                    state,
+                    total_drep_stake,
+                    total_spo_stake,
+                    &drep_power_cache,
+                );
                 if met {
                     info!(
                         action_id = %action_id.transaction_id.to_hex(),
@@ -2041,10 +2048,11 @@ impl LedgerState {
         state: &ProposalState,
         total_drep_stake: u64,
         total_spo_stake: u64,
+        drep_power_cache: &HashMap<Hash32, u64>,
     ) -> bool {
-        // Count votes by voter type
+        // Count votes by voter type (uses pre-computed DRep power cache)
         let (drep_yes, drep_total, spo_yes, spo_total, _cc_yes, _cc_total) =
-            self.count_votes_by_type(action_id);
+            self.count_votes_by_type(action_id, drep_power_cache);
 
         let bootstrap = self.is_bootstrap_phase();
 
@@ -2227,7 +2235,11 @@ impl LedgerState {
     /// - DRep voting power = sum of stake delegated to that DRep via VoteDelegation
     /// - SPO voting power = pool's total active stake
     /// - CC votes are unweighted (1 per member)
-    fn count_votes_by_type(&self, action_id: &GovActionId) -> (u64, u64, u64, u64, u64, u64) {
+    fn count_votes_by_type(
+        &self,
+        action_id: &GovActionId,
+        drep_power_cache: &HashMap<Hash32, u64>,
+    ) -> (u64, u64, u64, u64, u64, u64) {
         let mut drep_yes = 0u64;
         let mut drep_total = 0u64;
         let mut spo_yes = 0u64;
@@ -2245,7 +2257,18 @@ impl LedgerState {
             match voter {
                 Voter::DRep(cred) => {
                     let drep_hash = credential_to_hash(cred);
-                    let voting_power = self.compute_drep_voting_power(&drep_hash);
+                    let voting_power =
+                        drep_power_cache
+                            .get(&drep_hash)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                // Fallback for DReps not in cache (e.g., voted but not delegated to)
+                                if self.governance.dreps.contains_key(&drep_hash) {
+                                    1
+                                } else {
+                                    0
+                                }
+                            });
                     drep_total += voting_power;
                     if procedure.vote == Vote::Yes {
                         drep_yes += voting_power;
@@ -2292,30 +2315,28 @@ impl LedgerState {
         utxo + reward
     }
 
-    /// Compute the voting power of a DRep: sum of stake delegated to them.
-    fn compute_drep_voting_power(&self, drep_hash: &Hash32) -> u64 {
-        let mut power = 0u64;
+    /// Build a cache of DRep voting power (Hash32 → delegated stake).
+    /// Iterates vote_delegations once, O(n), instead of per-DRep O(n) lookups.
+    fn build_drep_power_cache(&self) -> HashMap<Hash32, u64> {
+        let mut cache: HashMap<Hash32, u64> = HashMap::new();
         for (stake_cred, drep) in &self.governance.vote_delegations {
-            let matches = match drep {
-                DRep::KeyHash(h) => h == drep_hash,
+            let drep_hash = match drep {
+                DRep::KeyHash(h) => *h,
                 DRep::ScriptHash(h) => {
-                    // ScriptHash is Hash28 — pad to Hash32 for comparison
                     let mut padded = [0u8; 32];
                     padded[..28].copy_from_slice(h.as_bytes());
-                    Hash32::from_bytes(padded) == *drep_hash
+                    Hash32::from_bytes(padded)
                 }
-                DRep::Abstain | DRep::NoConfidence => false,
+                DRep::Abstain | DRep::NoConfidence => continue,
             };
-            if matches {
-                power += self.credential_stake(stake_cred);
-            }
+            let stake = self.credential_stake(stake_cred);
+            *cache.entry(drep_hash).or_default() += stake;
         }
-        // Minimum voting power of 1 for registered DReps with no delegated stake
-        if power == 0 && self.governance.dreps.contains_key(drep_hash) {
-            1
-        } else {
-            power
+        // Ensure registered DReps with no delegated stake have minimum power of 1
+        for drep_hash in self.governance.dreps.keys() {
+            cache.entry(*drep_hash).or_insert(1);
         }
+        cache
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
