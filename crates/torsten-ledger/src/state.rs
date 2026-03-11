@@ -543,10 +543,32 @@ impl LedgerState {
         );
     }
 
+    /// Validate that a governance threshold rational is in the range [0, 1]
+    /// with a non-zero denominator.
+    fn validate_threshold(name: &str, r: &Rational) -> Result<(), LedgerError> {
+        if r.denominator == 0 {
+            return Err(LedgerError::InvalidProtocolParam(format!(
+                "{}: zero denominator",
+                name
+            )));
+        }
+        if r.numerator > r.denominator {
+            return Err(LedgerError::InvalidProtocolParam(format!(
+                "{}: threshold {}/{} exceeds 1",
+                name, r.numerator, r.denominator
+            )));
+        }
+        Ok(())
+    }
+
     /// Apply a single ProtocolParamUpdate to the current protocol parameters.
     /// Each field in the update, if Some, overwrites the corresponding parameter.
     /// Used by both pre-Conway update proposals and Conway governance actions.
-    fn apply_protocol_param_update(&mut self, update: &ProtocolParamUpdate) {
+    /// Returns an error if any governance threshold is out of range [0, 1].
+    fn apply_protocol_param_update(
+        &mut self,
+        update: &ProtocolParamUpdate,
+    ) -> Result<(), LedgerError> {
         if let Some(v) = update.min_fee_a {
             self.protocol_params.min_fee_a = v;
         }
@@ -631,48 +653,63 @@ impl LedgerState {
             self.protocol_params.gov_action_deposit = v;
         }
         if let Some(ref v) = update.dvt_pp_network_group {
+            Self::validate_threshold("dvt_pp_network_group", v)?;
             self.protocol_params.dvt_pp_network_group = v.clone();
         }
         if let Some(ref v) = update.dvt_pp_economic_group {
+            Self::validate_threshold("dvt_pp_economic_group", v)?;
             self.protocol_params.dvt_pp_economic_group = v.clone();
         }
         if let Some(ref v) = update.dvt_pp_technical_group {
+            Self::validate_threshold("dvt_pp_technical_group", v)?;
             self.protocol_params.dvt_pp_technical_group = v.clone();
         }
         if let Some(ref v) = update.dvt_pp_gov_group {
+            Self::validate_threshold("dvt_pp_gov_group", v)?;
             self.protocol_params.dvt_pp_gov_group = v.clone();
         }
         if let Some(ref v) = update.dvt_hard_fork {
+            Self::validate_threshold("dvt_hard_fork", v)?;
             self.protocol_params.dvt_hard_fork = v.clone();
         }
         if let Some(ref v) = update.dvt_no_confidence {
+            Self::validate_threshold("dvt_no_confidence", v)?;
             self.protocol_params.dvt_no_confidence = v.clone();
         }
         if let Some(ref v) = update.dvt_committee_normal {
+            Self::validate_threshold("dvt_committee_normal", v)?;
             self.protocol_params.dvt_committee_normal = v.clone();
         }
         if let Some(ref v) = update.dvt_committee_no_confidence {
+            Self::validate_threshold("dvt_committee_no_confidence", v)?;
             self.protocol_params.dvt_committee_no_confidence = v.clone();
         }
         if let Some(ref v) = update.dvt_constitution {
+            Self::validate_threshold("dvt_constitution", v)?;
             self.protocol_params.dvt_constitution = v.clone();
         }
         if let Some(ref v) = update.dvt_treasury_withdrawal {
+            Self::validate_threshold("dvt_treasury_withdrawal", v)?;
             self.protocol_params.dvt_treasury_withdrawal = v.clone();
         }
         if let Some(ref v) = update.pvt_motion_no_confidence {
+            Self::validate_threshold("pvt_motion_no_confidence", v)?;
             self.protocol_params.pvt_motion_no_confidence = v.clone();
         }
         if let Some(ref v) = update.pvt_committee_normal {
+            Self::validate_threshold("pvt_committee_normal", v)?;
             self.protocol_params.pvt_committee_normal = v.clone();
         }
         if let Some(ref v) = update.pvt_committee_no_confidence {
+            Self::validate_threshold("pvt_committee_no_confidence", v)?;
             self.protocol_params.pvt_committee_no_confidence = v.clone();
         }
         if let Some(ref v) = update.pvt_hard_fork {
+            Self::validate_threshold("pvt_hard_fork", v)?;
             self.protocol_params.pvt_hard_fork = v.clone();
         }
         if let Some(ref v) = update.pvt_pp_security_group {
+            Self::validate_threshold("pvt_pp_security_group", v)?;
             self.protocol_params.pvt_pp_security_group = v.clone();
         }
         if let Some(v) = update.min_committee_size {
@@ -690,6 +727,7 @@ impl LedgerState {
         if let Some(v) = update.protocol_version_minor {
             self.protocol_params.protocol_version_minor = v;
         }
+        Ok(())
     }
 
     /// Apply a block to the ledger state
@@ -1472,17 +1510,24 @@ impl LedgerState {
                         "Protocol version change via pre-Conway update"
                     );
                 }
-                self.apply_protocol_param_update(&merged);
-                info!(
-                    epoch = new_epoch.0,
-                    proposers = distinct_proposers,
-                    protocol_version = format!(
-                        "{}.{}",
-                        self.protocol_params.protocol_version_major,
-                        self.protocol_params.protocol_version_minor
-                    ),
-                    "Pre-Conway protocol parameter update applied"
-                );
+                if let Err(e) = self.apply_protocol_param_update(&merged) {
+                    warn!(
+                        epoch = new_epoch.0,
+                        error = %e,
+                        "Pre-Conway protocol parameter update rejected"
+                    );
+                } else {
+                    info!(
+                        epoch = new_epoch.0,
+                        proposers = distinct_proposers,
+                        protocol_version = format!(
+                            "{}.{}",
+                            self.protocol_params.protocol_version_major,
+                            self.protocol_params.protocol_version_minor
+                        ),
+                        "Pre-Conway protocol parameter update applied"
+                    );
+                }
             } else {
                 debug!(
                     epoch = new_epoch.0,
@@ -2631,8 +2676,14 @@ impl LedgerState {
                 protocol_param_update,
                 ..
             } => {
-                self.apply_protocol_param_update(protocol_param_update);
-                info!("Protocol parameters updated via governance action");
+                if let Err(e) = self.apply_protocol_param_update(protocol_param_update) {
+                    warn!(
+                        error = %e,
+                        "Governance protocol parameter update rejected"
+                    );
+                } else {
+                    info!("Protocol parameters updated via governance action");
+                }
             }
             GovAction::HardForkInitiation {
                 protocol_version, ..
@@ -3350,6 +3401,8 @@ pub enum LedgerError {
     InvalidTransaction(String),
     #[error("Epoch transition error: {0}")]
     EpochTransition(String),
+    #[error("Invalid protocol parameter: {0}")]
+    InvalidProtocolParam(String),
 }
 
 #[cfg(test)]
@@ -6746,7 +6799,7 @@ mod tests {
             ..Default::default()
         };
 
-        state.apply_protocol_param_update(&update);
+        state.apply_protocol_param_update(&update).unwrap();
 
         assert_eq!(state.protocol_params.min_fee_a, 55);
         assert_eq!(state.protocol_params.min_fee_b, 200000);
@@ -7907,6 +7960,260 @@ mod tests {
     }
 
     #[test]
+    fn test_governance_threshold_valid_half() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let update = ProtocolParamUpdate {
+            dvt_hard_fork: Some(Rational {
+                numerator: 1,
+                denominator: 2,
+            }),
+            pvt_hard_fork: Some(Rational {
+                numerator: 1,
+                denominator: 2,
+            }),
+            ..Default::default()
+        };
+        assert!(state.apply_protocol_param_update(&update).is_ok());
+        assert_eq!(state.protocol_params.dvt_hard_fork.numerator, 1);
+        assert_eq!(state.protocol_params.dvt_hard_fork.denominator, 2);
+        assert_eq!(state.protocol_params.pvt_hard_fork.numerator, 1);
+        assert_eq!(state.protocol_params.pvt_hard_fork.denominator, 2);
+    }
+
+    #[test]
+    fn test_governance_threshold_exactly_one() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let update = ProtocolParamUpdate {
+            dvt_no_confidence: Some(Rational {
+                numerator: 1,
+                denominator: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(state.apply_protocol_param_update(&update).is_ok());
+        assert_eq!(state.protocol_params.dvt_no_confidence.numerator, 1);
+        assert_eq!(state.protocol_params.dvt_no_confidence.denominator, 1);
+    }
+
+    #[test]
+    fn test_governance_threshold_exactly_zero() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let update = ProtocolParamUpdate {
+            pvt_committee_normal: Some(Rational {
+                numerator: 0,
+                denominator: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(state.apply_protocol_param_update(&update).is_ok());
+        assert_eq!(state.protocol_params.pvt_committee_normal.numerator, 0);
+        assert_eq!(state.protocol_params.pvt_committee_normal.denominator, 1);
+    }
+
+    #[test]
+    fn test_governance_threshold_exceeds_one_rejected() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let original = state.protocol_params.dvt_hard_fork.clone();
+        let update = ProtocolParamUpdate {
+            dvt_hard_fork: Some(Rational {
+                numerator: 3,
+                denominator: 2,
+            }),
+            ..Default::default()
+        };
+        let result = state.apply_protocol_param_update(&update);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dvt_hard_fork"),
+            "Error should name the field: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("exceeds 1"),
+            "Error should mention exceeds 1: {}",
+            err_msg
+        );
+        // Parameter should NOT have been updated
+        assert_eq!(state.protocol_params.dvt_hard_fork, original);
+    }
+
+    #[test]
+    fn test_governance_threshold_zero_denominator_rejected() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let original = state.protocol_params.pvt_motion_no_confidence.clone();
+        let update = ProtocolParamUpdate {
+            pvt_motion_no_confidence: Some(Rational {
+                numerator: 1,
+                denominator: 0,
+            }),
+            ..Default::default()
+        };
+        let result = state.apply_protocol_param_update(&update);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("pvt_motion_no_confidence"),
+            "Error should name the field: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("zero denominator"),
+            "Error should mention zero denominator: {}",
+            err_msg
+        );
+        // Parameter should NOT have been updated
+        assert_eq!(state.protocol_params.pvt_motion_no_confidence, original);
+    }
+
+    #[test]
+    fn test_governance_threshold_all_dvt_fields_validated() {
+        let bad = Rational {
+            numerator: 5,
+            denominator: 3,
+        };
+        #[allow(clippy::type_complexity)]
+        let dvt_fields: Vec<(&str, Box<dyn Fn() -> ProtocolParamUpdate>)> = vec![
+            (
+                "dvt_pp_network_group",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_pp_network_group: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_pp_economic_group",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_pp_economic_group: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_pp_technical_group",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_pp_technical_group: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_pp_gov_group",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_pp_gov_group: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_hard_fork",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_hard_fork: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_no_confidence",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_no_confidence: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_committee_normal",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_committee_normal: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_committee_no_confidence",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_committee_no_confidence: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_constitution",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_constitution: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "dvt_treasury_withdrawal",
+                Box::new(|| ProtocolParamUpdate {
+                    dvt_treasury_withdrawal: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        for (name, make_update) in &dvt_fields {
+            let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+            let result = state.apply_protocol_param_update(&make_update());
+            assert!(result.is_err(), "{} should be rejected", name);
+            assert!(
+                result.unwrap_err().to_string().contains(name),
+                "Error should name {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_governance_threshold_all_pvt_fields_validated() {
+        let bad = Rational {
+            numerator: 5,
+            denominator: 3,
+        };
+        #[allow(clippy::type_complexity)]
+        let pvt_fields: Vec<(&str, Box<dyn Fn() -> ProtocolParamUpdate>)> = vec![
+            (
+                "pvt_motion_no_confidence",
+                Box::new(|| ProtocolParamUpdate {
+                    pvt_motion_no_confidence: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "pvt_committee_normal",
+                Box::new(|| ProtocolParamUpdate {
+                    pvt_committee_normal: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "pvt_committee_no_confidence",
+                Box::new(|| ProtocolParamUpdate {
+                    pvt_committee_no_confidence: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "pvt_hard_fork",
+                Box::new(|| ProtocolParamUpdate {
+                    pvt_hard_fork: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "pvt_pp_security_group",
+                Box::new(|| ProtocolParamUpdate {
+                    pvt_pp_security_group: Some(bad.clone()),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        for (name, make_update) in &pvt_fields {
+            let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+            let result = state.apply_protocol_param_update(&make_update());
+            assert!(result.is_err(), "{} should be rejected", name);
+            assert!(
+                result.unwrap_err().to_string().contains(name),
+                "Error should name {}",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_randomness_stabilisation_window_mainnet() {
         // Mainnet: k=2160, f=0.05 → ceil(4*2160/0.05) = 172800
         let params = ProtocolParameters::mainnet_defaults();
@@ -7944,6 +8251,7 @@ mod tests {
         state.set_epoch_length(1000, 3);
         assert_eq!(state.randomness_stabilisation_window, 48);
     }
+
     /// Regression test for GitHub issue #13: slot + stabilisation_window u64 overflow.
     ///
     /// When a block has a slot near u64::MAX, the old code `block.slot().0 +
