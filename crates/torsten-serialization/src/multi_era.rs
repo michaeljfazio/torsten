@@ -45,11 +45,20 @@ pub fn decode_transaction(era_id: u16, tx_cbor: &[u8]) -> Result<Transaction, Se
 
 /// Decode a multi-era block from raw CBOR bytes into a torsten Block.
 pub fn decode_block(cbor: &[u8]) -> Result<Block, SerializationError> {
+    decode_block_with_byron_epoch_length(cbor, 0)
+}
+
+/// Decode a multi-era block, using the given Byron epoch length (10*k) for
+/// correct slot computation on non-mainnet networks. Pass 0 for mainnet.
+pub fn decode_block_with_byron_epoch_length(
+    cbor: &[u8],
+    byron_epoch_length: u64,
+) -> Result<Block, SerializationError> {
     let pallas_block = PallasBlock::decode(cbor)
         .map_err(|e| SerializationError::CborDecode(format!("block decode: {e}")))?;
 
     let era = convert_era(pallas_block.era());
-    let header = decode_block_header(&pallas_block)?;
+    let header = decode_block_header(&pallas_block, byron_epoch_length)?;
     let transactions = pallas_block
         .txs()
         .iter()
@@ -64,8 +73,24 @@ pub fn decode_block(cbor: &[u8]) -> Result<Block, SerializationError> {
     })
 }
 
-fn decode_block_header(block: &PallasBlock) -> Result<BlockHeader, SerializationError> {
-    let slot = SlotNo(block.slot());
+fn decode_block_header(
+    block: &PallasBlock,
+    byron_epoch_length: u64,
+) -> Result<BlockHeader, SerializationError> {
+    // For Byron blocks on non-mainnet networks, compute the correct absolute
+    // slot from the raw epoch/relative-slot. Pallas hardcodes mainnet values
+    // in GenesisValues::default() which gives wrong slots on other networks.
+    let slot = if byron_epoch_length > 0 {
+        if let Some(byron) = block.as_byron() {
+            let epoch = byron.header.consensus_data.0.epoch;
+            let rel_slot = byron.header.consensus_data.0.slot;
+            SlotNo(epoch * byron_epoch_length + rel_slot)
+        } else {
+            SlotNo(block.slot())
+        }
+    } else {
+        SlotNo(block.slot())
+    };
     let block_number = BlockNo(block.number());
     let header_hash = pallas_hash_to_torsten32(&block.hash());
     let pallas_header = block.header();

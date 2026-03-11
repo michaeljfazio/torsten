@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 use torsten_primitives::network::NetworkId;
 
@@ -15,9 +15,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub network_magic: Option<u64>,
 
-    /// Protocol parameters
-    #[serde(default)]
+    /// Protocol parameters (can be a string like "Cardano" or a struct)
+    #[serde(default, deserialize_with = "deserialize_protocol")]
     pub protocol: Protocol,
+
+    /// RequiresNetworkMagic at top level (guild/newer configs)
+    #[serde(default)]
+    pub requires_network_magic: Option<String>,
 
     /// Shelley genesis file path
     #[serde(default)]
@@ -110,6 +114,34 @@ fn default_requires_network_magic() -> String {
     "RequiresMagic".to_string()
 }
 
+/// Deserialize Protocol from either a string (e.g. "Cardano") or a struct
+fn deserialize_protocol<'de, D>(deserializer: D) -> Result<Protocol, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+
+    struct ProtocolVisitor;
+
+    impl<'de> de::Visitor<'de> for ProtocolVisitor {
+        type Value = Protocol;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or Protocol object")
+        }
+
+        fn visit_str<E: de::Error>(self, _value: &str) -> Result<Protocol, E> {
+            Ok(Protocol::default())
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<Protocol, M::Error> {
+            Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_any(ProtocolVisitor)
+}
+
 impl NodeConfig {
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
@@ -142,6 +174,7 @@ impl Default for NodeConfig {
             network: NetworkId::Mainnet,
             network_magic: None,
             protocol: Protocol::default(),
+            requires_network_magic: None,
             shelley_genesis_file: None,
             byron_genesis_file: None,
             alonzo_genesis_file: None,

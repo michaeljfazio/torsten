@@ -54,6 +54,9 @@ pub struct PipelinedPeerClient {
     stale: bool,
     /// TxSubmission2 channel (available for taking by a background tx fetcher)
     txsub_channel: Option<pallas_network::multiplexer::AgentChannel>,
+    /// Byron epoch length in absolute slots (10 * k). Used for correct
+    /// slot computation on non-mainnet networks. 0 = use pallas defaults.
+    byron_epoch_length: u64,
 }
 
 impl PipelinedPeerClient {
@@ -117,6 +120,7 @@ impl PipelinedPeerClient {
             in_flight: 0,
             stale: false,
             txsub_channel: Some(txsub_channel),
+            byron_epoch_length: 0,
         })
     }
 
@@ -210,14 +214,18 @@ impl PipelinedPeerClient {
                 Message::RollForward(header, tip) => {
                     latest_tip = Some(pallas_to_torsten_tip(&tip));
 
-                    match decode_header_info(&header) {
-                        Ok(info) => {
+                    match decode_header_info(&header, self.byron_epoch_length) {
+                        Ok(Some(info)) => {
                             trace!(
                                 slot = info.slot,
                                 block_no = info.block_no,
                                 "pipelined header received"
                             );
                             headers.push(info);
+                        }
+                        Ok(None) => {
+                            // EBB skipped
+                            trace!("skipping EBB header");
                         }
                         Err(e) => {
                             return Err(ClientError::BlockDecode(format!(
@@ -260,7 +268,9 @@ impl PipelinedPeerClient {
                     match wait_response {
                         Message::RollForward(header, tip) => {
                             latest_tip = Some(pallas_to_torsten_tip(&tip));
-                            if let Ok(info) = decode_header_info(&header) {
+                            if let Ok(Some(info)) =
+                                decode_header_info(&header, self.byron_epoch_length)
+                            {
                                 headers.push(info);
                             }
                             // Drain remaining in-flight
@@ -369,6 +379,12 @@ impl PipelinedPeerClient {
         self.stale
     }
 
+    /// Set the Byron epoch length for correct slot computation on non-mainnet
+    /// networks. Value should be `10 * security_param` (10 * k).
+    pub fn set_byron_epoch_length(&mut self, len: u64) {
+        self.byron_epoch_length = len;
+    }
+
     /// Take the TxSubmission2 agent channel for use by a background tx fetcher.
     ///
     /// Returns `None` if the channel has already been taken.
@@ -383,12 +399,43 @@ impl PipelinedPeerClient {
 }
 
 /// Decode header metadata from a ChainSync HeaderContent.
-fn decode_header_info(header: &HeaderContent) -> Result<HeaderInfo, String> {
+/// Returns None for Epoch Boundary Blocks (EBBs), which contain no
+/// transactions and are not needed for ledger application.
+///
+/// `byron_epoch_length`: the number of absolute slots per Byron epoch
+/// (= 10 * k). Required for correct slot computation on non-mainnet
+/// networks where pallas's hardcoded mainnet values would be wrong.
+/// Pass 0 to use pallas defaults (correct for mainnet).
+fn decode_header_info(
+    header: &HeaderContent,
+    byron_epoch_length: u64,
+) -> Result<Option<HeaderInfo>, String> {
     let subtag = header.byron_prefix.map(|(st, _)| st);
+
+    // Skip EBBs: variant 0 with subtag 0
+    if header.variant == 0 && subtag == Some(0) {
+        return Ok(None);
+    }
+
     let multi_era_header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)
         .map_err(|e| format!("header decode: {e}"))?;
 
-    let slot = multi_era_header.slot();
+    // For Byron headers on non-mainnet networks, compute slot from the
+    // raw (epoch, relative_slot) using the actual Byron epoch length.
+    // Pallas uses hardcoded mainnet genesis values which produce wrong
+    // absolute slots on testnets with different k values.
+    let slot = if header.variant == 0 && byron_epoch_length > 0 {
+        if let Some(byron) = multi_era_header.as_byron() {
+            let epoch = byron.consensus_data.0.epoch;
+            let rel_slot = byron.consensus_data.0.slot;
+            epoch * byron_epoch_length + rel_slot
+        } else {
+            multi_era_header.slot()
+        }
+    } else {
+        multi_era_header.slot()
+    };
+
     let hash = multi_era_header.hash();
     let block_no = multi_era_header.number();
 
@@ -396,11 +443,11 @@ fn decode_header_info(header: &HeaderContent) -> Result<HeaderInfo, String> {
     let hash_vec = hash.to_vec();
     hash_bytes.copy_from_slice(&hash_vec);
 
-    Ok(HeaderInfo {
+    Ok(Some(HeaderInfo {
         slot,
         hash: hash_bytes,
         block_no,
-    })
+    }))
 }
 
 // Point/Tip conversion utilities

@@ -145,6 +145,21 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
 
 /// Convert an f64 to a (numerator, denominator) rational approximation.
 /// Handles common Cardano genesis values like 0.05 → (1, 20).
+/// Return the number of Byron epochs before the Shelley hard fork for known
+/// Cardano networks, identified by network magic.
+///
+/// Based on CNCLI's `guess_shelley_transition_epoch`.
+fn shelley_transition_epoch_for_magic(network_magic: u64) -> u64 {
+    match network_magic {
+        764824073 => 208, // mainnet
+        1 => 4,           // preprod
+        2 => 0,           // preview (no Byron era)
+        4 => 0,           // sanchonet
+        141 => 2,         // guild
+        _ => 0,           // unknown — assume no Byron era (safest default)
+    }
+}
+
 fn float_to_rational(f: f64) -> (u64, u64) {
     if f == 0.0 {
         return (0, 1);
@@ -261,6 +276,9 @@ pub struct Node {
     database_path: PathBuf,
     listen_addr: std::net::SocketAddr,
     network_magic: u64,
+    /// Byron epoch length in absolute slots (10 * k). For correct slot
+    /// computation on non-mainnet networks.
+    byron_epoch_length: u64,
     shelley_genesis: Option<ShelleyGenesis>,
     topology_path: PathBuf,
     metrics: Arc<crate::metrics::NodeMetrics>,
@@ -290,15 +308,19 @@ impl Node {
 
         // Load Byron genesis if configured
         let config_dir = args.config_dir.clone();
+        let mut byron_epoch_length: u64 = 0; // 0 = use pallas defaults (mainnet)
         let byron_genesis_utxos: Vec<(Vec<u8>, u64)> =
             if let Some(ref genesis_path) = args.config.byron_genesis_file {
                 let genesis_path = config_dir.join(genesis_path);
                 match ByronGenesis::load(&genesis_path) {
                     Ok(genesis) => {
                         let utxos = genesis.initial_utxos();
+                        let k = genesis.security_param();
+                        byron_epoch_length = 10 * k;
                         info!(
                             protocol_magic = genesis.protocol_magic(),
-                            security_param = genesis.security_param(),
+                            security_param = k,
+                            byron_epoch_length,
                             initial_utxos = utxos.len(),
                             "Byron genesis loaded"
                         );
@@ -377,6 +399,15 @@ impl Node {
             }
         }
 
+        // Compute network magic early — needed for shelley transition epoch lookup
+        let network_magic = args.config.network_magic.unwrap_or_else(|| {
+            if let Some(ref sg) = shelley_genesis {
+                sg.network_magic
+            } else {
+                args.config.network.magic()
+            }
+        });
+
         // Try to load existing ledger snapshot
         let snapshot_path = args.database_path.join("ledger-snapshot.bin");
         let mut ledger = if snapshot_path.exists() {
@@ -388,6 +419,8 @@ impl Node {
                         state.set_slot_config(genesis.slot_config());
                         state.set_update_quorum(genesis.update_quorum);
                     }
+                    let ste = shelley_transition_epoch_for_magic(network_magic);
+                    state.set_shelley_transition(ste, byron_epoch_length);
                     if let Some(hash) = shelley_genesis_hash {
                         state.genesis_hash = hash;
                     }
@@ -436,6 +469,8 @@ impl Node {
                             shelley_genesis.as_ref(),
                             shelley_genesis_hash,
                             &byron_genesis_utxos,
+                            network_magic,
+                            byron_epoch_length,
                         )
                     }
                 }
@@ -446,6 +481,8 @@ impl Node {
                         shelley_genesis.as_ref(),
                         shelley_genesis_hash,
                         &byron_genesis_utxos,
+                        network_magic,
+                        byron_epoch_length,
                     )
                 }
             }
@@ -455,6 +492,8 @@ impl Node {
                 shelley_genesis.as_ref(),
                 shelley_genesis_hash,
                 &byron_genesis_utxos,
+                network_magic,
+                byron_epoch_length,
             )
         };
         // Apply Conway genesis committee threshold and members if not already set
@@ -517,10 +556,7 @@ impl Node {
         let socket_path = args.socket_path.clone();
         let listen_addr: std::net::SocketAddr =
             format!("{}:{}", args.host_addr, args.port).parse()?;
-        let network_magic = args
-            .config
-            .network_magic
-            .unwrap_or_else(|| args.config.network.magic());
+        // network_magic computed earlier (before ledger snapshot loading)
         let server_config = NodeServerConfig {
             listen_addr,
             socket_path: args.socket_path,
@@ -591,6 +627,7 @@ impl Node {
             database_path: args.database_path,
             listen_addr,
             network_magic,
+            byron_epoch_length,
             shelley_genesis,
             topology_path: args.topology_path,
             metrics: Arc::new(crate::metrics::NodeMetrics::new()),
@@ -926,7 +963,8 @@ impl Node {
                     info!("Connecting to peer {target}...");
                     let connect_start = std::time::Instant::now();
                     match NodeToNodeClient::connect(&*target, network_magic).await {
-                        Ok(c) => {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             let mut pm = peer_manager.write().await;
                             pm.peer_connected(addr, 14, true);
@@ -949,7 +987,8 @@ impl Node {
                     let target = format!("{addr}:{port}");
                     info!("Connecting to peer {target}...");
                     match NodeToNodeClient::connect(&*target, network_magic).await {
-                        Ok(c) => {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
                             info!("Connected to {target}");
                             let sock_addr = c.remote_addr().to_owned();
                             client = Some((c, sock_addr));
@@ -1041,7 +1080,8 @@ impl Node {
                     let target = addr.to_string();
                     let connect_start = std::time::Instant::now();
                     match NodeToNodeClient::connect(&*target, network_magic).await {
-                        Ok(c) => {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             let mut pm = peer_manager.write().await;
                             pm.peer_connected(addr, 14, true);
@@ -1062,7 +1102,8 @@ impl Node {
                 if fetch_pool.is_empty() {
                     let target = peer_addr.to_string();
                     match NodeToNodeClient::connect(&*target, network_magic).await {
-                        Ok(c) => {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
                             info!("Connected dedicated block fetcher to primary peer {target}");
                             fetch_pool.add_fetcher(c);
                         }
@@ -1082,6 +1123,7 @@ impl Node {
                 let target = peer_addr.to_string();
                 match PipelinedPeerClient::connect(&*target, network_magic).await {
                     Ok(mut pc) => {
+                        pc.set_byron_epoch_length(self.byron_epoch_length);
                         info!("Pipelined ChainSync client connected to {target}");
                         // Take the TxSubmission channel and spawn a background tx fetcher
                         if let Some(txsub_channel) = pc.take_txsub_channel() {
@@ -1213,6 +1255,8 @@ impl Node {
         shelley_genesis: Option<&ShelleyGenesis>,
         shelley_genesis_hash: Option<torsten_primitives::Hash32>,
         byron_genesis_utxos: &[(Vec<u8>, u64)],
+        network_magic: u64,
+        byron_epoch_length: u64,
     ) -> LedgerState {
         let mut ledger = LedgerState::new(protocol_params.clone());
         if let Some(genesis) = shelley_genesis {
@@ -1220,6 +1264,9 @@ impl Node {
             ledger.set_slot_config(genesis.slot_config());
             ledger.set_update_quorum(genesis.update_quorum);
         }
+        // Set Byron→Shelley transition boundary for correct HFC epoch numbering
+        let shelley_transition_epoch = shelley_transition_epoch_for_magic(network_magic);
+        ledger.set_shelley_transition(shelley_transition_epoch, byron_epoch_length);
         if let Some(hash) = shelley_genesis_hash {
             ledger.set_genesis_hash(hash);
         }
@@ -1349,6 +1396,50 @@ impl Node {
     /// 2. **LSM replay** (fallback): Reads blocks by block number from the LSM tree.
     ///    Slower due to random I/O but works when chunk files aren't available.
     async fn replay_ledger_from_storage(&self) {
+        // Migrate legacy immutable-replay/ to immutable/ (backwards compat)
+        let legacy_dir = self.database_path.join("immutable-replay");
+        let immutable_dir = self.database_path.join("immutable");
+        if legacy_dir.is_dir() && !immutable_dir.is_dir() {
+            info!("Migrating legacy immutable-replay/ to immutable/");
+            if let Err(e) = std::fs::rename(&legacy_dir, &immutable_dir) {
+                warn!(error = %e, "Failed to migrate, will use legacy path");
+            }
+        }
+
+        // Check for chunk files — ImmutableDB provides permanent historical
+        // block storage from Mithril. Chunk files are NOT deleted after replay.
+        let chunk_dir = if immutable_dir.is_dir() {
+            Some(immutable_dir)
+        } else if legacy_dir.is_dir() {
+            Some(legacy_dir)
+        } else {
+            None
+        };
+        if let Some(ref dir) = chunk_dir {
+            let ledger_slot = {
+                let ls = self.ledger_state.read().await;
+                ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
+            };
+            // Only replay if the ledger hasn't caught up to the immutable tip
+            let imm_tip_slot = self
+                .chain_db
+                .read()
+                .await
+                .get_tip()
+                .point
+                .slot()
+                .map(|s| s.0)
+                .unwrap_or(0);
+            if ledger_slot < imm_tip_slot {
+                info!(
+                    ledger_slot,
+                    imm_tip_slot, "Ledger behind ImmutableDB — replaying from chunk files"
+                );
+                self.replay_from_chunk_files(dir).await;
+                return;
+            }
+        }
+
         let db_tip = self.chain_db.read().await.get_tip();
         let ledger_slot = {
             let ls = self.ledger_state.read().await;
@@ -1387,7 +1478,7 @@ impl Node {
             info!(
                 blocks_behind,
                 "Large ledger replay starting — this may take a while. \
-                 Snapshots will be saved every 100k blocks. \
+                 Snapshots will be saved every 500k blocks. \
                  Set TORSTEN_REPLAY_LIMIT=0 to skip replay."
             );
         }
@@ -1398,20 +1489,6 @@ impl Node {
             blocks_behind,
             "Ledger is behind ChainDB — replaying blocks from local storage"
         );
-
-        // Try fast path: replay from chunk files left by Mithril import
-        let replay_dir = self.database_path.join("immutable-replay");
-        if replay_dir.is_dir() {
-            info!("Found immutable-replay directory, using fast chunk-file replay");
-            self.replay_from_chunk_files(&replay_dir).await;
-            // Clean up chunk files after successful replay
-            if let Err(e) = std::fs::remove_dir_all(&replay_dir) {
-                warn!(error = %e, "Failed to remove immutable-replay directory");
-            } else {
-                info!("Cleaned up immutable-replay directory");
-            }
-            return;
-        }
 
         // Fallback: replay from LSM tree by block number
         info!("No chunk files found, replaying from LSM tree (slower)");
@@ -1426,14 +1503,27 @@ impl Node {
         let ledger_state = self.ledger_state.clone();
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
         let replay_dir = replay_dir.to_path_buf();
+        let bel = self.byron_epoch_length;
 
         let result = tokio::task::spawn_blocking(move || {
             let start = std::time::Instant::now();
             let mut replayed = 0u64;
             let mut last_log = std::time::Instant::now();
 
+            // Disable address index and full stake rebuild during replay.
+            // Address index is never queried during replay, and the O(n)
+            // retain per remove is expensive. Both are rebuilt at the end.
+            // Incremental stake tracking is correct during sequential replay.
+            {
+                let mut ls = ledger_state.blocking_write();
+                ls.utxo_set.set_indexing_enabled(false);
+                ls.needs_stake_rebuild = false;
+            }
+
             let result = crate::mithril::replay_from_chunk_files(&replay_dir, |cbor| {
-                match torsten_serialization::multi_era::decode_block(cbor) {
+                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                    cbor, bel,
+                ) {
                     Ok(block) => {
                         let mut ls_guard = ledger_state.blocking_write();
                         if let Err(e) = ls_guard.apply_block(&block) {
@@ -1453,7 +1543,7 @@ impl Node {
                             last_log = std::time::Instant::now();
                         }
 
-                        if replayed.is_multiple_of(100_000) {
+                        if replayed.is_multiple_of(500_000) {
                             if let Err(e) = ls_guard.save_snapshot(&snapshot_path) {
                                 warn!("Failed to save ledger snapshot during replay: {e}");
                             }
@@ -1486,6 +1576,17 @@ impl Node {
                 }
             }
 
+            // Re-enable address indexing and rebuild the index
+            {
+                let mut ls = ledger_state.blocking_write();
+                ls.utxo_set.set_indexing_enabled(true);
+                info!("Rebuilding address index after replay...");
+                ls.utxo_set.rebuild_address_index();
+                info!("Address index rebuilt");
+                // Also mark that we need a full stake rebuild now that replay is done
+                ls.needs_stake_rebuild = true;
+            }
+
             // Save final snapshot
             {
                 let ls = ledger_state.blocking_read();
@@ -1511,7 +1612,9 @@ impl Node {
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
 
         let start_block_no = {
-            let ls = self.ledger_state.read().await;
+            let mut ls = self.ledger_state.write().await;
+            ls.utxo_set.set_indexing_enabled(false);
+            ls.needs_stake_rebuild = false;
             ls.tip.block_number.0 + 1
         };
         let end_block_no = db_tip.block_number.0;
@@ -1524,7 +1627,10 @@ impl Node {
 
             match block_data {
                 Ok(Some((slot, _hash, cbor))) => {
-                    match torsten_serialization::multi_era::decode_block(&cbor) {
+                    match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                        &cbor,
+                        self.byron_epoch_length,
+                    ) {
                         Ok(block) => {
                             let mut ls = self.ledger_state.write().await;
                             if let Err(e) = ls.apply_block(&block) {
@@ -1550,7 +1656,7 @@ impl Node {
                                 last_log = std::time::Instant::now();
                             }
 
-                            if replayed.is_multiple_of(100_000) {
+                            if replayed.is_multiple_of(500_000) {
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
                                 }
@@ -1584,6 +1690,16 @@ impl Node {
             speed = speed as u64,
             "LSM replay from local storage complete"
         );
+
+        // Re-enable address indexing and rebuild after replay
+        {
+            let mut ls = self.ledger_state.write().await;
+            ls.utxo_set.set_indexing_enabled(true);
+            info!("Rebuilding address index after LSM replay...");
+            ls.utxo_set.rebuild_address_index();
+            info!("Address index rebuilt");
+            ls.needs_stake_rebuild = true;
+        }
 
         // Save final snapshot after replay
         {
@@ -2094,7 +2210,7 @@ impl Node {
                                 if next_slot.0 >= target_slot {
                                     break; // Reached the incoming batch
                                 }
-                                match torsten_serialization::multi_era::decode_block(&cbor) {
+                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
                                         if let Err(e) = ls.apply_block(&block) {
                                             warn!(
@@ -3085,7 +3201,7 @@ impl Node {
                                 if next_slot.0 > rollback_slot {
                                     break;
                                 }
-                                match torsten_serialization::multi_era::decode_block(&cbor) {
+                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
                                         if let Err(e) = ls.apply_block(&block) {
                                             error!(

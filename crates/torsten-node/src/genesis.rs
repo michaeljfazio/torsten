@@ -281,9 +281,33 @@ pub struct AlonzoExPrices {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AlonzoRational {
-    pub numerator: u64,
-    pub denominator: u64,
+#[serde(untagged)]
+pub enum AlonzoRational {
+    Struct { numerator: u64, denominator: u64 },
+    Float(f64),
+}
+
+impl AlonzoRational {
+    pub fn to_rational(&self) -> Rational {
+        match self {
+            AlonzoRational::Struct {
+                numerator,
+                denominator,
+            } => Rational {
+                numerator: *numerator,
+                denominator: *denominator,
+            },
+            AlonzoRational::Float(f) => float_to_rational(*f),
+        }
+    }
+
+    pub fn numerator(&self) -> u64 {
+        self.to_rational().numerator
+    }
+
+    pub fn denominator(&self) -> u64 {
+        self.to_rational().denominator
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -313,12 +337,12 @@ impl AlonzoGenesis {
 
         // Execution unit prices
         params.execution_costs.step_price = Rational {
-            numerator: self.execution_prices.pr_steps.numerator,
-            denominator: self.execution_prices.pr_steps.denominator,
+            numerator: self.execution_prices.pr_steps.numerator(),
+            denominator: self.execution_prices.pr_steps.denominator(),
         };
         params.execution_costs.mem_price = Rational {
-            numerator: self.execution_prices.pr_mem.numerator,
-            denominator: self.execution_prices.pr_mem.denominator,
+            numerator: self.execution_prices.pr_mem.numerator(),
+            denominator: self.execution_prices.pr_mem.denominator(),
         };
 
         // Execution unit limits
@@ -659,8 +683,8 @@ mod tests {
         assert_eq!(genesis.max_collateral_inputs, 3);
         assert_eq!(genesis.max_tx_ex_units.ex_units_mem, 10000000);
         assert_eq!(genesis.max_block_ex_units.ex_units_steps, 40000000000);
-        assert_eq!(genesis.execution_prices.pr_steps.numerator, 721);
-        assert_eq!(genesis.execution_prices.pr_mem.denominator, 10000);
+        assert_eq!(genesis.execution_prices.pr_steps.numerator(), 721);
+        assert_eq!(genesis.execution_prices.pr_mem.denominator(), 10000);
 
         let mut pp = ProtocolParameters::mainnet_defaults();
         genesis.apply_to_protocol_params(&mut pp);

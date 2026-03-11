@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use torsten_primitives::block::{Block, Point, Tip};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{BlockNo, SlotNo};
-use torsten_serialization::multi_era::decode_block;
+use torsten_serialization::multi_era::decode_block_with_byron_epoch_length;
 use tracing::{debug, info, warn};
 
 #[derive(Error, Debug)]
@@ -45,6 +45,9 @@ pub enum ChainSyncEvent {
 pub struct NodeToNodeClient {
     peer: PeerClient,
     remote_addr: SocketAddr,
+    /// Byron epoch length in absolute slots (10 * k). Used for correct
+    /// slot computation on non-mainnet networks. 0 = use pallas defaults.
+    byron_epoch_length: u64,
 }
 
 impl NodeToNodeClient {
@@ -66,7 +69,17 @@ impl NodeToNodeClient {
 
         info!("connected to peer {remote_addr}");
 
-        Ok(NodeToNodeClient { peer, remote_addr })
+        Ok(NodeToNodeClient {
+            peer,
+            remote_addr,
+            byron_epoch_length: 0,
+        })
+    }
+
+    /// Set the Byron epoch length for correct slot computation on non-mainnet
+    /// networks. Value should be `10 * security_param` (10 * k).
+    pub fn set_byron_epoch_length(&mut self, len: u64) {
+        self.byron_epoch_length = len;
     }
 
     /// Find an intersection point with the remote peer's chain.
@@ -136,8 +149,8 @@ impl NodeToNodeClient {
                     .next()
                     .ok_or_else(|| ClientError::BlockFetch("no block returned".into()))?;
 
-                let block =
-                    decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+                let block = decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length)
+                    .map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
 
                 debug!(slot, block_no, txs = block.tx_count(), "roll forward");
                 Ok(ChainSyncEvent::RollForward(Box::new(block), torsten_tip))
@@ -272,11 +285,12 @@ impl NodeToNodeClient {
         let torsten_tip = pallas_tip_to_torsten(tip);
 
         // Decode blocks on a blocking thread to avoid stalling the async runtime
+        let bel = self.byron_epoch_length;
         let decoded = tokio::task::spawn_blocking(move || {
             let mut events = Vec::with_capacity(bodies.len());
             for cbor in bodies {
-                let block =
-                    decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+                let block = decode_block_with_byron_epoch_length(&cbor, bel)
+                    .map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
                 events.push(ChainSyncEvent::RollForward(
                     Box::new(block),
                     torsten_tip.clone(),
@@ -308,8 +322,8 @@ impl NodeToNodeClient {
 
         let mut blocks = Vec::with_capacity(bodies.len());
         for body in bodies {
-            let block =
-                decode_block(&body).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+            let block = decode_block_with_byron_epoch_length(&body, self.byron_epoch_length)
+                .map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
             blocks.push(block);
         }
 
@@ -343,11 +357,30 @@ impl NodeToNodeClient {
                 NextResponse::RollForward(header, tip) => {
                     latest_tip = Some(pallas_tip_to_torsten(&tip));
                     let subtag = header.byron_prefix.map(|(st, _)| st);
+
+                    // Skip EBBs: they contain no transactions
+                    if header.variant == 0 && subtag == Some(0) {
+                        continue;
+                    }
+
                     let multi_era_header =
                         MultiEraHeader::decode(header.variant, subtag, &header.cbor)
                             .map_err(|e| ClientError::BlockDecode(format!("header decode: {e}")))?;
 
-                    let slot = multi_era_header.slot();
+                    // For Byron headers on non-mainnet, compute slot from raw
+                    // (epoch, rel_slot) using actual Byron epoch length
+                    let slot = if header.variant == 0 && self.byron_epoch_length > 0 {
+                        if let Some(byron) = multi_era_header.as_byron() {
+                            let epoch = byron.consensus_data.0.epoch;
+                            let rel_slot = byron.consensus_data.0.slot;
+                            epoch * self.byron_epoch_length + rel_slot
+                        } else {
+                            multi_era_header.slot()
+                        }
+                    } else {
+                        multi_era_header.slot()
+                    };
+
                     let hash = multi_era_header.hash();
                     let block_no = multi_era_header.number();
 
@@ -404,59 +437,57 @@ impl NodeToNodeClient {
             return Ok(vec![]);
         }
 
-        // Batch into sub-ranges of contiguous points for efficiency.
-        // Each sub-range uses fetch_range, but we verify block count matches.
         let mut all_bodies = Vec::with_capacity(points.len());
 
-        // Fetch all points as one range (from first to last).
-        // Then verify the returned blocks match our expected points by count and hash.
+        // Try fetching all points as one range (from first to last) for efficiency.
+        // Falls back to individual point fetches if the range request fails (e.g.
+        // cross-era ranges, peer doesn't support the range, etc.).
         let first = PallasPoint::Specific(points[0].slot, points[0].hash.to_vec());
         let last_pt = points.last().expect("points non-empty (checked above)");
         let last = PallasPoint::Specific(last_pt.slot, last_pt.hash.to_vec());
 
-        let bodies = self
-            .peer
-            .blockfetch()
-            .fetch_range((first, last))
-            .await
-            .map_err(|e| ClientError::BlockFetch(format!("fetch range: {e}")))?;
+        let range_result = self.peer.blockfetch().fetch_range((first, last)).await;
 
-        if bodies.len() != points.len() {
-            // Peer returned different number of blocks — fall back to individual fetches
-            tracing::warn!(
-                expected = points.len(),
-                got = bodies.len(),
-                "Block count mismatch from fetch_range, falling back to individual fetches"
-            );
-            for point in points {
-                let p = PallasPoint::Specific(point.slot, point.hash.to_vec());
-                let single = self
-                    .peer
-                    .blockfetch()
-                    .fetch_range((p.clone(), p))
-                    .await
-                    .map_err(|e| ClientError::BlockFetch(format!("single fetch: {e}")))?;
-                if let Some(body) = single.into_iter().next() {
-                    all_bodies.push(body);
-                } else {
-                    return Err(ClientError::BlockFetch(format!(
-                        "block not found at slot {}",
-                        point.slot
-                    )));
-                }
+        match range_result {
+            Ok(bodies) if bodies.len() == points.len() => {
+                all_bodies = bodies;
             }
-        } else {
-            all_bodies = bodies;
+            Ok(bodies) => {
+                // Peer returned different number of blocks — fall back to individual fetches
+                tracing::warn!(
+                    expected = points.len(),
+                    got = bodies.len(),
+                    peer = %self.remote_addr,
+                    "Block count mismatch from range fetch, falling back to individual fetches"
+                );
+                self.fetch_individual_points(points, &mut all_bodies)
+                    .await?;
+            }
+            Err(e) => {
+                // Range fetch failed (NoBlocks, cross-era range, etc.)
+                // Fall back to individual point fetches
+                tracing::warn!(
+                    first_slot = points[0].slot,
+                    last_slot = last_pt.slot,
+                    num_points = points.len(),
+                    peer = %self.remote_addr,
+                    error = %e,
+                    "Range fetch failed, falling back to individual point fetches"
+                );
+                self.fetch_individual_points(points, &mut all_bodies)
+                    .await?;
+            }
         }
 
         // Decode on blocking thread and verify block hashes
         let expected_points: Vec<(u64, [u8; 32])> =
             points.iter().map(|p| (p.slot, p.hash)).collect();
+        let bel = self.byron_epoch_length;
         let decoded = tokio::task::spawn_blocking(move || {
             let mut blocks = Vec::with_capacity(all_bodies.len());
             for (i, cbor) in all_bodies.into_iter().enumerate() {
-                let block =
-                    decode_block(&cbor).map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
+                let block = decode_block_with_byron_epoch_length(&cbor, bel)
+                    .map_err(|e| ClientError::BlockDecode(format!("{e}")))?;
 
                 // Verify block hash matches expected header hash
                 if i < expected_points.len() {
@@ -479,6 +510,36 @@ impl NodeToNodeClient {
         .map_err(|e| ClientError::BlockDecode(format!("decode task: {e}")))??;
 
         Ok(decoded)
+    }
+
+    /// Fetch blocks one at a time by their exact point (slot + hash).
+    /// Slower than range fetch but works across era boundaries and when
+    /// the peer doesn't support the requested range.
+    async fn fetch_individual_points(
+        &mut self,
+        points: &[HeaderInfo],
+        out: &mut Vec<Vec<u8>>,
+    ) -> Result<(), ClientError> {
+        for point in points {
+            let p = PallasPoint::Specific(point.slot, point.hash.to_vec());
+            let single = self
+                .peer
+                .blockfetch()
+                .fetch_range((p.clone(), p))
+                .await
+                .map_err(|e| {
+                    ClientError::BlockFetch(format!("single fetch slot {}: {e}", point.slot))
+                })?;
+            if let Some(body) = single.into_iter().next() {
+                out.push(body);
+            } else {
+                return Err(ClientError::BlockFetch(format!(
+                    "block not found at slot {}",
+                    point.slot
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Disconnect from the peer.

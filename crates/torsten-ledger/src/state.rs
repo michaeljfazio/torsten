@@ -3,6 +3,7 @@ use crate::utxo::UtxoSet;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 use torsten_primitives::block::{Block, Point, Tip};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::era::Era;
@@ -116,8 +117,15 @@ pub struct LedgerState {
     pub era: Era,
     /// Current epoch
     pub epoch: EpochNo,
-    /// Epoch length in slots
+    /// Shelley epoch length in slots
     pub epoch_length: u64,
+    /// Number of Byron epochs before the Shelley hard fork.
+    /// Total Byron slots = byron_epoch_length * shelley_transition_epoch.
+    #[serde(default)]
+    pub shelley_transition_epoch: u64,
+    /// Byron epoch length in slots (10 * k). 0 = mainnet default (21600).
+    #[serde(default)]
+    pub byron_epoch_length: u64,
     /// Current protocol parameters
     pub protocol_params: ProtocolParameters,
     /// Stake distribution
@@ -183,6 +191,11 @@ pub struct LedgerState {
     pub governance: GovernanceState,
     /// Slot configuration for Plutus time conversion
     pub slot_config: SlotConfig,
+    /// When true, `rebuild_stake_distribution()` runs at each epoch boundary.
+    /// Set after loading a snapshot (where incremental tracking may have drifted).
+    /// During replay from genesis, incremental tracking is always correct.
+    #[serde(skip)]
+    pub needs_stake_rebuild: bool,
 }
 
 /// Conway-era governance state (CIP-1694)
@@ -276,19 +289,20 @@ pub struct EpochSnapshots {
     pub go: Option<StakeSnapshot>,
 }
 
-/// A snapshot of the stake distribution at an epoch boundary
+/// A snapshot of the stake distribution at an epoch boundary.
+/// Uses `Arc` for large HashMaps to avoid deep-cloning during epoch rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StakeSnapshot {
     pub epoch: EpochNo,
     /// stake credential hash -> pool_id delegation
-    pub delegations: HashMap<Hash32, Hash28>,
+    pub delegations: Arc<HashMap<Hash32, Hash28>>,
     /// pool_id -> total active stake delegated to that pool
     pub pool_stake: HashMap<Hash28, Lovelace>,
     /// pool_id -> pool parameters at snapshot time
-    pub pool_params: HashMap<Hash28, PoolRegistration>,
+    pub pool_params: Arc<HashMap<Hash28, PoolRegistration>>,
     /// Individual stake per credential (for reward distribution and pledge verification)
     #[serde(default)]
-    pub stake_distribution: HashMap<Hash32, Lovelace>,
+    pub stake_distribution: Arc<HashMap<Hash32, Lovelace>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,7 +337,9 @@ impl LedgerState {
             tip: Tip::origin(),
             era: Era::Conway,
             epoch: EpochNo(0),
-            epoch_length: 432000, // mainnet default
+            epoch_length: 432000,          // mainnet default
+            shelley_transition_epoch: 208, // mainnet default
+            byron_epoch_length: 21600,     // mainnet default (10 * 2160)
             protocol_params: params,
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
@@ -352,6 +368,7 @@ impl LedgerState {
             update_quorum: default_update_quorum(),
             governance: GovernanceState::default(),
             slot_config: SlotConfig::default(),
+            needs_stake_rebuild: true,
         }
     }
 
@@ -378,6 +395,59 @@ impl LedgerState {
             security_param,
             "Ledger: epoch length configured"
         );
+    }
+
+    /// Configure the Byron→Shelley hard fork boundary.
+    ///
+    /// `shelley_transition_epoch` is the number of Byron epochs before
+    /// Shelley starts (e.g. mainnet=208, guild=2, preview=0).
+    /// `byron_epoch_length` is 10*k in Byron slots.
+    pub fn set_shelley_transition(
+        &mut self,
+        shelley_transition_epoch: u64,
+        byron_epoch_length: u64,
+    ) {
+        self.shelley_transition_epoch = shelley_transition_epoch;
+        self.byron_epoch_length = byron_epoch_length;
+        info!(
+            shelley_transition_epoch,
+            byron_epoch_length,
+            byron_slots = byron_epoch_length * shelley_transition_epoch,
+            "Ledger: Shelley transition configured"
+        );
+    }
+
+    /// Compute the HFC epoch number for a given absolute slot.
+    ///
+    /// Uses the CNCLI formula: for slots in the Shelley era,
+    /// epoch = shelley_transition_epoch + (slot - byron_slots) / epoch_length
+    /// where byron_slots = byron_epoch_length * shelley_transition_epoch.
+    pub fn epoch_of_slot(&self, slot: u64) -> u64 {
+        let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
+        if slot < byron_slots {
+            // Still in Byron era
+            if self.byron_epoch_length > 0 {
+                slot / self.byron_epoch_length
+            } else {
+                0
+            }
+        } else {
+            // Shelley era
+            let shelley_slots = slot - byron_slots;
+            self.shelley_transition_epoch + shelley_slots / self.epoch_length
+        }
+    }
+
+    /// Compute the first slot of the epoch that contains the given slot.
+    pub fn first_slot_of_epoch(&self, epoch: u64) -> u64 {
+        if epoch < self.shelley_transition_epoch {
+            // Byron epoch
+            epoch * self.byron_epoch_length
+        } else {
+            // Shelley epoch
+            let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
+            byron_slots + (epoch - self.shelley_transition_epoch) * self.epoch_length
+        }
     }
 
     /// Set the Shelley genesis hash.
@@ -630,7 +700,7 @@ impl LedgerState {
         // When multiple epochs are skipped (e.g., after offline time or Mithril import),
         // process each intermediate epoch transition individually so that snapshots rotate
         // correctly, pending retirements fire at the right epoch, and rewards are distributed.
-        let block_epoch = EpochNo(block.slot().0 / self.epoch_length);
+        let block_epoch = EpochNo(self.epoch_of_slot(block.slot().0));
         if block_epoch > self.epoch {
             info!(
                 prev_epoch = self.epoch.0,
@@ -847,7 +917,7 @@ impl LedgerState {
 
             // Update candidate nonce only if NOT in the stabilisation window
             // (i.e., if slot + rsw < first_slot_of_next_epoch)
-            let first_slot_of_next_epoch = (self.epoch.0 + 1) * self.epoch_length;
+            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0 + 1);
             if block.slot().0 + self.randomness_stabilisation_window < first_slot_of_next_epoch {
                 self.candidate_nonce = self.evolving_nonce;
             }
@@ -1230,9 +1300,12 @@ impl LedgerState {
         self.snapshots.set = self.snapshots.mark.take();
 
         // Take a new "mark" snapshot of current stake distribution.
-        // Recompute stake_map from the full UTxO set for correctness (matching Haskell).
-        // The incremental tracking can drift after snapshot load or Mithril import.
-        self.rebuild_stake_distribution();
+        // Only do a full UTxO scan if needed (after snapshot load or Mithril import).
+        // During replay from genesis, incremental tracking is always correct.
+        if self.needs_stake_rebuild {
+            self.rebuild_stake_distribution();
+            self.needs_stake_rebuild = false;
+        }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
@@ -1279,10 +1352,10 @@ impl LedgerState {
 
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
-            delegations: self.delegations.clone(),
+            delegations: Arc::new(self.delegations.clone()),
             pool_stake,
-            pool_params: self.pool_params.clone(),
-            stake_distribution: snapshot_stake,
+            pool_params: Arc::new(self.pool_params.clone()),
+            stake_distribution: Arc::new(snapshot_stake),
         });
 
         // Process pending pool retirements for this epoch
@@ -1596,7 +1669,7 @@ impl LedgerState {
 
         // Build delegators-by-pool index for O(n) reward distribution
         let mut delegators_by_pool: HashMap<Hash28, Vec<Hash32>> = HashMap::new();
-        for (cred_hash, pool_id) in &go_snapshot.delegations {
+        for (cred_hash, pool_id) in go_snapshot.delegations.iter() {
             delegators_by_pool
                 .entry(*pool_id)
                 .or_default()
@@ -1605,7 +1678,7 @@ impl LedgerState {
 
         // Build owner-delegated-stake per pool for pledge check
         let mut owner_stake_by_pool: HashMap<Hash28, u64> = HashMap::new();
-        for (pool_id, pool_reg) in &go_snapshot.pool_params {
+        for (pool_id, pool_reg) in go_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
                 let mut key_bytes = [0u8; 32];
@@ -2731,6 +2804,9 @@ impl LedgerState {
             LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
         })?;
         state.utxo_set.rebuild_address_index();
+        // After loading a snapshot, incremental stake tracking may be stale,
+        // so force a full rebuild at the next epoch boundary.
+        state.needs_stake_rebuild = true;
         info!(
             path = %path.display(),
             bytes = raw.len(),
@@ -3588,6 +3664,8 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100; // Small epochs for testing
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
 
         // Apply a block in epoch 0
         let block = make_test_block(50, 1, Hash32::ZERO, vec![]);
@@ -3997,6 +4075,8 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
         // randomness_stabilisation_window = 4k/f; use 40 for testing
         // (so slots 0-59 update candidate, slots 60-99 freeze candidate)
         state.randomness_stabilisation_window = 40;
@@ -6910,6 +6990,8 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100; // 100 slots per epoch for testing
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
 
         let pool_a = Hash28::from_bytes([0xA1; 28]);
         let pool_b = Hash28::from_bytes([0xA2; 28]);
@@ -6969,6 +7051,8 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
 
         let cred = Credential::VerificationKey(Hash28::from_bytes([0xDE; 28]));
         let pool_id = Hash28::from_bytes([0xDA; 28]);
