@@ -1229,7 +1229,7 @@ impl LedgerState {
                             if *amount >= 0 {
                                 let amt = *amount as u64;
                                 entry.0 = entry.0.saturating_add(amt);
-                                total_distributed += amt;
+                                total_distributed = total_distributed.saturating_add(amt);
                             } else {
                                 entry.0 = entry.0.saturating_sub(amount.unsigned_abs());
                             }
@@ -1256,28 +1256,28 @@ impl LedgerState {
                     }
                     MIRTarget::OtherAccountingPot(coin) => {
                         // Transfer between reserves and treasury
+                        // Use saturating arithmetic to handle compound MIR operations
+                        // where credential distributions and pot transfers interact
                         match source {
                             MIRSource::Reserves => {
-                                // Move from reserves to treasury
-                                if self.reserves.0 >= *coin {
-                                    self.reserves.0 -= *coin;
-                                    self.treasury.0 += *coin;
-                                    debug!(
-                                        "MIR: transferred {} lovelace from reserves to treasury",
-                                        coin
-                                    );
-                                }
+                                // Move from reserves to treasury, capped at available
+                                let actual = (*coin).min(self.reserves.0);
+                                self.reserves.0 = self.reserves.0.saturating_sub(actual);
+                                self.treasury.0 = self.treasury.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from reserves to treasury",
+                                    actual
+                                );
                             }
                             MIRSource::Treasury => {
-                                // Move from treasury to reserves
-                                if self.treasury.0 >= *coin {
-                                    self.treasury.0 -= *coin;
-                                    self.reserves.0 += *coin;
-                                    debug!(
-                                        "MIR: transferred {} lovelace from treasury to reserves",
-                                        coin
-                                    );
-                                }
+                                // Move from treasury to reserves, capped at available
+                                let actual = (*coin).min(self.treasury.0);
+                                self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                                self.reserves.0 = self.reserves.0.saturating_add(actual);
+                                debug!(
+                                    "MIR: transferred {} lovelace from treasury to reserves",
+                                    actual
+                                );
                             }
                         }
                     }
@@ -1641,21 +1641,21 @@ impl LedgerState {
 
         // Treasury cut: floor(tau * total_rewards)
         let treasury_cut = (tau_num * total_rewards_available as i128 / tau_den) as u64;
-        self.treasury.0 += treasury_cut;
+        self.treasury.0 = self.treasury.0.saturating_add(treasury_cut);
 
         let reward_pot = total_rewards_available - treasury_cut;
 
         // Total stake for sigma denominator: circulation = maxSupply - reserves
         let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
         if total_stake == 0 {
-            self.treasury.0 += reward_pot;
+            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
             return;
         }
 
         // Total active stake (for apparent performance denominator)
         let total_active_stake: u64 = go_snapshot.pool_stake.values().map(|s| s.0).sum();
         if total_active_stake == 0 {
-            self.treasury.0 += reward_pot;
+            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
             return;
         }
 
@@ -1846,7 +1846,7 @@ impl LedgerState {
         // Any undistributed rewards go to treasury
         let undistributed = reward_pot.saturating_sub(total_distributed);
         if undistributed > 0 {
-            self.treasury.0 += undistributed;
+            self.treasury.0 = self.treasury.0.saturating_add(undistributed);
         }
 
         info!(
@@ -6797,6 +6797,81 @@ mod tests {
         assert_eq!(state.reward_accounts[&key], Lovelace(7_000_000));
         // Treasury should be debited
         assert_eq!(state.treasury, Lovelace(43_000_000));
+    }
+
+    #[test]
+    fn test_mir_compound_credential_and_pot_transfer() {
+        // Issue #16: When both credential distribution AND OtherAccountingPot transfer
+        // happen from the same source pot, the sequential operations must use saturating
+        // arithmetic to avoid underflow/overflow if the first operation depletes the pot.
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(10_000_000);
+        state.treasury = Lovelace(5_000_000);
+
+        let cred = Credential::VerificationKey(Hash28::from_bytes([0xee; 28]));
+        let key = credential_to_hash(&cred);
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+        // Step 1: MIR distributes 8M from reserves to credential (leaves 2M in reserves)
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::StakeCredentials(vec![(cred.clone(), 8_000_000)]),
+        });
+        assert_eq!(state.reserves, Lovelace(2_000_000));
+        assert_eq!(state.reward_accounts[&key], Lovelace(8_000_000));
+
+        // Step 2: MIR pot transfer tries to move 5M from reserves to treasury,
+        // but only 2M remain. Should cap at available (2M), not panic/underflow.
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::OtherAccountingPot(5_000_000),
+        });
+        // Reserves fully drained (capped at 2M available)
+        assert_eq!(state.reserves, Lovelace(0));
+        // Treasury receives only the 2M that was actually available
+        assert_eq!(state.treasury, Lovelace(7_000_000));
+    }
+
+    #[test]
+    fn test_mir_pot_transfer_exceeds_source_treasury() {
+        // Symmetric test: treasury pot transfer exceeding available balance
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(20_000_000);
+        state.treasury = Lovelace(3_000_000);
+
+        let cred = Credential::VerificationKey(Hash28::from_bytes([0xff; 28]));
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+        // Distribute 2M from treasury to credential (leaves 1M)
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Treasury,
+            target: MIRTarget::StakeCredentials(vec![(cred.clone(), 2_000_000)]),
+        });
+        assert_eq!(state.treasury, Lovelace(1_000_000));
+
+        // Try to transfer 10M from treasury to reserves, but only 1M available
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Treasury,
+            target: MIRTarget::OtherAccountingPot(10_000_000),
+        });
+        assert_eq!(state.treasury, Lovelace(0));
+        assert_eq!(state.reserves, Lovelace(21_000_000));
+    }
+
+    #[test]
+    fn test_mir_pot_transfer_zero_source() {
+        // Edge case: pot transfer when source is already zero
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.reserves = Lovelace(0);
+        state.treasury = Lovelace(5_000_000);
+
+        // Should be a no-op, not panic
+        state.process_certificate(&Certificate::MoveInstantaneousRewards {
+            source: MIRSource::Reserves,
+            target: MIRTarget::OtherAccountingPot(1_000_000),
+        });
+        assert_eq!(state.reserves, Lovelace(0));
+        assert_eq!(state.treasury, Lovelace(5_000_000));
     }
 
     #[test]
