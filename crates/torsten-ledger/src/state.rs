@@ -1627,8 +1627,12 @@ impl LedgerState {
         let expansion = if expected_blocks == 0 {
             0u64
         } else {
-            (rho_num * self.reserves.0 as i128 * effective_blocks as i128
-                / (rho_den * expected_blocks as i128)) as u64
+            // Use Rat to avoid i128 overflow: rho * reserves * (effective/expected)
+            let rho = Rat::new(rho_num, rho_den);
+            let expansion_rat = rho
+                .mul(&Rat::new(self.reserves.0 as i128, 1))
+                .mul(&Rat::new(effective_blocks as i128, expected_blocks as i128));
+            expansion_rat.floor_u64()
         };
         let total_rewards_available = expansion + self.epoch_fees.0;
 
@@ -1640,7 +1644,10 @@ impl LedgerState {
         self.reserves.0 = self.reserves.0.saturating_sub(expansion);
 
         // Treasury cut: floor(tau * total_rewards)
-        let treasury_cut = (tau_num * total_rewards_available as i128 / tau_den) as u64;
+        let tau = Rat::new(tau_num, tau_den);
+        let treasury_cut = tau
+            .mul(&Rat::new(total_rewards_available as i128, 1))
+            .floor_u64();
         self.treasury.0 += treasury_cut;
 
         let reward_pot = total_rewards_available - treasury_cut;
@@ -1748,9 +1755,10 @@ impl LedgerState {
             let pool_reward = if blocks_made == 0 || pool_active_stake.0 == 0 {
                 0u64
             } else {
-                let perf = Rat::new(
-                    blocks_made as i128 * total_active_stake as i128,
-                    total_blocks_in_epoch as i128 * pool_active_stake.0 as i128,
+                // perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
+                // Use Rat chained multiplication to avoid i128 overflow
+                let perf = Rat::new(blocks_made as i128, total_blocks_in_epoch as i128).mul(
+                    &Rat::new(total_active_stake as i128, pool_active_stake.0 as i128),
                 );
                 perf.mul(&Rat::new(max_pool as i128, 1)).floor_u64()
             };
@@ -1764,23 +1772,19 @@ impl LedgerState {
             let cost = pool_reg.cost.0;
             let margin_num = pool_reg.margin_numerator as i128;
             let margin_den = pool_reg.margin_denominator.max(1) as i128;
-            let pool_stake_i = pool_active_stake.0 as i128;
 
             let operator_reward = if pool_reward <= cost {
                 pool_reward
             } else {
-                let remainder = (pool_reward - cost) as i128;
+                let remainder = pool_reward - cost;
                 // operator_share = margin + (1-margin) * s/sigma
-                // = [margin_num * pool_stake + (margin_den - margin_num) * self_delegated] / (margin_den * pool_stake)
-                let share_num =
-                    margin_num * pool_stake_i + (margin_den - margin_num) * self_delegated as i128;
-                let share_den = margin_den * pool_stake_i;
-                let op_extra = if share_den == 0 {
-                    0i128
-                } else {
-                    remainder * share_num / share_den
-                };
-                cost + op_extra.max(0) as u64
+                // Use Rat to avoid i128 overflow in cross terms
+                let margin = Rat::new(margin_num, margin_den);
+                let one_minus_margin = Rat::new(margin_den - margin_num, margin_den);
+                let s_over_sigma = Rat::new(self_delegated as i128, pool_active_stake.0 as i128);
+                let share = margin.add(&one_minus_margin.mul(&s_over_sigma));
+                let op_extra = share.mul(&Rat::new(remainder as i128, 1)).floor_u64();
+                cost + op_extra
             };
 
             // Distribute member rewards proportionally to delegators.
@@ -1818,10 +1822,15 @@ impl LedgerState {
                     let member_share = if pool_reward <= cost {
                         0u64
                     } else {
-                        let remainder = (pool_reward - cost) as i128;
-                        let ms = remainder * (margin_den - margin_num) * member_stake as i128
-                            / (margin_den * pool_stake_i);
-                        ms.max(0) as u64
+                        let remainder = pool_reward - cost;
+                        // Use Rat to avoid i128 overflow in cross terms
+                        let one_minus_margin = Rat::new(margin_den - margin_num, margin_den);
+                        let member_frac =
+                            Rat::new(member_stake as i128, pool_active_stake.0 as i128);
+                        Rat::new(remainder as i128, 1)
+                            .mul(&one_minus_margin)
+                            .mul(&member_frac)
+                            .floor_u64()
                     };
 
                     if member_share > 0 {
@@ -7362,5 +7371,176 @@ mod tests {
         state.governance.dreps.get_mut(&dreps[1].1).unwrap().active = false;
         let total = state.compute_total_drep_stake();
         assert_eq!(total, 3_000_000_000);
+    }
+
+    /// Verify that reward expansion calculation does not overflow i128 even with
+    /// large reserves and high rho numerator values near the i128 boundary.
+    ///
+    /// The old code computed `rho_num * reserves * effective_blocks` in a single
+    /// i128 expression, which overflows when reserves is near MAX_LOVELACE_SUPPLY
+    /// and rho_num is large. The Rat-based calculation cross-reduces before
+    /// multiplying, avoiding the overflow.
+    #[test]
+    fn test_reward_expansion_no_i128_overflow() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Use a rho that would cause overflow in the naive calculation:
+        // rho = 999/1000 (extreme value to stress the arithmetic)
+        // naive: 999 * 45_000_000_000_000_000 * 21600 = 9.7e23, fits in i128
+        // But with a larger numerator (e.g., rho = 999_999_999/1_000_000_000):
+        // naive: 999_999_999 * 45_000_000_000_000_000 * 21600 = ~9.7e32
+        // This is still within i128 range (max ~1.7e38), so we need to push harder.
+        //
+        // To truly overflow i128 in the naive code path, we need:
+        // rho_num * reserves * effective_blocks > 2^127
+        // With reserves = 45e15 and effective_blocks = 21600:
+        // rho_num > 2^127 / (45e15 * 21600) ≈ 1.75e23
+        // So we use a rho with a very large numerator.
+        params.rho = Rational {
+            numerator: u64::MAX, // 1.8e19
+            denominator: u64::MAX,
+        };
+        // rho = u64::MAX / u64::MAX = 1, so expansion = reserves * effective/expected
+        // But the naive code would compute: u64::MAX * 45e15 * 21600 which is
+        // ~1.8e19 * 4.5e16 * 2.16e4 = ~1.7e40, far exceeding i128::MAX (~1.7e38)
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(0);
+        state.epoch_length = 432000;
+
+        // Set up minimal structures for calculate_and_distribute_rewards
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // This should NOT panic from i128 overflow
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // With rho=1 and eta=1 (effective==expected when active_slot_coeff=0.05):
+        // expected_blocks = floor(0.05 * 432000) = 21600
+        // effective_blocks = min(21600, 21600) = 21600
+        // expansion = floor(1 * reserves * 21600/21600) = reserves = 45e15
+        assert_eq!(
+            state.reserves.0, 0,
+            "All reserves should be expanded with rho=1"
+        );
+    }
+
+    /// Verify that reward expansion works correctly with extreme rho values
+    /// where the numerator and denominator differ significantly.
+    #[test]
+    fn test_reward_expansion_large_rho_numerator() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // rho = large_num / (large_num + 1) ≈ 1
+        // This maximizes rho_num while keeping the fraction valid.
+        params.rho = Rational {
+            numerator: u64::MAX - 1,
+            denominator: u64::MAX,
+        };
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(0);
+        state.epoch_length = 432000;
+
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // Should not panic
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // expansion ≈ reserves * (u64::MAX-1)/u64::MAX ≈ reserves - 1
+        // After subtracting expansion, reserves should be approximately 0-2
+        assert!(
+            state.reserves.0 <= 3,
+            "Reserves should be nearly zero with rho ≈ 1, got {}",
+            state.reserves.0
+        );
+    }
+
+    /// Verify that treasury cut calculation also uses Rat and doesn't overflow.
+    #[test]
+    fn test_treasury_cut_no_overflow() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // tau = u64::MAX / u64::MAX = 1 (takes entire reward pot as treasury)
+        params.tau = Rational {
+            numerator: u64::MAX,
+            denominator: u64::MAX,
+        };
+        // Use small rho to get a moderate expansion
+        params.rho = Rational {
+            numerator: 3,
+            denominator: 1000,
+        };
+
+        let mut state = LedgerState::new(params);
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.epoch_block_count = 21600;
+        state.epoch_fees = Lovelace(1_000_000_000_000); // 1M ADA in fees
+        state.epoch_length = 432000;
+
+        let go_snapshot = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+        };
+
+        // Should not panic
+        state.calculate_and_distribute_rewards(go_snapshot);
+
+        // With tau=1, all rewards go to treasury (no pool rewards)
+        // expansion = floor(0.003 * 45e15) = 135_000_000_000_000
+        let expected_expansion = 135_000_000_000_000u64;
+        let total_rewards = expected_expansion + 1_000_000_000_000;
+        // Treasury should have received the entire reward pot
+        assert_eq!(
+            state.treasury.0, total_rewards,
+            "Treasury should receive all rewards when tau=1"
+        );
+    }
+
+    /// Verify the Rat struct itself handles large values without overflow.
+    #[test]
+    fn test_rat_large_value_multiplication() {
+        // This simulates the problematic calculation:
+        // rho_num * reserves * effective_blocks where all are large
+        let rho = Rat::new(u64::MAX as i128, u64::MAX as i128);
+        let reserves = Rat::new(MAX_LOVELACE_SUPPLY as i128, 1);
+        let eta = Rat::new(21600, 21600);
+
+        // Should not panic
+        let result = rho.mul(&reserves).mul(&eta);
+        assert_eq!(
+            result.floor_u64(),
+            MAX_LOVELACE_SUPPLY,
+            "rho=1 * reserves * eta=1 should equal reserves"
+        );
+
+        // Test with values that would overflow naive i128 multiplication
+        // u64::MAX * 45e15 * 21600 > i128::MAX
+        let rho2 = Rat::new(u64::MAX as i128, 1);
+        let reserves2 = Rat::new(MAX_LOVELACE_SUPPLY as i128, 1);
+        let eta2 = Rat::new(21600, u64::MAX as i128);
+        // = u64::MAX * 45e15 * 21600 / u64::MAX = 45e15 * 21600 = 9.72e17
+        let result2 = rho2.mul(&reserves2).mul(&eta2);
+        let expected = MAX_LOVELACE_SUPPLY as u128 * 21600;
+        assert_eq!(
+            result2.floor_u64(),
+            expected as u64,
+            "Large numerator cross-reduced with large denominator"
+        );
     }
 }
