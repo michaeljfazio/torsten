@@ -89,6 +89,8 @@ pub enum ValidationError {
     OutputValueTooLarge { maximum: u64, actual: u64 },
     #[error("Plutus transaction missing raw CBOR for script evaluation")]
     MissingRawCbor,
+    #[error("Plutus transaction missing slot configuration for script evaluation")]
+    MissingSlotConfig,
     #[error("Script-locked input at index {index} has no matching Spend redeemer")]
     MissingSpendRedeemer { index: u32 },
     #[error("Redeemer index out of range: tag={tag}, index={index}, max={max}")]
@@ -685,28 +687,31 @@ pub fn validate_transaction_with_pools(
             }
         }
 
-        // Phase-2: Execute Plutus scripts
-        if errors.is_empty() {
-            if let Some(sc) = slot_config {
-                if let Some(ref _raw) = tx.raw_cbor {
-                    let cost_models_cbor = params.cost_models.to_cbor();
-                    let max_ex = (params.max_tx_ex_units.mem, params.max_tx_ex_units.steps);
-                    if let Err(e) = evaluate_plutus_scripts(
-                        tx,
-                        utxo_set,
-                        cost_models_cbor.as_deref(),
-                        max_ex,
-                        sc,
-                    ) {
-                        errors.push(ValidationError::ScriptFailed(e.to_string()));
-                    }
-                } else {
-                    // Plutus tx without raw CBOR cannot be validated — reject in mempool admission
-                    debug!(
-                        tx_hash = %tx.hash.to_hex(),
-                        "Plutus transaction missing raw CBOR for script evaluation"
-                    );
-                    errors.push(ValidationError::MissingRawCbor);
+        // Phase-2: Execute Plutus scripts when redeemers are present.
+        // Both raw_cbor and slot_config are required for Plutus evaluation.
+        // Missing either is a hard error — silent bypass is not allowed.
+        if errors.is_empty() && has_redeemers {
+            if tx.raw_cbor.is_none() {
+                debug!(
+                    tx_hash = %tx.hash.to_hex(),
+                    "Plutus transaction missing raw CBOR for script evaluation"
+                );
+                errors.push(ValidationError::MissingRawCbor);
+            }
+            if slot_config.is_none() {
+                debug!(
+                    tx_hash = %tx.hash.to_hex(),
+                    "Plutus transaction missing slot configuration for script evaluation"
+                );
+                errors.push(ValidationError::MissingSlotConfig);
+            }
+            if let (Some(ref _raw), Some(sc)) = (&tx.raw_cbor, slot_config) {
+                let cost_models_cbor = params.cost_models.to_cbor();
+                let max_ex = (params.max_tx_ex_units.mem, params.max_tx_ex_units.steps);
+                if let Err(e) =
+                    evaluate_plutus_scripts(tx, utxo_set, cost_models_cbor.as_deref(), max_ex, sc)
+                {
+                    errors.push(ValidationError::ScriptFailed(e.to_string()));
                 }
             }
         }
@@ -1787,8 +1792,22 @@ mod tests {
 
         let params = ProtocolParameters::mainnet_defaults();
         let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        // Without slot_config and raw_cbor, Phase-2 errors are expected (MissingRawCbor,
+        // MissingSlotConfig), but no collateral errors should be present.
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
-        assert!(result.is_ok());
+        if let Err(errors) = &result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::InsufficientCollateral
+                        | ValidationError::TooManyCollateralInputs { .. }
+                        | ValidationError::CollateralNotFound(_)
+                        | ValidationError::CollateralHasTokens(_)
+                        | ValidationError::CollateralMismatch { .. }
+                )),
+                "No collateral errors expected, got: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -2197,8 +2216,22 @@ mod tests {
         });
         tx.body.total_collateral = Some(Lovelace(300_000));
 
+        // Without slot_config and raw_cbor, Phase-2 errors are expected (MissingRawCbor,
+        // MissingSlotConfig), but no collateral errors should be present.
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
-        assert!(result.is_ok());
+        if let Err(errors) = &result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::InsufficientCollateral
+                        | ValidationError::TooManyCollateralInputs { .. }
+                        | ValidationError::CollateralNotFound(_)
+                        | ValidationError::CollateralHasTokens(_)
+                        | ValidationError::CollateralMismatch { .. }
+                )),
+                "No collateral errors expected, got: {errors:?}"
+            );
+        }
     }
 
     #[test]
@@ -3610,5 +3643,240 @@ mod tests {
         let (deposits_rereg, _) =
             calculate_deposits_and_refunds(&certs, &params, Some(&registered));
         assert_eq!(deposits_rereg, 0);
+    }
+
+    // --- Phase-2 Plutus evaluation mandatory tests ---
+
+    /// Helper: create a UTxO set and Plutus transaction with redeemers that triggers
+    /// Phase-2 validation.
+    ///
+    /// The tx has a Plutus V1 script, a redeemer, proper collateral, and a correct
+    /// script_data_hash. The `raw_cbor` parameter controls whether the tx has raw CBOR
+    /// (needed for actual Plutus evaluation).
+    fn make_plutus_utxo_and_tx(raw_cbor: Option<Vec<u8>>) -> (UtxoSet, Transaction) {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        // Regular input: 10 ADA
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+        // Collateral input: 10 ADA (pure ADA, no tokens)
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let redeemers = vec![Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        }];
+        let plutus_v1_scripts = vec![vec![0x01, 0x02, 0x03]];
+
+        // Compute correct script_data_hash to pass Rule 12
+        let params = ProtocolParameters::mainnet_defaults();
+        let script_data_hash = torsten_serialization::compute_script_data_hash(
+            &redeemers,
+            &[], // no datums
+            &params.cost_models,
+            true,  // has v1
+            false, // no v2
+            false, // no v3
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: Some(script_data_hash),
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts,
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor,
+        };
+        (utxo_set, tx)
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_raw_cbor_returns_error() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(None);
+        let params = ProtocolParameters::mainnet_defaults();
+        let slot_config = crate::plutus::SlotConfig::default();
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, Some(&slot_config));
+        assert!(
+            result.is_err(),
+            "Should reject Plutus tx with missing raw_cbor"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+            "Should contain MissingRawCbor error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_slot_config_returns_error() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(Some(vec![0x84, 0x00]));
+        let params = ProtocolParameters::mainnet_defaults();
+
+        // slot_config = None should now be a hard error for Plutus transactions
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_err(),
+            "Should reject Plutus tx with missing slot_config"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+            "Should contain MissingSlotConfig error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_both_raw_cbor_and_slot_config() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(None);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        // Both missing — should get both errors
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+            "Should contain MissingRawCbor, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+            "Should contain MissingSlotConfig, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_plutus_tx_missing_raw_cbor_passes() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        // Simple tx with no Plutus scripts and no redeemers
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+
+        // Should pass even without raw_cbor and slot_config, since there are no Plutus scripts
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_ok(),
+            "Non-Plutus tx should pass without raw_cbor/slot_config"
+        );
+    }
+
+    #[test]
+    fn test_non_plutus_tx_missing_slot_config_passes() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+
+        // slot_config=None is fine for non-Plutus transactions
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_ok(),
+            "Non-Plutus tx should pass without slot_config"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_with_raw_cbor_and_slot_config_reaches_evaluation() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(Some(vec![0x84, 0x00]));
+        let params = ProtocolParameters::mainnet_defaults();
+        let slot_config = crate::plutus::SlotConfig::default();
+
+        // With both raw_cbor and slot_config, validation should reach Plutus evaluation.
+        // The evaluation will fail because the raw_cbor is not a real transaction, but
+        // the important thing is it does NOT return MissingRawCbor or MissingSlotConfig.
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, Some(&slot_config));
+        if let Err(errors) = &result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+                "Should NOT contain MissingRawCbor when raw_cbor is present"
+            );
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+                "Should NOT contain MissingSlotConfig when slot_config is present"
+            );
+        }
     }
 }
