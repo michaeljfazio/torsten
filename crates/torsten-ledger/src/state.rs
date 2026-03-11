@@ -2217,19 +2217,20 @@ impl LedgerState {
                 protocol_param_update,
                 ..
             } => {
-                // DRep threshold = max of applicable DRep group thresholds (0 during bootstrap)
+                // Per CIP-1694: each affected DRep parameter group must independently
+                // meet its own threshold. ALL affected group thresholds must be met.
                 // SPO threshold = pvtPPSecurityGroup if any param is security-relevant
                 // CC approval required
-                let rational_zero = Rational {
-                    numerator: 0,
-                    denominator: 1,
-                };
-                let drep_threshold = if bootstrap {
-                    rational_zero.clone()
+                let drep_met = if bootstrap {
+                    true // All DRep thresholds are 0 during bootstrap
                 } else {
-                    pp_change_drep_threshold(protocol_param_update, &self.protocol_params)
+                    pp_change_drep_all_groups_met(
+                        protocol_param_update,
+                        &self.protocol_params,
+                        drep_yes,
+                        drep_total,
+                    )
                 };
-                let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let spo_met = if let Some(ref spo_threshold) =
                     pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
                 {
@@ -2990,10 +2991,45 @@ fn modified_pp_groups(ppu: &ProtocolParamUpdate) -> Vec<PPGroup> {
     groups
 }
 
-/// Compute the DRep voting threshold for a ParameterChange governance action.
+/// Check that ALL affected DRep parameter group thresholds are independently met.
 ///
-/// Per Haskell `pparamsUpdateThreshold`: takes the maximum DRep group threshold
-/// across all modified parameter groups.
+/// Per CIP-1694 / Haskell `pparamsUpdateThreshold`: each affected parameter group
+/// has its own DRep voting threshold. A ParameterChange is ratified only if the
+/// DRep vote ratio meets the threshold for EVERY affected group independently.
+///
+/// This replaces the previous (incorrect) max-of-all-groups approach.
+fn pp_change_drep_all_groups_met(
+    ppu: &ProtocolParamUpdate,
+    params: &ProtocolParameters,
+    drep_yes: u64,
+    drep_total: u64,
+) -> bool {
+    let groups = modified_pp_groups(ppu);
+    // Collect unique DRep groups (avoid checking the same group multiple times)
+    let mut seen = std::collections::HashSet::new();
+    for (drep_group, _) in &groups {
+        if !seen.insert(*drep_group) {
+            continue;
+        }
+        let threshold = match drep_group {
+            DRepPPGroup::Network => &params.dvt_pp_network_group,
+            DRepPPGroup::Economic => &params.dvt_pp_economic_group,
+            DRepPPGroup::Technical => &params.dvt_pp_technical_group,
+            DRepPPGroup::Gov => &params.dvt_pp_gov_group,
+        };
+        if !check_threshold(drep_yes, drep_total, threshold) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compute the maximum DRep voting threshold for a ParameterChange governance action.
+///
+/// Returns the highest DRep group threshold across all affected parameter groups.
+/// Used by tests and for informational purposes. For ratification, use
+/// `pp_change_drep_all_groups_met` which checks each group independently.
+#[cfg(test)]
 fn pp_change_drep_threshold(ppu: &ProtocolParamUpdate, params: &ProtocolParameters) -> Rational {
     let groups = modified_pp_groups(ppu);
     let mut max_threshold = Rational {
@@ -5920,6 +5956,161 @@ mod tests {
         assert!(groups
             .iter()
             .all(|g| *g == (DRepPPGroup::Network, StakePoolPPGroup::Security)));
+    }
+
+    /// Helper: create ProtocolParameters with distinct per-group DRep thresholds
+    /// to verify each group is checked independently.
+    fn params_with_distinct_thresholds() -> ProtocolParameters {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Network: 51% (easy)
+        params.dvt_pp_network_group = Rational {
+            numerator: 51,
+            denominator: 100,
+        };
+        // Economic: 60%
+        params.dvt_pp_economic_group = Rational {
+            numerator: 60,
+            denominator: 100,
+        };
+        // Technical: 67%
+        params.dvt_pp_technical_group = Rational {
+            numerator: 67,
+            denominator: 100,
+        };
+        // Governance: 75% (hardest)
+        params.dvt_pp_gov_group = Rational {
+            numerator: 75,
+            denominator: 100,
+        };
+        params
+    }
+
+    #[test]
+    fn test_per_group_network_only_uses_network_threshold() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        // 52% yes — meets network (51%) but would fail economic (60%)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 52, 100));
+        // 50% yes — fails network (51%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 50, 100));
+    }
+
+    #[test]
+    fn test_per_group_economic_only_uses_economic_threshold() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate {
+            min_fee_a: Some(44),
+            ..Default::default()
+        };
+        // 61% yes — meets economic (60%) but would fail technical (67%)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 61, 100));
+        // 59% yes — fails economic (60%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 59, 100));
+    }
+
+    #[test]
+    fn test_per_group_technical_only_uses_technical_threshold() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate {
+            cost_models: Some(torsten_primitives::transaction::CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1]),
+                plutus_v3: None,
+            }),
+            ..Default::default()
+        };
+        // 68% yes — meets technical (67%) but would fail governance (75%)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 68, 100));
+        // 66% yes — fails technical (67%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 66, 100));
+    }
+
+    #[test]
+    fn test_per_group_governance_only_uses_gov_threshold() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate {
+            gov_action_lifetime: Some(10),
+            ..Default::default()
+        };
+        // 76% yes — meets governance (75%)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 76, 100));
+        // 74% yes — fails governance (75%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 74, 100));
+    }
+
+    #[test]
+    fn test_per_group_multi_group_must_meet_all_thresholds() {
+        let params = params_with_distinct_thresholds();
+        // Update touches Network (51%), Economic (60%), and Technical (67%)
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536), // Network
+            min_fee_a: Some(44),              // Economic
+            cost_models: Some(torsten_primitives::transaction::CostModels {
+                plutus_v1: None,
+                plutus_v2: Some(vec![1]),
+                plutus_v3: None,
+            }), // Technical
+            ..Default::default()
+        };
+        // 68% yes — meets all three (51%, 60%, 67%)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 68, 100));
+        // 65% yes — meets network+economic but fails technical (67%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 65, 100));
+        // 55% yes — meets network only, fails economic+technical
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 55, 100));
+    }
+
+    #[test]
+    fn test_per_group_all_four_groups_must_meet_highest() {
+        let params = params_with_distinct_thresholds();
+        // Update touches all 4 groups: Network (51%), Economic (60%), Technical (67%), Gov (75%)
+        let ppu = ProtocolParamUpdate {
+            max_tx_size: Some(16384),                  // Network
+            key_deposit: Some(Lovelace(2_000_000)),    // Economic
+            n_opt: Some(500),                          // Technical
+            drep_deposit: Some(Lovelace(500_000_000)), // Governance
+            ..Default::default()
+        };
+        // 76% — meets all four
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 76, 100));
+        // 70% — meets network+economic+technical but fails governance (75%)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 70, 100));
+    }
+
+    #[test]
+    fn test_per_group_governance_only_no_spo_security_required() {
+        let params = params_with_distinct_thresholds();
+        // Governance-only change: no security-relevant params
+        let ppu = ProtocolParamUpdate {
+            gov_action_lifetime: Some(10),
+            drep_deposit: Some(Lovelace(500_000_000)),
+            ..Default::default()
+        };
+        // SPO threshold should be None (no security params)
+        let spo = pp_change_spo_threshold(&ppu, &params);
+        assert_eq!(spo, None);
+    }
+
+    #[test]
+    fn test_per_group_zero_total_stake_fails() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(65536),
+            ..Default::default()
+        };
+        // Zero total stake should fail (can't meet any threshold)
+        assert!(!pp_change_drep_all_groups_met(&ppu, &params, 0, 0));
+    }
+
+    #[test]
+    fn test_per_group_empty_update_trivially_passes() {
+        let params = params_with_distinct_thresholds();
+        let ppu = ProtocolParamUpdate::default();
+        // No groups affected — should trivially pass (no thresholds to check)
+        assert!(pp_change_drep_all_groups_met(&ppu, &params, 0, 100));
     }
 
     #[test]
