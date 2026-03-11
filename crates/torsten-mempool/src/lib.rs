@@ -327,7 +327,7 @@ impl Mempool {
             .iter()
             .map(|entry| {
                 let fee_density = if entry.size_bytes > 0 {
-                    entry.fee.0 * 1000 / entry.size_bytes as u64 // fee per KB
+                    entry.fee.0.saturating_mul(1000) / entry.size_bytes as u64 // fee per KB
                 } else {
                     0
                 };
@@ -788,5 +788,33 @@ mod tests {
         assert_eq!(txs.len(), 2); // only room for 2 x 500 bytes
         assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest priority first
         assert_eq!(txs[1].body.fee, Lovelace(200_000)); // second highest
+    }
+
+    #[test]
+    fn test_fee_density_no_overflow_near_u64_max() {
+        // A fee near u64::MAX would overflow when multiplied by 1000
+        // without saturating_mul. This test ensures no panic occurs.
+        let mempool = Mempool::new(MempoolConfig::default());
+
+        let huge_fee = u64::MAX - 1; // 18_446_744_073_709_551_614
+        let tx = make_tx_with_fee(huge_fee);
+        let hash = Hash32::from_bytes([1u8; 32]);
+        mempool
+            .add_tx_with_fee(hash, tx, 1000, Lovelace(huge_fee))
+            .unwrap();
+
+        // A normal-fee tx for comparison
+        let tx2 = make_tx_with_fee(200_000);
+        let hash2 = Hash32::from_bytes([2u8; 32]);
+        mempool
+            .add_tx_with_fee(hash2, tx2, 1000, Lovelace(200_000))
+            .unwrap();
+
+        // Should not panic and should return both transactions
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
+        assert_eq!(txs.len(), 2);
+        // The huge-fee tx should come first (higher fee density)
+        assert_eq!(txs[0].body.fee.0, huge_fee);
+        assert_eq!(txs[1].body.fee.0, 200_000);
     }
 }
