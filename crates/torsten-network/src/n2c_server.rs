@@ -3637,7 +3637,10 @@ mod tests {
         let errors = err.errors();
         assert_eq!(errors.len(), 3);
         assert!(matches!(errors[0], TxValidationError::NoInputs));
-        assert!(matches!(errors[1], TxValidationError::InsufficientCollateral));
+        assert!(matches!(
+            errors[1],
+            TxValidationError::InsufficientCollateral
+        ));
         assert!(matches!(errors[2], TxValidationError::NativeScriptFailed));
     }
 
@@ -3722,9 +3725,7 @@ mod tests {
                 input: "dup#0".into(),
             },
             TxValidationError::NativeScriptFailed,
-            TxValidationError::InvalidWitnessSignature {
-                vkey: "vk".into(),
-            },
+            TxValidationError::InvalidWitnessSignature { vkey: "vk".into() },
             TxValidationError::NetworkMismatch {
                 expected: "Testnet".into(),
                 actual: "Mainnet".into(),
@@ -3784,11 +3785,7 @@ mod tests {
         // Verify that a TxValidator implementation can return typed errors
         struct RejectingValidator;
         impl TxValidator for RejectingValidator {
-            fn validate_tx(
-                &self,
-                _era_id: u16,
-                _tx_bytes: &[u8],
-            ) -> Result<(), TxValidationError> {
+            fn validate_tx(&self, _era_id: u16, _tx_bytes: &[u8]) -> Result<(), TxValidationError> {
                 Err(TxValidationError::NoInputs)
             }
         }
@@ -3803,11 +3800,7 @@ mod tests {
     fn test_tx_validator_trait_accepting() {
         struct AcceptingValidator;
         impl TxValidator for AcceptingValidator {
-            fn validate_tx(
-                &self,
-                _era_id: u16,
-                _tx_bytes: &[u8],
-            ) -> Result<(), TxValidationError> {
+            fn validate_tx(&self, _era_id: u16, _tx_bytes: &[u8]) -> Result<(), TxValidationError> {
                 Ok(())
             }
         }
