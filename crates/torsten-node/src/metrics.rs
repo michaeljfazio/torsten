@@ -29,6 +29,7 @@ pub struct NodeMetrics {
     pub drep_count: AtomicU64,
     pub proposal_count: AtomicU64,
     pub pool_count: AtomicU64,
+    pub disk_available_bytes: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -57,6 +58,7 @@ impl NodeMetrics {
             drep_count: AtomicU64::new(0),
             proposal_count: AtomicU64::new(0),
             pool_count: AtomicU64::new(0),
+            disk_available_bytes: AtomicU64::new(0),
         }
     }
 
@@ -93,8 +95,12 @@ impl NodeMetrics {
         self.mempool_tx_count.store(count, Ordering::Relaxed);
     }
 
+    pub fn set_disk_available_bytes(&self, bytes: u64) {
+        self.disk_available_bytes.store(bytes, Ordering::Relaxed);
+    }
+
     /// Format metrics as Prometheus exposition format
-    fn to_prometheus(&self) -> String {
+    pub(crate) fn to_prometheus(&self) -> String {
         let mut out = String::with_capacity(2048);
 
         // Counters (monotonically increasing totals)
@@ -217,6 +223,11 @@ impl NodeMetrics {
                 "torsten_pool_count",
                 "Number of registered stake pools",
                 &self.pool_count,
+            ),
+            (
+                "torsten_disk_available_bytes",
+                "Available disk space in bytes on the database volume",
+                &self.disk_available_bytes,
             ),
         ];
 

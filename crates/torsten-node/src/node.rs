@@ -681,6 +681,16 @@ impl Node {
             });
         }
 
+        // Start disk space monitor on the database volume
+        {
+            let db_path = self.database_path.clone();
+            let metrics = self.metrics.clone();
+            let disk_shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                crate::disk_monitor::start_disk_monitor(db_path, metrics, disk_shutdown_rx).await;
+            });
+        }
+
         // Start N2C server on Unix socket
         let mut n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());
         let slot_config = self.ledger_state.read().await.slot_config;
