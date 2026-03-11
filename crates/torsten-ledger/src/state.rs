@@ -427,7 +427,9 @@ impl LedgerState {
     /// epoch = shelley_transition_epoch + (slot - byron_slots) / epoch_length
     /// where byron_slots = byron_epoch_length * shelley_transition_epoch.
     pub fn epoch_of_slot(&self, slot: u64) -> u64 {
-        let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
+        let byron_slots = self
+            .byron_epoch_length
+            .saturating_mul(self.shelley_transition_epoch);
         if slot < byron_slots {
             // Still in Byron era
             if self.byron_epoch_length > 0 {
@@ -438,19 +440,25 @@ impl LedgerState {
         } else {
             // Shelley era
             let shelley_slots = slot - byron_slots;
-            self.shelley_transition_epoch + shelley_slots / self.epoch_length
+            self.shelley_transition_epoch
+                .saturating_add(shelley_slots / self.epoch_length)
         }
     }
 
     /// Compute the first slot of the epoch that contains the given slot.
+    /// Uses saturating arithmetic to prevent u64 overflow with extreme values.
     pub fn first_slot_of_epoch(&self, epoch: u64) -> u64 {
         if epoch < self.shelley_transition_epoch {
             // Byron epoch
-            epoch * self.byron_epoch_length
+            epoch.saturating_mul(self.byron_epoch_length)
         } else {
             // Shelley epoch
-            let byron_slots = self.byron_epoch_length * self.shelley_transition_epoch;
-            byron_slots + (epoch - self.shelley_transition_epoch) * self.epoch_length
+            let byron_slots = self
+                .byron_epoch_length
+                .saturating_mul(self.shelley_transition_epoch);
+            byron_slots.saturating_add(
+                (epoch - self.shelley_transition_epoch).saturating_mul(self.epoch_length),
+            )
         }
     }
 
@@ -713,7 +721,7 @@ impl LedgerState {
                 "Ledger: epoch transition detected"
             );
             while self.epoch < block_epoch {
-                let next_epoch = EpochNo(self.epoch.0 + 1);
+                let next_epoch = EpochNo(self.epoch.0.saturating_add(1));
                 self.process_epoch_transition(next_epoch);
             }
         }
@@ -920,9 +928,12 @@ impl LedgerState {
             self.update_evolving_nonce(&block.header.vrf_result.output);
 
             // Update candidate nonce only if NOT in the stabilisation window
-            // (i.e., if slot + rsw < first_slot_of_next_epoch)
-            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0 + 1);
-            if block.slot().0 + self.randomness_stabilisation_window < first_slot_of_next_epoch {
+            // (i.e., if slot < first_slot_of_next_epoch - rsw)
+            // Uses saturating_sub to avoid u64 overflow when slot values are extreme
+            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
+            if block.slot().0
+                < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
+            {
                 self.candidate_nonce = self.evolving_nonce;
             }
         }
@@ -1054,7 +1065,7 @@ impl LedgerState {
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
                 // Validate: retirement epoch must be <= current_epoch + e_max
-                let max_retirement_epoch = self.epoch.0 + self.protocol_params.e_max;
+                let max_retirement_epoch = self.epoch.0.saturating_add(self.protocol_params.e_max);
                 if *epoch > max_retirement_epoch {
                     warn!(
                         pool = %pool_hash.to_hex(),
@@ -1982,7 +1993,7 @@ impl LedgerState {
 
         // Governance action lifetime from protocol parameters
         let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
-        let expires_epoch = EpochNo(self.epoch.0 + gov_action_lifetime);
+        let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
 
         let state = ProposalState {
             procedure: proposal.clone(),
@@ -7604,6 +7615,97 @@ mod tests {
         state.governance.dreps.get_mut(&dreps[1].1).unwrap().active = false;
         let total = state.compute_total_drep_stake();
         assert_eq!(total, 3_000_000_000);
+    }
+
+    /// Regression test for GitHub issue #13: slot + stabilisation_window u64 overflow.
+    ///
+    /// When a block has a slot near u64::MAX, the old code `block.slot().0 +
+    /// self.randomness_stabilisation_window` would overflow. The fix restructures
+    /// the comparison to subtract from the larger value instead.
+    #[test]
+    fn test_slot_stabilisation_window_no_overflow() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        state.randomness_stabilisation_window = 40;
+
+        let genesis_hash = Hash32::from_bytes([0xAB; 32]);
+        state.set_genesis_hash(genesis_hash);
+
+        // Pre-set the epoch to match the extreme slot so we don't trigger
+        // a massive epoch transition loop. The extreme slot u64::MAX - 10
+        // falls in epoch (u64::MAX - 10) / 100.
+        let extreme_slot = u64::MAX - 10;
+        state.epoch = EpochNo(extreme_slot / 100);
+
+        // Block at a slot near u64::MAX — the old code would panic here
+        // because slot + stabilisation_window overflows u64.
+        let mut block = make_test_block(extreme_slot, 1, Hash32::ZERO, vec![]);
+        block.header.vrf_result.output = vec![42u8; 32];
+        block.header.issuer_vkey = vec![1u8; 32];
+
+        // This should NOT panic; the candidate nonce should be frozen
+        // because the extreme slot is definitely in the stabilisation window.
+        state.apply_block(&block).unwrap();
+
+        // Evolving nonce updated (always updates)
+        assert_ne!(state.evolving_nonce, genesis_hash);
+        // Candidate nonce should be FROZEN (extreme slot is in stabilisation window)
+        assert_eq!(state.candidate_nonce, genesis_hash);
+    }
+
+    /// Test that first_slot_of_epoch and epoch_of_slot don't overflow with
+    /// extreme epoch numbers.
+    #[test]
+    fn test_first_slot_of_epoch_saturating() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 432000;
+        state.shelley_transition_epoch = 208;
+        state.byron_epoch_length = 21600;
+
+        // Extreme epoch number should saturate to u64::MAX, not panic
+        let result = state.first_slot_of_epoch(u64::MAX);
+        assert_eq!(result, u64::MAX);
+
+        // Normal epoch should still work correctly
+        let result = state.first_slot_of_epoch(208);
+        assert_eq!(result, 208 * 21600); // byron_slots + 0 shelley slots
+    }
+
+    /// Test that the stabilisation window boundary works correctly with
+    /// saturating arithmetic for normal values (no behavioral change).
+    #[test]
+    fn test_stabilisation_window_boundary_normal_values() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        state.randomness_stabilisation_window = 40;
+
+        let genesis_hash = Hash32::from_bytes([0xAB; 32]);
+        state.set_genesis_hash(genesis_hash);
+
+        // Slot 59 is the LAST slot before the stabilisation window
+        // (59 < 100 - 40 = 60, so candidate updates)
+        let mut block = make_test_block(59, 1, Hash32::ZERO, vec![]);
+        block.header.vrf_result.output = vec![42u8; 32];
+        block.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block).unwrap();
+        assert_eq!(state.candidate_nonce, state.evolving_nonce);
+
+        // Slot 60 is the FIRST slot in the stabilisation window
+        // (60 >= 100 - 40 = 60, so candidate freezes)
+        let candidate_before = state.candidate_nonce;
+        let mut block2 = make_test_block(60, 2, *block.hash(), vec![]);
+        block2.header.vrf_result.output = vec![99u8; 32];
+        block2.header.issuer_vkey = vec![1u8; 32];
+        state.apply_block(&block2).unwrap();
+        assert_eq!(state.candidate_nonce, candidate_before);
+        assert_ne!(state.evolving_nonce, candidate_before);
     }
 
     /// Verify that reward expansion calculation does not overflow i128 even with
