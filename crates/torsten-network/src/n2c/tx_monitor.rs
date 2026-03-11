@@ -110,7 +110,8 @@ pub(crate) async fn handle_tx_monitor(
             // MsgHasTx(tx_id) → MsgReplyHasTx(bool)
             let tx_id_bytes = decoder.bytes().unwrap_or(&[]);
             let has_tx = if tx_id_bytes.len() == 32 {
-                let tx_hash = Hash32::from_bytes(tx_id_bytes.try_into().unwrap());
+                // Safety: tx_id_bytes.len() == 32 is checked by the enclosing `if`
+                let tx_hash = Hash32::from_bytes(tx_id_bytes.try_into().expect("32-byte slice"));
                 let exists = mempool.contains(&tx_hash);
                 debug!("LocalTxMonitor: MsgHasTx {} → {exists}", tx_hash.to_hex());
                 exists

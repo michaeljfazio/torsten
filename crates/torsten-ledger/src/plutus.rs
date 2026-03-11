@@ -62,10 +62,11 @@ fn encode_input_cbor(input: &torsten_primitives::transaction::TransactionInput) 
     let mut buf = Vec::with_capacity(40);
     let mut enc = Encoder::new(&mut buf);
     // minicbor encoding to Vec<u8> is infallible
-    enc.array(2).expect("vec write");
+    // Safety: minicbor encoding to Vec<u8> is infallible (cannot fail on memory writes)
+    enc.array(2).expect("infallible: Vec<u8> write");
     enc.bytes(input.transaction_id.as_bytes())
-        .expect("vec write");
-    enc.u32(input.index).expect("vec write");
+        .expect("infallible: Vec<u8> write");
+    enc.u32(input.index).expect("infallible: Vec<u8> write");
     buf
 }
 

@@ -483,31 +483,36 @@ impl CostModels {
         let mut buf = Vec::with_capacity(4096);
         let mut enc = Encoder::new(&mut buf);
 
+        // Safety: minicbor encoding to Vec<u8> is infallible (cannot fail on memory writes).
+        // All expect() calls below use the same "infallible" message for this reason.
         let count = [&self.plutus_v1, &self.plutus_v2, &self.plutus_v3]
             .iter()
             .filter(|m| m.is_some())
             .count();
-        enc.map(count as u64).unwrap();
+        enc.map(count as u64).expect("infallible: Vec<u8> write");
 
         if let Some(v1) = &self.plutus_v1 {
-            enc.u32(0).unwrap();
-            enc.array(v1.len() as u64).unwrap();
+            enc.u32(0).expect("infallible: Vec<u8> write");
+            enc.array(v1.len() as u64)
+                .expect("infallible: Vec<u8> write");
             for cost in v1 {
-                enc.i64(*cost).unwrap();
+                enc.i64(*cost).expect("infallible: Vec<u8> write");
             }
         }
         if let Some(v2) = &self.plutus_v2 {
-            enc.u32(1).unwrap();
-            enc.array(v2.len() as u64).unwrap();
+            enc.u32(1).expect("infallible: Vec<u8> write");
+            enc.array(v2.len() as u64)
+                .expect("infallible: Vec<u8> write");
             for cost in v2 {
-                enc.i64(*cost).unwrap();
+                enc.i64(*cost).expect("infallible: Vec<u8> write");
             }
         }
         if let Some(v3) = &self.plutus_v3 {
-            enc.u32(2).unwrap();
-            enc.array(v3.len() as u64).unwrap();
+            enc.u32(2).expect("infallible: Vec<u8> write");
+            enc.array(v3.len() as u64)
+                .expect("infallible: Vec<u8> write");
             for cost in v3 {
-                enc.i64(*cost).unwrap();
+                enc.i64(*cost).expect("infallible: Vec<u8> write");
             }
         }
 

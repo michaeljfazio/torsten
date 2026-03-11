@@ -223,7 +223,9 @@ fn parse_client_points(
             if point_len == 2 {
                 if let (Ok(slot), Ok(hash_bytes)) = (decoder.u64(), decoder.bytes()) {
                     if slot == tip_slot && hash_bytes.len() == 32 {
-                        let point_hash = Hash32::from_bytes(hash_bytes.try_into().unwrap());
+                        // Safety: hash_bytes.len() == 32 is checked by the enclosing `if`
+                        let point_hash =
+                            Hash32::from_bytes(hash_bytes.try_into().expect("32-byte slice"));
                         if point_hash == *tip_hash {
                             return Some((slot, point_hash));
                         }

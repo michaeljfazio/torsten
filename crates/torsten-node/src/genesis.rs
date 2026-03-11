@@ -429,7 +429,8 @@ fn parse_cost_model(value: &serde_json::Value) -> Option<Vec<i64>> {
                 return None;
             }
             // Check if keys are "key-N" format (indexed)
-            let first_key = map.keys().next().expect("map non-empty (checked above)");
+            // Safety: map.is_empty() is checked above, so .next() always returns Some
+            let first_key = map.keys().next().expect("map is non-empty (checked above)");
             if first_key.starts_with("key-") {
                 let mut indexed: Vec<(usize, i64)> = Vec::new();
                 for (k, v) in map {

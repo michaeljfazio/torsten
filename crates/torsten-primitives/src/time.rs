@@ -102,6 +102,7 @@ impl std::fmt::Display for BlockNo {
 pub fn mainnet_system_start() -> SystemStart {
     use chrono::TimeZone;
     SystemStart {
+        // Safety: this is a known valid date constant (Cardano mainnet genesis)
         utc_time: chrono::Utc
             .with_ymd_and_hms(2017, 9, 23, 21, 44, 51)
             .unwrap(),
