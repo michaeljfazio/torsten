@@ -71,10 +71,6 @@ struct RunArgs {
     /// Path to the operational certificate file
     #[arg(long)]
     shelley_operational_certificate: Option<PathBuf>,
-
-    /// Path to the cold signing key file (required for block production)
-    #[arg(long)]
-    shelley_cold_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -167,7 +163,6 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_kes_key: args.shelley_kes_key,
         shelley_vrf_key: args.shelley_vrf_key,
         shelley_operational_certificate: args.shelley_operational_certificate,
-        shelley_cold_key: args.shelley_cold_key,
         metrics_port: args.metrics_port,
     })?;
 

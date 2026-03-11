@@ -40,8 +40,6 @@ pub struct NodeArgs {
     pub shelley_vrf_key: Option<PathBuf>,
     /// Path to operational certificate (enables block production)
     pub shelley_operational_certificate: Option<PathBuf>,
-    /// Path to cold signing key (required for block production)
-    pub shelley_cold_key: Option<PathBuf>,
     /// Prometheus metrics port (0 to disable)
     pub metrics_port: u16,
 }
@@ -782,15 +780,10 @@ impl Node {
             &args.shelley_vrf_key,
             &args.shelley_kes_key,
             &args.shelley_operational_certificate,
-            &args.shelley_cold_key,
         ) {
-            (Some(vrf_path), Some(kes_path), Some(opcert_path), Some(cold_key_path)) => {
-                match crate::forge::BlockProducerCredentials::load_with_cold_key(
-                    vrf_path,
-                    kes_path,
-                    opcert_path,
-                    cold_key_path,
-                ) {
+            (Some(vrf_path), Some(kes_path), Some(opcert_path)) => {
+                match crate::forge::BlockProducerCredentials::load(vrf_path, kes_path, opcert_path)
+                {
                     Ok(creds) => {
                         info!(
                             pool_id = %creds.pool_id,
@@ -805,13 +798,6 @@ impl Node {
                         None
                     }
                 }
-            }
-            (Some(_), Some(_), Some(_), None) => {
-                warn!(
-                    "Block producer keys provided but --shelley-cold-key is missing. \
-                     Running in relay-only mode."
-                );
-                None
             }
             _ => {
                 info!("Running in relay-only mode (no block producer keys configured)");

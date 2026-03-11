@@ -14,9 +14,7 @@ pub struct BlockProducerCredentials {
     pub vrf_skey: [u8; 32],
     /// VRF verification key (32 bytes)
     pub vrf_vkey: [u8; 32],
-    /// Cold signing key for operational certificate verification
-    pub cold_skey: torsten_crypto::keys::PaymentSigningKey,
-    /// Cold verification key
+    /// Cold verification key (extracted from opcert)
     pub cold_vkey: Vec<u8>,
     /// KES secret key bytes (Sum6Kes format, 612 bytes)
     pub kes_skey: Vec<u8>,
@@ -33,16 +31,15 @@ pub struct BlockProducerCredentials {
 }
 
 impl BlockProducerCredentials {
-    /// Load block producer credentials from the given file paths.
+    /// Load block producer credentials from VRF key, KES key, and operational certificate.
     ///
-    /// Requires all four keys: VRF signing key, KES signing key, operational
-    /// certificate, and cold signing key. The cold key is needed to derive
-    /// the pool ID (blake2b-224 of the cold verification key).
-    pub fn load_with_cold_key(
+    /// The cold verification key is extracted from the opcert (which contains it
+    /// as a second CBOR element), matching cardano-node behavior. The cold signing
+    /// key is NOT needed at runtime.
+    pub fn load(
         vrf_skey_path: &Path,
         kes_skey_path: &Path,
         opcert_path: &Path,
-        cold_skey_path: &Path,
     ) -> Result<Self> {
         // Load VRF signing key
         let vrf_content = std::fs::read_to_string(vrf_skey_path)
@@ -77,6 +74,7 @@ impl BlockProducerCredentials {
         let kes_key_bytes = unwrap_cbor(&kes_cbor).to_vec();
 
         // Load operational certificate
+        // Opcert CBOR format: ([kes_vkey, sequence, kes_period, sigma], cold_vkey)
         let opcert_content = std::fs::read_to_string(opcert_path)
             .with_context(|| format!("Failed to read opcert: {}", opcert_path.display()))?;
         let opcert_env: serde_json::Value = serde_json::from_str(&opcert_content)?;
@@ -85,34 +83,32 @@ impl BlockProducerCredentials {
             .ok_or_else(|| anyhow::anyhow!("Missing cborHex in opcert file"))?;
         let opcert_cbor = hex::decode(opcert_cbor_hex)?;
 
-        // Parse opcert CBOR: [hot_vkey, sequence_number, kes_period, sigma]
         let mut decoder = minicbor::Decoder::new(&opcert_cbor);
-        let _array_len = decoder.array()?;
+        // Outer array: [ocert_group, cold_vkey]
+        let outer_len = decoder.array()?;
+        // OCert is a CBOR group (4 elements encoded inline in the outer array)
         let kes_vkey_bytes = decoder.bytes()?.to_vec();
         let opcert_sequence = decoder.u64()?;
         let opcert_kes_period = decoder.u64()?;
         let opcert_sigma = decoder.bytes()?.to_vec();
+        // Cold verification key is the 5th element (after the 4-element OCert group)
+        let cold_vkey = decoder.bytes()?.to_vec();
 
-        // Load cold signing key
-        let cold_content = std::fs::read_to_string(cold_skey_path)
-            .with_context(|| format!("Failed to read cold skey: {}", cold_skey_path.display()))?;
-        let cold_env: serde_json::Value = serde_json::from_str(&cold_content)?;
-        let cold_cbor_hex = cold_env["cborHex"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing cborHex in cold skey file"))?;
-        let cold_cbor = hex::decode(cold_cbor_hex)?;
-        let cold_key_bytes = unwrap_cbor(&cold_cbor);
-        let cold_skey = torsten_crypto::keys::PaymentSigningKey::from_bytes(cold_key_bytes)?;
-        let cold_vk = cold_skey.verification_key();
-        let cold_vkey = cold_vk.to_bytes().to_vec();
+        if cold_vkey.len() != 32 {
+            anyhow::bail!(
+                "Cold verification key in opcert must be 32 bytes, got {} \
+                 (outer_len={:?}, opcert may be in unexpected format)",
+                cold_vkey.len(),
+                outer_len,
+            );
+        }
 
         // Pool ID = blake2b-224 of the cold verification key
-        let pool_id = torsten_primitives::hash::blake2b_224(&cold_vk.to_bytes());
+        let pool_id = torsten_primitives::hash::blake2b_224(&cold_vkey);
 
         Ok(BlockProducerCredentials {
             vrf_skey,
             vrf_vkey,
-            cold_skey,
             cold_vkey,
             kes_skey: kes_key_bytes,
             kes_vkey: kes_vkey_bytes,
@@ -324,6 +320,7 @@ mod tests {
         let vrf_kp = torsten_crypto::vrf::generate_vrf_keypair();
         let cold_sk = torsten_crypto::keys::PaymentSigningKey::generate();
         let cold_vk = cold_sk.verification_key();
+        let cold_vkey = cold_vk.to_bytes().to_vec();
 
         // Generate a KES key pair for testing
         let seed = [42u8; 32];
@@ -332,14 +329,13 @@ mod tests {
         BlockProducerCredentials {
             vrf_skey: vrf_kp.secret_key,
             vrf_vkey: vrf_kp.public_key,
-            cold_skey: cold_sk,
-            cold_vkey: cold_vk.to_bytes().to_vec(),
+            cold_vkey: cold_vkey.clone(),
             kes_skey: kes_sk,
             kes_vkey: kes_pk.to_vec(),
             opcert_sequence: 0,
             opcert_kes_period: 0,
             opcert_sigma: vec![0u8; 64],
-            pool_id: torsten_primitives::hash::blake2b_224(&cold_vk.to_bytes()),
+            pool_id: torsten_primitives::hash::blake2b_224(&cold_vkey),
         }
     }
 
