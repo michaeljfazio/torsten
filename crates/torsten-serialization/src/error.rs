@@ -15,3 +15,9 @@ pub enum SerializationError {
     #[error("Invalid length: expected {expected}, got {got}")]
     InvalidLength { expected: usize, got: usize },
 }
+
+impl From<minicbor::decode::Error> for SerializationError {
+    fn from(e: minicbor::decode::Error) -> Self {
+        SerializationError::CborDecode(e.to_string())
+    }
+}

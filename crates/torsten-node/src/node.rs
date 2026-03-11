@@ -691,14 +691,44 @@ impl Node {
                 }
             }
         } else {
-            Self::init_fresh_ledger(
-                &protocol_params,
-                shelley_genesis.as_ref(),
-                shelley_genesis_hash,
-                &byron_genesis_utxos,
-                network_magic,
-                byron_epoch_length,
-            )
+            // Try loading a Haskell ledger state from Mithril import before
+            // falling back to a completely fresh ledger.
+            let haskell_dir = args.database_path.join("haskell-ledger");
+            if haskell_dir.is_dir() {
+                match crate::haskell_ledger::load_haskell_ledger_state(&haskell_dir, None) {
+                    Ok((state, slot)) => {
+                        info!(
+                            slot = slot.0,
+                            epoch = state.epoch.0,
+                            "Loaded Haskell ledger state — skipping block replay for non-UTxO state"
+                        );
+                        state
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "Failed to parse Haskell ledger state — falling back to fresh ledger"
+                        );
+                        Self::init_fresh_ledger(
+                            &protocol_params,
+                            shelley_genesis.as_ref(),
+                            shelley_genesis_hash,
+                            &byron_genesis_utxos,
+                            network_magic,
+                            byron_epoch_length,
+                        )
+                    }
+                }
+            } else {
+                Self::init_fresh_ledger(
+                    &protocol_params,
+                    shelley_genesis.as_ref(),
+                    shelley_genesis_hash,
+                    &byron_genesis_utxos,
+                    network_magic,
+                    byron_epoch_length,
+                )
+            }
         };
         // Apply Conway genesis committee threshold and members if not already set
         if let Some((num, den)) = conway_committee_threshold {

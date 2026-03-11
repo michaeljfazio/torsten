@@ -2,6 +2,7 @@ mod config;
 mod disk_monitor;
 mod forge;
 mod genesis;
+mod haskell_ledger;
 mod metrics;
 mod mithril;
 mod node;
