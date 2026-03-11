@@ -3503,6 +3503,7 @@ dependencies = [
  "minicbor 0.25.1",
  "pallas-traverse 1.0.0-alpha.5",
  "rand 0.8.5",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",

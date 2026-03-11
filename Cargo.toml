@@ -107,6 +107,7 @@ indicatif = "0.17"
 futures-util = "0.3"
 memmap2 = "0.9"
 fs2 = "0.4"
+rayon = "1"
 proptest = "1"
 
 [profile.release]

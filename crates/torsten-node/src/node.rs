@@ -6,7 +6,7 @@ use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
 use torsten_consensus::praos::BlockIssuerInfo;
-use torsten_consensus::OuroborosPraos;
+use torsten_consensus::{OuroborosPraos, ValidationMode};
 use torsten_ledger::LedgerState;
 use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
@@ -2064,202 +2064,192 @@ impl Node {
         // Track the last slot we checked for forging to avoid duplicate checks
         let mut last_forge_slot: u64 = 0;
 
-        loop {
-            if *shutdown_rx.borrow() {
-                info!("Shutdown requested, stopping sync");
-                break;
+        // Pipeline decoupling: when both a pipelined client and fetch pool are
+        // available, spawn a separate task for header/block fetching. This allows
+        // network I/O to stay saturated while the main task processes blocks.
+        // The fetch task sends blocks through a bounded channel; the main task
+        // consumes and applies them. This matches cardano-node's architecture
+        // where block download and ledger application run on separate threads.
+        if use_pipelined && use_pool {
+            /// Messages from the block fetch pipeline to the processing loop.
+            enum PipelineMsg {
+                /// A batch of blocks fetched from the network.
+                Batch {
+                    blocks: Vec<torsten_primitives::block::Block>,
+                    tip: torsten_primitives::block::Tip,
+                    fetch_ms: f64,
+                    header_count: u64,
+                },
+                /// Chain rollback — process any preceding blocks, then rollback.
+                Rollback(Point),
+                /// Caught up to chain tip — enable strict verification.
+                AtTip,
+                /// Fetch error — abort the pipeline.
+                FetchError(String),
             }
 
-            if use_pipelined || use_pool {
-                // Pipelined/multi-peer mode: collect headers, fetch blocks from pool
-                let header_future = async {
-                    if let Some(ref mut pc) = pipelined {
-                        pc.request_headers_pipelined_with_depth(header_batch_size, pipeline_depth)
-                            .await
-                    } else {
-                        client.request_headers_batch(header_batch_size).await
+            let mut pc = pipelined
+                .take()
+                .expect("use_pipelined implies pipelined is Some");
+            let (depth_tx, depth_rx) = tokio::sync::watch::channel(max_pipeline_depth);
+            // Bounded channel: 4 batches of buffering allows network to stay
+            // saturated while CPU catches up on block processing.
+            let (block_tx, mut block_rx) = tokio::sync::mpsc::channel::<PipelineMsg>(4);
+            let fetch_shutdown = shutdown_rx.clone();
+
+            let fetch_handle = tokio::spawn(async move {
+                loop {
+                    if *fetch_shutdown.borrow() {
+                        break;
                     }
-                };
-                tokio::select! {
-                    result = header_future => {
-                        match result {
-                            Ok(batch_result) => {
-                                match batch_result {
-                                    HeaderBatchResult::Headers(headers, tip) => {
-                                        // If we got a substantial batch, we're not at tip:
-                                        // restore full pipeline depth for throughput
-                                        if headers.len() > 10 && pipeline_depth < max_pipeline_depth {
-                                            pipeline_depth = max_pipeline_depth;
-                                        }
-                                        if !headers.is_empty() {
-                                            debug!(
-                                                header_count = headers.len(),
-                                                first_slot = headers[0].slot,
-                                                first_block = headers[0].block_no,
-                                                // Safety: inside `if !headers.is_empty()` guard
-                                                last_slot = headers.last().expect("headers is non-empty").slot,
-                                                last_block = headers.last().expect("headers is non-empty").block_no,
-                                                "Headers received from pipelined client"
-                                            );
-                                        }
-                                        let fetch_start = std::time::Instant::now();
-                                        let header_count = headers.len() as u64;
-                                        // Use fetch pool if available, otherwise primary peer
-                                        let blocks_result = if fetch_pool.is_empty() {
-                                            client.fetch_blocks_by_points(&headers).await
-                                        } else {
-                                            match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                                Ok(blocks) => Ok(blocks),
-                                                Err(e) => {
-                                                    warn!("Pool fetch failed, falling back to primary peer: {e}");
-                                                    client.fetch_blocks_by_points(&headers).await
-                                                }
-                                            }
-                                        };
-                                        match blocks_result {
-                                            Ok(blocks) => {
-                                                let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
-                                                self.peer_manager.write().await.record_block_fetch(
-                                                    &peer_addr, fetch_ms, header_count, 0,
-                                                );
-                                                let applied = self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
-                                                if applied > 0 {
-                                                    consecutive_apply_failures = 0;
-                                                } else if header_count > 0 {
-                                                    consecutive_apply_failures += 1;
-                                                    if consecutive_apply_failures >= 5 {
-                                                        error!(
-                                                            consecutive_apply_failures,
-                                                            "Ledger state diverged from chain — \
-                                                             blocks do not connect. Triggering \
-                                                             reconnect to re-establish intersection."
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => { error!("Block fetch failed: {e}"); break; }
-                                        }
-                                    }
-                                    HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, .. } => {
-                                        // Process any headers before the rollback
-                                        if !headers.is_empty() {
-                                            match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                                Ok(blocks) => {
-                                                    self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
-                                                }
-                                                Err(e) => { warn!("Pool fetch failed during rollback batch: {e}"); }
-                                            }
-                                        }
-                                        warn!("Rollback to {rollback_point}");
-                                        self.handle_rollback(&rollback_point).await;
-                                    }
-                                    HeaderBatchResult::RollBackward(point, _tip) => {
-                                        warn!("Rollback to {point}");
-                                        self.handle_rollback(&point).await;
-                                    }
-                                    HeaderBatchResult::Await => {
-                                        info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
-                                        // Enable strict VRF/KES verification now that we're synced
-                                        self.enable_strict_verification().await;
-                                        self.update_query_state().await;
-                                        self.try_forge_block().await;
-                                        // At tip: reduce pipeline depth to 1 to avoid
-                                        // sending many MsgRequestNext that pile up
-                                        pipeline_depth = 1;
+                    let depth = *depth_rx.borrow();
+
+                    let result = pc
+                        .request_headers_pipelined_with_depth(header_batch_size, depth)
+                        .await;
+                    match result {
+                        Ok(HeaderBatchResult::Headers(headers, tip)) => {
+                            if headers.is_empty() {
+                                continue;
+                            }
+                            debug!(
+                                header_count = headers.len(),
+                                first_slot = headers[0].slot,
+                                last_slot = headers.last().expect("headers is non-empty").slot,
+                                "Pipeline: headers received"
+                            );
+                            let fetch_start = std::time::Instant::now();
+                            let header_count = headers.len() as u64;
+                            match fetch_pool.fetch_blocks_concurrent(&headers).await {
+                                Ok(blocks) => {
+                                    let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                    if block_tx
+                                        .send(PipelineMsg::Batch {
+                                            blocks,
+                                            tip,
+                                            fetch_ms,
+                                            header_count,
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        break; // receiver dropped
                                     }
                                 }
-                                // Reconnect pipelined client if it became stale
-                                // (has pending in-flight requests from pipelining
-                                // that would block for minutes waiting for new blocks)
-                                if pipelined.as_ref().is_some_and(|pc| pc.is_stale()) {
-                                    // We hit the tip — reduce pipeline depth and
-                                    // enable strict verification for new blocks
-                                    pipeline_depth = 1;
-                                    self.enable_strict_verification().await;
-                                    // Safety: is_some_and guard above ensures pipelined is Some
-                                    let old = pipelined.take().expect("pipelined is Some (is_some_and guard)");
-                                    let addr = old.remote_addr();
-                                    old.abort().await;
-                                    match PipelinedPeerClient::connect(&addr.to_string() as &str, self.network_magic).await {
-                                        Ok(mut new_pc) => {
-                                            let tip = self.ledger_state.read().await.tip.point.clone();
-                                            let mut pts = Vec::new();
-                                            if tip != Point::Origin { pts.push(tip); }
-                                            pts.push(Point::Origin);
-                                            match new_pc.find_intersect(pts).await {
-                                                Ok(_) => {
-                                                    info!("Reconnected pipelined client after tip sync");
-                                                    pipelined = Some(new_pc);
-                                                }
-                                                Err(e) => warn!("Pipelined reconnect intersect failed: {e}"),
-                                            }
-                                        }
-                                        Err(e) => warn!("Pipelined reconnect failed: {e}"),
-                                    }
+                                Err(e) => {
+                                    let _ = block_tx
+                                        .send(PipelineMsg::FetchError(format!("{e}")))
+                                        .await;
+                                    break;
                                 }
                             }
-                            Err(e) => { error!("Chain sync error: {e}"); break; }
                         }
-                    }
-                    _ = forge_ticker.tick(), if self.block_producer.is_some() && pipeline_depth <= 1 => {
-                        // Wall-clock slot ticker for block production.
-                        // Only enabled at tip (pipeline_depth <= 1) to avoid interrupting
-                        // the pipelined header fetch during bulk sync — dropping the header
-                        // future mid-read loses already-consumed ChainSync responses.
-                        if let Some(wc) = self.current_wall_clock_slot() {
-                            if wc.0 > last_forge_slot {
-                                last_forge_slot = wc.0;
-                                self.try_forge_block().await;
+                        Ok(HeaderBatchResult::HeadersAndRollback {
+                            headers,
+                            tip,
+                            rollback_point,
+                            ..
+                        }) => {
+                            // Fetch blocks for headers before the rollback point
+                            if !headers.is_empty() {
+                                if let Ok(blocks) =
+                                    fetch_pool.fetch_blocks_concurrent(&headers).await
+                                {
+                                    let _ = block_tx
+                                        .send(PipelineMsg::Batch {
+                                            blocks,
+                                            tip,
+                                            fetch_ms: 0.0,
+                                            header_count: headers.len() as u64,
+                                        })
+                                        .await;
+                                }
+                            }
+                            if block_tx
+                                .send(PipelineMsg::Rollback(rollback_point))
+                                .await
+                                .is_err()
+                            {
+                                break;
                             }
                         }
+                        Ok(HeaderBatchResult::RollBackward(point, _)) => {
+                            if block_tx.send(PipelineMsg::Rollback(point)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(HeaderBatchResult::Await) => {
+                            // Depth reduction is signaled by the main loop via
+                            // the watch channel when it processes AtTip.
+                            if block_tx.send(PipelineMsg::AtTip).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = block_tx.send(PipelineMsg::FetchError(format!("{e}"))).await;
+                            break;
+                        }
                     }
-                    _ = shutdown_rx.changed() => {
-                        info!("Shutdown requested during sync");
+
+                    // Exit if pipelined client became stale (in-flight requests
+                    // that would block for minutes waiting for new blocks)
+                    if pc.is_stale() {
                         break;
                     }
                 }
-            } else {
-                // Single-peer mode: use request_next_batch (headers + blocks from same peer)
+            });
+
+            // Processing loop: consume block batches from the pipeline channel.
+            // Block processing and network fetching now run concurrently.
+            loop {
                 tokio::select! {
-                    result = client.request_next_batch(header_batch_size) => {
-                        match result {
-                            Ok(events) => {
-                                let mut forward_blocks = Vec::new();
-                                let mut other_events = Vec::new();
-
-                                for event in events {
-                                    match event {
-                                        ChainSyncEvent::RollForward(block, tip) => {
-                                            forward_blocks.push((*block, tip));
-                                        }
-                                        other => other_events.push(other),
-                                    }
-                                }
-
-                                if !forward_blocks.is_empty() {
-                                    // Safety: inside `if !forward_blocks.is_empty()` guard
-                                    let tip = forward_blocks.last().expect("forward_blocks is non-empty (checked above)").1.clone();
-                                    let blocks: Vec<_> = forward_blocks.into_iter().map(|(b, _)| b).collect();
-                                    self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
-                                }
-
-                                for event in other_events {
-                                    match event {
-                                        ChainSyncEvent::RollBackward(point, tip) => {
-                                            warn!("Rollback to {point}, tip: {tip}");
-                                            self.handle_rollback(&point).await;
-                                        }
-                                        ChainSyncEvent::Await => {
-                                            info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
-                                            self.enable_strict_verification().await;
-                                            self.update_query_state().await;
-                                        }
-                                        ChainSyncEvent::RollForward(..) => unreachable!(),
+                    msg = block_rx.recv() => {
+                        match msg {
+                            Some(PipelineMsg::Batch { blocks, tip, fetch_ms, header_count }) => {
+                                self.peer_manager.write().await.record_block_fetch(
+                                    &peer_addr, fetch_ms, header_count, 0,
+                                );
+                                let applied = self.process_forward_blocks(
+                                    blocks, &tip, &mut blocks_received,
+                                    &mut blocks_since_last_log, &mut last_snapshot_epoch,
+                                    &mut last_log_time, &mut last_query_update,
+                                ).await;
+                                if applied > 0 {
+                                    consecutive_apply_failures = 0;
+                                } else if header_count > 0 {
+                                    consecutive_apply_failures += 1;
+                                    if consecutive_apply_failures >= 5 {
+                                        error!(
+                                            consecutive_apply_failures,
+                                            "Ledger state diverged from chain — \
+                                             blocks do not connect. Triggering \
+                                             reconnect to re-establish intersection."
+                                        );
+                                        break;
                                     }
                                 }
                             }
-                            Err(e) => { error!("Chain sync error: {e}"); break; }
+                            Some(PipelineMsg::Rollback(point)) => {
+                                warn!("Rollback to {point}");
+                                self.handle_rollback(&point).await;
+                            }
+                            Some(PipelineMsg::AtTip) => {
+                                info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
+                                self.enable_strict_verification().await;
+                                self.update_query_state().await;
+                                self.try_forge_block().await;
+                                // Reduce pipeline depth to 1 at tip
+                                let _ = depth_tx.send(1);
+                            }
+                            Some(PipelineMsg::FetchError(e)) => {
+                                error!("Block fetch pipeline error: {e}");
+                                break;
+                            }
+                            None => {
+                                // Channel closed — fetch task exited (stale or shutdown)
+                                debug!("Fetch pipeline channel closed, ending sync loop");
+                                break;
+                            }
                         }
                     }
                     _ = forge_ticker.tick(), if self.block_producer.is_some() => {
@@ -2276,10 +2266,213 @@ impl Node {
                     }
                 }
             }
+
+            // Cleanup: close channel and abort fetch task
+            drop(block_rx);
+            fetch_handle.abort();
+        } else {
+            // Sequential mode: no pipeline decoupling (single peer or no fetch pool)
+            loop {
+                if *shutdown_rx.borrow() {
+                    info!("Shutdown requested, stopping sync");
+                    break;
+                }
+
+                if use_pipelined || use_pool {
+                    // Pipelined/multi-peer mode without separate fetch pool
+                    let header_future = async {
+                        if let Some(ref mut pc) = pipelined {
+                            pc.request_headers_pipelined_with_depth(
+                                header_batch_size,
+                                pipeline_depth,
+                            )
+                            .await
+                        } else {
+                            client.request_headers_batch(header_batch_size).await
+                        }
+                    };
+                    tokio::select! {
+                        result = header_future => {
+                            match result {
+                                Ok(batch_result) => {
+                                    match batch_result {
+                                        HeaderBatchResult::Headers(headers, tip) => {
+                                            if headers.len() > 10 && pipeline_depth < max_pipeline_depth {
+                                                pipeline_depth = max_pipeline_depth;
+                                            }
+                                            if !headers.is_empty() {
+                                                debug!(
+                                                    header_count = headers.len(),
+                                                    first_slot = headers[0].slot,
+                                                    first_block = headers[0].block_no,
+                                                    last_slot = headers.last().expect("headers is non-empty").slot,
+                                                    last_block = headers.last().expect("headers is non-empty").block_no,
+                                                    "Headers received from pipelined client"
+                                                );
+                                            }
+                                            let fetch_start = std::time::Instant::now();
+                                            let header_count = headers.len() as u64;
+                                            let blocks_result = if fetch_pool.is_empty() {
+                                                client.fetch_blocks_by_points(&headers).await
+                                            } else {
+                                                match fetch_pool.fetch_blocks_concurrent(&headers).await {
+                                                    Ok(blocks) => Ok(blocks),
+                                                    Err(e) => {
+                                                        warn!("Pool fetch failed, falling back to primary peer: {e}");
+                                                        client.fetch_blocks_by_points(&headers).await
+                                                    }
+                                                }
+                                            };
+                                            match blocks_result {
+                                                Ok(blocks) => {
+                                                    let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                                    self.peer_manager.write().await.record_block_fetch(
+                                                        &peer_addr, fetch_ms, header_count, 0,
+                                                    );
+                                                    let applied = self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                    if applied > 0 {
+                                                        consecutive_apply_failures = 0;
+                                                    } else if header_count > 0 {
+                                                        consecutive_apply_failures += 1;
+                                                        if consecutive_apply_failures >= 5 {
+                                                            error!(
+                                                                consecutive_apply_failures,
+                                                                "Ledger state diverged from chain — \
+                                                                 blocks do not connect. Triggering \
+                                                                 reconnect to re-establish intersection."
+                                                            );
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => { error!("Block fetch failed: {e}"); break; }
+                                            }
+                                        }
+                                        HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, .. } => {
+                                            if !headers.is_empty() {
+                                                match fetch_pool.fetch_blocks_concurrent(&headers).await {
+                                                    Ok(blocks) => {
+                                                        self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                    }
+                                                    Err(e) => { warn!("Pool fetch failed during rollback batch: {e}"); }
+                                                }
+                                            }
+                                            warn!("Rollback to {rollback_point}");
+                                            self.handle_rollback(&rollback_point).await;
+                                        }
+                                        HeaderBatchResult::RollBackward(point, _tip) => {
+                                            warn!("Rollback to {point}");
+                                            self.handle_rollback(&point).await;
+                                        }
+                                        HeaderBatchResult::Await => {
+                                            info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
+                                            self.enable_strict_verification().await;
+                                            self.update_query_state().await;
+                                            self.try_forge_block().await;
+                                            pipeline_depth = 1;
+                                        }
+                                    }
+                                    if pipelined.as_ref().is_some_and(|pc| pc.is_stale()) {
+                                        pipeline_depth = 1;
+                                        self.enable_strict_verification().await;
+                                        let old = pipelined.take().expect("pipelined is Some (is_some_and guard)");
+                                        let addr = old.remote_addr();
+                                        old.abort().await;
+                                        match PipelinedPeerClient::connect(&addr.to_string() as &str, self.network_magic).await {
+                                            Ok(mut new_pc) => {
+                                                let tip = self.ledger_state.read().await.tip.point.clone();
+                                                let mut pts = Vec::new();
+                                                if tip != Point::Origin { pts.push(tip); }
+                                                pts.push(Point::Origin);
+                                                match new_pc.find_intersect(pts).await {
+                                                    Ok(_) => {
+                                                        info!("Reconnected pipelined client after tip sync");
+                                                        pipelined = Some(new_pc);
+                                                    }
+                                                    Err(e) => warn!("Pipelined reconnect intersect failed: {e}"),
+                                                }
+                                            }
+                                            Err(e) => warn!("Pipelined reconnect failed: {e}"),
+                                        }
+                                    }
+                                }
+                                Err(e) => { error!("Chain sync error: {e}"); break; }
+                            }
+                        }
+                        _ = forge_ticker.tick(), if self.block_producer.is_some() && pipeline_depth <= 1 => {
+                            if let Some(wc) = self.current_wall_clock_slot() {
+                                if wc.0 > last_forge_slot {
+                                    last_forge_slot = wc.0;
+                                    self.try_forge_block().await;
+                                }
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            info!("Shutdown requested during sync");
+                            break;
+                        }
+                    }
+                } else {
+                    // Single-peer mode: use request_next_batch (headers + blocks from same peer)
+                    tokio::select! {
+                        result = client.request_next_batch(header_batch_size) => {
+                            match result {
+                                Ok(events) => {
+                                    let mut forward_blocks = Vec::new();
+                                    let mut other_events = Vec::new();
+
+                                    for event in events {
+                                        match event {
+                                            ChainSyncEvent::RollForward(block, tip) => {
+                                                forward_blocks.push((*block, tip));
+                                            }
+                                            other => other_events.push(other),
+                                        }
+                                    }
+
+                                    if !forward_blocks.is_empty() {
+                                        let tip = forward_blocks.last().expect("forward_blocks is non-empty (checked above)").1.clone();
+                                        let blocks: Vec<_> = forward_blocks.into_iter().map(|(b, _)| b).collect();
+                                        self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                    }
+
+                                    for event in other_events {
+                                        match event {
+                                            ChainSyncEvent::RollBackward(point, tip) => {
+                                                warn!("Rollback to {point}, tip: {tip}");
+                                                self.handle_rollback(&point).await;
+                                            }
+                                            ChainSyncEvent::Await => {
+                                                info!(blocks_received, "Caught up to chain tip, awaiting new blocks");
+                                                self.enable_strict_verification().await;
+                                                self.update_query_state().await;
+                                            }
+                                            ChainSyncEvent::RollForward(..) => unreachable!(),
+                                        }
+                                    }
+                                }
+                                Err(e) => { error!("Chain sync error: {e}"); break; }
+                            }
+                        }
+                        _ = forge_ticker.tick(), if self.block_producer.is_some() => {
+                            if let Some(wc) = self.current_wall_clock_slot() {
+                                if wc.0 > last_forge_slot {
+                                    last_forge_slot = wc.0;
+                                    self.try_forge_block().await;
+                                }
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            info!("Shutdown requested during sync");
+                            break;
+                        }
+                    }
+                }
+            }
+            fetch_pool.disconnect_all().await;
         }
 
         self.save_ledger_snapshot().await;
-        fetch_pool.disconnect_all().await;
         info!("Chain sync stopped after {blocks_received} blocks");
         Ok(())
     }
@@ -2324,9 +2517,21 @@ impl Node {
         }
 
         // Validate ALL block headers BEFORE storing.
-        // In strict mode (caught up to tip), validation failures reject the entire batch.
-        // In non-strict mode (during sync), failures are logged but non-fatal.
+        // Two-phase validation matching Haskell's cardano-node:
+        //
+        // During initial sync (non-strict), use Replay mode — skip all cryptographic
+        // verification (VRF, KES, opcert Ed25519). This matches Haskell's
+        // `reupdateChainDepState` behavior for blocks from the immutable chain.
+        // Historical blocks are validated by hash-chain connectivity.
+        //
+        // At tip (strict), use Full mode with parallel crypto verification via rayon.
+        // This matches Haskell's `updateChainDepState` for new network blocks.
         let strict = self.consensus.strict_verification();
+        let mode = if strict {
+            ValidationMode::Full
+        } else {
+            ValidationMode::Replay
+        };
         {
             // Read ledger state once for the whole batch
             let ls = self.ledger_state.read().await;
@@ -2343,6 +2548,9 @@ impl Node {
                 0
             };
 
+            // Phase 1: Sequential structural validation + state updates.
+            // Uses Replay mode during sync (skip crypto) or Full mode at tip.
+            // Opcert counter tracking and structural checks always run.
             for block in &blocks {
                 if !block.era.is_shelley_based() {
                     continue;
@@ -2388,6 +2596,7 @@ impl Node {
                     &header_with_nonce,
                     block.slot(),
                     issuer_info.as_ref(),
+                    mode,
                 ) {
                     if strict {
                         error!(

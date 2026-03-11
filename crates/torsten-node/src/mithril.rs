@@ -687,15 +687,9 @@ where
     chunk_numbers.sort();
 
     let total_chunks = chunk_numbers.len() as u64;
-    let pb = ProgressBar::new(total_chunks);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} chunks ({per_sec}, {eta})")
-            // Safety: template string is a compile-time constant known to be valid
-            .expect("progress bar template is a valid constant")
-            .progress_chars("█▉▊▋▌▍▎▏ "),
-    );
-
+    let start = std::time::Instant::now();
+    let mut last_log = std::time::Instant::now();
+    let mut chunks_processed = 0u64;
     let mut total_blocks = 0u64;
 
     for chunk_num in &chunk_numbers {
@@ -707,7 +701,19 @@ where
             let count = replay_chunk_with_index(&chunk_path, &secondary_path, &mut on_block)?;
             if count > 0 {
                 total_blocks += count;
-                pb.inc(1);
+                chunks_processed += 1;
+                if last_log.elapsed().as_secs() >= 5 {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let speed = total_blocks as f64 / elapsed;
+                    tracing::info!(
+                        chunks_processed,
+                        total_chunks,
+                        total_blocks,
+                        speed = speed as u64,
+                        "Chunk replay progress"
+                    );
+                    last_log = std::time::Instant::now();
+                }
                 continue;
             }
         }
@@ -715,10 +721,9 @@ where
         // Fallback: sequential CBOR probe for block boundaries (no pallas decode)
         let count = replay_chunk_sequential(&chunk_path, &mut on_block)?;
         total_blocks += count;
-        pb.inc(1);
+        chunks_processed += 1;
     }
 
-    pb.finish_with_message("Replay complete");
     Ok(total_blocks)
 }
 

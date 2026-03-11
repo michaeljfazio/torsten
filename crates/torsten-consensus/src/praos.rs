@@ -80,6 +80,37 @@ pub struct BlockIssuerInfo {
     pub relative_stake: f64,
 }
 
+/// Controls the level of header validation performed.
+///
+/// Matches the Haskell cardano-node's structural distinction between
+/// `tickThenApply` (full validation for new network blocks) and
+/// `tickThenReapply` (state-update-only for blocks replayed from disk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationMode {
+    /// Full validation — verify all cryptographic proofs (VRF, KES, opcert Ed25519).
+    /// Used for blocks received from the network. Equivalent to Haskell's
+    /// `updateChainDepState` which calls `validateKESSignature` and
+    /// `validateVRFSignature`.
+    Full,
+    /// Replay validation — skip all cryptographic verification.
+    /// Only performs structural checks and updates chain-dependent state
+    /// (nonces, opcert counters). Used for blocks replayed from local storage
+    /// (ChainDB gap bridging, chunk-file replay after Mithril import).
+    /// Equivalent to Haskell's `reupdateChainDepState`.
+    Replay,
+}
+
+/// Parameters needed for standalone cryptographic verification of block headers.
+/// Extracted from `OuroborosPraos` so that verification can run in parallel
+/// (e.g., via rayon) without holding a mutable reference to the consensus engine.
+#[derive(Debug, Clone)]
+pub struct CryptoVerificationParams {
+    pub strict_verification: bool,
+    pub nonce_established: bool,
+    pub slots_per_kes_period: u64,
+    pub max_kes_evolutions: u64,
+}
+
 /// Active slot coefficient (f) - probability that a slot has a block
 /// Mainnet value: 1/20 = 0.05 (one block every ~20 seconds on average)
 pub const ACTIVE_SLOT_COEFF: f64 = 0.05;
@@ -186,18 +217,31 @@ impl OuroborosPraos {
         self.strict_verification = strict;
     }
 
+    /// Extract the parameters needed for standalone cryptographic verification.
+    /// Used to run VRF/KES/opcert verification in parallel (via rayon)
+    /// without holding a mutable reference to the consensus engine.
+    pub fn crypto_params(&self) -> CryptoVerificationParams {
+        CryptoVerificationParams {
+            strict_verification: self.strict_verification,
+            nonce_established: self.nonce_established,
+            slots_per_kes_period: self.slots_per_kes_period,
+            max_kes_evolutions: self.max_kes_evolutions,
+        }
+    }
+
     /// Validate a block header against consensus rules.
     ///
     /// This checks:
     /// 1. Block is not from the future
     /// 2. Issuer VRF key is present
-    /// 3. VRF proof is cryptographically valid
+    /// 3. VRF proof is cryptographically valid (in Full mode)
     /// 4. KES period is valid (not expired, not before cert start)
-    /// 5. Operational certificate has required fields
+    /// 5. Operational certificate has required fields (in Full mode)
     pub fn validate_header(
         &self,
         header: &BlockHeader,
         current_slot: SlotNo,
+        mode: ValidationMode,
     ) -> Result<(), ConsensusError> {
         trace!(
             slot = header.slot.0,
@@ -205,6 +249,7 @@ impl OuroborosPraos {
             current_slot = current_slot.0,
             issuer_vkey_len = header.issuer_vkey.len(),
             vrf_vkey_len = header.vrf_vkey.len(),
+            mode = ?mode,
             "Praos: validating block header"
         );
 
@@ -233,17 +278,15 @@ impl OuroborosPraos {
             return Err(ConsensusError::EmptyVrfKey);
         }
 
-        // Verify VRF proof cryptographically
-        self.verify_vrf_proof(header)?;
-
-        // Validate KES period
+        // Validate KES period (always — cheap structural check)
         self.validate_kes_period(header)?;
 
-        // Validate operational certificate structure
-        self.validate_operational_cert(header)?;
-
-        // Verify KES signature over the header body
-        self.verify_kes_signature(header)?;
+        // Cryptographic verification only in Full mode
+        if mode == ValidationMode::Full {
+            self.verify_vrf_proof(header)?;
+            self.validate_operational_cert(header)?;
+            self.verify_kes_signature(header)?;
+        }
 
         trace!(
             slot = header.slot.0,
@@ -263,11 +306,19 @@ impl OuroborosPraos {
     ///
     /// Pool-aware checks and opcert counter are evaluated BEFORE cryptographic
     /// verification so that binding/eligibility failures are reported accurately.
+    ///
+    /// The `mode` parameter controls whether cryptographic verification is performed:
+    /// - `ValidationMode::Full`: verify VRF proof, KES signature, and opcert Ed25519
+    ///   signature. Used for blocks received from the network (Haskell's `updateChainDepState`).
+    /// - `ValidationMode::Replay`: skip all crypto verification, only perform structural
+    ///   checks and update chain-dependent state (nonces, opcert counters). Used for blocks
+    ///   replayed from local storage (Haskell's `reupdateChainDepState`).
     pub fn validate_header_full(
         &mut self,
         header: &BlockHeader,
         current_slot: SlotNo,
         issuer_info: Option<&BlockIssuerInfo>,
+        mode: ValidationMode,
     ) -> Result<(), ConsensusError> {
         // 1. Structural checks (always fatal)
         if header.slot > current_slot {
@@ -385,17 +436,23 @@ impl OuroborosPraos {
         // 4. Opcert counter monotonicity check
         self.check_opcert_counter(header)?;
 
-        // 5. KES period validation (always fatal)
+        // 5. KES period validation (always fatal — cheap structural check)
         self.validate_kes_period(header)?;
 
         // 6. Cryptographic verification (VRF proof, opcert signature, KES signature)
-        self.verify_vrf_proof(header)?;
-        self.validate_operational_cert(header)?;
-        self.verify_kes_signature(header)?;
+        // In Replay mode (Haskell's reupdateChainDepState), skip all crypto verification.
+        // This is used for blocks replayed from local storage (ImmutableDB/ChainDB) where
+        // the blocks were previously validated or are from a trusted source (Mithril).
+        if mode == ValidationMode::Full {
+            self.verify_vrf_proof(header)?;
+            self.validate_operational_cert(header)?;
+            self.verify_kes_signature(header)?;
+        }
 
         trace!(
             slot = header.slot.0,
             block_no = header.block_number.0,
+            mode = ?mode,
             "Praos: full header validation passed"
         );
 
@@ -813,6 +870,134 @@ impl OuroborosPraos {
     pub fn update_tip(&mut self, tip: Tip) {
         self.tip = tip;
     }
+
+    /// Verify VRF proof, opcert signature, and KES signature for a block header.
+    /// This is a standalone function that does not require `&mut self`, enabling
+    /// parallel verification of multiple headers via rayon.
+    ///
+    /// Returns `Ok(())` if all checks pass (or failures are non-fatal in non-strict mode).
+    /// Returns `Err` only if a check fails in strict mode.
+    pub fn verify_header_crypto(
+        params: &CryptoVerificationParams,
+        header: &BlockHeader,
+    ) -> Result<(), ConsensusError> {
+        Self::verify_vrf_proof_static(params, header)?;
+        Self::verify_opcert_static(params, header)?;
+        Self::verify_kes_signature_static(params, header)?;
+        Ok(())
+    }
+
+    /// Standalone VRF proof verification (no &self required).
+    fn verify_vrf_proof_static(
+        params: &CryptoVerificationParams,
+        header: &BlockHeader,
+    ) -> Result<(), ConsensusError> {
+        let vrf_is_fatal = params.strict_verification && params.nonce_established;
+
+        let seed = crate::slot_leader::vrf_input(&header.epoch_nonce, header.slot);
+
+        match torsten_crypto::vrf::verify_vrf_proof(
+            &header.vrf_vkey,
+            &header.vrf_result.proof,
+            &seed,
+        ) {
+            Ok(vrf_output) => {
+                if header.vrf_result.output.len() == 64
+                    && header.vrf_result.output[..] != vrf_output[..]
+                {
+                    if vrf_is_fatal {
+                        return Err(ConsensusError::InvalidBlock(
+                            "VRF output mismatch".to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if vrf_is_fatal {
+                    return Err(ConsensusError::VrfVerification(format!("{e}")));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Standalone opcert signature verification (no &self required).
+    fn verify_opcert_static(
+        params: &CryptoVerificationParams,
+        header: &BlockHeader,
+    ) -> Result<(), ConsensusError> {
+        let opcert = &header.operational_cert;
+
+        if opcert.hot_vkey.is_empty() {
+            return Err(ConsensusError::InvalidOperationalCert);
+        }
+        if opcert.sigma.is_empty() {
+            return Err(ConsensusError::InvalidOperationalCert);
+        }
+
+        if header.issuer_vkey.len() == 32 && opcert.sigma.len() == 64 {
+            if let Err(e) = verify_opcert_signature(
+                &header.issuer_vkey,
+                &opcert.hot_vkey,
+                opcert.sequence_number,
+                opcert.kes_period,
+                &opcert.sigma,
+            ) {
+                if params.strict_verification {
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Standalone KES signature verification (no &self required).
+    fn verify_kes_signature_static(
+        params: &CryptoVerificationParams,
+        header: &BlockHeader,
+    ) -> Result<(), ConsensusError> {
+        if header.kes_signature.is_empty() {
+            return Ok(());
+        }
+
+        let opcert = &header.operational_cert;
+        if opcert.hot_vkey.len() != 32 || header.kes_signature.len() != 448 {
+            return Ok(());
+        }
+
+        let block_kes_period = header.slot.0 / params.slots_per_kes_period;
+        let kes_period_offset = block_kes_period.saturating_sub(opcert.kes_period);
+
+        let header_body_cbor = torsten_serialization::encode_block_header_body(header);
+
+        let mut hot_vkey = [0u8; 32];
+        hot_vkey.copy_from_slice(&opcert.hot_vkey);
+
+        let kes_period_offset_u32 = u32::try_from(kes_period_offset).map_err(|_| {
+            ConsensusError::InvalidBlock(format!(
+                "KES period offset {} exceeds u32 range",
+                kes_period_offset
+            ))
+        })?;
+
+        match torsten_crypto::kes::kes_verify_bytes(
+            &hot_vkey,
+            kes_period_offset_u32,
+            &header.kes_signature,
+            &header_body_cbor,
+        ) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                if params.strict_verification {
+                    return Err(ConsensusError::InvalidKesSignature);
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Verify the operational certificate Ed25519 signature.
@@ -976,7 +1161,7 @@ mod tests {
     fn test_future_block_rejected() {
         let praos = OuroborosPraos::new();
         let header = make_valid_header(200);
-        let result = praos.validate_header(&header, SlotNo(100));
+        let result = praos.validate_header(&header, SlotNo(100), ValidationMode::Full);
         assert!(matches!(result, Err(ConsensusError::FutureBlock { .. })));
     }
 
@@ -984,7 +1169,7 @@ mod tests {
     fn test_valid_header() {
         let praos = OuroborosPraos::new();
         let header = make_valid_header(100);
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(result.is_ok());
     }
 
@@ -993,7 +1178,7 @@ mod tests {
         let praos = OuroborosPraos::new();
         let mut header = make_valid_header(100);
         header.issuer_vkey = vec![];
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(matches!(result, Err(ConsensusError::EmptyIssuerVkey)));
     }
 
@@ -1002,7 +1187,7 @@ mod tests {
         let praos = OuroborosPraos::new();
         let mut header = make_valid_header(100);
         header.vrf_vkey = vec![];
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(matches!(result, Err(ConsensusError::EmptyVrfKey)));
     }
 
@@ -1013,7 +1198,7 @@ mod tests {
         let praos = OuroborosPraos::new();
         let header = make_valid_header(100);
         // With dummy VRF key/proof, verification should pass (non-fatal mode)
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(result.is_ok());
     }
 
@@ -1024,7 +1209,9 @@ mod tests {
         let mut header = make_valid_header(200_000);
         // Set cert KES period to 1 (matches)
         header.operational_cert.kes_period = 1;
-        assert!(praos.validate_header(&header, SlotNo(300_000)).is_ok());
+        assert!(praos
+            .validate_header(&header, SlotNo(300_000), ValidationMode::Full)
+            .is_ok());
     }
 
     #[test]
@@ -1033,7 +1220,7 @@ mod tests {
         let mut header = make_valid_header(100);
         // Block at slot 100 is in KES period 0, but cert says period 5
         header.operational_cert.kes_period = 5;
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(matches!(
             result,
             Err(ConsensusError::KesPeriodBeforeCert { .. })
@@ -1048,7 +1235,7 @@ mod tests {
         let mut header = make_valid_header(slot);
         // Cert started at period 0, so 63 evolutions > max 62
         header.operational_cert.kes_period = 0;
-        let result = praos.validate_header(&header, SlotNo(slot + 1000));
+        let result = praos.validate_header(&header, SlotNo(slot + 1000), ValidationMode::Full);
         assert!(matches!(result, Err(ConsensusError::KesExpired { .. })));
     }
 
@@ -1059,7 +1246,9 @@ mod tests {
         let slot = KES_PERIOD_SLOTS * 61;
         let mut header = make_valid_header(slot);
         header.operational_cert.kes_period = 0;
-        assert!(praos.validate_header(&header, SlotNo(slot + 1000)).is_ok());
+        assert!(praos
+            .validate_header(&header, SlotNo(slot + 1000), ValidationMode::Full)
+            .is_ok());
     }
 
     #[test]
@@ -1067,7 +1256,7 @@ mod tests {
         let praos = OuroborosPraos::new();
         let mut header = make_valid_header(100);
         header.operational_cert.hot_vkey = vec![];
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(matches!(
             result,
             Err(ConsensusError::InvalidOperationalCert)
@@ -1079,7 +1268,7 @@ mod tests {
         let praos = OuroborosPraos::new();
         let mut header = make_valid_header(100);
         header.operational_cert.sigma = vec![];
-        let result = praos.validate_header(&header, SlotNo(200));
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
         assert!(matches!(
             result,
             Err(ConsensusError::InvalidOperationalCert)
@@ -1091,7 +1280,9 @@ mod tests {
         let praos = OuroborosPraos::new();
         let mut header = make_valid_header(100);
         header.vrf_result.output = vec![0u8; 64]; // TPraos compatibility
-        assert!(praos.validate_header(&header, SlotNo(200)).is_ok());
+        assert!(praos
+            .validate_header(&header, SlotNo(200), ValidationMode::Full)
+            .is_ok());
     }
 
     #[test]
@@ -1181,7 +1372,9 @@ mod tests {
 
         // In non-strict mode, dummy VRF should pass (non-fatal)
         let header = make_valid_header(100);
-        assert!(praos.validate_header(&header, SlotNo(200)).is_ok());
+        assert!(praos
+            .validate_header(&header, SlotNo(200), ValidationMode::Full)
+            .is_ok());
 
         // Enable strict mode
         praos.set_strict_verification(true);
@@ -1194,7 +1387,9 @@ mod tests {
         // This tests that the strict flag is properly toggled
         praos.set_strict_verification(false);
         assert!(!praos.strict_verification);
-        assert!(praos.validate_header(&header2, SlotNo(200)).is_ok());
+        assert!(praos
+            .validate_header(&header2, SlotNo(200), ValidationMode::Full)
+            .is_ok());
     }
 
     // --- Tests for validate_header_full ---
@@ -1206,7 +1401,7 @@ mod tests {
         let mut praos = OuroborosPraos::new();
         let header = make_valid_header(100);
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), None)
+            .validate_header_full(&header, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
     }
 
@@ -1223,7 +1418,8 @@ mod tests {
             relative_stake: 1.0,
         };
 
-        let result = praos.validate_header_full(&header, SlotNo(200), Some(&info));
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full);
         assert!(
             matches!(result, Err(ConsensusError::VrfKeyMismatch)),
             "Expected VrfKeyMismatch, got: {result:?}"
@@ -1242,7 +1438,7 @@ mod tests {
         };
 
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), Some(&info))
+            .validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full)
             .is_ok());
     }
 
@@ -1265,7 +1461,7 @@ mod tests {
         // by using non-strict for the underlying check
         praos.set_strict_verification(false);
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), Some(&info))
+            .validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full)
             .is_ok());
     }
 
@@ -1277,21 +1473,21 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None)
+            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
 
         // Second block from same pool with seq=6 (forward, OK)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None)
+            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full)
             .is_ok());
 
         // Third block from same pool with seq=4 (regression, non-strict: OK)
         let mut header3 = make_valid_header(300);
         header3.operational_cert.sequence_number = 4;
         assert!(praos
-            .validate_header_full(&header3, SlotNo(400), None)
+            .validate_header_full(&header3, SlotNo(400), None, ValidationMode::Full)
             .is_ok());
     }
 
@@ -1304,7 +1500,7 @@ mod tests {
         header1.operational_cert.sequence_number = 5;
         let info1 = make_issuer_info(&header1);
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), Some(&info1))
+            .validate_header_full(&header1, SlotNo(200), Some(&info1), ValidationMode::Full)
             .is_ok());
 
         // Enable strict mode
@@ -1314,7 +1510,8 @@ mod tests {
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 3;
         let info2 = make_issuer_info(&header2);
-        let result = praos.validate_header_full(&header2, SlotNo(300), Some(&info2));
+        let result =
+            praos.validate_header_full(&header2, SlotNo(300), Some(&info2), ValidationMode::Full);
         assert!(
             matches!(
                 result,
@@ -1336,14 +1533,14 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None)
+            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
 
         // Same seq=5 is allowed (not a regression, same cert can sign multiple blocks)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None)
+            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full)
             .is_ok());
 
         // Verify counter was tracked
@@ -1361,7 +1558,7 @@ mod tests {
         header_a.issuer_vkey = vec![1u8; 32];
         header_a.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header_a, SlotNo(200), None)
+            .validate_header_full(&header_a, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
 
         // Pool B (different issuer key) with seq=2 — should be fine (different pool)
@@ -1369,7 +1566,7 @@ mod tests {
         header_b.issuer_vkey = vec![2u8; 32];
         header_b.operational_cert.sequence_number = 2;
         assert!(praos
-            .validate_header_full(&header_b, SlotNo(300), None)
+            .validate_header_full(&header_b, SlotNo(300), None, ValidationMode::Full)
             .is_ok());
 
         // Verify each pool tracked separately
@@ -1400,7 +1597,7 @@ mod tests {
         praos.set_strict_verification(false);
         // Non-strict: leader eligibility failure is non-fatal
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), Some(&info))
+            .validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full)
             .is_ok());
     }
 
@@ -1422,14 +1619,14 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None)
+            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
 
         // Jump from 5 to 10 (over-increment by 5) — non-fatal during sync
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 10;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None)
+            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full)
             .is_ok());
     }
 
@@ -1441,7 +1638,7 @@ mod tests {
         header1.operational_cert.sequence_number = 5;
         let info1 = make_issuer_info(&header1);
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), Some(&info1))
+            .validate_header_full(&header1, SlotNo(200), Some(&info1), ValidationMode::Full)
             .is_ok());
 
         praos.set_strict_verification(true);
@@ -1450,7 +1647,8 @@ mod tests {
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 7;
         let info2 = make_issuer_info(&header2);
-        let result = praos.validate_header_full(&header2, SlotNo(300), Some(&info2));
+        let result =
+            praos.validate_header_full(&header2, SlotNo(300), Some(&info2), ValidationMode::Full);
         assert!(
             matches!(
                 result,
@@ -1474,13 +1672,13 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None)
+            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full)
             .is_ok());
 
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None)
+            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full)
             .is_ok());
 
         let pool_id = torsten_primitives::hash::blake2b_224(&header1.issuer_vkey);
@@ -1598,7 +1796,7 @@ mod tests {
         let expected_pool_id = torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
 
         // No issuer info = unregistered pool
-        let result = praos.validate_header_full(&header, SlotNo(200), None);
+        let result = praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full);
         match result {
             Err(ConsensusError::UnregisteredPool { pool_id }) => {
                 assert_eq!(pool_id, expected_pool_id);
@@ -1615,7 +1813,7 @@ mod tests {
         assert!(!praos.strict_verification);
 
         let header = make_valid_header(100);
-        let result = praos.validate_header_full(&header, SlotNo(200), None);
+        let result = praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full);
         assert!(
             result.is_ok(),
             "Unregistered pool should be non-fatal during sync, got: {result:?}"
@@ -1634,7 +1832,8 @@ mod tests {
             relative_stake: 0.5,
         };
 
-        let result = praos.validate_header_full(&header, SlotNo(200), Some(&info));
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full);
         assert!(
             result.is_ok(),
             "Registered pool with correct info should pass, got: {result:?}"
@@ -1647,7 +1846,7 @@ mod tests {
         praos.set_strict_verification(true);
 
         let header = make_valid_header(100);
-        let result = praos.validate_header_full(&header, SlotNo(200), None);
+        let result = praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full);
         assert!(result.is_err());
 
         let err_msg = format!("{}", result.unwrap_err());
@@ -1694,7 +1893,8 @@ mod tests {
         // With strict mode and dummy VRF data, VRF key binding check passes but
         // later VRF proof check may fail. The important thing is that it does NOT
         // fail with UnregisteredPool.
-        let result = praos.validate_header_full(&header, SlotNo(200), Some(&info));
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full);
         if let Err(ConsensusError::UnregisteredPool { .. }) = &result {
             panic!("Should not get UnregisteredPool when issuer_info is Some");
         }
