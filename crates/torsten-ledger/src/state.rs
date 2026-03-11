@@ -1496,10 +1496,7 @@ impl LedgerState {
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
-                            let mut key_bytes = [0u8; 32];
-                            let copy_len = (return_addr.len() - 1).min(32);
-                            key_bytes[..copy_len].copy_from_slice(&return_addr[1..1 + copy_len]);
-                            let key = Hash32::from_bytes(key_bytes);
+                            let key = Self::reward_account_to_hash(return_addr);
                             *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
                         }
                     }
@@ -1872,12 +1869,15 @@ impl LedgerState {
         self.stake_distribution.stake_map = new_map;
     }
 
-    /// Convert a reward account (raw bytes with network header) to a Hash32 key
+    /// Convert a reward account (raw bytes with network header) to a Hash32 key.
+    ///
+    /// Reward addresses are 29 bytes: 1 byte network header + 28 byte credential hash.
+    /// We extract exactly the 28-byte credential and zero-pad to 32 bytes for Hash32.
     fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
         let mut key_bytes = [0u8; 32];
         if reward_account.len() >= 29 {
-            let copy_len = (reward_account.len() - 1).min(32);
-            key_bytes[..copy_len].copy_from_slice(&reward_account[1..1 + copy_len]);
+            // Copy exactly 28 bytes of the credential (skip the 1-byte header)
+            key_bytes[..28].copy_from_slice(&reward_account[1..29]);
         }
         Hash32::from_bytes(key_bytes)
     }
@@ -2127,10 +2127,7 @@ impl LedgerState {
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
-                            let mut key_bytes = [0u8; 32];
-                            let copy_len = (return_addr.len() - 1).min(32);
-                            key_bytes[..copy_len].copy_from_slice(&return_addr[1..1 + copy_len]);
-                            let key = Hash32::from_bytes(key_bytes);
+                            let key = Self::reward_account_to_hash(return_addr);
                             *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
                         }
                     }
@@ -2632,10 +2629,7 @@ impl LedgerState {
                     total += actual;
                     // Credit the withdrawal to the recipient's reward account
                     if actual > 0 && reward_addr.len() >= 29 {
-                        let mut key_bytes = [0u8; 32];
-                        let copy_len = (reward_addr.len() - 1).min(32);
-                        key_bytes[..copy_len].copy_from_slice(&reward_addr[1..1 + copy_len]);
-                        let key = Hash32::from_bytes(key_bytes);
+                        let key = Self::reward_account_to_hash(reward_addr);
                         *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
@@ -7413,5 +7407,107 @@ mod tests {
         state.governance.dreps.get_mut(&dreps[1].1).unwrap().active = false;
         let total = state.compute_total_drep_stake();
         assert_eq!(total, 3_000_000_000);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_extracts_28_byte_credential() {
+        // Standard 29-byte reward address: 1 byte header + 28 byte credential
+        let cred_bytes = [0xAB; 28];
+        let mut reward_addr_29 = vec![0xE0u8]; // testnet header
+        reward_addr_29.extend_from_slice(&cred_bytes);
+        assert_eq!(reward_addr_29.len(), 29);
+
+        let hash = LedgerState::reward_account_to_hash(&reward_addr_29);
+        let hash_bytes = hash.as_ref();
+        // First 28 bytes should be the credential
+        assert_eq!(&hash_bytes[..28], &cred_bytes);
+        // Last 4 bytes should be zero-padded
+        assert_eq!(&hash_bytes[28..32], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_ignores_extra_bytes() {
+        // An address longer than 29 bytes should still extract only 28 bytes of credential.
+        // This tests the fix for the hash collision risk where .min(32) could copy
+        // extra trailing bytes, causing different addresses to map to the same key.
+        let cred_bytes = [0xCD; 28];
+        let mut reward_addr_long = vec![0xE1u8]; // mainnet header
+        reward_addr_long.extend_from_slice(&cred_bytes);
+        // Append extra bytes (e.g., script hash or other data)
+        reward_addr_long.extend_from_slice(&[0xFF; 10]);
+        assert_eq!(reward_addr_long.len(), 39);
+
+        let hash = LedgerState::reward_account_to_hash(&reward_addr_long);
+        let hash_bytes = hash.as_ref();
+        // Should only contain the 28-byte credential, not the extra bytes
+        assert_eq!(&hash_bytes[..28], &cred_bytes);
+        assert_eq!(&hash_bytes[28..32], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_no_collision_different_trailing_bytes() {
+        // Two addresses with the same 28-byte credential but different trailing data
+        // must produce the same hash (both should extract only the credential).
+        let cred_bytes = [0x42; 28];
+
+        let mut addr_a = vec![0xE0u8];
+        addr_a.extend_from_slice(&cred_bytes);
+        addr_a.extend_from_slice(&[0x00; 5]); // trailing zeros
+
+        let mut addr_b = vec![0xE0u8];
+        addr_b.extend_from_slice(&cred_bytes);
+        addr_b.extend_from_slice(&[0xFF; 5]); // trailing 0xFF
+
+        let hash_a = LedgerState::reward_account_to_hash(&addr_a);
+        let hash_b = LedgerState::reward_account_to_hash(&addr_b);
+        assert_eq!(
+            hash_a, hash_b,
+            "Same credential should produce same hash regardless of trailing bytes"
+        );
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_different_credentials_no_collision() {
+        // Two addresses with different 28-byte credentials must produce different hashes.
+        let mut addr_a = vec![0xE0u8];
+        addr_a.extend_from_slice(&[0xAA; 28]);
+
+        let mut addr_b = vec![0xE0u8];
+        addr_b.extend_from_slice(&[0xBB; 28]);
+
+        let hash_a = LedgerState::reward_account_to_hash(&addr_a);
+        let hash_b = LedgerState::reward_account_to_hash(&addr_b);
+        assert_ne!(
+            hash_a, hash_b,
+            "Different credentials must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_short_address_returns_zeros() {
+        // Address shorter than 29 bytes should return all zeros (no extraction possible).
+        let short_addr = vec![0xE0u8; 10];
+        let hash = LedgerState::reward_account_to_hash(&short_addr);
+        assert_eq!(hash.as_ref(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn test_reward_account_to_hash_header_byte_ignored() {
+        // Different header bytes with same credential should produce the same hash,
+        // since only bytes 1..29 are extracted.
+        let cred_bytes = [0x77; 28];
+
+        let mut addr_testnet = vec![0xE0u8]; // testnet
+        addr_testnet.extend_from_slice(&cred_bytes);
+
+        let mut addr_mainnet = vec![0xE1u8]; // mainnet
+        addr_mainnet.extend_from_slice(&cred_bytes);
+
+        let hash_testnet = LedgerState::reward_account_to_hash(&addr_testnet);
+        let hash_mainnet = LedgerState::reward_account_to_hash(&addr_mainnet);
+        assert_eq!(
+            hash_testnet, hash_mainnet,
+            "Header byte should not affect the hash key"
+        );
     }
 }
