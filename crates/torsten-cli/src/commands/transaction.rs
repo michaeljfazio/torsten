@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
-use torsten_primitives::hash::Hash32;
+use torsten_primitives::hash::{Hash28, Hash32};
 
 #[derive(Args, Debug)]
 pub struct TransactionCmd {
@@ -470,7 +470,6 @@ fn parse_mint_args(mint_args: &[String]) -> Result<Vec<MintEntry>> {
 fn parse_json_native_script(
     json: &serde_json::Value,
 ) -> Result<torsten_primitives::transaction::NativeScript> {
-    use torsten_primitives::hash::Hash32;
     use torsten_primitives::transaction::NativeScript;
 
     let script_type = json["type"]
@@ -488,9 +487,9 @@ fn parse_json_native_script(
                 bail!("keyHash must be 28 bytes, got {}", key_hash_bytes.len());
             }
             // Pad 28-byte key hash to Hash32 (our internal representation)
-            let mut bytes = [0u8; 32];
-            bytes[..28].copy_from_slice(&key_hash_bytes);
-            Ok(NativeScript::ScriptPubkey(Hash32::from_bytes(bytes)))
+            let h28 = Hash28::try_from(key_hash_bytes.as_slice())
+                .map_err(|_| anyhow::anyhow!("Failed to convert key hash to Hash28"))?;
+            Ok(NativeScript::ScriptPubkey(h28.to_hash32_padded()))
         }
         "all" | "ScriptAll" => {
             let scripts = parse_json_script_list(json)?;
