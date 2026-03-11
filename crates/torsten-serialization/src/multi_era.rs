@@ -578,9 +578,7 @@ fn convert_native_script_inner(script: &pallas_primitives::alonzo::NativeScript)
     match script {
         PNS::ScriptPubkey(h) => {
             // ScriptPubkey contains AddrKeyhash (28 bytes); pad to Hash32
-            let mut bytes = [0u8; 32];
-            bytes[..28].copy_from_slice(h.as_ref());
-            NativeScript::ScriptPubkey(Hash32::from_bytes(bytes))
+            NativeScript::ScriptPubkey(pallas_hash_to_torsten28(h).to_hash32_padded())
         }
         PNS::ScriptAll(scripts) => {
             NativeScript::ScriptAll(scripts.iter().map(convert_native_script_inner).collect())
@@ -922,9 +920,7 @@ fn convert_pallas_drep(drep: &pallas_primitives::conway::DRep) -> DRep {
     match drep {
         PD::Key(h) => {
             // DRep key hash is 28 bytes; pad to Hash32
-            let mut bytes = [0u8; 32];
-            bytes[..28].copy_from_slice(h.as_ref());
-            DRep::KeyHash(Hash32::from_bytes(bytes))
+            DRep::KeyHash(pallas_hash_to_torsten28(h).to_hash32_padded())
         }
         PD::Script(h) => DRep::ScriptHash(pallas_hash_to_torsten28(h)),
         PD::Abstain => DRep::Abstain,
@@ -1175,9 +1171,7 @@ fn convert_pallas_voter(voter: &pallas_primitives::conway::Voter) -> Voter {
         PV::DRepScript(h) => Voter::DRep(Credential::Script(pallas_hash_to_torsten28(h))),
         PV::StakePoolKey(h) => {
             // Pool key hash is 28 bytes; pad to Hash32
-            let mut bytes = [0u8; 32];
-            bytes[..28].copy_from_slice(h.as_ref());
-            Voter::StakePool(Hash32::from_bytes(bytes))
+            Voter::StakePool(pallas_hash_to_torsten28(h).to_hash32_padded())
         }
     }
 }
