@@ -81,10 +81,18 @@ pub enum PeerSharingMode {
     PeerSharingEnabled = 1,
 }
 
+/// Maximum number of distinct IPs tracked by the rate limiter.
+/// Prevents unbounded HashMap growth from attackers connecting from many IPs.
+const MAX_TRACKED_IPS: usize = 100_000;
+
+/// Run inline cleanup every N insertions to evict stale entries.
+const CLEANUP_EVERY_N_INSERTIONS: usize = 1_000;
+
 /// Per-IP connection rate limiter to prevent DoS attacks.
 /// Tracks connection timestamps per IP and enforces:
 /// - Max connections per IP within a time window
 /// - Cleanup of stale entries
+/// - Bounded memory via MAX_TRACKED_IPS cap
 struct ConnectionRateLimiter {
     /// Map of IP → list of connection timestamps
     attempts: std::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>,
@@ -92,6 +100,10 @@ struct ConnectionRateLimiter {
     max_per_ip: usize,
     /// Time window for rate limiting
     window: std::time::Duration,
+    /// Insertion counter for periodic inline cleanup
+    insertion_count: std::sync::atomic::AtomicUsize,
+    /// Maximum number of tracked IPs (for testing override)
+    max_tracked_ips: usize,
 }
 
 impl ConnectionRateLimiter {
@@ -100,6 +112,8 @@ impl ConnectionRateLimiter {
             attempts: std::sync::Mutex::new(HashMap::new()),
             max_per_ip,
             window,
+            insertion_count: std::sync::atomic::AtomicUsize::new(0),
+            max_tracked_ips: MAX_TRACKED_IPS,
         }
     }
 
@@ -108,6 +122,28 @@ impl ConnectionRateLimiter {
     fn check_and_record(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let mut attempts = self.attempts.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Periodic inline cleanup: every N insertions, evict expired entries
+        let count = self
+            .insertion_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count.is_multiple_of(CLEANUP_EVERY_N_INSERTIONS) && count > 0 {
+            attempts.retain(|_, timestamps| {
+                timestamps.retain(|t| now.duration_since(*t) < self.window);
+                !timestamps.is_empty()
+            });
+        }
+
+        // If map is at capacity and this is a new IP, reject the connection
+        if attempts.len() >= self.max_tracked_ips && !attempts.contains_key(&ip) {
+            warn!(
+                tracked_ips = attempts.len(),
+                max = self.max_tracked_ips,
+                "Rate limiter: rejecting new IP, tracked IP cap reached"
+            );
+            return false;
+        }
+
         let timestamps = attempts.entry(ip).or_default();
 
         // Remove timestamps outside the window
@@ -129,6 +165,15 @@ impl ConnectionRateLimiter {
             timestamps.retain(|t| now.duration_since(*t) < self.window);
             !timestamps.is_empty()
         });
+    }
+
+    /// Return the number of IPs currently tracked (for testing)
+    #[cfg(test)]
+    fn tracked_ip_count(&self) -> usize {
+        self.attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -1844,5 +1889,122 @@ mod tests {
         limiter.cleanup();
         // Should allow again after window expires
         assert!(limiter.check_and_record(ip));
+    }
+
+    #[test]
+    fn test_rate_limiter_cap_prevents_unbounded_growth() {
+        // Use a small cap for testing
+        let mut limiter = ConnectionRateLimiter::new(1, std::time::Duration::from_secs(60));
+        limiter.max_tracked_ips = 10;
+
+        // Fill up to the cap with distinct IPs
+        for i in 0..10u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            assert!(
+                limiter.check_and_record(ip),
+                "IP 10.0.0.{i} should be allowed"
+            );
+        }
+        assert_eq!(limiter.tracked_ip_count(), 10);
+
+        // 11th distinct IP should be rejected (cap reached)
+        let new_ip: IpAddr = "10.0.0.10".parse().unwrap();
+        assert!(
+            !limiter.check_and_record(new_ip),
+            "New IP should be rejected when cap is reached"
+        );
+        // Map should not have grown
+        assert_eq!(limiter.tracked_ip_count(), 10);
+    }
+
+    #[test]
+    fn test_rate_limiter_cap_allows_existing_ips() {
+        // Even at cap, existing IPs can still connect (up to per-IP limit)
+        let mut limiter = ConnectionRateLimiter::new(3, std::time::Duration::from_secs(60));
+        limiter.max_tracked_ips = 5;
+
+        for i in 0..5u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            assert!(limiter.check_and_record(ip));
+        }
+        assert_eq!(limiter.tracked_ip_count(), 5);
+
+        // Existing IP should still be allowed (under per-IP limit of 3)
+        let existing_ip: IpAddr = "10.0.0.0".parse().unwrap();
+        assert!(
+            limiter.check_and_record(existing_ip),
+            "Existing IP should still be allowed at cap"
+        );
+        // Still 5 tracked IPs
+        assert_eq!(limiter.tracked_ip_count(), 5);
+    }
+
+    #[test]
+    fn test_rate_limiter_cleanup_frees_cap_space() {
+        // After cleanup of expired entries, new IPs should be allowed again
+        let mut limiter = ConnectionRateLimiter::new(1, std::time::Duration::from_millis(1));
+        limiter.max_tracked_ips = 5;
+
+        // Fill up the cap
+        for i in 0..5u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            assert!(limiter.check_and_record(ip));
+        }
+        assert_eq!(limiter.tracked_ip_count(), 5);
+
+        // New IP rejected at cap
+        let new_ip: IpAddr = "10.0.0.5".parse().unwrap();
+        assert!(!limiter.check_and_record(new_ip));
+
+        // Wait for all entries to expire
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Run cleanup to evict expired entries
+        limiter.cleanup();
+        assert_eq!(limiter.tracked_ip_count(), 0);
+
+        // Now new IPs should be allowed again
+        assert!(
+            limiter.check_and_record(new_ip),
+            "New IP should be allowed after cleanup frees space"
+        );
+    }
+
+    #[test]
+    fn test_rate_limiter_inline_cleanup_evicts_stale() {
+        // Test that inline cleanup (triggered every N insertions) removes expired entries
+        let mut limiter = ConnectionRateLimiter::new(1, std::time::Duration::from_millis(1));
+        limiter.max_tracked_ips = 100_000; // Don't hit cap
+
+        // Reset the counter so next call is at count=0 (no cleanup on first)
+        limiter
+            .insertion_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Add some IPs
+        for i in 0..10u8 {
+            let ip: IpAddr = format!("10.0.0.{i}").parse().unwrap();
+            limiter.check_and_record(ip);
+        }
+        assert_eq!(limiter.tracked_ip_count(), 10);
+
+        // Wait for entries to expire
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Set counter so the next fetch_add(1) returns a value that triggers cleanup.
+        // fetch_add returns the old value, so store N so the returned count is N,
+        // and N % N == 0 && N > 0 triggers the cleanup branch.
+        limiter.insertion_count.store(
+            CLEANUP_EVERY_N_INSERTIONS,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // This call will trigger inline cleanup (counter becomes CLEANUP_EVERY_N_INSERTIONS)
+        // which should evict all expired entries. The new IP gets added.
+        let trigger_ip: IpAddr = "10.0.0.100".parse().unwrap();
+        assert!(limiter.check_and_record(trigger_ip));
+
+        // After inline cleanup, only the newly added IP should remain
+        assert_eq!(limiter.tracked_ip_count(), 1);
     }
 }
