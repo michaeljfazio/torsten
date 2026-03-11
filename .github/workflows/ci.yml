@@ -89,9 +89,12 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: torsten-macos-aarch64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: torsten-windows-x86_64
+          # Windows disabled: cardano-lsm v1.0.1 has compilation errors on MSVC
+          # (missing std::io::Read import, unsafe block in session_lock.rs)
+          # Re-enable when upstream is fixed.
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   artifact: torsten-windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -123,35 +126,16 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} -p torsten-node -p torsten-cli
 
-      - name: Package binaries (Unix)
-        if: runner.os != 'Windows'
+      - name: Package binaries
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/torsten-node dist/ 2>/dev/null || true
           cp target/${{ matrix.target }}/release/torsten-cli dist/ 2>/dev/null || true
           tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
 
-      - name: Package binaries (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/${{ matrix.target }}/release/torsten-node.exe" dist/ -ErrorAction SilentlyContinue
-          Copy-Item "target/${{ matrix.target }}/release/torsten-cli.exe" dist/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
-
-      - name: Upload artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
-          retention-days: 30
-
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
           retention-days: 30
