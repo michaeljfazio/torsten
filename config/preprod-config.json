@@ -6,7 +6,9 @@
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
   "ByronGenesisFile": "preprod-byron-genesis.json",
+  "ByronGenesisHash": "559db4dedff91ea6291019d55ac0708595b3820a5aad8cddc4b4863e7947cc8f",
   "ShelleyGenesisFile": "preprod-shelley-genesis.json",
+  "ShelleyGenesisHash": "162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86",
   "AlonzoGenesisFile": "preprod-alonzo-genesis.json",
   "ConwayGenesisFile": "preprod-conway-genesis.json",
   "MinSeverity": "Info"

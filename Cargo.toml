@@ -11,6 +11,7 @@ members = [
     "crates/torsten-node",
     "crates/torsten-cli",
     "crates/torsten-integration-tests",
+    "tests/conformance",
 ]
 resolver = "2"
 
@@ -106,6 +107,7 @@ indicatif = "0.17"
 futures-util = "0.3"
 memmap2 = "0.9"
 fs2 = "0.4"
+proptest = "1"
 
 [profile.release]
 opt-level = 3

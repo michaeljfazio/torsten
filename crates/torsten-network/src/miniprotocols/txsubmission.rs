@@ -18,7 +18,7 @@ use torsten_mempool::Mempool;
 use torsten_primitives::hash::{Hash32, TransactionHash};
 use tracing::{debug, info, trace};
 
-use crate::n2c_server::TxValidator;
+use crate::n2c::TxValidator;
 
 /// Maximum number of tx IDs to request per batch
 const MAX_TX_IDS_REQUEST: u16 = 100;

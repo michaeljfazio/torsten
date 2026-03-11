@@ -110,7 +110,14 @@ fn default_update_quorum() -> u64 {
     5 // Mainnet default: 5 out of 7 genesis delegates
 }
 
-/// The complete ledger state
+/// The complete ledger state.
+///
+/// Large collections (`delegations`, `pool_params`, `reward_accounts`,
+/// `governance`, `epoch_blocks_by_pool`) are wrapped in `Arc` for
+/// copy-on-write semantics.  Cloning a `LedgerState` is therefore cheap:
+/// it only bumps reference counts instead of deep-copying megabytes of
+/// data.  Mutations go through `Arc::make_mut()`, which clones the inner
+/// collection only when there are other outstanding references.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerState {
     /// Current UTxO set
@@ -138,20 +145,20 @@ pub struct LedgerState {
     pub treasury: Lovelace,
     /// Reserves balance (ADA not yet in circulation)
     pub reserves: Lovelace,
-    /// Delegation state: credential_hash -> pool_id
-    pub delegations: HashMap<Hash32, Hash28>,
-    /// Pool registrations: pool_id -> pool registration
-    pub pool_params: HashMap<Hash28, PoolRegistration>,
+    /// Delegation state: credential_hash -> pool_id (Arc for copy-on-write)
+    pub delegations: Arc<HashMap<Hash32, Hash28>>,
+    /// Pool registrations: pool_id -> pool registration (Arc for copy-on-write)
+    pub pool_params: Arc<HashMap<Hash28, PoolRegistration>>,
     /// Pool retirements pending at a given epoch
     pub pending_retirements: BTreeMap<EpochNo, Vec<Hash28>>,
     /// Stake snapshots for the Cardano "mark/set/go" snapshot model
     pub snapshots: EpochSnapshots,
-    /// Reward accounts: stake credential hash -> accumulated rewards
-    pub reward_accounts: HashMap<Hash32, Lovelace>,
+    /// Reward accounts: stake credential hash -> accumulated rewards (Arc for copy-on-write)
+    pub reward_accounts: Arc<HashMap<Hash32, Lovelace>>,
     /// Fees collected in the current epoch
     pub epoch_fees: Lovelace,
-    /// Number of blocks produced by each pool in the current epoch
-    pub epoch_blocks_by_pool: HashMap<Hash28, u64>,
+    /// Number of blocks produced by each pool in the current epoch (Arc for copy-on-write)
+    pub epoch_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
     /// Total blocks in the current epoch
     pub epoch_block_count: u64,
     /// Evolving nonce (eta_v): accumulated hash of ALL VRF outputs (never reset).
@@ -191,8 +198,8 @@ pub struct LedgerState {
     /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
     #[serde(default = "default_update_quorum")]
     pub update_quorum: u64,
-    /// Conway governance state
-    pub governance: GovernanceState,
+    /// Conway governance state (Arc for copy-on-write)
+    pub governance: Arc<GovernanceState>,
     /// Slot configuration for Plutus time conversion
     pub slot_config: SlotConfig,
     /// When true, `rebuild_stake_distribution()` runs at each epoch boundary.
@@ -348,13 +355,13 @@ impl LedgerState {
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),
-            delegations: HashMap::new(),
-            pool_params: HashMap::new(),
+            delegations: Arc::new(HashMap::new()),
+            pool_params: Arc::new(HashMap::new()),
             pending_retirements: BTreeMap::new(),
             snapshots: EpochSnapshots::default(),
-            reward_accounts: HashMap::new(),
+            reward_accounts: Arc::new(HashMap::new()),
             epoch_fees: Lovelace(0),
-            epoch_blocks_by_pool: HashMap::new(),
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
             epoch_block_count: 0,
             evolving_nonce: Hash32::ZERO,
             candidate_nonce: Hash32::ZERO,
@@ -370,7 +377,7 @@ impl LedgerState {
             prev_epoch_first_block_hash: None,
             pending_pp_updates: BTreeMap::new(),
             update_quorum: default_update_quorum(),
-            governance: GovernanceState::default(),
+            governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: true,
         }
@@ -958,7 +965,9 @@ impl LedgerState {
         // Track block production by pool (issuer vkey hash)
         if !block.header.issuer_vkey.is_empty() {
             let pool_id = torsten_primitives::hash::blake2b_224(&block.header.issuer_vkey);
-            *self.epoch_blocks_by_pool.entry(pool_id).or_insert(0) += 1;
+            *Arc::make_mut(&mut self.epoch_blocks_by_pool)
+                .entry(pool_id)
+                .or_insert(0) += 1;
         }
         self.epoch_block_count += 1;
 
@@ -1019,7 +1028,9 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 debug!("Stake key registered: {}", key.to_hex());
             }
             Certificate::StakeDeregistration(credential) => {
@@ -1039,8 +1050,8 @@ impl LedgerState {
                     );
                 } else {
                     self.stake_distribution.stake_map.remove(&key);
-                    self.delegations.remove(&key);
-                    self.reward_accounts.remove(&key);
+                    Arc::make_mut(&mut self.delegations).remove(&key);
+                    Arc::make_mut(&mut self.reward_accounts).remove(&key);
                     debug!("Stake key deregistered: {}", key.to_hex());
                 }
             }
@@ -1054,7 +1065,9 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 debug!("Stake key registered (Conway): {}", key.to_hex());
             }
             Certificate::ConwayStakeDeregistration {
@@ -1065,8 +1078,8 @@ impl LedgerState {
                 // as part of the deposit refund, so unconditional removal is correct.
                 let key = credential_to_hash(credential);
                 self.stake_distribution.stake_map.remove(&key);
-                self.delegations.remove(&key);
-                self.reward_accounts.remove(&key);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 debug!("Stake key deregistered (Conway): {}", key.to_hex());
             }
             Certificate::StakeDelegation {
@@ -1074,7 +1087,7 @@ impl LedgerState {
                 pool_hash,
             } => {
                 let key = credential_to_hash(credential);
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 debug!("Stake delegated to pool: {}", pool_hash.to_hex());
             }
             Certificate::PoolRegistration(params) => {
@@ -1106,7 +1119,7 @@ impl LedgerState {
                 } else {
                     debug!("Pool registered: {}", params.operator.to_hex());
                 }
-                self.pool_params.insert(params.operator, pool_reg);
+                Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
                 // Validate: retirement epoch must be <= current_epoch + e_max
@@ -1141,8 +1154,10 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
             }
             Certificate::RegDRep {
                 credential,
@@ -1150,7 +1165,7 @@ impl LedgerState {
                 anchor,
             } => {
                 let key = credential_to_hash(credential);
-                self.governance.dreps.insert(
+                Arc::make_mut(&mut self.governance).dreps.insert(
                     key,
                     DRepRegistration {
                         credential: credential.clone(),
@@ -1161,7 +1176,7 @@ impl LedgerState {
                         active: true,
                     },
                 );
-                self.governance.drep_registration_count += 1;
+                Arc::make_mut(&mut self.governance).drep_registration_count += 1;
                 debug!("DRep registered: {}", key.to_hex());
             }
             Certificate::UnregDRep {
@@ -1169,12 +1184,12 @@ impl LedgerState {
                 refund: _,
             } => {
                 let key = credential_to_hash(credential);
-                self.governance.dreps.remove(&key);
+                Arc::make_mut(&mut self.governance).dreps.remove(&key);
                 debug!("DRep deregistered: {}", key.to_hex());
             }
             Certificate::UpdateDRep { credential, anchor } => {
                 let key = credential_to_hash(credential);
-                if let Some(drep) = self.governance.dreps.get_mut(&key) {
+                if let Some(drep) = Arc::make_mut(&mut self.governance).dreps.get_mut(&key) {
                     drep.anchor = anchor.clone();
                     drep.last_active_epoch = self.epoch;
                     debug!("DRep updated: {}", key.to_hex());
@@ -1182,7 +1197,9 @@ impl LedgerState {
             }
             Certificate::VoteDelegation { credential, drep } => {
                 let key = credential_to_hash(credential);
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!("Vote delegated to {:?}", drep);
             }
             Certificate::StakeVoteDelegation {
@@ -1192,9 +1209,11 @@ impl LedgerState {
             } => {
                 let key = credential_to_hash(credential);
                 // Stake delegation
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!(
                     "Stake+vote delegated to pool {} and drep {:?}",
                     pool_hash.to_hex(),
@@ -1207,9 +1226,13 @@ impl LedgerState {
             } => {
                 let cold_key = credential_to_hash(cold_credential);
                 let hot_key = credential_to_hash(hot_credential);
-                self.governance.committee_hot_keys.insert(cold_key, hot_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .insert(cold_key, hot_key);
                 // Remove from resigned if re-authorizing
-                self.governance.committee_resigned.remove(&cold_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_resigned
+                    .remove(&cold_key);
                 debug!(
                     "Committee hot key authorized: {} -> {}",
                     cold_key.to_hex(),
@@ -1221,10 +1244,12 @@ impl LedgerState {
                 anchor,
             } => {
                 let cold_key = credential_to_hash(cold_credential);
-                self.governance
+                Arc::make_mut(&mut self.governance)
                     .committee_resigned
                     .insert(cold_key, anchor.clone());
-                self.governance.committee_hot_keys.remove(&cold_key);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .remove(&cold_key);
                 debug!("Committee member resigned: {}", cold_key.to_hex());
             }
             Certificate::RegStakeVoteDeleg {
@@ -1239,11 +1264,15 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 // Stake delegation
-                self.delegations.insert(key, *pool_hash);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!(
                     "Reg+stake+vote delegated: pool={}, drep={:?}",
                     pool_hash.to_hex(),
@@ -1259,9 +1288,13 @@ impl LedgerState {
                     .stake_map
                     .entry(key)
                     .or_insert(Lovelace(0));
-                self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
                 // Vote delegation
-                self.governance.vote_delegations.insert(key, drep.clone());
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
                 debug!("Reg+vote delegated to {:?}", drep);
             }
             Certificate::GenesisKeyDelegation {
@@ -1285,7 +1318,9 @@ impl LedgerState {
                         let mut total_distributed: u64 = 0;
                         for (cred, amount) in creds {
                             let key = credential_to_hash(cred);
-                            let entry = self.reward_accounts.entry(key).or_insert(Lovelace(0));
+                            let entry = Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0));
                             if *amount >= 0 {
                                 let amt = *amount as u64;
                                 entry.0 = entry.0.saturating_add(amt);
@@ -1369,7 +1404,7 @@ impl LedgerState {
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
-        for (cred_hash, pool_id) in &self.delegations {
+        for (cred_hash, pool_id) in self.delegations.iter() {
             let utxo_stake = self
                 .stake_distribution
                 .stake_map
@@ -1387,7 +1422,7 @@ impl LedgerState {
 
         // Build per-credential stake including reward balances
         let mut snapshot_stake = self.stake_distribution.stake_map.clone();
-        for (cred_hash, reward) in &self.reward_accounts {
+        for (cred_hash, reward) in self.reward_accounts.iter() {
             if reward.0 > 0 {
                 *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
             }
@@ -1412,9 +1447,9 @@ impl LedgerState {
 
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
-            delegations: Arc::new(self.delegations.clone()),
+            delegations: Arc::clone(&self.delegations),
             pool_stake,
-            pool_params: Arc::new(self.pool_params.clone()),
+            pool_params: Arc::clone(&self.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
         });
 
@@ -1423,9 +1458,11 @@ impl LedgerState {
             let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
                 // Refund pool deposit to operator's registered reward account
-                if let Some(pool_reg) = self.pool_params.remove(pool_id) {
+                if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                    *self.reward_accounts.entry(op_key).or_insert(Lovelace(0)) += pool_deposit;
+                    *Arc::make_mut(&mut self.reward_accounts)
+                        .entry(op_key)
+                        .or_insert(Lovelace(0)) += pool_deposit;
                     debug!(
                         "Pool retired at epoch {}: {} (deposit {} refunded)",
                         new_epoch.0,
@@ -1557,14 +1594,19 @@ impl LedgerState {
             .collect();
         if !expired.is_empty() {
             for action_id in &expired {
-                if let Some(proposal_state) = self.governance.proposals.remove(action_id) {
+                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                    .proposals
+                    .remove(action_id)
+                {
                     // Refund deposit to return address's reward account
                     let deposit = proposal_state.procedure.deposit;
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
                         }
                     }
                     debug!(
@@ -1575,7 +1617,9 @@ impl LedgerState {
             }
             // Remove all votes for expired proposals
             for id in &expired {
-                self.governance.votes_by_action.remove(id);
+                Arc::make_mut(&mut self.governance)
+                    .votes_by_action
+                    .remove(id);
             }
             debug!(
                 "Expired {} governance proposals at epoch {}",
@@ -1591,7 +1635,7 @@ impl LedgerState {
         if drep_activity > 0 {
             let mut newly_inactive = 0u64;
             let mut reactivated = 0u64;
-            for drep in self.governance.dreps.values_mut() {
+            for drep in Arc::make_mut(&mut self.governance).dreps.values_mut() {
                 let inactive = new_epoch.0.saturating_sub(drep.last_active_epoch.0) > drep_activity;
                 if inactive && drep.active {
                     drep.active = false;
@@ -1622,8 +1666,12 @@ impl LedgerState {
             .collect();
         if !expired_members.is_empty() {
             for hash in &expired_members {
-                self.governance.committee_hot_keys.remove(hash);
-                self.governance.committee_expiration.remove(hash);
+                Arc::make_mut(&mut self.governance)
+                    .committee_hot_keys
+                    .remove(hash);
+                Arc::make_mut(&mut self.governance)
+                    .committee_expiration
+                    .remove(hash);
             }
             info!(
                 "Expired {} committee members at epoch {}",
@@ -1658,7 +1706,7 @@ impl LedgerState {
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
-        self.epoch_blocks_by_pool.clear();
+        Arc::make_mut(&mut self.epoch_blocks_by_pool).clear();
         self.epoch_block_count = 0;
 
         self.epoch = new_epoch;
@@ -1896,8 +1944,7 @@ impl LedgerState {
                     };
 
                     if member_share > 0 {
-                        *self
-                            .reward_accounts
+                        *Arc::make_mut(&mut self.reward_accounts)
                             .entry(*cred_hash)
                             .or_insert(Lovelace(0)) += Lovelace(member_share);
                         total_distributed += member_share;
@@ -1908,8 +1955,9 @@ impl LedgerState {
             // Operator reward goes to pool's registered reward account
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                *self.reward_accounts.entry(op_key).or_insert(Lovelace(0)) +=
-                    Lovelace(operator_reward);
+                *Arc::make_mut(&mut self.reward_accounts)
+                    .entry(op_key)
+                    .or_insert(Lovelace(0)) += Lovelace(operator_reward);
                 total_distributed += operator_reward;
             }
         }
@@ -2060,8 +2108,10 @@ impl LedgerState {
             "Governance proposal submitted: {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        self.governance.proposals.insert(action_id, state);
-        self.governance.proposal_count += 1;
+        Arc::make_mut(&mut self.governance)
+            .proposals
+            .insert(action_id, state);
+        Arc::make_mut(&mut self.governance).proposal_count += 1;
     }
 
     /// Process a governance vote
@@ -2072,7 +2122,10 @@ impl LedgerState {
         procedure: &VotingProcedure,
     ) {
         // Update vote tally on the proposal
-        if let Some(proposal) = self.governance.proposals.get_mut(action_id) {
+        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+            .proposals
+            .get_mut(action_id)
+        {
             match procedure.vote {
                 Vote::Yes => proposal.yes_votes += 1,
                 Vote::No => proposal.no_votes += 1,
@@ -2083,14 +2136,16 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
-            if let Some(drep) = self.governance.dreps.get_mut(&drep_hash) {
+            if let Some(drep) = Arc::make_mut(&mut self.governance)
+                .dreps
+                .get_mut(&drep_hash)
+            {
                 drep.last_active_epoch = self.epoch;
             }
         }
 
         // Record the vote (indexed by action_id for efficient ratification)
-        let action_votes = self
-            .governance
+        let action_votes = Arc::make_mut(&mut self.governance)
             .votes_by_action
             .entry(action_id.clone())
             .or_default();
@@ -2198,17 +2253,24 @@ impl LedgerState {
         // Remove ratified proposals and refund deposits
         if !ratified.is_empty() {
             for action_id in &ratified {
-                if let Some(proposal_state) = self.governance.proposals.remove(action_id) {
+                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                    .proposals
+                    .remove(action_id)
+                {
                     let deposit = proposal_state.procedure.deposit;
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += deposit;
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
                         }
                     }
                 }
-                self.governance.votes_by_action.remove(action_id);
+                Arc::make_mut(&mut self.governance)
+                    .votes_by_action
+                    .remove(action_id);
             }
             info!(
                 "{} governance proposal(s) ratified and enacted",
@@ -2221,16 +2283,16 @@ impl LedgerState {
     fn update_enacted_root(&mut self, action_id: &GovActionId, action: &GovAction) {
         match action {
             GovAction::ParameterChange { .. } => {
-                self.governance.enacted_pparam_update = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_pparam_update = Some(action_id.clone());
             }
             GovAction::HardForkInitiation { .. } => {
-                self.governance.enacted_hard_fork = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_hard_fork = Some(action_id.clone());
             }
             GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
-                self.governance.enacted_committee = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_committee = Some(action_id.clone());
             }
             GovAction::NewConstitution { .. } => {
-                self.governance.enacted_constitution = Some(action_id.clone());
+                Arc::make_mut(&mut self.governance).enacted_constitution = Some(action_id.clone());
             }
             // TreasuryWithdrawals and InfoAction don't update any root
             GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {}
@@ -2641,7 +2703,7 @@ impl LedgerState {
         }
         // Fallback: compute from current delegations (UTxO + rewards)
         let mut total = 0u64;
-        for (stake_cred, delegated_pool) in &self.delegations {
+        for (stake_cred, delegated_pool) in self.delegations.iter() {
             if delegated_pool == pool_id {
                 total += self.credential_stake(stake_cred);
             }
@@ -2713,7 +2775,9 @@ impl LedgerState {
                     // Credit the withdrawal to the recipient's reward account
                     if actual > 0 && reward_addr.len() >= 29 {
                         let key = Self::reward_account_to_hash(reward_addr);
-                        *self.reward_accounts.entry(key).or_insert(Lovelace(0)) += Lovelace(actual);
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(key)
+                            .or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
                 info!(
@@ -2724,9 +2788,10 @@ impl LedgerState {
             }
             GovAction::NoConfidence { .. } => {
                 // No confidence motion: remove all committee hot key authorizations and expirations
-                self.governance.committee_hot_keys.clear();
-                self.governance.committee_expiration.clear();
-                self.governance.no_confidence = true;
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_hot_keys.clear();
+                gov.committee_expiration.clear();
+                gov.no_confidence = true;
                 info!("No confidence motion enacted: committee disbanded");
             }
             GovAction::UpdateCommittee {
@@ -2738,22 +2803,28 @@ impl LedgerState {
                 // Remove specified members
                 for cred in members_to_remove {
                     let key = credential_to_hash(cred);
-                    self.governance.committee_hot_keys.remove(&key);
-                    self.governance.committee_expiration.remove(&key);
-                    self.governance.committee_resigned.remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_hot_keys
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_expiration
+                        .remove(&key);
+                    Arc::make_mut(&mut self.governance)
+                        .committee_resigned
+                        .remove(&key);
                 }
                 // Add new members with expiration epochs
                 for (cred, expiration_epoch) in members_to_add {
                     let key = credential_to_hash(cred);
-                    self.governance
+                    Arc::make_mut(&mut self.governance)
                         .committee_expiration
                         .insert(key, EpochNo(*expiration_epoch));
                     // Hot key auth comes via CommitteeHotAuth certificates
                 }
                 // Store the new committee quorum threshold
-                self.governance.committee_threshold = Some(threshold.clone());
+                Arc::make_mut(&mut self.governance).committee_threshold = Some(threshold.clone());
                 // UpdateCommittee restores confidence
-                self.governance.no_confidence = false;
+                Arc::make_mut(&mut self.governance).no_confidence = false;
                 info!(
                     "Committee updated: {} removed, {} added, threshold={}/{}",
                     members_to_remove.len(),
@@ -2763,7 +2834,7 @@ impl LedgerState {
                 );
             }
             GovAction::NewConstitution { constitution, .. } => {
-                self.governance.constitution = Some(constitution.clone());
+                Arc::make_mut(&mut self.governance).constitution = Some(constitution.clone());
                 info!(
                     "New constitution enacted (script_hash: {:?})",
                     constitution.script_hash.as_ref().map(|h| h.to_hex())
@@ -2781,7 +2852,7 @@ impl LedgerState {
     /// After withdrawal, the balance is reduced by the withdrawal amount.
     fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
         let key = Self::reward_account_to_hash(reward_account);
-        if let Some(balance) = self.reward_accounts.get_mut(&key) {
+        if let Some(balance) = Arc::make_mut(&mut self.reward_accounts).get_mut(&key) {
             // Per Cardano spec, withdrawal amount must exactly equal the reward balance.
             // During sync from genesis, we may not have accumulated all rewards yet,
             // so we only warn and process as best-effort.
@@ -3975,7 +4046,7 @@ mod tests {
         // Pool produced blocks proportional to its stake
         // expected_blocks = epoch_length * active_slot_coeff = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000); // 500k ADA fees
-        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
 
         // Epoch 3→4: triggers reward calculation using "go" snapshot
@@ -4107,7 +4178,7 @@ mod tests {
 
         // Simulate 1 block produced and some fees — should NOT panic
         state.epoch_fees = Lovelace(500_000_000_000);
-        state.epoch_blocks_by_pool.insert(pool_id, 1);
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 1);
         state.epoch_block_count = 1;
 
         let reserves_before = state.reserves.0;
@@ -4181,7 +4252,7 @@ mod tests {
 
         // expected_blocks = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000);
-        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
         state.process_epoch_transition(EpochNo(4));
 
@@ -4239,7 +4310,7 @@ mod tests {
 
         // expected_blocks = 432000 * 0.05 = 21600
         state.epoch_fees = Lovelace(500_000_000_000);
-        state.epoch_blocks_by_pool.insert(pool_id, 21600);
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
         state.process_epoch_transition(EpochNo(4));
 
@@ -4495,14 +4566,16 @@ mod tests {
         let hot1 = Hash32::from_bytes([11u8; 32]);
         let hot2 = Hash32::from_bytes([12u8; 32]);
 
-        state.governance.committee_hot_keys.insert(cold1, hot1);
-        state
-            .governance
+        Arc::make_mut(&mut state.governance)
+            .committee_hot_keys
+            .insert(cold1, hot1);
+        Arc::make_mut(&mut state.governance)
             .committee_expiration
             .insert(cold1, EpochNo(5));
-        state.governance.committee_hot_keys.insert(cold2, hot2);
-        state
-            .governance
+        Arc::make_mut(&mut state.governance)
+            .committee_hot_keys
+            .insert(cold2, hot2);
+        Arc::make_mut(&mut state.governance)
             .committee_expiration
             .insert(cold2, EpochNo(10));
 
@@ -4797,7 +4870,7 @@ mod tests {
         // Register at least one DRep so threshold checks don't pass with 0/0
         let cred = Credential::VerificationKey(Hash28::from_bytes([1u8; 28]));
         let key = credential_to_hash(&cred);
-        state.governance.dreps.insert(
+        Arc::make_mut(&mut state.governance).dreps.insert(
             key,
             DRepRegistration {
                 credential: cred,
@@ -4921,7 +4994,7 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
         // Set CC threshold to 0 so CC auto-approves (we're testing DRep voting here)
-        state.governance.committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -4931,7 +5004,7 @@ mod tests {
         for i in 0..drep_count {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred,
@@ -5018,7 +5091,7 @@ mod tests {
         for i in 0..10 {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred.clone(),
@@ -5031,10 +5104,12 @@ mod tests {
             );
             // Set up vote delegation and stake for each DRep
             let stake_key = Hash32::from_bytes([100 + i as u8; 32]);
-            state.governance.vote_delegations.insert(
-                stake_key,
-                DRep::KeyHash(Hash28::from_bytes([i as u8; 28]).to_hash32_padded()),
-            );
+            Arc::make_mut(&mut state.governance)
+                .vote_delegations
+                .insert(
+                    stake_key,
+                    DRep::KeyHash(Hash28::from_bytes([i as u8; 28]).to_hash32_padded()),
+                );
             state
                 .stake_distribution
                 .stake_map
@@ -5093,7 +5168,7 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
         state.treasury = Lovelace(10_000_000_000);
-        state.governance.committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -5102,7 +5177,7 @@ mod tests {
         for i in 0..10 {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred,
@@ -5178,7 +5253,7 @@ mod tests {
         for i in 0..10 {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred,
@@ -5194,7 +5269,7 @@ mod tests {
         // Register some SPOs
         for i in 0..10 {
             let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
-            state.pool_params.insert(
+            Arc::make_mut(&mut state.pool_params).insert(
                 pool_id,
                 PoolRegistration {
                     pool_id,
@@ -5272,7 +5347,7 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.governance.committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -5281,7 +5356,7 @@ mod tests {
         for i in 0..10 {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred,
@@ -5693,6 +5768,242 @@ mod tests {
     }
 
     #[test]
+    fn test_arc_cow_snapshot_shares_data() {
+        // Verify that cloning a LedgerState shares the underlying data via Arc
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        // Populate with some data
+        let cred_hash = Hash32::from_bytes([1u8; 32]);
+        let pool_id = Hash28::from_bytes([2u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
+        Arc::make_mut(&mut state.pool_params).insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::ZERO,
+                pledge: Lovelace(0),
+                cost: Lovelace(340_000_000),
+                margin_numerator: 1,
+                margin_denominator: 100,
+                reward_account: vec![0u8; 29],
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+        Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 42);
+
+        // Clone the state (should be cheap — Arc bumps refcount)
+        let snapshot = state.clone();
+
+        // Verify the Arc pointers are the same (data is shared, not deep-copied)
+        assert!(Arc::ptr_eq(&state.delegations, &snapshot.delegations));
+        assert!(Arc::ptr_eq(&state.pool_params, &snapshot.pool_params));
+        assert!(Arc::ptr_eq(
+            &state.reward_accounts,
+            &snapshot.reward_accounts
+        ));
+        assert!(Arc::ptr_eq(
+            &state.epoch_blocks_by_pool,
+            &snapshot.epoch_blocks_by_pool
+        ));
+        assert!(Arc::ptr_eq(&state.governance, &snapshot.governance));
+
+        // Verify the data is accessible through both
+        assert_eq!(state.delegations.len(), 1);
+        assert_eq!(snapshot.delegations.len(), 1);
+        assert_eq!(state.pool_params.len(), 1);
+        assert_eq!(snapshot.pool_params.len(), 1);
+        assert_eq!(
+            state.reward_accounts.get(&cred_hash),
+            Some(&Lovelace(5_000_000))
+        );
+        assert_eq!(
+            snapshot.reward_accounts.get(&cred_hash),
+            Some(&Lovelace(5_000_000))
+        );
+    }
+
+    #[test]
+    fn test_arc_cow_mutation_does_not_affect_snapshot() {
+        // Verify copy-on-write: mutating the original does not affect the snapshot
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        let cred_hash = Hash32::from_bytes([1u8; 32]);
+        let pool_id = Hash28::from_bytes([2u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
+        Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+
+        // Take a snapshot
+        let snapshot = state.clone();
+        assert!(Arc::ptr_eq(&state.delegations, &snapshot.delegations));
+
+        // Mutate the original via Arc::make_mut — this should trigger a clone
+        let cred_hash_2 = Hash32::from_bytes([3u8; 32]);
+        let pool_id_2 = Hash28::from_bytes([4u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(cred_hash_2, pool_id_2);
+
+        // The Arcs should no longer point to the same data
+        assert!(!Arc::ptr_eq(&state.delegations, &snapshot.delegations));
+
+        // Original has the new entry, snapshot does not
+        assert_eq!(state.delegations.len(), 2);
+        assert_eq!(snapshot.delegations.len(), 1);
+        assert!(state.delegations.contains_key(&cred_hash_2));
+        assert!(!snapshot.delegations.contains_key(&cred_hash_2));
+
+        // Mutate reward_accounts on original
+        Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(10_000_000));
+        assert_eq!(
+            state.reward_accounts.get(&cred_hash),
+            Some(&Lovelace(10_000_000))
+        );
+        // Snapshot still has the original value
+        assert_eq!(
+            snapshot.reward_accounts.get(&cred_hash),
+            Some(&Lovelace(5_000_000))
+        );
+    }
+
+    #[test]
+    fn test_arc_cow_governance_isolation() {
+        // Verify that governance Arc provides proper copy-on-write isolation
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        let drep_cred = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+        let drep_hash = credential_to_hash(&drep_cred);
+        Arc::make_mut(&mut state.governance).dreps.insert(
+            drep_hash,
+            DRepRegistration {
+                credential: drep_cred.clone(),
+                deposit: Lovelace(500_000_000),
+                anchor: None,
+                registered_epoch: EpochNo(0),
+                last_active_epoch: EpochNo(0),
+                active: true,
+            },
+        );
+
+        // Snapshot shares the same Arc
+        let snapshot = state.clone();
+        assert!(Arc::ptr_eq(&state.governance, &snapshot.governance));
+        assert_eq!(state.governance.dreps.len(), 1);
+        assert_eq!(snapshot.governance.dreps.len(), 1);
+
+        // Mutate governance on original
+        Arc::make_mut(&mut state.governance).drep_registration_count = 99;
+
+        // Arcs should now be different
+        assert!(!Arc::ptr_eq(&state.governance, &snapshot.governance));
+        assert_eq!(state.governance.drep_registration_count, 99);
+        assert_eq!(snapshot.governance.drep_registration_count, 0);
+    }
+
+    #[test]
+    fn test_arc_cow_serialization_roundtrip() {
+        // Verify that Arc-wrapped fields serialize and deserialize correctly
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        let cred_hash = Hash32::from_bytes([1u8; 32]);
+        let pool_id = Hash28::from_bytes([2u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
+        Arc::make_mut(&mut state.pool_params).insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::ZERO,
+                pledge: Lovelace(500_000_000),
+                cost: Lovelace(340_000_000),
+                margin_numerator: 1,
+                margin_denominator: 100,
+                reward_account: vec![0u8; 29],
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+        Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+        Arc::make_mut(&mut state.governance).drep_registration_count = 42;
+        state.epoch = EpochNo(100);
+
+        // Save and reload
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("arc-cow-test.bin");
+        state.save_snapshot(&snapshot_path).unwrap();
+        let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+
+        // Verify all fields survived the roundtrip
+        assert_eq!(loaded.epoch, EpochNo(100));
+        assert_eq!(loaded.delegations.len(), 1);
+        assert_eq!(loaded.delegations.get(&cred_hash), Some(&pool_id));
+        assert_eq!(loaded.pool_params.len(), 1);
+        assert_eq!(
+            loaded.pool_params.get(&pool_id).unwrap().pledge,
+            Lovelace(500_000_000)
+        );
+        assert_eq!(
+            loaded.reward_accounts.get(&cred_hash),
+            Some(&Lovelace(5_000_000))
+        );
+        assert_eq!(loaded.governance.drep_registration_count, 42);
+    }
+
+    #[test]
+    fn test_arc_cow_epoch_snapshot_shares_arcs() {
+        // Verify that epoch snapshots share Arcs with the live state
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+
+        let cred_hash = Hash32::from_bytes([1u8; 32]);
+        let pool_id = Hash28::from_bytes([2u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
+        Arc::make_mut(&mut state.pool_params).insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::ZERO,
+                pledge: Lovelace(0),
+                cost: Lovelace(340_000_000),
+                margin_numerator: 1,
+                margin_denominator: 100,
+                reward_account: vec![0u8; 29],
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+        state
+            .stake_distribution
+            .stake_map
+            .insert(cred_hash, Lovelace(1_000_000));
+
+        // Trigger epoch transition to create a "mark" snapshot
+        state.process_epoch_transition(EpochNo(1));
+
+        // The mark snapshot should share the same Arc as the live state's delegations/pool_params
+        let mark = state.snapshots.mark.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&state.delegations, &mark.delegations));
+        assert!(Arc::ptr_eq(&state.pool_params, &mark.pool_params));
+
+        // Now mutate live state — should not affect the snapshot
+        let new_cred = Hash32::from_bytes([5u8; 32]);
+        let new_pool = Hash28::from_bytes([6u8; 28]);
+        Arc::make_mut(&mut state.delegations).insert(new_cred, new_pool);
+
+        // Live state has 2 delegations, snapshot still has 1
+        assert_eq!(state.delegations.len(), 2);
+        assert_eq!(mark.delegations.len(), 1);
+    }
+
+    #[test]
     fn test_ledger_snapshot_save_load() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot_path = dir.path().join("ledger-snapshot.bin");
@@ -5938,7 +6249,7 @@ mod tests {
 
         // Set up a constitution with a guardrail script hash
         let guardrail_hash = Hash28::from_bytes([42u8; 28]);
-        state.governance.constitution = Some(Constitution {
+        Arc::make_mut(&mut state.governance).constitution = Some(Constitution {
             anchor: Anchor {
                 url: "https://constitution.example.com".to_string(),
                 data_hash: Hash32::ZERO,
@@ -6620,7 +6931,7 @@ mod tests {
 
         // reward_account_to_hash pads 28 bytes to Hash32
         let hash_key = LedgerState::reward_account_to_hash(&reward_account);
-        state.reward_accounts.insert(hash_key, Lovelace(5_000_000));
+        Arc::make_mut(&mut state.reward_accounts).insert(hash_key, Lovelace(5_000_000));
 
         state.process_withdrawal(&reward_account, Lovelace(5_000_000));
         assert_eq!(state.reward_accounts.get(&hash_key), Some(&Lovelace(0)));
@@ -7517,7 +7828,9 @@ mod tests {
         assert!(state.reward_accounts.contains_key(&key));
 
         // Add some rewards
-        *state.reward_accounts.get_mut(&key).unwrap() = Lovelace(500_000);
+        *Arc::make_mut(&mut state.reward_accounts)
+            .get_mut(&key)
+            .unwrap() = Lovelace(500_000);
 
         // Try to deregister — should be rejected because balance > 0
         state.process_certificate(&Certificate::StakeDeregistration(cred.clone()));
@@ -7566,7 +7879,9 @@ mod tests {
         assert!(state.reward_accounts.contains_key(&key));
 
         // Add rewards
-        *state.reward_accounts.get_mut(&key).unwrap() = Lovelace(1_000_000);
+        *Arc::make_mut(&mut state.reward_accounts)
+            .get_mut(&key)
+            .unwrap() = Lovelace(1_000_000);
 
         // Conway deregistration — should succeed even with non-zero balance
         state.process_certificate(&Certificate::ConwayStakeDeregistration {
@@ -7702,7 +8017,7 @@ mod tests {
         params.protocol_version_major = 10;
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.governance.committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -7711,7 +8026,7 @@ mod tests {
         for i in 0..drep_count {
             let cred = Credential::VerificationKey(Hash28::from_bytes([(i + 1) as u8; 28]));
             let key = credential_to_hash(&cred);
-            state.governance.dreps.insert(
+            Arc::make_mut(&mut state.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred.clone(),
@@ -7725,8 +8040,7 @@ mod tests {
             let delegator_cred =
                 Credential::VerificationKey(Hash28::from_bytes([(i + 100) as u8; 28]));
             let delegator_key = credential_to_hash(&delegator_cred);
-            state
-                .governance
+            Arc::make_mut(&mut state.governance)
                 .vote_delegations
                 .insert(delegator_key, DRep::KeyHash(key));
             add_stake_utxo(&mut state, &delegator_cred, stake_per_drep);
@@ -7813,8 +8127,7 @@ mod tests {
             let delegator_cred =
                 Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
             let delegator_key = credential_to_hash(&delegator_cred);
-            state
-                .governance
+            Arc::make_mut(&mut state.governance)
                 .vote_delegations
                 .insert(delegator_key, DRep::NoConfidence);
             add_stake_utxo(&mut state, &delegator_cred, 1_000_000_000);
@@ -7863,8 +8176,7 @@ mod tests {
             let delegator_cred =
                 Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
             let delegator_key = credential_to_hash(&delegator_cred);
-            state
-                .governance
+            Arc::make_mut(&mut state.governance)
                 .vote_delegations
                 .insert(delegator_key, DRep::NoConfidence);
             add_stake_utxo(&mut state, &delegator_cred, 1_000_000_000);
@@ -7921,7 +8233,11 @@ mod tests {
     fn test_inactive_drep_excluded_from_voting_power() {
         let (mut state, dreps) = setup_governance_state(5, 1_000_000_000);
         for (_, key) in dreps.iter().take(2) {
-            state.governance.dreps.get_mut(key).unwrap().active = false;
+            Arc::make_mut(&mut state.governance)
+                .dreps
+                .get_mut(key)
+                .unwrap()
+                .active = false;
         }
         let (drep_power_cache, _, _) = state.build_drep_power_cache();
         assert!(!drep_power_cache.contains_key(&dreps[0].1));
@@ -7953,8 +8269,16 @@ mod tests {
     #[test]
     fn test_inactive_drep_stake_not_in_total() {
         let (mut state, dreps) = setup_governance_state(5, 1_000_000_000);
-        state.governance.dreps.get_mut(&dreps[0].1).unwrap().active = false;
-        state.governance.dreps.get_mut(&dreps[1].1).unwrap().active = false;
+        Arc::make_mut(&mut state.governance)
+            .dreps
+            .get_mut(&dreps[0].1)
+            .unwrap()
+            .active = false;
+        Arc::make_mut(&mut state.governance)
+            .dreps
+            .get_mut(&dreps[1].1)
+            .unwrap()
+            .active = false;
         let total = state.compute_total_drep_stake();
         assert_eq!(total, 3_000_000_000);
     }

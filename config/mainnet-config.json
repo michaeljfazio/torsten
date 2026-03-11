@@ -9,7 +9,9 @@
   "TargetNumberOfEstablishedPeers": 40,
   "TargetNumberOfKnownPeers": 100,
   "ByronGenesisFile": "mainnet-byron-genesis.json",
+  "ByronGenesisHash": "dbbdaeab0ea4ea58225892d8b1294f178b417f4a9d1ed3bbf629c40d8f74e86b",
   "ShelleyGenesisFile": "mainnet-shelley-genesis.json",
+  "ShelleyGenesisHash": "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81",
   "AlonzoGenesisFile": "mainnet-alonzo-genesis.json",
   "ConwayGenesisFile": "mainnet-conway-genesis.json",
   "TraceOptions": {

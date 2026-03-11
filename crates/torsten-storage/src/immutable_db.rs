@@ -8,8 +8,14 @@
 //! On startup, builds an in-memory hash index from secondary index files.
 //! Slot-based queries use binary search over per-chunk metadata followed
 //! by a secondary index scan within the target chunk.
+//!
+//! ## I/O backends
+//!
+//! By default, chunk file reads use `memmap2`.  On Linux, enable the
+//! `io-uring` feature for kernel-bypassed async I/O via `io_uring`,
+//! which improves throughput on NVMe storage for large sequential scans.
 
-use memmap2::Mmap;
+use crate::chunk_reader::{self, ChunkReaderTrait};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -335,8 +341,13 @@ impl ImmutableDB {
     }
 
     /// Get blocks in slot range `[from_slot, to_slot]` inclusive.
+    ///
+    /// Uses the batched [`ChunkReader::read_ranges`] API to read all
+    /// matching blocks from each chunk file in a single I/O operation
+    /// when possible (e.g. io_uring submits all reads at once).
     pub fn get_blocks_in_slot_range(&self, from_slot: u64, to_slot: u64) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
+        let reader = chunk_reader::default_reader();
 
         let start_idx = self.chunks.partition_point(|c| c.last_slot < from_slot);
 
@@ -354,12 +365,8 @@ impl ImmutableDB {
                 Ok(data) => data,
                 Err(_) => continue,
             };
-            let chunk_file = match fs::File::open(&chunk_path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let chunk_mmap = match unsafe { Mmap::map(&chunk_file) } {
-                Ok(m) => m,
+            let chunk_len = match chunk_path.metadata() {
+                Ok(m) => m.len(),
                 Err(_) => continue,
             };
 
@@ -387,6 +394,8 @@ impl ImmutableDB {
                 pos += SECONDARY_ENTRY_SIZE;
             }
 
+            // Collect the (offset, length) ranges for blocks in the slot window.
+            let mut ranges: Vec<(u64, usize)> = Vec::new();
             for i in 0..entries.len() {
                 let (block_offset, slot) = entries[i];
                 if slot < from_slot {
@@ -397,14 +406,19 @@ impl ImmutableDB {
                 }
 
                 let block_end = if i + 1 < entries.len() {
-                    entries[i + 1].0 as usize
+                    entries[i + 1].0
                 } else {
-                    chunk_mmap.len()
+                    chunk_len
                 };
-                let start = block_offset as usize;
-                if start < chunk_mmap.len() && block_end <= chunk_mmap.len() {
-                    result.push(chunk_mmap[start..block_end].to_vec());
+                if block_offset < block_end {
+                    ranges.push((block_offset, (block_end - block_offset) as usize));
                 }
+            }
+
+            // Batch-read all selected ranges from this chunk file.
+            let batch = reader.read_ranges(&chunk_path, &ranges);
+            for block in batch.into_iter().flatten() {
+                result.push(block);
             }
         }
 
@@ -412,25 +426,33 @@ impl ImmutableDB {
     }
 
     /// Read a block from a chunk file at the given location.
+    ///
+    /// Uses the configured I/O backend (memmap2 or io_uring).
     fn read_block_at(&self, loc: &BlockLocation) -> Option<Vec<u8>> {
         let chunk_path = self.dir.join(format!("{:05}.chunk", loc.chunk_num));
-        let file = fs::File::open(&chunk_path).ok()?;
-        let mmap = unsafe { Mmap::map(&file).ok()? };
-
-        let start = loc.block_offset as usize;
-        let end = loc.block_end as usize;
-        if end > mmap.len() || start >= end {
+        let start = loc.block_offset;
+        let end = loc.block_end;
+        if end <= start {
             warn!(
                 chunk = loc.chunk_num,
                 offset = start,
                 end,
-                chunk_len = mmap.len(),
-                "Invalid block location in chunk file"
+                "Invalid block location (end <= start)"
             );
             return None;
         }
-
-        Some(mmap[start..end].to_vec())
+        let len = (end - start) as usize;
+        let reader = chunk_reader::default_reader();
+        let result = reader.read_range(&chunk_path, start, len);
+        if result.is_none() {
+            warn!(
+                chunk = loc.chunk_num,
+                offset = start,
+                end,
+                "Failed to read block from chunk file"
+            );
+        }
+        result
     }
 }
 
