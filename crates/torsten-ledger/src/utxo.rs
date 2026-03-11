@@ -1,20 +1,39 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use torsten_primitives::address::Address;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
 use torsten_primitives::value::Lovelace;
 
 /// The UTxO set: maps transaction inputs to their unspent outputs.
 /// Uses HashMap for O(1) amortized lookups (vs BTreeMap O(log n)).
+/// Maintains a secondary index by address for O(1) address queries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoSet {
     utxos: HashMap<TransactionInput, TransactionOutput>,
+    /// Secondary index: address → set of TransactionInputs at that address.
+    /// Skipped during serialization and rebuilt on load via `rebuild_address_index()`.
+    #[serde(skip)]
+    address_index: HashMap<Address, Vec<TransactionInput>>,
 }
 
 impl UtxoSet {
     pub fn new() -> Self {
         UtxoSet {
             utxos: HashMap::new(),
+            address_index: HashMap::new(),
+        }
+    }
+
+    /// Rebuild the address index from the UTxO map.
+    /// Must be called after deserialization since the index is not serialized.
+    pub fn rebuild_address_index(&mut self) {
+        self.address_index.clear();
+        for (input, output) in &self.utxos {
+            self.address_index
+                .entry(output.address.clone())
+                .or_default()
+                .push(input.clone());
         }
     }
 
@@ -33,12 +52,26 @@ impl UtxoSet {
 
     /// Insert a new UTxO
     pub fn insert(&mut self, input: TransactionInput, output: TransactionOutput) {
+        self.address_index
+            .entry(output.address.clone())
+            .or_default()
+            .push(input.clone());
         self.utxos.insert(input, output);
     }
 
     /// Remove a UTxO (mark as spent)
     pub fn remove(&mut self, input: &TransactionInput) -> Option<TransactionOutput> {
-        self.utxos.remove(input)
+        if let Some(output) = self.utxos.remove(input) {
+            if let Some(inputs) = self.address_index.get_mut(&output.address) {
+                inputs.retain(|i| i != input);
+                if inputs.is_empty() {
+                    self.address_index.remove(&output.address);
+                }
+            }
+            Some(output)
+        } else {
+            None
+        }
     }
 
     /// Check if a UTxO exists
@@ -106,15 +139,18 @@ impl UtxoSet {
         })
     }
 
-    /// Get all UTxOs at a specific address
+    /// Get all UTxOs at a specific address (O(1) lookup via secondary index)
     pub fn utxos_at_address(
         &self,
-        address: &torsten_primitives::address::Address,
+        address: &Address,
     ) -> Vec<(&TransactionInput, &TransactionOutput)> {
-        self.utxos
-            .iter()
-            .filter(|(_, output)| &output.address == address)
-            .collect()
+        match self.address_index.get(address) {
+            Some(inputs) => inputs
+                .iter()
+                .filter_map(|input| self.utxos.get_key_value(input))
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Iterator over all UTxOs
@@ -296,5 +332,90 @@ mod tests {
             utxo_set.lookup(&genesis_input).unwrap().value.coin.0,
             10_000_000
         );
+    }
+
+    #[test]
+    fn test_address_index() {
+        let mut utxo_set = UtxoSet::new();
+
+        let addr_a = Address::Byron(torsten_primitives::address::ByronAddress {
+            payload: vec![1u8; 32],
+        });
+        let addr_b = Address::Byron(torsten_primitives::address::ByronAddress {
+            payload: vec![2u8; 32],
+        });
+
+        let make_output_with_addr = |lovelace: u64, addr: &Address| TransactionOutput {
+            address: addr.clone(),
+            value: Value::lovelace(lovelace),
+            datum: OutputDatum::None,
+            script_ref: None,
+            raw_cbor: None,
+        };
+
+        // Insert UTxOs at different addresses
+        let input_a1 = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let input_a2 = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 1,
+        };
+        let input_b1 = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+
+        utxo_set.insert(input_a1.clone(), make_output_with_addr(1_000_000, &addr_a));
+        utxo_set.insert(input_a2.clone(), make_output_with_addr(2_000_000, &addr_a));
+        utxo_set.insert(input_b1.clone(), make_output_with_addr(3_000_000, &addr_b));
+
+        // Query by address
+        let a_utxos = utxo_set.utxos_at_address(&addr_a);
+        assert_eq!(a_utxos.len(), 2);
+        let b_utxos = utxo_set.utxos_at_address(&addr_b);
+        assert_eq!(b_utxos.len(), 1);
+
+        // Remove one UTxO from addr_a
+        utxo_set.remove(&input_a1);
+        let a_utxos = utxo_set.utxos_at_address(&addr_a);
+        assert_eq!(a_utxos.len(), 1);
+
+        // Remove the last UTxO at addr_b — address entry should be cleaned up
+        utxo_set.remove(&input_b1);
+        let b_utxos = utxo_set.utxos_at_address(&addr_b);
+        assert_eq!(b_utxos.len(), 0);
+    }
+
+    #[test]
+    fn test_rebuild_address_index() {
+        let mut utxo_set = UtxoSet::new();
+        let addr = Address::Byron(torsten_primitives::address::ByronAddress {
+            payload: vec![1u8; 32],
+        });
+
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input,
+            TransactionOutput {
+                address: addr.clone(),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        // Clear the index to simulate deserialization
+        utxo_set.address_index.clear();
+        assert_eq!(utxo_set.utxos_at_address(&addr).len(), 0);
+
+        // Rebuild
+        utxo_set.rebuild_address_index();
+        assert_eq!(utxo_set.utxos_at_address(&addr).len(), 1);
     }
 }

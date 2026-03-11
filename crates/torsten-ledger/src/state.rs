@@ -2588,9 +2588,10 @@ impl LedgerState {
             &raw
         };
 
-        let state: LedgerState = bincode::deserialize(data).map_err(|e| {
+        let mut state: LedgerState = bincode::deserialize(data).map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
         })?;
+        state.utxo_set.rebuild_address_index();
         info!(
             path = %path.display(),
             bytes = raw.len(),
