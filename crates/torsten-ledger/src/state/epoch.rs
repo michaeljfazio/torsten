@@ -20,12 +20,13 @@ impl LedgerState {
         self.snapshots.go = self.snapshots.set.take();
         self.snapshots.set = self.snapshots.mark.take();
 
-        // Take a new "mark" snapshot of current stake distribution.
-        // Only do a full UTxO scan if needed (after snapshot load or Mithril import).
-        // During replay from genesis, incremental tracking is always correct.
+        // Rebuild stake distribution from the full UTxO set at epoch boundaries.
+        // During fast replay (needs_stake_rebuild=false), skip the expensive full
+        // UTxO scan. During live sync (needs_stake_rebuild=true, the default),
+        // always rebuild to ensure correctness and prevent incremental drift.
+        // Note: needs_stake_rebuild stays true once set — every live epoch boundary rebuilds.
         if self.needs_stake_rebuild {
             self.rebuild_stake_distribution();
-            self.needs_stake_rebuild = false;
         }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
@@ -343,7 +344,7 @@ impl LedgerState {
     /// This recomputes per-credential UTxO stake by scanning all UTxOs,
     /// matching Haskell's behavior at epoch boundaries. This corrects any
     /// drift from incremental tracking (e.g., after snapshot load or Mithril import).
-    pub(crate) fn rebuild_stake_distribution(&mut self) {
+    pub fn rebuild_stake_distribution(&mut self) {
         let mut new_map: HashMap<Hash32, Lovelace> = HashMap::new();
         for (_, output) in self.utxo_set.iter() {
             if let Some(cred_hash) = stake_credential_hash(&output.address) {
@@ -355,6 +356,53 @@ impl LedgerState {
             new_map.entry(*cred_hash).or_insert(Lovelace(0));
         }
         self.stake_distribution.stake_map = new_map;
+    }
+
+    /// Recompute pool_stake for all existing snapshots (mark/set/go).
+    ///
+    /// After rebuilding stake_distribution from the UTxO set, this updates
+    /// each snapshot's pool_stake map using the snapshot's own delegations
+    /// with the current (rebuilt) stake distribution and reward accounts.
+    /// This corrects any drift in snapshot pool_stake values after snapshot load.
+    pub fn recompute_snapshot_pool_stakes(&mut self) {
+        for (name, snapshot) in [
+            ("mark", &mut self.snapshots.mark),
+            ("set", &mut self.snapshots.set),
+            ("go", &mut self.snapshots.go),
+        ] {
+            if let Some(snap) = snapshot {
+                let old_total: u64 = snap.pool_stake.values().map(|s| s.0).sum();
+                let mut new_pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
+                    HashMap::new();
+                for (cred_hash, pool_id) in snap.delegations.iter() {
+                    let utxo_stake = self
+                        .stake_distribution
+                        .stake_map
+                        .get(cred_hash)
+                        .copied()
+                        .unwrap_or(Lovelace(0));
+                    let reward_balance = self
+                        .reward_accounts
+                        .get(cred_hash)
+                        .copied()
+                        .unwrap_or(Lovelace(0));
+                    let total_stake = Lovelace(utxo_stake.0 + reward_balance.0);
+                    *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
+                }
+                let new_total: u64 = new_pool_stake.values().map(|s| s.0).sum();
+                if old_total != new_total {
+                    info!(
+                        snapshot = name,
+                        epoch = snap.epoch.0,
+                        old_total_ada = old_total / 1_000_000,
+                        new_total_ada = new_total / 1_000_000,
+                        delta_ada = (new_total as i128 - old_total as i128) / 1_000_000,
+                        "Snapshot pool_stake recomputed (corrected drift)"
+                    );
+                }
+                snap.pool_stake = new_pool_stake;
+            }
+        }
     }
 
     /// Update the evolving nonce with a new VRF output.

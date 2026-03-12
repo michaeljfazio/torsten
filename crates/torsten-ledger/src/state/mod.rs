@@ -907,8 +907,14 @@ impl LedgerState {
                 LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
             })?;
         state.utxo_set.rebuild_address_index();
-        // After loading a snapshot, incremental stake tracking may be stale,
-        // so force a full rebuild at the next epoch boundary.
+        // After loading a snapshot, incremental stake tracking may have drifted.
+        // Rebuild stake distribution from the full UTxO set immediately, then
+        // recompute pool_stake for all existing snapshots (mark/set/go).
+        // This ensures leader eligibility checks use correct sigma values
+        // even before the next epoch boundary rotates in fresh snapshots.
+        state.rebuild_stake_distribution();
+        state.recompute_snapshot_pool_stakes();
+        // Keep needs_stake_rebuild=true so every live epoch boundary rebuilds.
         state.needs_stake_rebuild = true;
         info!(
             path = %path.display(),
@@ -916,7 +922,7 @@ impl LedgerState {
             utxo_count = state.utxo_set.len(),
             epoch = state.epoch.0,
             slot = ?state.tip.point.slot().map(|s| s.0),
-            "Ledger snapshot loaded"
+            "Ledger snapshot loaded (stake distribution rebuilt)"
         );
         Ok(state)
     }

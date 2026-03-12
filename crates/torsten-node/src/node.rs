@@ -1832,8 +1832,12 @@ impl Node {
                 info!("Rebuilding address index after replay...");
                 ls.utxo_set.rebuild_address_index();
                 info!("Address index rebuilt");
-                // Also mark that we need a full stake rebuild now that replay is done
+                // Rebuild stake distribution from UTxO set and recompute snapshot pool_stakes
+                // to ensure the saved snapshot has correct values.
                 ls.needs_stake_rebuild = true;
+                ls.rebuild_stake_distribution();
+                ls.recompute_snapshot_pool_stakes();
+                info!("Stake distribution rebuilt after chunk replay");
             }
 
             // Save final snapshot
@@ -1947,7 +1951,12 @@ impl Node {
             info!("Rebuilding address index after LSM replay...");
             ls.utxo_set.rebuild_address_index();
             info!("Address index rebuilt");
+            // Rebuild stake distribution from UTxO set and recompute snapshot pool_stakes
+            // to ensure the saved snapshot has correct values.
             ls.needs_stake_rebuild = true;
+            ls.rebuild_stake_distribution();
+            ls.recompute_snapshot_pool_stakes();
+            info!("Stake distribution rebuilt after LSM replay");
         }
 
         // Save final snapshot after replay
@@ -1969,39 +1978,68 @@ impl Node {
     ) -> Result<()> {
         let mut pipelined = pipelined_client;
         // Find intersection with our current chain.
-        // Use the furthest-ahead tip (ChainDB or ledger) as the primary
-        // intersection point. After a Mithril import, ChainDB may be far
-        // ahead of the ledger — we don't want to re-download blocks that
-        // are already stored. The ledger builds state incrementally from
-        // new blocks as they arrive.
+        // When ChainDB is ahead of the ledger, verify the chain connects.
+        // If ChainDB has blocks on a different fork (e.g., from a previous
+        // run that stored blocks but couldn't apply them), use the ledger
+        // tip to avoid re-downloading blocks that won't connect.
         let chain_tip = self.chain_db.read().await.get_tip().point;
         let ledger_tip = self.ledger_state.read().await.tip.point.clone();
         let mut known_points = Vec::new();
-        // Use whichever tip is further ahead as primary intersection.
-        // The peer returns the first matching point, so put the furthest-ahead
-        // tip first to avoid re-downloading blocks the ledger already has.
         let ledger_slot = ledger_tip.slot().map(|s| s.0).unwrap_or(0);
         let chain_slot = chain_tip.slot().map(|s| s.0).unwrap_or(0);
-        if ledger_slot >= chain_slot {
-            if ledger_tip != Point::Origin {
-                known_points.push(ledger_tip.clone());
+
+        // When ChainDB is ahead, check if its chain connects to the ledger.
+        // If not (fork divergence), prefer the ledger tip for intersection.
+        let mut use_chain_tip = chain_slot > ledger_slot;
+        if use_chain_tip && ledger_tip != Point::Origin {
+            // Check if the first ChainDB block after ledger tip connects
+            let db = self.chain_db.read().await;
+            if let Ok(Some((_next_slot, _hash, cbor))) = db.get_next_block_after_slot(
+                torsten_primitives::time::SlotNo(ledger_slot),
+            ) {
+                if let Ok(block) =
+                    torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                        &cbor,
+                        self.byron_epoch_length,
+                    )
+                {
+                    let ledger_hash = ledger_tip.hash();
+                    if ledger_hash.is_some_and(|h| h != block.prev_hash()) {
+                        warn!(
+                            "ChainDB fork divergence detected: ChainDB blocks after ledger tip \
+                             do not connect (expected prev_hash={}, got {}). \
+                             Using ledger tip for intersection.",
+                            ledger_hash.map(|h| h.to_hex()).unwrap_or_default(),
+                            block.prev_hash().to_hex()
+                        );
+                        use_chain_tip = false;
+                    }
+                }
             }
-            if chain_tip != Point::Origin && chain_tip != ledger_tip {
-                known_points.push(chain_tip.clone());
-            }
-        } else {
+        }
+
+        if use_chain_tip {
             if chain_tip != Point::Origin {
                 known_points.push(chain_tip.clone());
             }
             if ledger_tip != Point::Origin && ledger_tip != chain_tip {
                 known_points.push(ledger_tip.clone());
             }
+        } else {
+            if ledger_tip != Point::Origin {
+                known_points.push(ledger_tip.clone());
+            }
+            if chain_tip != Point::Origin && chain_tip != ledger_tip {
+                known_points.push(chain_tip.clone());
+            }
         }
         known_points.push(Point::Origin);
         if ledger_tip != chain_tip {
             info!(
-                "Ledger tip ({}) differs from ChainDB tip ({}), syncing from furthest-ahead tip",
-                ledger_tip, chain_tip
+                "Ledger tip ({}) differs from ChainDB tip ({}), using {} for intersection",
+                ledger_tip,
+                chain_tip,
+                if use_chain_tip { "ChainDB" } else { "ledger" }
             );
         }
         // Find intersection: use pipelined client if available, otherwise serial client
@@ -2986,10 +3024,20 @@ impl Node {
     async fn enable_strict_verification(&mut self) {
         self.consensus.set_strict_verification(true);
         self.consensus.nonce_established = self.epoch_transitions_observed >= 2;
+        // Stake snapshots need 3 epoch transitions to fully rotate with correct
+        // rebuilt data (mark→set→go). Until then, VRF leader eligibility failures
+        // are non-fatal to avoid rejecting valid blocks with approximate sigma values.
+        self.consensus.snapshots_established = self.epoch_transitions_observed >= 3;
         if !self.consensus.nonce_established {
             debug!(
                 transitions = self.epoch_transitions_observed,
                 "VRF proof verification deferred: epoch nonce not yet established (need 2 epoch transitions)"
+            );
+        }
+        if !self.consensus.snapshots_established {
+            debug!(
+                transitions = self.epoch_transitions_observed,
+                "VRF leader check non-fatal: stake snapshots not yet established (need 3 epoch transitions)"
             );
         }
     }

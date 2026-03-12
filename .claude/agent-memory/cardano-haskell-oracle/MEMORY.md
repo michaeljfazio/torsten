@@ -31,6 +31,25 @@
 - Torsten bug: uses snapshots.set on-the-fly instead of memoized pool_distr
 - See [pool-distr-leader-check.md](pool-distr-leader-check.md)
 
+## Block Validation: apply vs reapply
+- Replay from snapshot (LedgerDB init): `tickThenReapply` -> NO VRF/KES/opcert/ledger validation
+- New blocks from network: `tickThenApply` -> FULL validation (unless previously applied in session)
+- `reupdateChainDepState`: only updates nonces/counters, NO crypto checks
+- `updateChainDepState`: validateKESSignature + validateVRFSignature + then reupdateChainDepState
+- STS.ValidateNone: skips all STS predicate failures (no UTxO checks, no script execution)
+- No "sync mode" flag; purely structural: ImmutableDB blocks trusted, network blocks untrusted
+- See [block-validation-modes.md](block-validation-modes.md)
+
+## ChainSync At-Tip Behavior
+- Connection stays OPEN — no disconnect/reconnect cycle
+- Server sends MsgAwaitReply (tag 1) when follower is at head of chain
+- Server then blocks on `followerInstructionBlocking` (STM retry until chain changes)
+- Client receives MsgAwaitReply, sets csIdling=true, pauses LoP bucket
+- Client enters StNext(StMustReply) state, waits for eventual RollForward/RollBackward
+- Pipeline decision at tip: non-pipelined Request (not Pipeline) when client==server block number
+- Default pipeline marks: lowMark=200, highMark=300 (pipelineDecisionLowHighMark)
+- See [chainsync-at-tip.md](chainsync-at-tip.md)
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
@@ -46,6 +65,7 @@
 - [epoch-nonce-calculation.md](epoch-nonce-calculation.md) - Praos epoch nonce: PraosState fields, per-block update, epoch boundary computation, stability windows, Torsten bugs
 - [vrf-leader-check.md](vrf-leader-check.md) - VRF leader eligibility: checkLeaderValue, taylorExpCmp, FixedPoint E34, certNat/certNatMax, exact algorithm
 - [block-forging-flow.md](block-forging-flow.md) - Complete block forging: slot tick→leader check→tx selection→body hash→header→KES sign, all key files and Torsten body hash bug
+- [utxo-hd-snapshot-format.md](utxo-hd-snapshot-format.md) - UTxO-HD in-memory backend snapshot: version wrapper array(2)[1,ext], HFC telescope, per-era version array(2)[2,...], NewEpochState array(7), EMPTY UTxO in state file, tables written separately
 
 ## N2C Key Facts
 - Shelley query CBOR tags: 40 queries (0-39), see n2c-protocol-details.md

@@ -141,6 +141,12 @@ pub struct OuroborosPraos {
     /// have accumulated correct VRF nonce contributions. When false, VRF proof
     /// verification is skipped even in strict mode.
     pub nonce_established: bool,
+    /// Whether stake snapshots have been correctly established.
+    /// After snapshot load, the mark/set/go snapshots may have drifted pool_stake
+    /// values. It takes 3 epoch transitions for all snapshots to be rebuilt with
+    /// correct stake distributions. When false, VRF leader eligibility failures
+    /// are non-fatal even in strict mode.
+    pub snapshots_established: bool,
     /// Tracked opcert sequence numbers per pool (cold key hash → highest seen sequence number).
     /// Used to detect opcert counter regressions (replay protection).
     opcert_counters: HashMap<Hash28, u64>,
@@ -157,6 +163,7 @@ impl OuroborosPraos {
             tip: Tip::origin(),
             strict_verification: false,
             nonce_established: false,
+            snapshots_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -175,6 +182,7 @@ impl OuroborosPraos {
             tip: Tip::origin(),
             strict_verification: false,
             nonce_established: false,
+            snapshots_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -195,6 +203,7 @@ impl OuroborosPraos {
             tip: Tip::origin(),
             strict_verification: false,
             nonce_established: false,
+            snapshots_established: false,
             opcert_counters: HashMap::new(),
         }
     }
@@ -415,7 +424,7 @@ impl OuroborosPraos {
                     )
                 };
                 if !is_leader {
-                    if self.strict_verification {
+                    if self.strict_verification && self.snapshots_established {
                         return Err(ConsensusError::InvalidBlock(format!(
                             "VRF leader eligibility check failed: slot={}, sigma={}, proto={}",
                             header.slot.0, info.relative_stake, header.protocol_version.major,
