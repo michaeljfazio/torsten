@@ -14,3 +14,4 @@ keys/
 *.skey
 *.vkey
 docs/book/
+checkpoints.json
