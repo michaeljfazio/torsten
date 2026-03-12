@@ -235,6 +235,9 @@ impl LedgerState {
             }
         }
 
+        // Capture ratified proposal states before removal (for GetRatifyState query tag 32)
+        let mut ratified_with_state = Vec::new();
+
         // Remove ratified proposals and refund deposits
         if !ratified.is_empty() {
             for action_id in &ratified {
@@ -252,6 +255,7 @@ impl LedgerState {
                                 .or_insert(Lovelace(0)) += deposit;
                         }
                     }
+                    ratified_with_state.push((action_id.clone(), proposal_state));
                 }
                 Arc::make_mut(&mut self.governance)
                     .votes_by_action
@@ -262,6 +266,11 @@ impl LedgerState {
                 ratified.len()
             );
         }
+
+        // Store ratification results for GetRatifyState query (tag 32)
+        let gov = Arc::make_mut(&mut self.governance);
+        gov.last_ratified = ratified_with_state;
+        gov.last_ratify_delayed = delayed;
     }
 
     /// Update the enacted governance root for a given purpose after enactment.

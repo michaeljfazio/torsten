@@ -712,6 +712,12 @@ pub struct NodeStateSnapshot {
     pub update_quorum: u64,
     /// Maximum lovelace supply (genesis value)
     pub max_lovelace_supply: u64,
+    /// Last ratified proposals (from most recent epoch transition) for GetRatifyState
+    pub ratify_enacted: Vec<(ProposalSnapshot, GovActionId)>,
+    /// Last expired proposal IDs (from most recent epoch transition) for GetRatifyState
+    pub ratify_expired: Vec<GovActionId>,
+    /// Whether ratification was delayed by a delaying action
+    pub ratify_delayed: bool,
 }
 
 impl Default for NodeStateSnapshot {
@@ -761,6 +767,9 @@ impl Default for NodeStateSnapshot {
             max_kes_evolutions: 62,
             update_quorum: 5,
             max_lovelace_supply: 45_000_000_000_000_000,
+            ratify_enacted: Vec::new(),
+            ratify_expired: Vec::new(),
+            ratify_delayed: false,
         }
     }
 }

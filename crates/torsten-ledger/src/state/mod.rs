@@ -183,6 +183,14 @@ pub struct GovernanceState {
     pub enacted_committee: Option<GovActionId>,
     #[serde(default)]
     pub enacted_constitution: Option<GovActionId>,
+    /// Last ratification results (from most recent epoch transition).
+    /// Used by GetRatifyState (N2C query tag 32).
+    #[serde(default)]
+    pub last_ratified: Vec<(GovActionId, ProposalState)>,
+    #[serde(default)]
+    pub last_expired: Vec<GovActionId>,
+    #[serde(default)]
+    pub last_ratify_delayed: bool,
 }
 
 /// Registration state for a DRep

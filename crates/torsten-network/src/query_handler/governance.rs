@@ -81,16 +81,13 @@ fn parse_gov_action_id_set(decoder: &mut minicbor::Decoder<'_>) -> Vec<(Vec<u8>,
 ///
 /// Returns: array(4) [enacted_seq, expired_seq, delayed_bool, future_pparam_update]
 /// The Haskell node computes this from the DRep pulsing state. We return the
-/// current enacted/expired state which is functionally equivalent between epoch boundaries.
-pub(crate) fn handle_ratify_state(_state: &NodeStateSnapshot) -> QueryResult {
+/// results from the most recent epoch transition's ratification pass.
+pub(crate) fn handle_ratify_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetRatifyState");
-    // We don't currently track per-epoch enacted/expired proposals separately.
-    // Return empty enacted/expired lists with no delay — this is correct between
-    // epoch boundaries since ratification happens at epoch transitions.
     QueryResult::RatifyState {
-        enacted: Vec::new(),
-        expired: Vec::new(),
-        delayed: false,
+        enacted: state.ratify_enacted.clone(),
+        expired: state.ratify_expired.clone(),
+        delayed: state.ratify_delayed,
     }
 }
 
@@ -158,7 +155,7 @@ pub(crate) fn handle_filtered_vote_delegatees(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_handler::types::{NodeStateSnapshot, ProposalSnapshot};
+    use crate::query_handler::types::{GovActionId, NodeStateSnapshot, ProposalSnapshot};
 
     fn make_state_with_proposals() -> NodeStateSnapshot {
         NodeStateSnapshot {
@@ -261,6 +258,58 @@ mod tests {
                 assert!(enacted.is_empty());
                 assert!(expired.is_empty());
                 assert!(!delayed);
+            }
+            _ => panic!("Expected RatifyState"),
+        }
+    }
+
+    #[test]
+    fn test_ratify_state_with_enacted_and_expired() {
+        let enacted_proposal = ProposalSnapshot {
+            tx_id: vec![0xAA; 32],
+            action_index: 0,
+            action_type: "NoConfidence".to_string(),
+            proposed_epoch: 100,
+            expires_epoch: 110,
+            yes_votes: 5,
+            no_votes: 1,
+            abstain_votes: 0,
+            deposit: 500_000_000,
+            return_addr: vec![0xBB; 29],
+            anchor_url: "https://example.com".to_string(),
+            anchor_hash: vec![0xCC; 32],
+            committee_votes: Vec::new(),
+            drep_votes: Vec::new(),
+            spo_votes: Vec::new(),
+        };
+        let enacted_id = GovActionId {
+            tx_id: vec![0xAA; 32],
+            action_index: 0,
+        };
+        let expired_id = GovActionId {
+            tx_id: vec![0xDD; 32],
+            action_index: 1,
+        };
+        let state = NodeStateSnapshot {
+            ratify_enacted: vec![(enacted_proposal, enacted_id)],
+            ratify_expired: vec![expired_id],
+            ratify_delayed: true,
+            ..NodeStateSnapshot::default()
+        };
+        let result = handle_ratify_state(&state);
+        match result {
+            QueryResult::RatifyState {
+                enacted,
+                expired,
+                delayed,
+            } => {
+                assert_eq!(enacted.len(), 1);
+                assert_eq!(enacted[0].0.action_type, "NoConfidence");
+                assert_eq!(enacted[0].1.tx_id, vec![0xAA; 32]);
+                assert_eq!(expired.len(), 1);
+                assert_eq!(expired[0].tx_id, vec![0xDD; 32]);
+                assert_eq!(expired[0].action_index, 1);
+                assert!(delayed);
             }
             _ => panic!("Expected RatifyState"),
         }

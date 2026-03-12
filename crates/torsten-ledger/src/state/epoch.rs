@@ -255,6 +255,10 @@ impl LedgerState {
             );
         }
 
+        // Store expired proposal IDs for GetRatifyState query (tag 32).
+        // This is set regardless of whether proposals expired (clears stale data).
+        Arc::make_mut(&mut self.governance).last_expired = expired;
+
         // Mark inactive DReps per CIP-1694
         // DReps that haven't voted or updated within drep_activity epochs are marked inactive
         // and excluded from voting power calculations. They remain registered and keep their deposits.

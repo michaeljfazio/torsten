@@ -3744,6 +3744,93 @@ impl Node {
                 .shelley_genesis
                 .as_ref()
                 .map_or(45_000_000_000_000_000, |g| g.max_lovelace_supply),
+            ratify_enacted: ls
+                .governance
+                .last_ratified
+                .iter()
+                .map(|(action_id, state)| {
+                    let action_type = match &state.procedure.gov_action {
+                        torsten_primitives::transaction::GovAction::ParameterChange { .. } => {
+                            "ParameterChange"
+                        }
+                        torsten_primitives::transaction::GovAction::HardForkInitiation {
+                            ..
+                        } => "HardForkInitiation",
+                        torsten_primitives::transaction::GovAction::TreasuryWithdrawals {
+                            ..
+                        } => "TreasuryWithdrawals",
+                        torsten_primitives::transaction::GovAction::NoConfidence { .. } => {
+                            "NoConfidence"
+                        }
+                        torsten_primitives::transaction::GovAction::UpdateCommittee { .. } => {
+                            "UpdateCommittee"
+                        }
+                        torsten_primitives::transaction::GovAction::NewConstitution { .. } => {
+                            "NewConstitution"
+                        }
+                        torsten_primitives::transaction::GovAction::InfoAction => "InfoAction",
+                    };
+                    // Build vote maps from votes_by_action (using pre-removal snapshot)
+                    let mut committee_votes = Vec::new();
+                    let mut drep_votes = Vec::new();
+                    let mut spo_votes = Vec::new();
+                    if let Some(votes) = ls.governance.votes_by_action.get(action_id) {
+                        for (voter, procedure) in votes {
+                            let vote_u8 = match procedure.vote {
+                                torsten_primitives::transaction::Vote::No => 0u8,
+                                torsten_primitives::transaction::Vote::Yes => 1u8,
+                                torsten_primitives::transaction::Vote::Abstain => 2u8,
+                            };
+                            use torsten_primitives::transaction::Voter;
+                            match voter {
+                                Voter::ConstitutionalCommittee(cred) => {
+                                    let (cred_type, hash) = credential_to_bytes(cred);
+                                    committee_votes.push((hash, cred_type, vote_u8));
+                                }
+                                Voter::DRep(cred) => {
+                                    let (cred_type, hash) = credential_to_bytes(cred);
+                                    drep_votes.push((hash, cred_type, vote_u8));
+                                }
+                                Voter::StakePool(pool_hash) => {
+                                    spo_votes.push((pool_hash.as_ref()[..28].to_vec(), vote_u8));
+                                }
+                            }
+                        }
+                    }
+                    let proposal = ProposalSnapshot {
+                        tx_id: action_id.transaction_id.as_ref().to_vec(),
+                        action_index: action_id.action_index,
+                        action_type: action_type.to_string(),
+                        proposed_epoch: state.proposed_epoch.0,
+                        expires_epoch: state.expires_epoch.0,
+                        yes_votes: state.yes_votes,
+                        no_votes: state.no_votes,
+                        abstain_votes: state.abstain_votes,
+                        deposit: state.procedure.deposit.0,
+                        return_addr: state.procedure.return_addr.clone(),
+                        anchor_url: state.procedure.anchor.url.clone(),
+                        anchor_hash: state.procedure.anchor.data_hash.as_ref().to_vec(),
+                        committee_votes,
+                        drep_votes,
+                        spo_votes,
+                    };
+                    let gov_id = torsten_network::query_handler::GovActionId {
+                        tx_id: action_id.transaction_id.as_ref().to_vec(),
+                        action_index: action_id.action_index,
+                    };
+                    (proposal, gov_id)
+                })
+                .collect(),
+            ratify_expired: ls
+                .governance
+                .last_expired
+                .iter()
+                .map(|id| torsten_network::query_handler::GovActionId {
+                    tx_id: id.transaction_id.as_ref().to_vec(),
+                    action_index: id.action_index,
+                })
+                .collect(),
+            ratify_delayed: ls.governance.last_ratify_delayed,
             genesis_config: self.shelley_genesis.as_ref().map(|g| {
                 let gp = &g.protocol_params;
                 // Convert a0 from f64 to rational
