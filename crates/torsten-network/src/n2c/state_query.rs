@@ -358,41 +358,67 @@ fn encode_tagged_rational(enc: &mut minicbor::Encoder<&mut Vec<u8>>, num: u64, d
     enc.u64(den).ok();
 }
 
-/// Encode a relay access point for LedgerPeerSnapshot.
-/// RelayAccessPoint is a sum type:
-///   [0, ip_addr, port]  — RelayAccessAddress
-///   [1, dns_name, port] — RelayAccessDomain
-fn encode_relay_access_point(
+/// Encode a LedgerRelayAccessPoint for LedgerPeerSnapshot.
+///
+/// Haskell wire format:
+///   DNS domain:   array(3) [0, port_integer, domain_bytestring]
+///   IPv4 address: array(3) [1, port_integer, array(4)[o1, o2, o3, o4]]
+///   IPv6 address: array(3) [2, port_integer, array(4)[w1, w2, w3, w4]]
+fn encode_ledger_relay(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
     relay: &crate::query_handler::RelaySnapshot,
 ) {
     match relay {
         crate::query_handler::RelaySnapshot::SingleHostAddr { port, ipv4, ipv6 } => {
-            // RelayAccessAddress: [0, ip_bytes, port]
-            enc.array(3).ok();
-            enc.u32(0).ok();
+            let p = port.unwrap_or(3001) as i64;
             if let Some(ip4) = ipv4 {
-                enc.bytes(ip4).ok();
+                // IPv4: [1, port, [o1, o2, o3, o4]]
+                enc.array(3).ok();
+                enc.u32(1).ok();
+                enc.i64(p).ok();
+                enc.array(4).ok();
+                for octet in ip4 {
+                    enc.i64(*octet as i64).ok();
+                }
             } else if let Some(ip6) = ipv6 {
-                enc.bytes(ip6).ok();
+                // IPv6: [2, port, [w1, w2, w3, w4]] as 4 x 32-bit words
+                enc.array(3).ok();
+                enc.u32(2).ok();
+                enc.i64(p).ok();
+                enc.array(4).ok();
+                for chunk in ip6.chunks(4) {
+                    let w = u32::from_be_bytes([
+                        chunk.first().copied().unwrap_or(0),
+                        chunk.get(1).copied().unwrap_or(0),
+                        chunk.get(2).copied().unwrap_or(0),
+                        chunk.get(3).copied().unwrap_or(0),
+                    ]);
+                    enc.i64(w as i64).ok();
+                }
             } else {
-                enc.bytes(&[0u8; 4]).ok(); // fallback
+                // No IP — encode as IPv4 0.0.0.0
+                enc.array(3).ok();
+                enc.u32(1).ok();
+                enc.i64(p).ok();
+                enc.array(4).ok();
+                for _ in 0..4 {
+                    enc.i64(0).ok();
+                }
             }
-            enc.u16(port.unwrap_or(3001)).ok();
         }
         crate::query_handler::RelaySnapshot::SingleHostName { port, dns_name } => {
-            // RelayAccessDomain: [1, dns_name, port]
+            // DNS: [0, port, domain_bytes]
             enc.array(3).ok();
-            enc.u32(1).ok();
-            enc.str(dns_name).ok();
-            enc.u16(port.unwrap_or(3001)).ok();
+            enc.u32(0).ok();
+            enc.i64(port.unwrap_or(3001) as i64).ok();
+            enc.bytes(dns_name.as_bytes()).ok();
         }
         crate::query_handler::RelaySnapshot::MultiHostName { dns_name } => {
-            // RelayAccessDomain: [1, dns_name, port=3001]
+            // DNS: [0, port=3001, domain_bytes]
             enc.array(3).ok();
-            enc.u32(1).ok();
-            enc.str(dns_name).ok();
-            enc.u16(3001).ok();
+            enc.u32(0).ok();
+            enc.i64(3001).ok();
+            enc.bytes(dns_name.as_bytes()).ok();
         }
     }
 }
@@ -1467,27 +1493,56 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
             enc.u32(*v).ok();
         }
         QueryResult::LedgerPeerSnapshot(peers) => {
-            // LedgerPeerSnapshot = array(2) [version, pool_relay_list]
-            // Haskell: LedgerPeerSnapshot (version, [(accStake, (poolStake, NonEmpty relay))])
-            enc.array(2).ok();
-            enc.u32(1).ok(); // version
-                             // peers: array of (accumulatedStake, (poolStake, relays))
-            enc.array(peers.len() as u64).ok();
-            let mut acc_stake: u64 = 0;
-            for peer in peers {
-                acc_stake = acc_stake.saturating_add(peer.stake);
-                enc.array(2).ok();
-                // accumulated stake
-                enc.u64(acc_stake).ok();
-                // (poolStake, relays)
-                enc.array(2).ok();
-                enc.u64(peer.stake).ok();
-                // relays: array of RelayAccessPoint
-                enc.array(peer.relays.len() as u64).ok();
-                for relay in &peer.relays {
-                    encode_relay_access_point(enc, relay);
+            // LedgerPeerSnapshotV2 (version 1): array(2) [1, array(2)[WithOrigin, pools_indef]]
+            // Haskell: (WithOrigin SlotNo, [(AccPoolStake, (PoolStake, NonEmpty relay))])
+            // Stakes are Rational: array(2)[numerator, denominator]
+            // Only include "big ledger peers" — top pools controlling 90% of stake.
+
+            // Sort by stake descending and filter to big peers (top 90%)
+            let mut sorted: Vec<_> = peers.iter().filter(|p| p.stake > 0).collect();
+            sorted.sort_by(|a, b| b.stake.cmp(&a.stake));
+            let total_stake: u64 = sorted.iter().map(|p| p.stake).sum();
+            let cutoff = total_stake * 9 / 10; // 90% threshold
+            let mut acc_raw: u64 = 0;
+            let mut big_peers = Vec::new();
+            for peer in &sorted {
+                big_peers.push(*peer);
+                acc_raw += peer.stake;
+                if acc_raw >= cutoff {
+                    break;
                 }
             }
+
+            enc.array(2).ok();
+            enc.u32(1).ok(); // version 1
+            enc.array(2).ok();
+            // WithOrigin: Origin = [0]  (we don't track the snapshot slot)
+            enc.array(1).ok();
+            enc.u32(0).ok();
+            // pools: indefinite-length array
+            enc.begin_array().ok();
+            let mut acc_num: u64 = 0;
+            for peer in &big_peers {
+                acc_num += peer.stake;
+                enc.array(2).ok();
+                // AccPoolStake as Rational (accumulated stake / total)
+                enc.array(2).ok();
+                enc.u64(acc_num).ok();
+                enc.u64(total_stake.max(1)).ok();
+                // (PoolStake, relays)
+                enc.array(2).ok();
+                // PoolStake as Rational (relative stake)
+                enc.array(2).ok();
+                enc.u64(peer.stake).ok();
+                enc.u64(total_stake.max(1)).ok();
+                // relays: indefinite-length array (NonEmpty)
+                enc.begin_array().ok();
+                for relay in &peer.relays {
+                    encode_ledger_relay(enc, relay);
+                }
+                enc.end().ok();
+            }
+            enc.end().ok(); // end pool list
         }
         QueryResult::StakePoolDefaultVote(entries) => {
             // Map<PoolId, DefaultVote>
