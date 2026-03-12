@@ -49,13 +49,13 @@ These are the primary libraries that Torsten directly depends on:
 | [pallas-traverse](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Utilities to traverse over multi-era block data |
 | [pallas-addresses](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Ergonomic library to work with different Cardano addresses |
 | [pallas-network](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Ouroboros networking stack using async IO |
-| [cardano-lsm](https://github.com/nixedge/cardano-lsm-rust) | 1.0.1 | Apache-2.0 | Pure Rust LSM tree for on-disk UTxO set storage (UTxO-HD) |
+| [cardano-lsm](https://github.com/nixedge/cardano-lsm-rust) | 1.0.1 | Apache-2.0 | Pure Rust port of Cardano's LSM tree for blockchain indexing |
 | [uplc](https://github.com/aiken-lang/aiken) | 1.1.21 | Apache-2.0 | Utilities for working with Untyped Plutus Core |
 | [tokio](https://github.com/tokio-rs/tokio) | 1.50.0 | MIT | An event-driven, non-blocking I/O platform for writing asynchronous I/O
 backe... |
 | [hyper](https://github.com/hyperium/hyper) | 1.8.1 | MIT | A protective and efficient HTTP library for all. |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12.28 | MIT OR Apache-2.0 | higher level HTTP client library |
-| [clap](https://github.com/clap-rs/clap) | 4.5.60 | MIT OR Apache-2.0 | A simple to use, efficient, and full-featured Command Line Argument Parser |
+| [clap](https://github.com/clap-rs/clap) | 4.6.0 | MIT OR Apache-2.0 | A simple to use, efficient, and full-featured Command Line Argument Parser |
 | [serde](https://github.com/serde-rs/serde) | 1.0.228 | MIT OR Apache-2.0 | A generic serialization/deserialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.0.149 | MIT OR Apache-2.0 | A JSON serialization file format |
 | [bincode](https://github.com/servo/bincode) | 1.3.3 | MIT | A binary serialization / deserialization strategy that uses Serde for transfo... |
@@ -98,9 +98,9 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [aho-corasick](https://github.com/BurntSushi/aho-corasick) | 1.1.4 | Unlicense OR MIT |
 | [android_system_properties](https://github.com/nical/android_system_properties) | 0.1.5 | MIT/Apache-2.0 |
 | [anes](https://github.com/zrzka/anes-rs) | 0.1.6 | MIT OR Apache-2.0 |
-| [anstream](https://github.com/rust-cli/anstyle.git) | 0.6.21 | MIT OR Apache-2.0 |
+| [anstream](https://github.com/rust-cli/anstyle.git) | 1.0.0 | MIT OR Apache-2.0 |
 | [anstyle](https://github.com/rust-cli/anstyle.git) | 1.0.13 | MIT OR Apache-2.0 |
-| [anstyle-parse](https://github.com/rust-cli/anstyle.git) | 0.2.7 | MIT OR Apache-2.0 |
+| [anstyle-parse](https://github.com/rust-cli/anstyle.git) | 1.0.0 | MIT OR Apache-2.0 |
 | [anstyle-query](https://github.com/rust-cli/anstyle.git) | 1.1.5 | MIT OR Apache-2.0 |
 | [anstyle-wincon](https://github.com/rust-cli/anstyle.git) | 3.0.11 | MIT OR Apache-2.0 |
 | [anyhow](https://github.com/dtolnay/anyhow) | 1.0.102 | MIT OR Apache-2.0 |
@@ -136,10 +136,10 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [ciborium](https://github.com/enarx/ciborium) | 0.2.2 | Apache-2.0 |
 | [ciborium-io](https://github.com/enarx/ciborium) | 0.2.2 | Apache-2.0 |
 | [ciborium-ll](https://github.com/enarx/ciborium) | 0.2.2 | Apache-2.0 |
-| [clap](https://github.com/clap-rs/clap) | 4.5.60 | MIT OR Apache-2.0 |
-| [clap_builder](https://github.com/clap-rs/clap) | 4.5.60 | MIT OR Apache-2.0 |
-| [clap_derive](https://github.com/clap-rs/clap) | 4.5.55 | MIT OR Apache-2.0 |
-| [clap_lex](https://github.com/clap-rs/clap) | 1.0.0 | MIT OR Apache-2.0 |
+| [clap](https://github.com/clap-rs/clap) | 4.6.0 | MIT OR Apache-2.0 |
+| [clap_builder](https://github.com/clap-rs/clap) | 4.6.0 | MIT OR Apache-2.0 |
+| [clap_derive](https://github.com/clap-rs/clap) | 4.6.0 | MIT OR Apache-2.0 |
+| [clap_lex](https://github.com/clap-rs/clap) | 1.1.0 | MIT OR Apache-2.0 |
 | [colorchoice](https://github.com/rust-cli/anstyle.git) | 1.0.4 | MIT OR Apache-2.0 |
 | [console](https://github.com/console-rs/console) | 0.15.11 | MIT |
 | [const-oid](https://github.com/RustCrypto/formats/tree/master/const-oid) | 0.9.6 | Apache-2.0 OR MIT |
@@ -248,7 +248,7 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [k256](https://github.com/RustCrypto/elliptic-curves/tree/master/k256) | 0.13.4 | Apache-2.0 OR MIT |
 | [lazy_static](https://github.com/rust-lang-nursery/lazy-static.rs) | 1.5.0 | MIT OR Apache-2.0 |
 | [leb128fmt](https://github.com/bluk/leb128fmt) | 0.1.0 | MIT OR Apache-2.0 |
-| [libc](https://github.com/rust-lang/libc) | 0.2.182 | MIT OR Apache-2.0 |
+| [libc](https://github.com/rust-lang/libc) | 0.2.183 | MIT OR Apache-2.0 |
 | [libredox](https://gitlab.redox-os.org/redox-os/libredox.git) | 0.1.14 | MIT |
 | [linux-raw-sys](https://github.com/sunfishcode/linux-raw-sys) | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [litemap](https://github.com/unicode-org/icu4x) | 0.8.1 | Unicode-3.0 |
@@ -276,7 +276,7 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [num-traits](https://github.com/rust-num/num-traits) | 0.2.19 | MIT OR Apache-2.0 |
 | [num_cpus](https://github.com/seanmonstar/num_cpus) | 1.17.0 | MIT OR Apache-2.0 |
 | [number_prefix](https://github.com/ogham/rust-number-prefix) | 0.4.0 | MIT |
-| [once_cell](https://github.com/matklad/once_cell) | 1.21.3 | MIT OR Apache-2.0 |
+| [once_cell](https://github.com/matklad/once_cell) | 1.21.4 | MIT OR Apache-2.0 |
 | [once_cell_polyfill](https://github.com/polyfill-rs/once_cell_polyfill) | 1.70.2 | MIT OR Apache-2.0 |
 | [oorandom](https://hg.sr.ht/~icefox/oorandom) | 11.1.5 | MIT |
 | [opaque-debug](https://github.com/RustCrypto/utils) | 0.3.1 | MIT OR Apache-2.0 |
@@ -311,7 +311,7 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [proptest](https://github.com/proptest-rs/proptest) | 1.10.0 | MIT OR Apache-2.0 |
 | [quick-error](http://github.com/tailhook/quick-error) | 1.2.3 | MIT/Apache-2.0 |
 | [quinn](https://github.com/quinn-rs/quinn) | 0.11.9 | MIT OR Apache-2.0 |
-| [quinn-proto](https://github.com/quinn-rs/quinn) | 0.11.13 | MIT OR Apache-2.0 |
+| [quinn-proto](https://github.com/quinn-rs/quinn) | 0.11.14 | MIT OR Apache-2.0 |
 | [quinn-udp](https://github.com/quinn-rs/quinn) | 0.5.14 | MIT OR Apache-2.0 |
 | [quote](https://github.com/dtolnay/quote) | 1.0.45 | MIT OR Apache-2.0 |
 | [r-efi](https://github.com/r-efi/r-efi) | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
@@ -376,7 +376,7 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [synstructure](https://github.com/mystor/synstructure) | 0.13.2 | MIT |
 | [tap](https://github.com/myrrlyn/tap) | 1.0.1 | MIT |
 | [tar](https://github.com/alexcrichton/tar-rs) | 0.4.44 | MIT OR Apache-2.0 |
-| [tempfile](https://github.com/Stebalien/tempfile) | 3.26.0 | MIT OR Apache-2.0 |
+| [tempfile](https://github.com/Stebalien/tempfile) | 3.27.0 | MIT OR Apache-2.0 |
 | [thiserror](https://github.com/dtolnay/thiserror) | 2.0.18 | MIT OR Apache-2.0 |
 | [thiserror-impl](https://github.com/dtolnay/thiserror) | 2.0.18 | MIT OR Apache-2.0 |
 | [thread_local](https://github.com/Amanieu/thread_local-rs) | 1.1.9 | MIT OR Apache-2.0 |
@@ -453,15 +453,15 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [windows-result](https://github.com/microsoft/windows-rs) | 0.4.1 | MIT OR Apache-2.0 |
 | [windows-strings](https://github.com/microsoft/windows-rs) | 0.5.1 | MIT OR Apache-2.0 |
 | [windows-sys](https://github.com/microsoft/windows-rs) | 0.61.2 | MIT OR Apache-2.0 |
-| [windows-targets](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_aarch64_gnullvm](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_aarch64_msvc](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_i686_gnu](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_i686_gnullvm](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_i686_msvc](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_x86_64_gnu](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_x86_64_gnullvm](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
-| [windows_x86_64_msvc](https://github.com/microsoft/windows-rs) | 0.52.6 | MIT OR Apache-2.0 |
+| [windows-targets](https://github.com/microsoft/windows-rs) | 0.53.5 | MIT OR Apache-2.0 |
+| [windows_aarch64_gnullvm](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_aarch64_msvc](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_i686_gnu](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_i686_gnullvm](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_i686_msvc](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_x86_64_gnu](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_x86_64_gnullvm](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
+| [windows_x86_64_msvc](https://github.com/microsoft/windows-rs) | 0.53.1 | MIT OR Apache-2.0 |
 | [winnow](https://github.com/winnow-rs/winnow) | 0.7.15 | MIT |
 | [wit-bindgen](https://github.com/bytecodealliance/wit-bindgen) | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [wit-bindgen-core](https://github.com/bytecodealliance/wit-bindgen) | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -474,8 +474,8 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [xattr](https://github.com/Stebalien/xattr) | 1.6.1 | MIT OR Apache-2.0 |
 | [yoke](https://github.com/unicode-org/icu4x) | 0.8.1 | Unicode-3.0 |
 | [yoke-derive](https://github.com/unicode-org/icu4x) | 0.8.1 | Unicode-3.0 |
-| [zerocopy](https://github.com/google/zerocopy) | 0.8.40 | BSD-2-Clause OR Apache-2.0 OR MIT |
-| [zerocopy-derive](https://github.com/google/zerocopy) | 0.8.40 | BSD-2-Clause OR Apache-2.0 OR MIT |
+| [zerocopy](https://github.com/google/zerocopy) | 0.8.42 | BSD-2-Clause OR Apache-2.0 OR MIT |
+| [zerocopy-derive](https://github.com/google/zerocopy) | 0.8.42 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | [zerofrom](https://github.com/unicode-org/icu4x) | 0.1.6 | Unicode-3.0 |
 | [zerofrom-derive](https://github.com/unicode-org/icu4x) | 0.1.6 | Unicode-3.0 |
 | [zeroize](https://github.com/RustCrypto/utils) | 1.8.2 | Apache-2.0 OR MIT |
