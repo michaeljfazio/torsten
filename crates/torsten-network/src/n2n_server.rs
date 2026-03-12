@@ -1097,10 +1097,22 @@ fn handle_n2n_blockfetch(
                 return Ok(segments);
             }
 
-            // Safety: from_exists/to_exists use from.as_ref()/to.as_ref(), so they are
-            // only true when from/to are Some. We return MsgNoBlocks if either is false.
-            let (from_slot, _from_hash) = from.expect("from is Some (from_exists checked above)");
-            let (to_slot, _to_hash) = to.expect("to is Some (to_exists checked above)");
+            let (from_slot, _from_hash) = match from {
+                Some(f) => f,
+                None => {
+                    return Err(N2NServerError::Protocol(
+                        "BlockFetch: from point missing after existence check".into(),
+                    ));
+                }
+            };
+            let (to_slot, _to_hash) = match to {
+                Some(t) => t,
+                None => {
+                    return Err(N2NServerError::Protocol(
+                        "BlockFetch: to point missing after existence check".into(),
+                    ));
+                }
+            };
 
             // Limit range to prevent DoS — max 2000 blocks per request
             const MAX_BLOCKFETCH_RANGE: u64 = 2000;

@@ -808,7 +808,9 @@ impl N2CClient {
 
                     // If the segment payload was less than max, this is the last chunk
                     if segment.payload.len() < 65535 {
-                        let mut result = first_segment.unwrap();
+                        let mut result = first_segment.ok_or_else(|| {
+                            N2CClientError::Protocol("no first segment in reassembly".into())
+                        })?;
                         result.payload = combined_payload;
                         return Ok(result);
                     }
