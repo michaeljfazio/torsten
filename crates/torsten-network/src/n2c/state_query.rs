@@ -1041,8 +1041,13 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
                 enc.bytes(&utxo.tx_hash).ok();
                 enc.u32(utxo.output_index).ok();
 
-                // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, ...}
-                encode_utxo_output(enc, utxo);
+                // Value: use pre-encoded raw CBOR if available (preserves original
+                // wire format from the ledger), otherwise re-encode from snapshot fields.
+                if let Some(raw) = &utxo.raw_cbor {
+                    enc.writer_mut().extend_from_slice(raw);
+                } else {
+                    encode_utxo_output(enc, utxo);
+                }
             }
         }
         QueryResult::StakeAddressInfo(addrs) => {
@@ -1789,6 +1794,38 @@ mod tests {
         let _ = dec.map(); // asset map
         assert_eq!(dec.bytes().unwrap(), "Token1".as_bytes());
         assert_eq!(dec.u64().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_encode_utxo_raw_cbor_passthrough() {
+        // When raw_cbor is present, it should be used directly instead of re-encoding
+        let raw_output = vec![
+            0xa2, // map(2)
+            0x00, 0x41, 0xFF, // 0: bytes(1) 0xFF
+            0x01, 0x1a, 0x00, 0x4c, 0x4b, 0x40, // 1: 5_000_000
+        ];
+        let buf = encode(&QueryResult::UtxoByAddress(vec![UtxoSnapshot {
+            tx_hash: vec![0x33; 32],
+            output_index: 2,
+            address_bytes: vec![0x01; 57], // ignored when raw_cbor is present
+            lovelace: 999,                 // ignored when raw_cbor is present
+            multi_asset: vec![],
+            datum_hash: None,
+            raw_cbor: Some(raw_output.clone()),
+        }]));
+        let mut dec = decode_msg_result(&buf);
+        strip_hfc(&mut dec);
+        let _ = dec.map(); // 1 entry
+        let _ = dec.array(); // key
+        assert_eq!(dec.bytes().unwrap(), &[0x33; 32]);
+        assert_eq!(dec.u32().unwrap(), 2);
+        // Value should be the raw CBOR bytes directly
+        let fields = dec.map().unwrap().unwrap();
+        assert_eq!(fields, 2);
+        assert_eq!(dec.u32().unwrap(), 0);
+        assert_eq!(dec.bytes().unwrap(), &[0xFF]);
+        assert_eq!(dec.u32().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 5_000_000);
     }
 
     #[test]
