@@ -326,6 +326,27 @@ fn tier1_query_treasury_values() {
     );
 }
 
+// ─── Ratification State ───────────────────────────────────────────────
+
+#[test]
+fn tier1_query_ratify_state() {
+    let socket = require_socket();
+    let output = query(&socket, &["ratify-state"]);
+    assert!(
+        !output.trim().is_empty(),
+        "ratify-state query should return data"
+    );
+    // Verify expected fields in output
+    assert!(
+        output.contains("Ratification State")
+            || output.contains("Enacted")
+            || output.contains("Expired")
+            || output.contains("Delayed"),
+        "ratify-state output should contain state fields, got: {}",
+        &output[..output.len().min(200)]
+    );
+}
+
 // ─── Cross-Verification with Koios ────────────────────────────────────
 
 #[test]
