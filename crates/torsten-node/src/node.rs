@@ -1994,9 +1994,9 @@ impl Node {
         if use_chain_tip && ledger_tip != Point::Origin {
             // Check if the first ChainDB block after ledger tip connects
             let db = self.chain_db.read().await;
-            if let Ok(Some((_next_slot, _hash, cbor))) = db.get_next_block_after_slot(
-                torsten_primitives::time::SlotNo(ledger_slot),
-            ) {
+            if let Ok(Some((_next_slot, _hash, cbor))) =
+                db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
+            {
                 if let Ok(block) =
                     torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
                         &cbor,
