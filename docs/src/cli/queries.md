@@ -254,6 +254,62 @@ Mempool snapshot at slot 73429851:
   Transactions: 12
 ```
 
+## Treasury
+
+Query the treasury and reserves:
+
+```bash
+torsten-cli query treasury --socket-path ./node.sock
+```
+
+Output:
+
+```
+Account State
+=============
+Treasury: 1234567 ADA
+Reserves: 9876543 ADA
+```
+
+## Constitution (Conway)
+
+Query the current constitution:
+
+```bash
+torsten-cli query constitution --socket-path ./node.sock
+```
+
+Output:
+
+```
+Constitution
+============
+URL:         https://constitution.gov/hash.json
+Data Hash:   a1b2c3d4e5f6...
+Script Hash: none
+```
+
+## Ratification State (Conway)
+
+Query the ratification state (enacted/expired proposals from the most recent epoch transition):
+
+```bash
+torsten-cli query ratify-state --socket-path ./node.sock
+```
+
+Output:
+
+```
+Ratification State
+==================
+Enacted proposals: 1
+  a1b2c3d4e5f6...#0
+Expired proposals: 2
+  d4e5f6a7b8c9...#1
+  e5f6a7b8c9d0...#0
+Delayed:           false
+```
+
 ## Leadership Schedule
 
 Compute the leader schedule for a stake pool:

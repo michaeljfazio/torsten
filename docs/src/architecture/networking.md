@@ -122,7 +122,7 @@ The PeerSharing mini-protocol enables gossip-based peer discovery. Peers exchang
 
 ## Node-to-Client (N2C) Protocol
 
-N2C connections use Unix domain sockets and serve local clients (wallets, CLI tools). The N2C handshake supports versions V16-V17 (Conway era) with automatic detection of the Haskell bit-15 version encoding used by cardano-cli.
+N2C connections use Unix domain sockets and serve local clients (wallets, CLI tools). The N2C handshake supports versions V16-V22 (Conway era) with automatic detection of the Haskell bit-15 version encoding used by cardano-cli 10.x.
 
 ### LocalStateQuery
 
@@ -155,6 +155,15 @@ Supports a wide range of ledger queries:
 | Committee state | 27 | Constitutional committee members |
 | Vote delegatees | 28 | Vote delegation map per credential |
 | Account state | 29 | Treasury and reserves |
+| SPO stake distribution | 30 | Per-pool stake distribution (filtered by pool IDs) |
+| Proposals | 31 | Active governance proposals (optional filter) |
+| Ratify state | 32 | Enacted/expired proposals and delayed flag |
+| Future PParams | 33 | Pending protocol parameter changes (if any) |
+| Ledger peer snapshot | 34 | SPO relays weighted by stake for peer discovery |
+| Pool default vote | 35 | Default vote per pool based on DRep delegation |
+| Pool distribution 2 | 36 | Extended pool distribution with total active stake |
+| Stake distribution 2 | 37 | Extended stake distribution with total active stake |
+| Max major proto ver | 38 | Maximum supported major protocol version |
 | Non-myopic rewards | 6* | Estimated rewards per pool for given stake amounts |
 
 The query protocol uses an acquire/query/release pattern:
