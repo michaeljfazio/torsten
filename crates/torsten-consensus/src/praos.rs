@@ -1083,6 +1083,7 @@ impl Default for OuroborosPraos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torsten_primitives::block::Point;
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::time::{BlockNo, SlotNo};
 
@@ -1949,5 +1950,269 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ========================================================================
+    // Tests for is_in_stability_window()
+    // ========================================================================
+
+    #[test]
+    fn test_stability_window_at_origin() {
+        let praos = OuroborosPraos::new();
+        // At origin, everything is in the stability window
+        assert!(praos.is_in_stability_window(SlotNo(0)));
+        assert!(praos.is_in_stability_window(SlotNo(999_999)));
+    }
+
+    #[test]
+    fn test_stability_window_recent_slot() {
+        let mut praos = OuroborosPraos::new();
+        // k=2160, f=0.05 → stability_window = 3*2160/0.05 = 129600
+        praos.update_tip(Tip {
+            point: Point::Specific(SlotNo(200_000), Hash32::ZERO),
+            block_number: BlockNo(100),
+        });
+        // Slot within the window (200000 - 129600 = 70400)
+        assert!(praos.is_in_stability_window(SlotNo(70_401)));
+        assert!(praos.is_in_stability_window(SlotNo(200_000)));
+        // Slot at the window boundary
+        assert!(praos.is_in_stability_window(SlotNo(70_400)));
+        // Slot outside the window
+        assert!(!praos.is_in_stability_window(SlotNo(70_399)));
+        assert!(!praos.is_in_stability_window(SlotNo(0)));
+    }
+
+    #[test]
+    fn test_stability_window_small_slot() {
+        let mut praos = OuroborosPraos::new();
+        // Tip slot < stability_window → saturating_sub returns 0 → all slots in window
+        praos.update_tip(Tip {
+            point: Point::Specific(SlotNo(100), Hash32::ZERO),
+            block_number: BlockNo(5),
+        });
+        assert!(praos.is_in_stability_window(SlotNo(0)));
+        assert!(praos.is_in_stability_window(SlotNo(100)));
+    }
+
+    // ========================================================================
+    // Tests for prune_opcert_counters()
+    // ========================================================================
+
+    #[test]
+    fn test_prune_opcert_counters_removes_retired() {
+        let mut praos = OuroborosPraos::new();
+        let pool_a = Hash28::from_bytes([0xAA; 28]);
+        let pool_b = Hash28::from_bytes([0xBB; 28]);
+        let pool_c = Hash28::from_bytes([0xCC; 28]);
+
+        praos.opcert_counters.insert(pool_a, 5);
+        praos.opcert_counters.insert(pool_b, 10);
+        praos.opcert_counters.insert(pool_c, 15);
+        assert_eq!(praos.opcert_counters.len(), 3);
+
+        // Only pool_a and pool_c are still active
+        let active: HashSet<Hash28> = [pool_a, pool_c].into_iter().collect();
+        praos.prune_opcert_counters(&active);
+
+        assert_eq!(praos.opcert_counters.len(), 2);
+        assert_eq!(praos.opcert_counters.get(&pool_a), Some(&5));
+        assert!(!praos.opcert_counters.contains_key(&pool_b));
+        assert_eq!(praos.opcert_counters.get(&pool_c), Some(&15));
+    }
+
+    #[test]
+    fn test_prune_opcert_counters_empty_active_set() {
+        let mut praos = OuroborosPraos::new();
+        praos
+            .opcert_counters
+            .insert(Hash28::from_bytes([0xAA; 28]), 5);
+        praos
+            .opcert_counters
+            .insert(Hash28::from_bytes([0xBB; 28]), 10);
+
+        // No active pools → all counters pruned
+        praos.prune_opcert_counters(&HashSet::new());
+        assert!(praos.opcert_counters.is_empty());
+    }
+
+    #[test]
+    fn test_prune_opcert_counters_all_active() {
+        let mut praos = OuroborosPraos::new();
+        let pool_a = Hash28::from_bytes([0xAA; 28]);
+        let pool_b = Hash28::from_bytes([0xBB; 28]);
+        praos.opcert_counters.insert(pool_a, 5);
+        praos.opcert_counters.insert(pool_b, 10);
+
+        // All pools active → nothing pruned
+        let active: HashSet<Hash28> = [pool_a, pool_b].into_iter().collect();
+        praos.prune_opcert_counters(&active);
+        assert_eq!(praos.opcert_counters.len(), 2);
+    }
+
+    #[test]
+    fn test_prune_opcert_counters_no_counters() {
+        let mut praos = OuroborosPraos::new();
+        assert!(praos.opcert_counters.is_empty());
+
+        // Pruning empty map is a no-op
+        let active: HashSet<Hash28> = [Hash28::from_bytes([0xAA; 28])].into_iter().collect();
+        praos.prune_opcert_counters(&active);
+        assert!(praos.opcert_counters.is_empty());
+    }
+
+    // ========================================================================
+    // Tests for update_tip()
+    // ========================================================================
+
+    #[test]
+    fn test_update_tip_from_origin() {
+        let mut praos = OuroborosPraos::new();
+        assert_eq!(praos.tip, Tip::origin());
+
+        let new_tip = Tip {
+            point: Point::Specific(SlotNo(42), Hash32::from_bytes([0xAB; 32])),
+            block_number: BlockNo(1),
+        };
+        praos.update_tip(new_tip.clone());
+        assert_eq!(praos.tip, new_tip);
+    }
+
+    #[test]
+    fn test_update_tip_advances() {
+        let mut praos = OuroborosPraos::new();
+
+        let tip1 = Tip {
+            point: Point::Specific(SlotNo(100), Hash32::from_bytes([0x01; 32])),
+            block_number: BlockNo(5),
+        };
+        praos.update_tip(tip1);
+        assert_eq!(praos.tip.block_number, BlockNo(5));
+
+        let tip2 = Tip {
+            point: Point::Specific(SlotNo(200), Hash32::from_bytes([0x02; 32])),
+            block_number: BlockNo(10),
+        };
+        praos.update_tip(tip2);
+        assert_eq!(praos.tip.block_number, BlockNo(10));
+        assert_eq!(praos.tip.point.slot(), Some(SlotNo(200)));
+    }
+
+    #[test]
+    fn test_update_tip_rollback() {
+        let mut praos = OuroborosPraos::new();
+
+        praos.update_tip(Tip {
+            point: Point::Specific(SlotNo(500), Hash32::from_bytes([0x01; 32])),
+            block_number: BlockNo(25),
+        });
+
+        // Rollback to earlier point
+        praos.update_tip(Tip {
+            point: Point::Specific(SlotNo(400), Hash32::from_bytes([0x02; 32])),
+            block_number: BlockNo(20),
+        });
+        assert_eq!(praos.tip.block_number, BlockNo(20));
+        assert_eq!(praos.tip.point.slot(), Some(SlotNo(400)));
+    }
+
+    // ========================================================================
+    // Tests for crypto_params() and with_genesis_params()
+    // ========================================================================
+
+    #[test]
+    fn test_crypto_params_reflects_state() {
+        let mut praos =
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62);
+        let params = praos.crypto_params();
+        assert!(!params.strict_verification);
+        assert!(!params.nonce_established);
+        assert_eq!(params.slots_per_kes_period, 129600);
+        assert_eq!(params.max_kes_evolutions, 62);
+
+        praos.set_strict_verification(true);
+        praos.nonce_established = true;
+        let params = praos.crypto_params();
+        assert!(params.strict_verification);
+        assert!(params.nonce_established);
+    }
+
+    #[test]
+    fn test_with_genesis_params_custom_values() {
+        let praos = OuroborosPraos::with_genesis_params(
+            0.1, // preview active_slot_coeff
+            500, // small k
+            EpochLength(86400),
+            3600, // small KES period
+            120,  // more evolutions
+        );
+        assert!((praos.active_slot_coeff - 0.1).abs() < f64::EPSILON);
+        assert_eq!(praos.security_param, 500);
+        assert_eq!(praos.epoch_length.0, 86400);
+        assert_eq!(praos.slots_per_kes_period, 3600);
+        assert_eq!(praos.max_kes_evolutions, 120);
+        assert_eq!(praos.tip, Tip::origin());
+        assert!(!praos.strict_verification);
+    }
+
+    // ========================================================================
+    // Tests for verify_header_crypto() (static verification pipeline)
+    // ========================================================================
+
+    #[test]
+    fn test_verify_header_crypto_non_strict_passes() {
+        // In non-strict mode, crypto failures are non-fatal
+        let params = CryptoVerificationParams {
+            strict_verification: false,
+            nonce_established: false,
+            slots_per_kes_period: KES_PERIOD_SLOTS,
+            max_kes_evolutions: MAX_KES_EVOLUTIONS,
+        };
+        let header = make_valid_header(100);
+        // VRF proof is dummy data — should pass in non-strict mode
+        let result = OuroborosPraos::verify_header_crypto(&params, &header);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_header_crypto_strict_vrf_fails() {
+        let params = CryptoVerificationParams {
+            strict_verification: true,
+            nonce_established: true,
+            slots_per_kes_period: KES_PERIOD_SLOTS,
+            max_kes_evolutions: MAX_KES_EVOLUTIONS,
+        };
+        let header = make_valid_header(100);
+        // With strict mode and nonce established, dummy VRF should fail
+        let result = OuroborosPraos::verify_header_crypto(&params, &header);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_header_crypto_strict_nonce_not_established() {
+        // Strict but nonce not established → VRF skipped
+        let params = CryptoVerificationParams {
+            strict_verification: true,
+            nonce_established: false,
+            slots_per_kes_period: KES_PERIOD_SLOTS,
+            max_kes_evolutions: MAX_KES_EVOLUTIONS,
+        };
+        let header = make_valid_header(100);
+        // VRF check skipped; opcert check with dummy data is non-fatal
+        let result = OuroborosPraos::verify_header_crypto(&params, &header);
+        // Even strict, VRF is skipped when nonce isn't established,
+        // but opcert may fail depending on data
+        // The test verifies the function doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_stability_window_calculation() {
+        // k=2160, f=0.05 → 3*2160/0.05 = 129600
+        let praos = OuroborosPraos::new();
+        assert_eq!(praos.stability_window(), 129600);
+
+        // k=500, f=0.1 → 3*500/0.1 = 15000
+        let praos2 = OuroborosPraos::with_params(0.1, 500, EpochLength(86400));
+        assert_eq!(praos2.stability_window(), 15000);
     }
 }
