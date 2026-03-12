@@ -630,6 +630,395 @@ mod tests {
         }
     }
 
+    fn make_empty_filter_cbor() -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.tag(minicbor::data::Tag::new(258)).ok();
+        enc.array(0).ok();
+        buf
+    }
+
+    fn make_pool_filter_cbor(pool_id: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.tag(minicbor::data::Tag::new(258)).ok();
+        enc.array(1).ok();
+        enc.bytes(pool_id).ok();
+        buf
+    }
+
+    fn make_credential_filter_cbor(cred_hash: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.tag(minicbor::data::Tag::new(258)).ok();
+        enc.array(1).ok();
+        enc.array(2).ok();
+        enc.u8(0).ok(); // KeyHash
+        enc.bytes(cred_hash).ok();
+        buf
+    }
+
+    // ─── GetFilteredDelegations (tag 10) ──────────────────────────────
+
+    #[test]
+    fn test_filtered_delegations_no_filter() {
+        use crate::query_handler::types::StakeAddressSnapshot;
+        let state = NodeStateSnapshot {
+            stake_addresses: vec![
+                StakeAddressSnapshot {
+                    credential_hash: vec![0xAA; 28],
+                    delegated_pool: Some(vec![1u8; 28]),
+                    reward_balance: 1_000_000,
+                },
+                StakeAddressSnapshot {
+                    credential_hash: vec![0xBB; 28],
+                    delegated_pool: None,
+                    reward_balance: 0,
+                },
+            ],
+            ..NodeStateSnapshot::default()
+        };
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_filtered_delegations(&state, &mut dec);
+        match result {
+            QueryResult::StakeAddressInfo(addrs) => assert_eq!(addrs.len(), 2),
+            _ => panic!("Expected StakeAddressInfo"),
+        }
+    }
+
+    #[test]
+    fn test_filtered_delegations_filtered() {
+        use crate::query_handler::types::StakeAddressSnapshot;
+        let state = NodeStateSnapshot {
+            stake_addresses: vec![
+                StakeAddressSnapshot {
+                    credential_hash: vec![0xAA; 28],
+                    delegated_pool: Some(vec![1u8; 28]),
+                    reward_balance: 1_000_000,
+                },
+                StakeAddressSnapshot {
+                    credential_hash: vec![0xBB; 28],
+                    delegated_pool: None,
+                    reward_balance: 0,
+                },
+            ],
+            ..NodeStateSnapshot::default()
+        };
+        let cbor = make_credential_filter_cbor(&[0xAA; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_filtered_delegations(&state, &mut dec);
+        match result {
+            QueryResult::StakeAddressInfo(addrs) => {
+                assert_eq!(addrs.len(), 1);
+                assert_eq!(addrs[0].credential_hash, vec![0xAA; 28]);
+                assert_eq!(addrs[0].reward_balance, 1_000_000);
+            }
+            _ => panic!("Expected StakeAddressInfo"),
+        }
+    }
+
+    // ─── GetStakePools (tag 16) ────────────────────────────────────────
+
+    #[test]
+    fn test_stake_pools() {
+        let state = make_state_with_pools();
+        let result = handle_stake_pools(&state);
+        match result {
+            QueryResult::StakePools(pool_ids) => {
+                assert_eq!(pool_ids.len(), 2);
+                assert_eq!(pool_ids[0], vec![1u8; 28]);
+                assert_eq!(pool_ids[1], vec![2u8; 28]);
+            }
+            _ => panic!("Expected StakePools"),
+        }
+    }
+
+    #[test]
+    fn test_stake_pools_empty() {
+        let state = NodeStateSnapshot::default();
+        let result = handle_stake_pools(&state);
+        match result {
+            QueryResult::StakePools(pool_ids) => assert!(pool_ids.is_empty()),
+            _ => panic!("Expected StakePools"),
+        }
+    }
+
+    // ─── GetStakePoolParams (tag 17) ──────────────────────────────────
+
+    #[test]
+    fn test_stake_pool_params_no_filter() {
+        let state = make_state_with_pools();
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_pool_params(&state, &mut dec);
+        match result {
+            QueryResult::PoolParams(params) => assert_eq!(params.len(), 2),
+            _ => panic!("Expected PoolParams"),
+        }
+    }
+
+    #[test]
+    fn test_stake_pool_params_filtered() {
+        let state = make_state_with_pools();
+        let cbor = make_pool_filter_cbor(&[1u8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_pool_params(&state, &mut dec);
+        match result {
+            QueryResult::PoolParams(params) => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].pool_id, vec![1u8; 28]);
+                assert_eq!(params[0].cost, 340_000_000);
+            }
+            _ => panic!("Expected PoolParams"),
+        }
+    }
+
+    // ─── GetPoolState (tag 19) ──────────────────────────────────────────
+
+    #[test]
+    fn test_pool_state_no_filter() {
+        let mut state = make_state_with_pools();
+        state.pending_retirements = vec![(150, vec![vec![2u8; 28]])];
+        state.pool_deposit = 500_000_000;
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_state(&state, &mut dec);
+        match result {
+            QueryResult::PoolState {
+                pool_params,
+                future_pool_params,
+                retiring,
+                deposits,
+            } => {
+                assert_eq!(pool_params.len(), 2);
+                assert!(future_pool_params.is_empty());
+                assert_eq!(retiring.len(), 1);
+                assert_eq!(retiring[0].0, vec![2u8; 28]);
+                assert_eq!(retiring[0].1, 150);
+                assert_eq!(deposits.len(), 2);
+                assert!(deposits.iter().all(|(_, d)| *d == 500_000_000));
+            }
+            _ => panic!("Expected PoolState"),
+        }
+    }
+
+    #[test]
+    fn test_pool_state_filtered() {
+        let mut state = make_state_with_pools();
+        state.pending_retirements = vec![(150, vec![vec![1u8; 28], vec![2u8; 28]])];
+        let cbor = make_pool_filter_cbor(&[1u8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_state(&state, &mut dec);
+        match result {
+            QueryResult::PoolState {
+                pool_params,
+                retiring,
+                deposits,
+                ..
+            } => {
+                assert_eq!(pool_params.len(), 1);
+                assert_eq!(pool_params[0].pool_id, vec![1u8; 28]);
+                // Only pool 1 retirement should be included
+                assert_eq!(retiring.len(), 1);
+                assert_eq!(retiring[0].0, vec![1u8; 28]);
+                assert_eq!(deposits.len(), 1);
+            }
+            _ => panic!("Expected PoolState"),
+        }
+    }
+
+    // ─── GetStakeSnapshots (tag 20) ────────────────────────────────────
+
+    #[test]
+    fn test_stake_snapshots() {
+        use crate::query_handler::types::{PoolStakeSnapshotEntry, StakeSnapshotsResult};
+        let state = NodeStateSnapshot {
+            stake_snapshots: StakeSnapshotsResult {
+                pools: vec![PoolStakeSnapshotEntry {
+                    pool_id: vec![1u8; 28],
+                    mark_stake: 100,
+                    set_stake: 200,
+                    go_stake: 300,
+                }],
+                total_mark_stake: 100,
+                total_set_stake: 200,
+                total_go_stake: 300,
+            },
+            ..NodeStateSnapshot::default()
+        };
+        let result = handle_stake_snapshots(&state);
+        match result {
+            QueryResult::StakeSnapshots(ss) => {
+                assert_eq!(ss.pools.len(), 1);
+                assert_eq!(ss.total_mark_stake, 100);
+                assert_eq!(ss.total_set_stake, 200);
+                assert_eq!(ss.total_go_stake, 300);
+            }
+            _ => panic!("Expected StakeSnapshots"),
+        }
+    }
+
+    // ─── GetPoolDistr (tag 21) ──────────────────────────────────────────
+
+    #[test]
+    fn test_pool_distr_no_filter() {
+        let state = make_state_with_pools();
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_distr(&state, &mut dec);
+        match result {
+            QueryResult::PoolDistr(pools) => assert_eq!(pools.len(), 2),
+            _ => panic!("Expected PoolDistr"),
+        }
+    }
+
+    #[test]
+    fn test_pool_distr_filtered() {
+        let state = make_state_with_pools();
+        let cbor = make_pool_filter_cbor(&[2u8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_distr(&state, &mut dec);
+        match result {
+            QueryResult::PoolDistr(pools) => {
+                assert_eq!(pools.len(), 1);
+                assert_eq!(pools[0].pool_id, vec![2u8; 28]);
+            }
+            _ => panic!("Expected PoolDistr"),
+        }
+    }
+
+    // ─── GetStakeDelegDeposits (tag 22) ─────────────────────────────────
+
+    #[test]
+    fn test_stake_deleg_deposits_no_filter() {
+        use crate::query_handler::types::StakeDelegDepositEntry;
+        let state = NodeStateSnapshot {
+            stake_deleg_deposits: vec![
+                StakeDelegDepositEntry {
+                    credential_hash: vec![0xAA; 28],
+                    credential_type: 0,
+                    deposit: 2_000_000,
+                },
+                StakeDelegDepositEntry {
+                    credential_hash: vec![0xBB; 28],
+                    credential_type: 1,
+                    deposit: 2_000_000,
+                },
+            ],
+            ..NodeStateSnapshot::default()
+        };
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_deleg_deposits(&state, &mut dec);
+        match result {
+            QueryResult::StakeDelegDeposits(deps) => assert_eq!(deps.len(), 2),
+            _ => panic!("Expected StakeDelegDeposits"),
+        }
+    }
+
+    #[test]
+    fn test_stake_deleg_deposits_filtered() {
+        use crate::query_handler::types::StakeDelegDepositEntry;
+        let state = NodeStateSnapshot {
+            stake_deleg_deposits: vec![
+                StakeDelegDepositEntry {
+                    credential_hash: vec![0xAA; 28],
+                    credential_type: 0,
+                    deposit: 2_000_000,
+                },
+                StakeDelegDepositEntry {
+                    credential_hash: vec![0xBB; 28],
+                    credential_type: 0,
+                    deposit: 2_000_000,
+                },
+            ],
+            ..NodeStateSnapshot::default()
+        };
+        let cbor = make_credential_filter_cbor(&[0xBB; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_deleg_deposits(&state, &mut dec);
+        match result {
+            QueryResult::StakeDelegDeposits(deps) => {
+                assert_eq!(deps.len(), 1);
+                assert_eq!(deps[0].credential_hash, vec![0xBB; 28]);
+            }
+            _ => panic!("Expected StakeDelegDeposits"),
+        }
+    }
+
+    // ─── GetStakeDistribution2 (tag 37) / GetPoolDistr2 (tag 36) ──────
+
+    #[test]
+    fn test_stake_distribution2() {
+        let state = make_state_with_pools();
+        let result = handle_stake_distribution2(&state);
+        match result {
+            QueryResult::PoolDistr2 {
+                pools,
+                total_active_stake,
+            } => {
+                assert_eq!(pools.len(), 2);
+                assert_eq!(total_active_stake, 1_000_000_000);
+            }
+            _ => panic!("Expected PoolDistr2"),
+        }
+    }
+
+    #[test]
+    fn test_stake_distribution2_empty() {
+        let state = NodeStateSnapshot::default();
+        let result = handle_stake_distribution2(&state);
+        match result {
+            QueryResult::PoolDistr2 {
+                pools,
+                total_active_stake,
+            } => {
+                assert!(pools.is_empty());
+                assert_eq!(total_active_stake, 1); // NonZero
+            }
+            _ => panic!("Expected PoolDistr2"),
+        }
+    }
+
+    #[test]
+    fn test_pool_distr2_no_filter() {
+        let state = make_state_with_pools();
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_distr2(&state, &mut dec);
+        match result {
+            QueryResult::PoolDistr2 {
+                pools,
+                total_active_stake,
+            } => {
+                assert_eq!(pools.len(), 2);
+                assert_eq!(total_active_stake, 1_000_000_000);
+            }
+            _ => panic!("Expected PoolDistr2"),
+        }
+    }
+
+    #[test]
+    fn test_pool_distr2_filtered() {
+        let state = make_state_with_pools();
+        let cbor = make_pool_filter_cbor(&[2u8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_distr2(&state, &mut dec);
+        match result {
+            QueryResult::PoolDistr2 {
+                pools,
+                total_active_stake,
+            } => {
+                assert_eq!(pools.len(), 1);
+                assert_eq!(pools[0].pool_id, vec![2u8; 28]);
+                // total_active_stake is sum of ALL pools, not filtered
+                assert_eq!(total_active_stake, 1_000_000_000);
+            }
+            _ => panic!("Expected PoolDistr2"),
+        }
+    }
+
     #[test]
     fn test_pool_default_vote_with_delegations() {
         use crate::query_handler::types::VoteDelegateeEntry;
