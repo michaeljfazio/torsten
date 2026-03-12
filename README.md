@@ -83,7 +83,7 @@ graph TD
 - **Full Ouroboros Praos** consensus with VRF leader election, KES validation, epoch nonce computation
 - **Multi-era support** from Byron through Conway (CIP-1694 governance)
 - **Pipelined multi-peer sync** with parallel block fetching from up to 4 peers
-- **Mithril snapshot import** for fast initial sync (4M blocks in ~60 seconds)
+- **Mithril snapshot import** for fast initial sync (4M blocks in ~2 minutes)
 - **N2N server** with ChainSync, BlockFetch, TxSubmission2, PeerSharing, KeepAlive
 - **N2C server** with LocalChainSync (block delivery), LocalStateQuery, LocalTxSubmission, LocalTxMonitor
 - **Plutus V1/V2/V3** script evaluation via UPLC CEK machine
@@ -201,6 +201,55 @@ The block production pipeline is **implemented but untested on a live network**:
 - Stake pool registration and delegation flow not end-to-end tested
 - KES key rotation across multiple KES periods not tested in production
 - Mempool transaction ordering and priority not optimized
+
+## Performance
+
+Measured on Apple M2 Max (32 GB), Preview testnet, release build (`cargo build --release`).
+
+### Resource Usage
+
+| Metric | Value |
+|--------|-------|
+| Binary size | 9.0 MB |
+| Memory at tip (RSS) | ~4.5 GB |
+| Memory peak (snapshot load) | ~6.4 GB |
+| CPU at tip (idle) | <1% |
+| ImmutableDB size | 12 GB |
+| Ledger snapshot size | 1.1 GB |
+| Total database | 16 GB |
+
+### Sync Performance
+
+| Phase | Speed |
+|-------|-------|
+| Mithril import (4M blocks) | ~2 minutes |
+| Block replay from snapshot | ~10,600 blocks/s |
+| Pipelined ChainSync (bulk) | ~275 blocks/s |
+| At-tip block processing | 1 block/~20s (network rate) |
+
+### Chain State (Preview Testnet)
+
+| Metric | Value |
+|--------|-------|
+| UTxO count | ~2.9M |
+| Delegations | ~11.5K |
+| Stake pools | ~657 |
+| DReps | ~8.8K |
+| Active proposals | 2 |
+
+### Prometheus Metrics (port 12798)
+
+Torsten exports the following metrics:
+
+- `torsten_blocks_received_total` / `torsten_blocks_applied_total` — block counters
+- `torsten_slot_number` / `torsten_block_number` / `torsten_epoch_number` — chain position
+- `torsten_sync_progress_percent` — sync progress (100% = at tip)
+- `torsten_utxo_count` / `torsten_delegation_count` — ledger state
+- `torsten_peers_connected` / `torsten_peers_hot` / `torsten_peers_warm` / `torsten_peers_cold` — P2P
+- `torsten_mempool_tx_count` / `torsten_mempool_bytes` — mempool
+- `torsten_treasury_lovelace` / `torsten_drep_count` / `torsten_proposal_count` / `torsten_pool_count` — governance
+- `torsten_transactions_received_total` / `torsten_transactions_validated_total` / `torsten_transactions_rejected_total` — tx processing
+- `torsten_disk_available_bytes` — storage
 
 ## Network Magic
 
