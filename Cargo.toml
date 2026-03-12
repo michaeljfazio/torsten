@@ -40,6 +40,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 minicbor = { version = "0.25", features = ["std", "derive"] }
 hex = "0.4"
+base64 = "0.22"
 
 # Cryptography
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
@@ -111,6 +112,9 @@ memmap2 = "0.9"
 fs2 = "0.4"
 rayon = "1"
 proptest = "1"
+
+## [patch.crates-io]
+## Removed: cardano-lsm now used from crates.io (for UTxO store in torsten-ledger)
 
 [profile.release]
 opt-level = 3

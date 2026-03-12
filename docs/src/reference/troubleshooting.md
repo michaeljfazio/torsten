@@ -116,7 +116,7 @@ Monitor disk usage and ensure adequate free space.
 
 2. **Network latency.** The ChainSync protocol has an inherent per-header RTT (~300ms). High-latency connections will reduce throughput.
 
-3. **Slow disk.** Storage performance depends on disk I/O speed. SSDs are strongly recommended. On Linux, enable `io_uring` for improved performance: `cargo build --release --features io-uring`.
+3. **Slow disk.** Storage performance depends on disk I/O speed. SSDs are strongly recommended. On Linux, enable `io_uring` for improved UTxO storage performance: `cargo build --release --features io-uring`.
 
 4. **CPU-bound during ledger validation.** Block processing includes UTxO validation and Plutus script execution. This is CPU-intensive during sync.
 

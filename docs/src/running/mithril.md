@@ -12,7 +12,7 @@ The import process:
 2. Downloads the snapshot archive (compressed with zstandard)
 3. Extracts the cardano-node chunk files
 4. Parses each block using the pallas CBOR decoder
-5. Bulk-imports blocks into Torsten's cardano-lsm ImmutableDB
+5. Bulk-imports blocks into Torsten's ImmutableDB (append-only chunk files)
 
 ## Usage
 

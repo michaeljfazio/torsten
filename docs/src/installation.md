@@ -73,7 +73,7 @@ Torsten requires **Rust 1.75 or later** (edition 2021).
 
 #### System Dependencies
 
-Torsten uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust storage backend with **no system dependencies** beyond the Rust toolchain. On all platforms, `cargo build` works out of the box.
+Torsten's storage layer is pure Rust with **no system dependencies** beyond the Rust toolchain. Block storage uses append-only chunk files, and the UTxO set uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust LSM tree. On all platforms, `cargo build` works out of the box.
 
 ### Build
 
@@ -90,7 +90,7 @@ Build in release mode:
 cargo build --release
 ```
 
-On Linux with kernel 5.1+, you can enable io_uring for improved disk I/O during compaction:
+On Linux with kernel 5.1+, you can enable io_uring for improved disk I/O in the UTxO LSM tree:
 
 ```bash
 cargo build --release --features io-uring

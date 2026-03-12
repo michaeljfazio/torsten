@@ -36,6 +36,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 hex.workspace = true
 bs58.workspace = true
+base64 = { workspace = true }
 chrono = { workspace = true }
 minicbor = { workspace = true }
 rand = { workspace = true }
@@ -44,6 +45,8 @@ zstd = { workspace = true }
 tar = { workspace = true }
 indicatif = { workspace = true }
 futures-util = { workspace = true }
+pallas-addresses = { workspace = true }
+pallas-crypto = { workspace = true }
 pallas-traverse = { workspace = true }
 sha2 = { workspace = true }
 memmap2 = { workspace = true }

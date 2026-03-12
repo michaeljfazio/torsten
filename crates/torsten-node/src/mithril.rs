@@ -2,7 +2,7 @@
 //!
 //! Downloads a Mithril-certified snapshot of the Cardano immutable DB,
 //! extracts the cardano-node chunk files, parses blocks with pallas,
-//! and bulk-imports them into Torsten's ImmutableDB (cardano-lsm).
+//! and bulk-imports them into Torsten's ImmutableDB (chunk files).
 //!
 //! Supports both the legacy `/artifact/snapshots` API and the newer
 //! `/artifact/cardano-database` API with per-immutable-file downloads.
@@ -204,7 +204,7 @@ pub async fn import_snapshot(
     verify_snapshot_digest(&extract_dir, network_name, &latest.beacon, &detail.digest)?;
 
     // Step 6: Skip ChainDB import — chunk files are the optimal format for sequential
-    // replay. The LSM import (parse → write 5 KV pairs per block → compaction) was
+    // replay. The old LSM import (parse → write 5 KV pairs per block → compaction) was
     // redundant since replay reads from chunk files directly. Blocks will be imported
     // into ChainDB during normal sync after replay completes.
 
@@ -534,7 +534,7 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
         anyhow::bail!("No chunk files found in immutable directory");
     }
 
-    // Open the database with bulk-import-optimized settings (deferred compaction)
+    // Open the database for bulk import
     let mut chain_db = torsten_storage::ChainDB::open_for_bulk_import(database_path)?;
 
     // Check if we already have blocks (resume support)
@@ -622,14 +622,12 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
         "Block import complete — persisting to disk"
     );
 
-    // Persist all data to a durable snapshot before exiting.
-    // cardano-lsm uses ephemeral writes; without this call, any data still in
-    // the in-memory memtable would be lost when the process exits.
+    // Persist: flush the active chunk's secondary index to disk.
     chain_db
         .persist()
         .context("Failed to persist imported blocks to disk")?;
 
-    info!("Import persisted successfully (compaction will run on next node start)");
+    info!("Import persisted successfully");
 
     Ok(())
 }

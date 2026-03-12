@@ -39,7 +39,7 @@ cargo fmt --all -- --check
 cargo build --release
 ```
 
-The cardano-lsm storage backend is pure Rust with no system dependencies. On Linux, enable `--features io-uring` for async I/O.
+The storage layer is pure Rust with no system dependencies. cardano-lsm (used for the on-disk UTxO set) supports `--features io-uring` for async I/O on Linux.
 
 ## Hard Requirements
 - **Zero warnings** — All code must compile with `RUSTFLAGS="-D warnings"`
@@ -57,8 +57,8 @@ The cardano-lsm storage backend is pure Rust with no system dependencies. On Lin
 torsten-node (binary: main node, config, pipelined sync, Mithril import, block forging)
 ├── torsten-network (Ouroboros mini-protocols, N2N/N2C multiplexer, pipelined client)
 ├── torsten-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
-├── torsten-ledger (UTxO set, tx validation, ledger state, certificates, rewards, governance)
-├── torsten-storage (ChainDB = ImmutableDB via cardano-lsm + VolatileDB in-memory)
+├── torsten-ledger (UTxO set via UTxO-HD, tx validation, ledger state, certificates, rewards, governance)
+├── torsten-storage (ChainDB = ImmutableDB append-only chunk files + VolatileDB in-memory)
 └── torsten-mempool (thread-safe tx mempool)
 
 torsten-cli (binary: cardano-cli compatible, 33+ subcommands)
@@ -71,7 +71,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 ### Key Traits & Abstractions
 - **`BlockProvider`** (storage) — trait used by N2N server for block serving
 - **`TxValidator`** (ledger) — trait used by N2C server for Phase-1/Phase-2 tx validation before mempool admission
-- **`ChainDB`** — wraps ImmutableDB (cardano-lsm) + VolatileDB (BTreeMap), handles rollback and volatile→immutable flush
+- **`ChainDB`** — wraps ImmutableDB (append-only chunk files) + VolatileDB (HashMap), handles rollback and volatile→immutable flush
 
 ### Wire Format
 - All Cardano wire-format compatibility via pallas crates (v1.0.0-alpha.5)
@@ -81,7 +81,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 ## Key Patterns
 - `ChainSyncEvent::RollForward` uses `Box<Block>` to avoid large enum variant size
 - Invalid transactions (`is_valid: false`): collateral consumed, collateral_return added, regular inputs/outputs skipped
-- Batch block storage: `add_blocks_batch()` for single immutable flush per batch
+- Batch block storage: `add_blocks_batch()` for efficient batch writes to ImmutableDB
 - ChainDB write happens BEFORE ledger apply to prevent divergence on failure
 - Epoch transitions use mark/set/go snapshot model with reward distribution from "go" snapshot
 - Governance ratification: DRep/SPO/CC voting thresholds vary by action type (CIP-1694)

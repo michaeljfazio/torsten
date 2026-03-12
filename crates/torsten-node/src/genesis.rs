@@ -116,12 +116,16 @@ impl ByronGenesis {
         self.protocol_consts.k
     }
 
-    /// Extract the initial UTxO set from nonAvvmBalances.
+    /// Extract the initial UTxO set from both nonAvvmBalances and avvmDistr.
     ///
     /// Returns decoded address bytes and lovelace amounts for all non-zero balances.
+    /// For nonAvvmBalances, addresses are base58-decoded directly.
+    /// For avvmDistr, base64url Ed25519 public keys are converted to Byron redeem addresses.
     pub fn initial_utxos(&self) -> Vec<GenesisUtxoEntry> {
         let mut entries = Vec::new();
+        let protocol_magic = self.protocol_consts.protocol_magic;
 
+        // Process nonAvvmBalances (base58 Byron addresses)
         for (addr_str, lovelace_str) in &self.non_avvm_balances {
             let lovelace: u64 = match lovelace_str.parse() {
                 Ok(v) => v,
@@ -149,13 +153,100 @@ impl ByronGenesis {
             }
         }
 
+        let non_avvm_count = entries.len();
+
+        // Process avvmDistr (base64url Ed25519 public keys → Byron redeem addresses)
+        for (pubkey_b64, lovelace_str) in &self.avvm_distr {
+            let lovelace: u64 = match lovelace_str.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if lovelace == 0 {
+                continue;
+            }
+
+            match Self::avvm_to_address(pubkey_b64, protocol_magic) {
+                Ok(addr_bytes) => {
+                    entries.push(GenesisUtxoEntry {
+                        address: addr_bytes,
+                        lovelace,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to convert AVVM key to address: {}: {}",
+                        &pubkey_b64[..20.min(pubkey_b64.len())],
+                        e
+                    );
+                }
+            }
+        }
+
+        let avvm_count = entries.len() - non_avvm_count;
         debug!(
-            count = entries.len(),
+            non_avvm = non_avvm_count,
+            avvm = avvm_count,
+            total = entries.len(),
             total_lovelace = entries.iter().map(|e| e.lovelace).sum::<u64>(),
             "Byron genesis: extracted initial UTxOs"
         );
 
         entries
+    }
+
+    /// Convert an AVVM base64url Ed25519 public key to a Byron redeem address.
+    ///
+    /// The AVVM distribution uses base64url-encoded 32-byte Ed25519 verification keys.
+    /// These are converted to Byron redeem addresses following the Haskell reference:
+    /// 1. Decode base64url → 32-byte Ed25519 public key
+    /// 2. Build SpendingData::Redeem with the raw key bytes
+    /// 3. Compute addrRoot = Blake2b-224(SHA3-256(CBOR([AddrType::Redeem, spending_data, attributes])))
+    /// 4. Construct CRC-protected Byron address CBOR
+    fn avvm_to_address(pubkey_b64: &str, protocol_magic: u64) -> Result<Vec<u8>> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        // Decode base64url key (Haskell normalizes -/_ to +/ before standard base64)
+        let key_bytes = URL_SAFE_NO_PAD
+            .decode(pubkey_b64)
+            .or_else(|_| {
+                // Try with padding
+                use base64::engine::general_purpose::URL_SAFE;
+                URL_SAFE.decode(pubkey_b64)
+            })
+            .or_else(|_| {
+                // Try standard base64 as fallback
+                use base64::engine::general_purpose::STANDARD;
+                STANDARD.decode(pubkey_b64)
+            })
+            .with_context(|| "Invalid base64 AVVM key")?;
+
+        anyhow::ensure!(
+            key_bytes.len() == 32,
+            "AVVM key must be 32 bytes, got {}",
+            key_bytes.len()
+        );
+
+        let pubkey = pallas_crypto::key::ed25519::PublicKey::try_from(key_bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("Invalid Ed25519 key: {e}"))?;
+
+        // Build network tag: None for mainnet (764824073), Some(cbor(magic)) for testnets
+        let network_tag = if protocol_magic == 764824073 {
+            None
+        } else {
+            // Network tag is CBOR-serialized protocol magic as bytes
+            let mut tag_buf = Vec::new();
+            minicbor::encode(protocol_magic as u32, &mut tag_buf)
+                .map_err(|e| anyhow::anyhow!("CBOR encode network tag: {e}"))?;
+            Some(tag_buf)
+        };
+
+        // Build the redeem address using pallas
+        let payload = pallas_addresses::byron::AddressPayload::new_redeem(pubkey, network_tag);
+        let byron_addr = pallas_addresses::byron::ByronAddress::from(payload);
+
+        // Serialize to CBOR bytes (the wire format)
+        Ok(byron_addr.to_vec())
     }
 }
 
@@ -1035,5 +1126,131 @@ mod tests {
 
         // Different genesis files must produce different hashes
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_avvm_to_address_produces_valid_byron_address() {
+        // Use a known AVVM key from mainnet genesis
+        let pubkey_b64 = "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=";
+        let addr_bytes = ByronGenesis::avvm_to_address(pubkey_b64, 764824073).unwrap();
+
+        // Should be valid CBOR that decodes as a Byron address
+        let byron_addr = pallas_addresses::byron::ByronAddress::from_bytes(&addr_bytes).unwrap();
+        let payload = byron_addr.decode().unwrap();
+
+        // Redeem address type
+        assert_eq!(payload.addrtype, pallas_addresses::byron::AddrType::Redeem);
+        // Address root should be 28 bytes
+        assert_eq!(payload.root.as_ref().len(), 28);
+    }
+
+    #[test]
+    fn test_avvm_to_address_mainnet_no_network_tag() {
+        let pubkey_b64 = "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=";
+        let addr_bytes = ByronGenesis::avvm_to_address(pubkey_b64, 764824073).unwrap();
+
+        let byron_addr = pallas_addresses::byron::ByronAddress::from_bytes(&addr_bytes).unwrap();
+        let payload = byron_addr.decode().unwrap();
+
+        // Mainnet should have empty attributes (no network tag)
+        assert!(
+            payload.attributes.is_empty(),
+            "Mainnet AVVM address should have no network tag"
+        );
+    }
+
+    #[test]
+    fn test_avvm_to_address_testnet_has_network_tag() {
+        let pubkey_b64 = "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=";
+        // Preview testnet magic = 2
+        let addr_bytes = ByronGenesis::avvm_to_address(pubkey_b64, 2).unwrap();
+
+        let byron_addr = pallas_addresses::byron::ByronAddress::from_bytes(&addr_bytes).unwrap();
+        let payload = byron_addr.decode().unwrap();
+
+        // Testnet should have network tag attribute
+        assert!(
+            !payload.attributes.is_empty(),
+            "Testnet AVVM address should have network tag"
+        );
+    }
+
+    #[test]
+    fn test_avvm_tx_hash_deterministic() {
+        let pubkey_b64 = "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=";
+        let addr_bytes = ByronGenesis::avvm_to_address(pubkey_b64, 764824073).unwrap();
+
+        // The tx hash should be blake2b_256 of the address bytes
+        let tx_hash = torsten_primitives::hash::blake2b_256(&addr_bytes);
+
+        // Re-derive and check determinism
+        let addr_bytes2 = ByronGenesis::avvm_to_address(pubkey_b64, 764824073).unwrap();
+        let tx_hash2 = torsten_primitives::hash::blake2b_256(&addr_bytes2);
+
+        assert_eq!(tx_hash, tx_hash2, "AVVM tx hash must be deterministic");
+    }
+
+    #[test]
+    fn test_avvm_genesis_initial_utxos() {
+        let json = r#"{
+            "avvmDistr": {
+                "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=": "9999300000000",
+                "-0Np4pyTOWF26iXWVIvu6fhz9QupwWRS2hcCaOEYlw0=": "3760024000000"
+            },
+            "nonAvvmBalances": {},
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1506203091,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": { "summand": "155381000000000", "multiplier": "43946000000" }
+            },
+            "protocolConsts": { "k": 2160, "protocolMagic": 764824073 }
+        }"#;
+
+        let genesis: ByronGenesis = serde_json::from_str(json).unwrap();
+        let utxos = genesis.initial_utxos();
+
+        assert_eq!(utxos.len(), 2, "Should have 2 AVVM UTxOs");
+        let total: u64 = utxos.iter().map(|e| e.lovelace).sum();
+        assert_eq!(total, 9999300000000 + 3760024000000);
+
+        // Each address should be valid Byron CBOR
+        for entry in &utxos {
+            let addr = pallas_addresses::byron::ByronAddress::from_bytes(&entry.address).unwrap();
+            let payload = addr.decode().unwrap();
+            assert_eq!(payload.addrtype, pallas_addresses::byron::AddrType::Redeem);
+        }
+    }
+
+    #[test]
+    fn test_mixed_avvm_and_non_avvm_utxos() {
+        let json = r#"{
+            "avvmDistr": {
+                "-0BJDi-gauylk4LptQTgjMeo7kY9lTCbZv12vwOSTZk=": "1000000"
+            },
+            "nonAvvmBalances": {
+                "37btjrVyb4KEB2STADSsj3MYSAdj52X9FgGzKZEiHbsyZH1r39ZZRH6FvkSRMxaVBMPKknvEPYhHPV1Qgr6FSNLF1sfhaMQ4bDYB2Y3FNkPZCz": "2000000"
+            },
+            "bootStakeholders": {},
+            "heavyDelegation": {},
+            "startTime": 1506203091,
+            "blockVersionData": {
+                "slotDuration": "20000",
+                "maxBlockSize": "2000000",
+                "maxTxSize": "4096",
+                "txFeePolicy": { "summand": "155381000000000", "multiplier": "43946000000" }
+            },
+            "protocolConsts": { "k": 2160, "protocolMagic": 764824073 }
+        }"#;
+
+        let genesis: ByronGenesis = serde_json::from_str(json).unwrap();
+        let utxos = genesis.initial_utxos();
+
+        assert_eq!(utxos.len(), 2, "Should have 1 non-AVVM + 1 AVVM");
+        let total: u64 = utxos.iter().map(|e| e.lovelace).sum();
+        assert_eq!(total, 3000000);
     }
 }

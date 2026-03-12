@@ -59,11 +59,44 @@ struct ChunkMeta {
     last_slot: u64,
 }
 
-/// Read-only storage backed by Cardano immutable chunk files.
+/// Active chunk being written to.
+struct ActiveChunk {
+    chunk_num: u64,
+    chunk_file: std::io::BufWriter<std::fs::File>,
+    secondary_entries: Vec<SecondaryEntry>,
+    current_offset: u64,
+    /// In-memory block data for the active chunk (not yet readable via memmap).
+    /// Keyed by block hash for O(1) lookup.
+    pending_blocks: HashMap<Hash32, Vec<u8>>,
+}
+
+/// A buffered secondary index entry (written on finalize or flush).
+#[derive(Clone)]
+struct SecondaryEntry {
+    block_offset: u64,
+    header_hash: [u8; 32],
+    slot: u64,
+}
+
+impl SecondaryEntry {
+    fn encode(&self) -> [u8; SECONDARY_ENTRY_SIZE] {
+        let mut entry = [0u8; SECONDARY_ENTRY_SIZE];
+        entry[0..8].copy_from_slice(&self.block_offset.to_be_bytes());
+        // bytes 8..16: header_offset(2), header_size(2), checksum(4) — zeros
+        entry[16..48].copy_from_slice(&self.header_hash);
+        entry[48..56].copy_from_slice(&self.slot.to_be_bytes());
+        entry
+    }
+}
+
+/// Storage backed by Cardano immutable chunk files.
 ///
 /// Each chunk file (`.chunk`) stores raw block CBOR sequentially.
 /// Secondary index files (`.secondary`) provide 56-byte entries with
 /// block boundaries, header hashes, and slot numbers.
+///
+/// Supports both read-only mode (via `open`) and read-write mode
+/// (via `open_for_writing`) with append-only writes.
 pub struct ImmutableDB {
     dir: PathBuf,
     chunks: Vec<ChunkMeta>,
@@ -71,6 +104,9 @@ pub struct ImmutableDB {
     total_blocks: u64,
     tip_slot: u64,
     tip_hash: Hash32,
+    tip_block_no: u64,
+    /// Active chunk for writing (None in read-only mode).
+    active_chunk: Option<ActiveChunk>,
 }
 
 impl ImmutableDB {
@@ -104,6 +140,8 @@ impl ImmutableDB {
                 total_blocks: 0,
                 tip_slot: 0,
                 tip_hash: Hash32::ZERO,
+                tip_block_no: 0,
+                active_chunk: None,
             });
         }
 
@@ -228,6 +266,11 @@ impl ImmutableDB {
             "ImmutableDB opened"
         );
 
+        // Try to read persisted tip metadata (block_no not in secondary index)
+        let tip_block_no = Self::read_tip_meta(dir)
+            .map(|(_, _, bn)| bn)
+            .unwrap_or(total_blocks);
+
         Ok(ImmutableDB {
             dir: dir.to_path_buf(),
             chunks,
@@ -235,11 +278,19 @@ impl ImmutableDB {
             total_blocks,
             tip_slot,
             tip_hash,
+            tip_block_no,
+            active_chunk: None,
         })
     }
 
     /// Get block CBOR by header hash.
     pub fn get_block(&self, hash: &Hash32) -> Option<Vec<u8>> {
+        // Check active chunk's pending blocks first (not yet on disk via memmap)
+        if let Some(ref active) = self.active_chunk {
+            if let Some(cbor) = active.pending_blocks.get(hash) {
+                return Some(cbor.clone());
+            }
+        }
         let loc = self.hash_index.get(hash)?;
         self.read_block_at(loc)
     }
@@ -264,9 +315,44 @@ impl ImmutableDB {
         self.tip_hash
     }
 
+    /// Tip block number of the immutable chain.
+    pub fn tip_block_no(&self) -> u64 {
+        self.tip_block_no
+    }
+
     /// Directory containing the chunk files.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Read tip metadata from a `tip.meta` file in the directory.
+    fn read_tip_meta(dir: &Path) -> Option<(u64, Hash32, u64)> {
+        let meta_path = dir.join("tip.meta");
+        let data = fs::read(&meta_path).ok()?;
+        if data.len() < 48 {
+            return None;
+        }
+        let slot = u64::from_be_bytes(data[0..8].try_into().ok()?);
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes.copy_from_slice(&data[8..40]);
+        let block_no = u64::from_be_bytes(data[40..48].try_into().ok()?);
+        Some((slot, Hash32::from_bytes(hash_bytes), block_no))
+    }
+
+    /// Write tip metadata to a `tip.meta` file.
+    fn write_tip_meta(
+        dir: &Path,
+        slot: u64,
+        hash: &Hash32,
+        block_no: u64,
+    ) -> Result<(), ImmutableDBError> {
+        let meta_path = dir.join("tip.meta");
+        let mut data = [0u8; 48];
+        data[0..8].copy_from_slice(&slot.to_be_bytes());
+        data[8..40].copy_from_slice(hash.as_bytes());
+        data[40..48].copy_from_slice(&block_no.to_be_bytes());
+        fs::write(&meta_path, data)?;
+        Ok(())
     }
 
     /// Get the first block strictly after `after_slot`.
@@ -423,6 +509,197 @@ impl ImmutableDB {
         }
 
         result
+    }
+
+    /// Open an ImmutableDB for writing, appending to existing chunk files.
+    ///
+    /// Scans existing chunks read-only (like `open`), then prepares the
+    /// next chunk number for writing.
+    pub fn open_for_writing(dir: &Path) -> Result<Self, ImmutableDBError> {
+        let mut db = Self::open(dir)?;
+
+        // Determine next chunk number
+        let next_chunk = db.chunks.last().map_or(0, |c| c.chunk_num + 1);
+
+        let chunk_path = dir.join(format!("{next_chunk:05}.chunk"));
+        let file = std::fs::File::create(&chunk_path)?;
+        let writer = std::io::BufWriter::new(file);
+
+        db.active_chunk = Some(ActiveChunk {
+            chunk_num: next_chunk,
+            chunk_file: writer,
+            secondary_entries: Vec::new(),
+            current_offset: 0,
+            pending_blocks: HashMap::new(),
+        });
+
+        debug!(
+            next_chunk,
+            existing_chunks = db.chunks.len(),
+            "ImmutableDB opened for writing"
+        );
+
+        Ok(db)
+    }
+
+    /// Append a block to the active chunk.
+    ///
+    /// Updates the in-memory hash index immediately so the block is
+    /// readable before the secondary index is flushed.
+    pub fn append_block(
+        &mut self,
+        slot: u64,
+        _block_no: u64,
+        hash: &Hash32,
+        cbor: &[u8],
+    ) -> Result<(), ImmutableDBError> {
+        use std::io::Write;
+
+        let active = self.active_chunk.as_mut().ok_or_else(|| {
+            ImmutableDBError::Io(std::io::Error::other("ImmutableDB not opened for writing"))
+        })?;
+
+        let block_offset = active.current_offset;
+        active.chunk_file.write_all(cbor)?;
+        active.current_offset += cbor.len() as u64;
+
+        // Buffer secondary entry and block data for reads
+        active.secondary_entries.push(SecondaryEntry {
+            block_offset,
+            header_hash: *hash.as_bytes(),
+            slot,
+        });
+        active.pending_blocks.insert(*hash, cbor.to_vec());
+
+        // Update in-memory index for immediate reads
+        let block_end = active.current_offset;
+        self.hash_index.insert(
+            *hash,
+            BlockLocation {
+                chunk_num: active.chunk_num,
+                block_offset,
+                block_end,
+            },
+        );
+
+        self.total_blocks += 1;
+        if slot >= self.tip_slot {
+            self.tip_slot = slot;
+            self.tip_hash = *hash;
+            self.tip_block_no = _block_no;
+        }
+
+        Ok(())
+    }
+
+    /// Finalize the current chunk: write its `.secondary` index and open
+    /// a new chunk file. Call this at epoch boundaries.
+    pub fn finalize_chunk(&mut self) -> Result<(), ImmutableDBError> {
+        use std::io::Write;
+
+        let active = match self.active_chunk.take() {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        // Flush the chunk file
+        let mut chunk_file = active.chunk_file;
+        chunk_file.flush()?;
+
+        // Write secondary index
+        let secondary_path = self.dir.join(format!("{:05}.secondary", active.chunk_num));
+        let mut secondary_file = std::io::BufWriter::new(std::fs::File::create(&secondary_path)?);
+        for entry in &active.secondary_entries {
+            secondary_file.write_all(&entry.encode())?;
+        }
+        secondary_file.flush()?;
+
+        // Update chunk metadata
+        if let (Some(first), Some(last)) = (
+            active.secondary_entries.first(),
+            active.secondary_entries.last(),
+        ) {
+            self.chunks.push(ChunkMeta {
+                chunk_num: active.chunk_num,
+                first_slot: first.slot,
+                last_slot: last.slot,
+            });
+        }
+
+        // Open new chunk for writing
+        let next_chunk = active.chunk_num + 1;
+        let chunk_path = self.dir.join(format!("{next_chunk:05}.chunk"));
+        let file = std::fs::File::create(&chunk_path)?;
+        self.active_chunk = Some(ActiveChunk {
+            chunk_num: next_chunk,
+            chunk_file: std::io::BufWriter::new(file),
+            secondary_entries: Vec::new(),
+            current_offset: 0,
+            pending_blocks: HashMap::new(),
+        });
+
+        debug!(
+            finalized_chunk = active.chunk_num,
+            next_chunk, "ImmutableDB: chunk finalized"
+        );
+        Ok(())
+    }
+
+    /// Flush the active chunk's secondary index to disk without starting
+    /// a new chunk. Call this on shutdown to ensure durability.
+    pub fn flush(&mut self) -> Result<(), ImmutableDBError> {
+        use std::io::Write;
+
+        let active = match self.active_chunk.as_mut() {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        // Flush chunk data
+        active.chunk_file.flush()?;
+
+        // Write secondary index for current state
+        let secondary_path = self.dir.join(format!("{:05}.secondary", active.chunk_num));
+        let mut secondary_file = std::io::BufWriter::new(std::fs::File::create(&secondary_path)?);
+        for entry in &active.secondary_entries {
+            secondary_file.write_all(&entry.encode())?;
+        }
+        secondary_file.flush()?;
+
+        // Update chunk metadata (replace existing entry for this chunk if present)
+        if let (Some(first), Some(last)) = (
+            active.secondary_entries.first(),
+            active.secondary_entries.last(),
+        ) {
+            let chunk_num = active.chunk_num;
+            if let Some(existing) = self.chunks.iter_mut().find(|c| c.chunk_num == chunk_num) {
+                existing.first_slot = first.slot;
+                existing.last_slot = last.slot;
+            } else {
+                self.chunks.push(ChunkMeta {
+                    chunk_num,
+                    first_slot: first.slot,
+                    last_slot: last.slot,
+                });
+            }
+        }
+
+        // Persist tip metadata
+        if self.tip_slot > 0 {
+            Self::write_tip_meta(&self.dir, self.tip_slot, &self.tip_hash, self.tip_block_no)?;
+        }
+
+        debug!(
+            chunk = active.chunk_num,
+            entries = active.secondary_entries.len(),
+            "ImmutableDB: flushed active chunk"
+        );
+        Ok(())
+    }
+
+    /// Whether this ImmutableDB is open for writing.
+    pub fn is_writable(&self) -> bool {
+        self.active_chunk.is_some()
     }
 
     /// Read a block from a chunk file at the given location.

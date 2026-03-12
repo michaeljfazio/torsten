@@ -236,10 +236,11 @@ pub fn to_utxo_set(entries: &[UtxoEntry]) -> Result<UtxoSet, AdapterError> {
 pub fn from_utxo_set(utxo_set: &UtxoSet) -> Vec<UtxoEntry> {
     let mut entries: Vec<UtxoEntry> = utxo_set
         .iter()
+        .into_iter()
         .map(|(input, output)| UtxoEntry {
             tx_hash: input.transaction_id.to_hex(),
             index: input.index,
-            output: from_tx_output(output),
+            output: from_tx_output(&output),
         })
         .collect();
     // Sort for deterministic comparison

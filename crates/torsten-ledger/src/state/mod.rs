@@ -758,6 +758,38 @@ impl LedgerState {
         self.tip.block_number
     }
 
+    /// Save the attached UTxO store's LSM snapshot.
+    /// Call this after `save_snapshot()` when using on-disk UTxO storage.
+    /// Requires mutable access because LsmTree::save_snapshot is &mut self.
+    pub fn save_utxo_snapshot(&mut self) -> Result<(), LedgerError> {
+        if let Some(store) = self.utxo_set.store_mut() {
+            store.save_snapshot("ledger").map_err(|e| {
+                LedgerError::EpochTransition(format!("Failed to save UTxO store snapshot: {e}"))
+            })?;
+            debug!("UTxO store snapshot saved ({} entries)", store.len());
+        }
+        Ok(())
+    }
+
+    /// Attach an on-disk UTxO store to this ledger state.
+    /// All subsequent UTxO operations will use the LSM-backed store.
+    /// If the ledger has in-memory UTxOs (from bincode snapshot load),
+    /// they are migrated to the store.
+    pub fn attach_utxo_store(&mut self, mut store: crate::utxo_store::UtxoStore) {
+        // Migrate any in-memory UTxOs to the store
+        if !self.utxo_set.is_empty() && !self.utxo_set.has_store() {
+            let count = self.utxo_set.len();
+            info!("Migrating {} in-memory UTxOs to on-disk store", count);
+            for (input, output) in self.utxo_set.iter() {
+                store.insert(input, output);
+            }
+        }
+        store.set_indexing_enabled(true);
+        store.rebuild_address_index();
+        self.utxo_set.attach_store(store);
+        info!("UTxO store attached ({} entries)", self.utxo_set.len());
+    }
+
     /// Current snapshot format version.
     /// Increment this when the serialized LedgerState layout changes.
     const SNAPSHOT_VERSION: u8 = 1;

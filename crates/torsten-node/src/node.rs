@@ -127,7 +127,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
             .utxo_set
             .utxos_at_address(&addr)
             .into_iter()
-            .map(|(input, output)| utxo_to_snapshot(input, output))
+            .map(|(input, output)| utxo_to_snapshot(&input, &output))
             .collect();
         tracing::debug!(
             addr_type = ?std::mem::discriminant(&addr),
@@ -153,7 +153,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
                     index: *idx,
                 };
                 if let Some(output) = ledger.utxo_set.lookup(&tx_input) {
-                    results.push(utxo_to_snapshot(&tx_input, output));
+                    results.push(utxo_to_snapshot(&tx_input, &output));
                 }
             }
         }
@@ -464,6 +464,63 @@ pub fn validate_genesis_blocks(
 }
 
 /// The main Torsten node
+/// Snapshot policy matching Haskell cardano-node's `SnapshotPolicy`.
+///
+/// Controls when ledger snapshots are taken based on time and block counts.
+/// Two modes:
+/// - **Normal operation:** snapshot every `k * 2` seconds (~72 minutes for k=2160)
+/// - **Bulk sync (replay):** snapshot every `bulk_min_blocks` blocks AND `bulk_min_interval` elapsed
+struct SnapshotPolicy {
+    /// Time between snapshots during normal operation (k * 2 seconds)
+    normal_interval: std::time::Duration,
+    /// Minimum blocks processed before snapshot during bulk sync
+    bulk_min_blocks: u64,
+    /// Minimum time between snapshots during bulk sync
+    bulk_min_interval: std::time::Duration,
+    /// Maximum snapshots to retain on disk
+    max_snapshots: usize,
+    /// Last snapshot time
+    last_snapshot_time: std::time::Instant,
+    /// Blocks since last snapshot
+    blocks_since_snapshot: u64,
+}
+
+impl SnapshotPolicy {
+    /// Create a new snapshot policy with defaults matching Haskell cardano-node.
+    fn new(security_param_k: u64) -> Self {
+        SnapshotPolicy {
+            normal_interval: std::time::Duration::from_secs(security_param_k * 2),
+            bulk_min_blocks: 50_000,
+            bulk_min_interval: std::time::Duration::from_secs(360), // 6 minutes
+            max_snapshots: 2,
+            last_snapshot_time: std::time::Instant::now(),
+            blocks_since_snapshot: 0,
+        }
+    }
+
+    /// Record that blocks have been applied.
+    fn record_blocks(&mut self, count: u64) {
+        self.blocks_since_snapshot += count;
+    }
+
+    /// Check if a snapshot should be taken during normal (at-tip) operation.
+    fn should_snapshot_normal(&self) -> bool {
+        self.last_snapshot_time.elapsed() >= self.normal_interval
+    }
+
+    /// Check if a snapshot should be taken during bulk sync (replay).
+    fn should_snapshot_bulk(&self) -> bool {
+        self.blocks_since_snapshot >= self.bulk_min_blocks
+            && self.last_snapshot_time.elapsed() >= self.bulk_min_interval
+    }
+
+    /// Mark that a snapshot was taken.
+    fn snapshot_taken(&mut self) {
+        self.last_snapshot_time = std::time::Instant::now();
+        self.blocks_since_snapshot = 0;
+    }
+}
+
 pub struct Node {
     config: NodeConfig,
     topology: Topology,
@@ -506,6 +563,8 @@ pub struct Node {
     /// After Mithril import, we need at least 2 epoch transitions for the
     /// rolling nonce to be correctly accumulated.
     epoch_transitions_observed: u32,
+    /// Snapshot policy controlling when ledger snapshots are taken.
+    snapshot_policy: SnapshotPolicy,
 }
 
 impl Node {
@@ -856,6 +915,12 @@ impl Node {
             listen_addr,
             network_magic,
             byron_epoch_length,
+            snapshot_policy: SnapshotPolicy::new(
+                shelley_genesis
+                    .as_ref()
+                    .map(|g| g.security_param)
+                    .unwrap_or(2160),
+            ),
             shelley_genesis,
             topology_path: args.topology_path,
             metrics: Arc::new(crate::metrics::NodeMetrics::new()),
@@ -1509,8 +1574,8 @@ impl Node {
 
         drop(ls);
 
-        // Prune old snapshots — keep only the 3 most recent
-        self.prune_old_snapshots(3);
+        // Prune old snapshots — keep only the configured maximum
+        self.prune_old_snapshots(self.snapshot_policy.max_snapshots + 1);
     }
 
     /// Create a fresh ledger state with genesis configuration applied.
@@ -1659,7 +1724,7 @@ impl Node {
     ///    files are laid out sequentially on disk.
     /// 2. **LSM replay** (fallback): Reads blocks by block number from the LSM tree.
     ///    Slower due to random I/O but works when chunk files aren't available.
-    async fn replay_ledger_from_storage(&self) {
+    async fn replay_ledger_from_storage(&mut self) {
         // Migrate legacy immutable-replay/ to immutable/ (backwards compat)
         let legacy_dir = self.database_path.join("immutable-replay");
         let immutable_dir = self.database_path.join("immutable");
@@ -1740,10 +1805,7 @@ impl Node {
         }
 
         if blocks_behind > 100_000 {
-            info!(
-                blocks_behind,
-                "Replaying blocks (snapshots every 500k blocks)",
-            );
+            info!(blocks_behind, "Replaying blocks (time-based snapshots)",);
         }
 
         info!(
@@ -1763,11 +1825,17 @@ impl Node {
         let replay_dir = replay_dir.to_path_buf();
         let bel = self.byron_epoch_length;
 
+        let security_param = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.security_param)
+            .unwrap_or(2160);
         let result = tokio::task::spawn_blocking(move || {
             let start = std::time::Instant::now();
             let mut replayed = 0u64;
             let mut skipped = 0u64;
             let mut last_log = std::time::Instant::now();
+            let mut snapshot_policy = SnapshotPolicy::new(security_param);
 
             // Get ledger tip slot so we can skip blocks already applied.
             let ledger_tip_slot = {
@@ -1806,6 +1874,7 @@ impl Node {
                             warn!(slot = block.slot().0, error = %e, "Ledger apply failed during replay");
                         }
                         replayed += 1;
+                        snapshot_policy.record_blocks(1);
 
                         if last_log.elapsed().as_secs() >= 5 {
                             let elapsed = start.elapsed().as_secs_f64();
@@ -1822,10 +1891,11 @@ impl Node {
                             last_log = std::time::Instant::now();
                         }
 
-                        if replayed.is_multiple_of(500_000) {
+                        if snapshot_policy.should_snapshot_bulk() {
                             if let Err(e) = ls_guard.save_snapshot(&snapshot_path) {
                                 warn!("Failed to save ledger snapshot during replay: {e}");
                             }
+                            snapshot_policy.snapshot_taken();
                         }
                     }
                     Err(e) => {
@@ -1884,7 +1954,7 @@ impl Node {
     }
 
     /// Fallback replay: read blocks from LSM tree by block number.
-    async fn replay_from_lsm(&self, db_tip: torsten_primitives::block::Tip) {
+    async fn replay_from_lsm(&mut self, db_tip: torsten_primitives::block::Tip) {
         let start = std::time::Instant::now();
         let mut replayed = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -1919,6 +1989,7 @@ impl Node {
                                 );
                             }
                             replayed += 1;
+                            self.snapshot_policy.record_blocks(1);
 
                             if last_log.elapsed().as_secs() >= 5 {
                                 let elapsed = start.elapsed().as_secs_f64();
@@ -1940,10 +2011,11 @@ impl Node {
                                 last_log = std::time::Instant::now();
                             }
 
-                            if replayed.is_multiple_of(500_000) {
+                            if self.snapshot_policy.should_snapshot_bulk() {
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
                                 }
+                                self.snapshot_policy.snapshot_taken();
                             }
                         }
                         Err(e) => {
@@ -2883,18 +2955,20 @@ impl Node {
             self.consensus.update_tip(last_block.tip());
         }
 
-        // Take a rollback snapshot after each successful batch.
-        // This allows the LSM tree to be atomically restored if a chain
-        // reorganization is required.
+        // Flush finalized blocks from VolatileDB to ImmutableDB.
+        // Blocks deeper than k are appended to chunk files.
         {
             let mut db = self.chain_db.write().await;
-            db.take_rollback_snapshot();
+            if let Err(e) = db.flush_to_immutable() {
+                warn!(error = %e, "Failed to flush blocks to immutable storage");
+            }
         }
 
         let tx_count: u64 = blocks.iter().map(|b| b.transactions.len() as u64).sum();
 
         *blocks_received += batch_count;
         *blocks_since_last_log += batch_count;
+        self.snapshot_policy.record_blocks(batch_count);
         self.metrics.add_blocks_received(batch_count);
         self.metrics.add_blocks_applied(batch_count);
         self.metrics
@@ -2957,9 +3031,12 @@ impl Node {
                     .epoch_transitions_observed
                     .saturating_add(epochs_crossed);
 
-                // Persist ChainDB before ledger snapshot to ensure consistency
+                // Finalize immutable chunk at epoch boundary and persist
                 {
                     let mut db = self.chain_db.write().await;
+                    if let Err(e) = db.finalize_immutable_chunk() {
+                        warn!(error = %e, "Failed to finalize immutable chunk at epoch transition");
+                    }
                     match db.persist() {
                         Ok(()) => info!(
                             epoch = current_epoch,
@@ -2970,7 +3047,10 @@ impl Node {
                         }
                     }
                 }
-                self.save_ledger_snapshot().await;
+                if self.snapshot_policy.should_snapshot_normal() {
+                    self.save_ledger_snapshot().await;
+                    self.snapshot_policy.snapshot_taken();
+                }
                 *last_snapshot_epoch = current_epoch;
 
                 // Prune opcert counters to only keep active pools (prevents unbounded growth)
@@ -4155,20 +4235,32 @@ impl Node {
         }
 
         // Check if we are the slot leader
-        if !crate::forge::check_slot_leadership(
+        let is_leader = crate::forge::check_slot_leadership(
             creds,
             next_slot,
             &epoch_nonce,
             relative_stake,
             self.consensus.active_slot_coeff,
-        ) {
-            return; // Not our slot
+        );
+
+        if !is_leader {
+            // Log periodically so operators can confirm the VRF check is running
+            if next_slot.0 % 20 == 0 {
+                info!(
+                    slot = next_slot.0,
+                    pool_id = %creds.pool_id,
+                    stake = format_args!("{relative_stake:.6}"),
+                    "Slot leader check: not elected"
+                );
+            }
+            return;
         }
 
         info!(
             slot = next_slot.0,
+            pool_id = %creds.pool_id,
             stake = format_args!("{relative_stake:.6}"),
-            "Leader elected",
+            "Slot leader check: ELECTED — forging block",
         );
 
         // Collect transactions from mempool using protocol params limits

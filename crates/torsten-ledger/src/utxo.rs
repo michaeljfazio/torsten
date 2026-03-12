@@ -5,6 +5,8 @@ use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
 use torsten_primitives::value::Lovelace;
 
+use crate::utxo_store::UtxoStore;
+
 /// Default for `indexing_enabled` during serde deserialization.
 /// Returns `true` so that address indexing is active by default after loading.
 fn default_indexing_enabled() -> bool {
@@ -12,9 +14,16 @@ fn default_indexing_enabled() -> bool {
 }
 
 /// The UTxO set: maps transaction inputs to their unspent outputs.
-/// Uses HashMap for O(1) amortized lookups (vs BTreeMap O(log n)).
-/// Maintains a secondary index by address for O(1) address queries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Supports two backends:
+/// - **In-memory** (`HashMap`): used for tests and legacy mode
+/// - **On-disk** (`UtxoStore` backed by `cardano-lsm`): used in production,
+///   dramatically reduces memory usage for large UTxO sets (mainnet ~20M entries)
+///
+/// When an `UtxoStore` is attached, all operations delegate to it and the
+/// in-memory `utxos` HashMap is unused. The store is `#[serde(skip)]` — it is
+/// managed separately during snapshot save/load.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UtxoSet {
     utxos: HashMap<TransactionInput, TransactionOutput>,
     /// Secondary index: address → set of TransactionInputs at that address.
@@ -25,6 +34,10 @@ pub struct UtxoSet {
     /// Call `rebuild_address_index()` after re-enabling.
     #[serde(skip, default = "default_indexing_enabled")]
     indexing_enabled: bool,
+    /// Optional LSM-tree backed store. When present, all operations delegate to it.
+    /// The in-memory `utxos` HashMap is unused when this is set.
+    #[serde(skip)]
+    store: Option<UtxoStore>,
 }
 
 impl UtxoSet {
@@ -33,7 +46,38 @@ impl UtxoSet {
             utxos: HashMap::new(),
             address_index: HashMap::new(),
             indexing_enabled: true,
+            store: None,
         }
+    }
+
+    /// Attach an LSM-backed UtxoStore. All subsequent operations will delegate to it.
+    /// Any existing in-memory UTxOs are NOT migrated — this is intended for use when
+    /// the store already contains the full UTxO set (e.g., after loading from snapshot).
+    pub fn attach_store(&mut self, store: UtxoStore) {
+        self.store = Some(store);
+        // Clear in-memory data to free RAM
+        self.utxos.clear();
+        self.utxos.shrink_to_fit();
+    }
+
+    /// Detach and return the LSM-backed store, reverting to in-memory mode.
+    pub fn detach_store(&mut self) -> Option<UtxoStore> {
+        self.store.take()
+    }
+
+    /// Get a reference to the attached UtxoStore (if any).
+    pub fn store(&self) -> Option<&UtxoStore> {
+        self.store.as_ref()
+    }
+
+    /// Get a mutable reference to the attached UtxoStore (if any).
+    pub fn store_mut(&mut self) -> Option<&mut UtxoStore> {
+        self.store.as_mut()
+    }
+
+    /// Whether this UtxoSet is backed by an on-disk UtxoStore.
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
     }
 
     /// Enable or disable address index maintenance.
@@ -41,11 +85,18 @@ impl UtxoSet {
     /// Call `rebuild_address_index()` after re-enabling.
     pub fn set_indexing_enabled(&mut self, enabled: bool) {
         self.indexing_enabled = enabled;
+        if let Some(ref mut store) = self.store {
+            store.set_indexing_enabled(enabled);
+        }
     }
 
     /// Rebuild the address index from the UTxO map.
     /// Must be called after deserialization since the index is not serialized.
     pub fn rebuild_address_index(&mut self) {
+        if let Some(ref mut store) = self.store {
+            store.rebuild_address_index();
+            return;
+        }
         self.address_index.clear();
         for (input, output) in &self.utxos {
             self.address_index
@@ -56,25 +107,42 @@ impl UtxoSet {
     }
 
     pub fn len(&self) -> usize {
+        if let Some(ref store) = self.store {
+            return store.len();
+        }
         self.utxos.len()
     }
 
     pub fn is_empty(&self) -> bool {
+        if let Some(ref store) = self.store {
+            return store.is_empty();
+        }
         self.utxos.is_empty()
     }
 
     /// Number of addresses in the secondary index
     pub fn address_index_size(&self) -> usize {
+        if let Some(ref store) = self.store {
+            return store.address_index_size();
+        }
         self.address_index.len()
     }
 
-    /// Look up a UTxO by input reference
-    pub fn lookup(&self, input: &TransactionInput) -> Option<&TransactionOutput> {
-        self.utxos.get(input)
+    /// Look up a UTxO by input reference.
+    /// Returns an owned value (cloned from HashMap or deserialized from LSM).
+    pub fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput> {
+        if let Some(ref store) = self.store {
+            return store.lookup(input);
+        }
+        self.utxos.get(input).cloned()
     }
 
     /// Insert a new UTxO
     pub fn insert(&mut self, input: TransactionInput, output: TransactionOutput) {
+        if let Some(ref mut store) = self.store {
+            store.insert(input, output);
+            return;
+        }
         if self.indexing_enabled {
             self.address_index
                 .entry(output.address.clone())
@@ -86,6 +154,9 @@ impl UtxoSet {
 
     /// Remove a UTxO (mark as spent)
     pub fn remove(&mut self, input: &TransactionInput) -> Option<TransactionOutput> {
+        if let Some(ref mut store) = self.store {
+            return store.remove(input);
+        }
         if let Some(output) = self.utxos.remove(input) {
             if self.indexing_enabled {
                 if let Some(inputs) = self.address_index.get_mut(&output.address) {
@@ -103,6 +174,9 @@ impl UtxoSet {
 
     /// Check if a UTxO exists
     pub fn contains(&self, input: &TransactionInput) -> bool {
+        if let Some(ref store) = self.store {
+            return store.contains(input);
+        }
         self.utxos.contains_key(input)
     }
 
@@ -113,6 +187,9 @@ impl UtxoSet {
         inputs: &[TransactionInput],
         outputs: &[TransactionOutput],
     ) -> Result<(), UtxoError> {
+        if let Some(ref mut store) = self.store {
+            return store.apply_transaction(tx_hash, inputs, outputs);
+        }
         // Validate all inputs exist
         for input in inputs {
             if !self.contains(input) {
@@ -144,6 +221,10 @@ impl UtxoSet {
         inputs: &[(TransactionInput, TransactionOutput)],
         output_count: usize,
     ) {
+        if let Some(ref mut store) = self.store {
+            store.rollback_transaction(tx_hash, inputs, output_count);
+            return;
+        }
         // Remove outputs that were added
         for idx in 0..output_count {
             let input = TransactionInput {
@@ -161,28 +242,61 @@ impl UtxoSet {
 
     /// Calculate total ADA in the UTxO set
     pub fn total_lovelace(&self) -> Lovelace {
+        if let Some(ref store) = self.store {
+            return store.total_lovelace();
+        }
         self.utxos.values().fold(Lovelace(0), |acc, output| {
             Lovelace(acc.0 + output.value.coin.0)
         })
     }
 
-    /// Get all UTxOs at a specific address (O(1) lookup via secondary index)
+    /// Get all UTxOs at a specific address.
+    /// Returns owned tuples (compatible with both in-memory and on-disk backends).
     pub fn utxos_at_address(
         &self,
         address: &Address,
-    ) -> Vec<(&TransactionInput, &TransactionOutput)> {
+    ) -> Vec<(TransactionInput, TransactionOutput)> {
+        if let Some(ref store) = self.store {
+            return store.utxos_at_address(address);
+        }
         match self.address_index.get(address) {
             Some(inputs) => inputs
                 .iter()
-                .filter_map(|input| self.utxos.get_key_value(input))
+                .filter_map(|input| {
+                    self.utxos
+                        .get(input)
+                        .map(|output| (input.clone(), output.clone()))
+                })
                 .collect(),
             None => Vec::new(),
         }
     }
 
-    /// Iterator over all UTxOs
-    pub fn iter(&self) -> impl Iterator<Item = (&TransactionInput, &TransactionOutput)> {
-        self.utxos.iter()
+    /// Iterate over all UTxOs.
+    /// Returns owned tuples (compatible with both in-memory and on-disk backends).
+    /// For on-disk stores, this performs a full LSM scan — use sparingly.
+    pub fn iter(&self) -> Vec<(TransactionInput, TransactionOutput)> {
+        if let Some(ref store) = self.store {
+            return store.iter();
+        }
+        self.utxos
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+}
+
+impl Clone for UtxoSet {
+    fn clone(&self) -> Self {
+        UtxoSet {
+            utxos: self.utxos.clone(),
+            address_index: self.address_index.clone(),
+            indexing_enabled: self.indexing_enabled,
+            // UtxoStore is not cloneable — clone gets in-memory mode.
+            // This is fine: LedgerState clones are only used in tests,
+            // and production code shares via Arc<RwLock<LedgerState>>.
+            store: None,
+        }
     }
 }
 
@@ -444,5 +558,27 @@ mod tests {
         // Rebuild
         utxo_set.rebuild_address_index();
         assert_eq!(utxo_set.utxos_at_address(&addr).len(), 1);
+    }
+
+    #[test]
+    fn test_with_store_backend() {
+        let store = UtxoStore::new_temp().unwrap();
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.attach_store(store);
+
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let output = make_output(5_000_000);
+        utxo_set.insert(input.clone(), output);
+
+        assert_eq!(utxo_set.len(), 1);
+        assert!(utxo_set.contains(&input));
+        assert_eq!(utxo_set.lookup(&input).unwrap().value.coin.0, 5_000_000);
+        assert!(utxo_set.has_store());
+
+        utxo_set.remove(&input);
+        assert_eq!(utxo_set.len(), 0);
     }
 }
