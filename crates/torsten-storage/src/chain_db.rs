@@ -408,6 +408,57 @@ impl ChainDB {
         Ok(count)
     }
 
+    /// Flush ALL volatile blocks to ImmutableDB, bypassing the k-depth check.
+    ///
+    /// Only safe to call during graceful shutdown — after this, the VolatileDB
+    /// is empty and the ImmutableDB contains all blocks up to the chain tip.
+    /// This ensures the ledger snapshot (saved at the volatile tip) is
+    /// consistent with the ImmutableDB tip on restart.
+    pub fn flush_all_to_immutable(&mut self) -> Result<u64, ChainDBError> {
+        let vol_tip = match self.volatile.get_tip() {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        let tip_block_no = vol_tip.2;
+
+        // Collect all volatile blocks in block_no order
+        let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
+        for block_no in 1..=tip_block_no {
+            if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
+                if self.immutable.has_block(&hash) {
+                    continue;
+                }
+                to_finalize.push((slot, hash, block_no, cbor.to_vec()));
+            }
+        }
+
+        if to_finalize.is_empty() {
+            return Ok(0);
+        }
+
+        let count = to_finalize.len() as u64;
+
+        for (slot, hash, block_no, cbor) in &to_finalize {
+            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+        }
+
+        if let Some((slot, hash, block_no, _)) = to_finalize.last() {
+            self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+        }
+
+        // Clear volatile — everything is now in immutable
+        self.volatile.clear();
+
+        debug!(
+            flushed = count,
+            immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
+            "ChainDB: flushed all volatile blocks to immutable (shutdown)"
+        );
+
+        Ok(count)
+    }
+
     /// Finalize the current ImmutableDB chunk and start a new one.
     /// Call this at epoch boundaries.
     pub fn finalize_immutable_chunk(&mut self) -> Result<(), ChainDBError> {
@@ -722,6 +773,58 @@ mod tests {
 
         // Volatile should have k blocks remaining
         assert_eq!(db.volatile.len(), SECURITY_PARAM_K);
+    }
+
+    #[test]
+    fn test_flush_all_to_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Add 20 blocks (well under k, so flush_to_immutable wouldn't move them)
+        for i in 1..=20u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            let mut prev_bytes = [0u8; 32];
+            prev_bytes[0..8].copy_from_slice(&(i - 1).to_be_bytes());
+            let prev = Hash32::from_bytes(prev_bytes);
+            db.add_block(
+                hash,
+                SlotNo(i * 10),
+                BlockNo(i),
+                prev,
+                format!("block{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Normal flush should move nothing (tip < k)
+        assert_eq!(db.flush_to_immutable().unwrap(), 0);
+        assert_eq!(db.volatile.len(), 20);
+
+        // flush_all should move everything
+        let flushed = db.flush_all_to_immutable().unwrap();
+        assert_eq!(flushed, 20);
+        assert_eq!(db.volatile.len(), 0);
+
+        // All blocks should still be readable from immutable
+        for i in 1..=20u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            assert!(db.has_block(&hash));
+        }
+
+        // Tip should reflect the last block
+        assert_eq!(db.tip_slot(), SlotNo(200));
+
+        // Persist and re-open — blocks should survive
+        db.persist().unwrap();
+        let db2 = ChainDB::open(dir.path()).unwrap();
+        assert_eq!(db2.tip_slot(), SlotNo(200));
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0..8].copy_from_slice(&1u64.to_be_bytes());
+        assert!(db2.has_block(&Hash32::from_bytes(hash_bytes)));
     }
 
     #[test]

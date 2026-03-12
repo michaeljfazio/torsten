@@ -1539,10 +1539,16 @@ impl Node {
             }
         }
 
-        // Persist ChainDB to disk BEFORE saving ledger snapshot
-        // (ensures ledger snapshot is consistent with persisted blocks)
+        // Flush all volatile blocks to ImmutableDB, then persist.
+        // This ensures the ledger snapshot (at the volatile tip) is consistent
+        // with the ImmutableDB tip on restart, avoiding a full replay.
         {
             let mut db = self.chain_db.write().await;
+            match db.flush_all_to_immutable() {
+                Ok(n) if n > 0 => info!(blocks = n, "Flushed volatile blocks to ImmutableDB"),
+                Ok(_) => {}
+                Err(e) => error!("Failed to flush volatile blocks on shutdown: {e}"),
+            }
             if let Err(e) = db.persist() {
                 error!("Failed to persist ChainDB on shutdown: {e}");
             }
