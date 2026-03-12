@@ -158,8 +158,48 @@ graph TD
 | SIGHUP topology reload | :white_check_mark: |
 | Full VRF/KES cryptographic verification | :white_check_mark: |
 | **Pending** | |
-| Mainnet production readiness | :construction: |
+| Mainnet integration testing | :construction: |
 | Genesis bootstrap from peers | :construction: |
+| Independent block validation (without trusting upstream) | :construction: |
+
+## Production Readiness
+
+> [!WARNING]
+> **Torsten is alpha-quality software.** It has not undergone the extensive human-driven QA, formal auditing, or prolonged mainnet soak testing required for production use. The assessments below reflect automated testing only and should not be taken as endorsement for mainnet deployment.
+
+### Relay Node
+
+Torsten can function as a **testnet relay node** with the following capabilities:
+
+- Syncs to chain tip on preview/preprod testnets via pipelined ChainSync
+- Serves blocks to downstream peers (N2N server: ChainSync, BlockFetch, KeepAlive, TxSubmission2)
+- Accepts and validates transactions (Phase-1 + Phase-2 Plutus) for mempool admission
+- Responds to all cardano-cli queries via N2C socket (V16–V22)
+- Handles graceful shutdown on SIGINT/SIGTERM with ChainDB + ledger snapshot persistence
+- Recovers from crash with snapshot fallback (latest → previous → fresh)
+- Persists ChainDB at epoch transitions to limit replay window on crash
+
+**Known limitations:**
+- Mainnet sync has not been verified to chain tip
+- No formal protocol conformance testing against the Cardano specification
+- No long-duration stability testing (multi-day uptime under load)
+- Block validation trusts upstream peers — independent full validation not yet verified
+
+### Block Producer
+
+The block production pipeline is **implemented but untested on a live network**:
+
+- VRF proof generation and slot leader election (exact 34-digit fixed-point arithmetic matching Haskell)
+- KES key loading, evolution, and block signing (Sum6Kes)
+- Operational certificate parsing and period validation
+- Block forging with mempool transaction selection
+- Block announcement to connected peers
+
+**Not yet verified:**
+- No testnet block has been forged by Torsten
+- Stake pool registration and delegation flow not end-to-end tested
+- KES key rotation across multiple KES periods not tested in production
+- Mempool transaction ordering and priority not optimized
 
 ## Network Magic
 
