@@ -10,7 +10,7 @@ use thiserror::Error;
 use torsten_primitives::block::{Point, Tip};
 use torsten_primitives::hash::{BlockHeaderHash, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::immutable_db::ImmutableDB;
 
@@ -812,25 +812,36 @@ impl ChainDB {
 
     /// Persist all in-memory data to a durable snapshot.
     ///
-    /// Uses save-to-temp-then-rename to avoid data loss if the process
-    /// crashes between deleting the old snapshot and writing the new one.
+    /// Uses a three-phase rotation to prevent data loss on crash:
+    ///   1. Write new snapshot to `latest_tmp`
+    ///   2. Rename current `latest` → `previous` (backup)
+    ///   3. Rename `latest_tmp` → `latest`
+    ///   4. Remove `previous`
+    ///
+    /// If the process crashes at any point, `open_tree()` can recover from
+    /// whichever of `latest`, `previous`, or `latest_tmp` is still valid.
     pub fn persist(&mut self) -> Result<(), ChainDBError> {
         debug!("ChainDB: persisting snapshot");
-        // Save to a temporary name first
+        // Phase 1: Write new snapshot to temporary name
         let _ = self.tree.delete_snapshot("latest_tmp");
         self.tree.save_snapshot("latest_tmp", "torsten")?;
 
-        // Atomically replace the old "latest" with the new one via directory rename
         let snapshots_dir = self.path.join("snapshots");
         let latest_dir = snapshots_dir.join("latest");
+        let previous_dir = snapshots_dir.join("previous");
         let tmp_dir = snapshots_dir.join("latest_tmp");
 
+        // Phase 2: Rotate current latest → previous (preserves a known-good backup)
+        let _ = std::fs::remove_dir_all(&previous_dir);
         if latest_dir.exists() {
-            // Remove old latest — if we crash here, latest_tmp is a valid recovery
-            std::fs::remove_dir_all(&latest_dir)?;
+            std::fs::rename(&latest_dir, &previous_dir)?;
         }
-        // Rename tmp → latest
+
+        // Phase 3: Promote tmp → latest
         std::fs::rename(&tmp_dir, &latest_dir)?;
+
+        // Phase 4: Clean up previous (optional — failure here is harmless)
+        let _ = std::fs::remove_dir_all(&previous_dir);
 
         debug!("ChainDB: snapshot persisted");
         Ok(())
@@ -870,29 +881,50 @@ impl ChainDB {
 // ---------------------------------------------------------------------------
 
 /// Open (or restore) an LSM tree from a persisted snapshot.
+///
+/// Tries snapshots in order of preference: `latest`, `previous`, `latest_tmp`.
+/// If a snapshot fails to load, it is removed and the next one is tried.
+/// This ensures recovery even if the node was killed during `persist()`.
 fn open_tree(path: &Path, config: LsmConfig) -> Result<LsmTree, ChainDBError> {
-    let snapshot_dir = path.join("snapshots").join("latest");
-    if snapshot_dir.exists() {
-        match LsmTree::open_snapshot(path, "latest") {
+    let snapshots_dir = path.join("snapshots");
+
+    // Try snapshots in order of recency/reliability
+    for snapshot_name in &["latest", "previous", "latest_tmp"] {
+        let snapshot_dir = snapshots_dir.join(snapshot_name);
+        if !snapshot_dir.exists() {
+            continue;
+        }
+        match LsmTree::open_snapshot(path, snapshot_name) {
             Ok(tree) => {
-                debug!("Restored from persisted snapshot");
+                if *snapshot_name != "latest" {
+                    info!(
+                        snapshot = snapshot_name,
+                        "Recovered from fallback snapshot (latest was corrupted)"
+                    );
+                } else {
+                    debug!("Restored from persisted snapshot");
+                }
                 return Ok(tree);
             }
             Err(e) => {
-                // Show only the first line of the error to avoid multi-line noise
                 let first_line = e
                     .to_string()
                     .lines()
                     .next()
                     .unwrap_or("unknown")
                     .to_string();
-                warn!("Failed to open snapshot, removing and retrying: {first_line}");
+                warn!(
+                    snapshot = snapshot_name,
+                    "Failed to open snapshot, trying next: {first_line}"
+                );
                 if let Err(rm_err) = std::fs::remove_dir_all(&snapshot_dir) {
                     warn!(error = %rm_err, "Failed to remove corrupted snapshot dir");
                 }
             }
         }
     }
+
+    info!("No valid snapshot found, starting fresh");
     Ok(LsmTree::open(path, config)?)
 }
 
@@ -1306,5 +1338,181 @@ mod tests {
         assert_eq!(result.0, SlotNo(500));
         assert_eq!(result.1, hash);
         assert_eq!(result.2, b"my_block");
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot crash safety / fallback tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_persist_creates_latest_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut db, 3);
+        db.persist().unwrap();
+
+        let latest = dir.path().join("snapshots/latest");
+        assert!(latest.exists(), "persist() should create snapshots/latest");
+    }
+
+    #[test]
+    fn test_persist_rotates_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // First persist
+        build_chain(&mut db, 3);
+        db.persist().unwrap();
+
+        let latest = dir.path().join("snapshots/latest");
+        assert!(latest.exists());
+
+        // Second persist: previous should be cleaned up, latest replaced
+        db.add_block(
+            make_hash(4),
+            SlotNo(4),
+            BlockNo(4),
+            make_hash(3),
+            b"block4".into(),
+        )
+        .unwrap();
+        db.persist().unwrap();
+
+        assert!(
+            latest.exists(),
+            "latest should still exist after second persist"
+        );
+        // previous is cleaned up in phase 4
+        let previous = dir.path().join("snapshots/previous");
+        assert!(
+            !previous.exists(),
+            "previous should be cleaned up after persist"
+        );
+    }
+
+    #[test]
+    fn test_recover_from_latest_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = make_hash(5);
+
+        {
+            let mut db = ChainDB::open(dir.path()).unwrap();
+            db.add_block(hash, SlotNo(50), BlockNo(5), Hash32::ZERO, b"data".into())
+                .unwrap();
+            db.persist().unwrap();
+        }
+
+        // Re-open should restore from latest
+        let db = ChainDB::open(dir.path()).unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(50));
+        assert!(db.has_block(&hash));
+    }
+
+    #[test]
+    fn test_recover_from_previous_when_latest_corrupted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a valid snapshot with blocks 1-3
+        {
+            let mut db = ChainDB::open(dir.path()).unwrap();
+            build_chain(&mut db, 3);
+            db.persist().unwrap();
+        }
+
+        // Simulate crash: corrupt the latest snapshot directory
+        let latest = dir.path().join("snapshots/latest");
+        // Remove contents to make it invalid, then create a bogus file
+        let _ = std::fs::remove_dir_all(&latest);
+        std::fs::create_dir_all(&latest).unwrap();
+        std::fs::write(latest.join("corrupted"), b"not a valid snapshot").unwrap();
+
+        // Copy a valid snapshot to "previous" to simulate the rotation state
+        // after a crash mid-persist
+        {
+            // First create a fresh valid DB and persist as "previous"
+            let dir2 = tempfile::tempdir().unwrap();
+            let mut db2 = ChainDB::open(dir2.path()).unwrap();
+            build_chain(&mut db2, 2);
+            db2.persist().unwrap();
+
+            // Copy the latest snapshot from dir2 to "previous" in dir
+            let src = dir2.path().join("snapshots/latest");
+            let dst = dir.path().join("snapshots/previous");
+            copy_dir_recursive(&src, &dst).unwrap();
+        }
+
+        // Re-open should fall back to "previous"
+        let db = ChainDB::open(dir.path()).unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(2));
+        assert!(db.has_block(&make_hash(1)));
+        assert!(db.has_block(&make_hash(2)));
+    }
+
+    #[test]
+    fn test_recover_fresh_when_all_snapshots_corrupted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create and persist a valid DB
+        {
+            let mut db = ChainDB::open(dir.path()).unwrap();
+            build_chain(&mut db, 3);
+            db.persist().unwrap();
+        }
+
+        // Corrupt all snapshot directories
+        let snapshots = dir.path().join("snapshots");
+        for name in &["latest", "previous", "latest_tmp"] {
+            let snap_dir = snapshots.join(name);
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            std::fs::create_dir_all(&snap_dir).unwrap();
+            std::fs::write(snap_dir.join("corrupted"), b"bad data").unwrap();
+        }
+
+        // Re-open should start fresh (no crash)
+        let db = ChainDB::open(dir.path()).unwrap();
+        assert_eq!(db.get_tip(), Tip::origin());
+    }
+
+    #[test]
+    fn test_persist_interrupted_leaves_previous_intact() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Persist a valid snapshot
+        {
+            let mut db = ChainDB::open(dir.path()).unwrap();
+            build_chain(&mut db, 3);
+            db.persist().unwrap();
+        }
+
+        // Simulate: latest was moved to previous, but tmp→latest rename failed
+        // (e.g. kill during phase 3)
+        let snapshots = dir.path().join("snapshots");
+        let latest = snapshots.join("latest");
+        let previous = snapshots.join("previous");
+
+        // Move latest to previous (simulating phase 2 completion)
+        std::fs::rename(&latest, &previous).unwrap();
+        // latest is now gone, previous exists
+
+        // Re-open should recover from "previous"
+        let db = ChainDB::open(dir.path()).unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(3));
+    }
+
+    /// Helper to recursively copy a directory.
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let dest_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_recursive(&entry.path(), &dest_path)?;
+            } else {
+                std::fs::copy(entry.path(), &dest_path)?;
+            }
+        }
+        Ok(())
     }
 }

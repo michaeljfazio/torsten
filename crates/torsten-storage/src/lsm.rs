@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use torsten_primitives::hash::{BlockHeaderHash, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use cardano_lsm::{CompactionStrategy, Key, LsmConfig, LsmTree, Value};
 
@@ -443,20 +443,28 @@ impl LsmImmutableDB {
     /// because cardano-lsm uses ephemeral writes.
     pub fn persist(&mut self) -> Result<(), LsmImmutableDBError> {
         debug!("ImmutableDB: persisting snapshot");
-        // Save to temp name first to avoid data loss on crash
+        // Phase 1: Write new snapshot to temporary name
         let _ = self.tree.delete_snapshot("latest_tmp");
         self.tree.save_snapshot("latest_tmp", "torsten")?;
 
-        // Atomically replace old "latest" with new one
         let snapshots_dir = self.path.join("snapshots");
         let latest_dir = snapshots_dir.join("latest");
+        let previous_dir = snapshots_dir.join("previous");
         let tmp_dir = snapshots_dir.join("latest_tmp");
+
+        // Phase 2: Rotate current latest → previous (preserves known-good backup)
+        let _ = std::fs::remove_dir_all(&previous_dir);
         if latest_dir.exists() {
-            std::fs::remove_dir_all(&latest_dir)
+            std::fs::rename(&latest_dir, &previous_dir)
                 .map_err(|e| LsmImmutableDBError::Lsm(cardano_lsm::Error::Io(e)))?;
         }
+
+        // Phase 3: Promote tmp → latest
         std::fs::rename(&tmp_dir, &latest_dir)
             .map_err(|e| LsmImmutableDBError::Lsm(cardano_lsm::Error::Io(e)))?;
+
+        // Phase 4: Clean up previous (failure is harmless)
+        let _ = std::fs::remove_dir_all(&previous_dir);
 
         debug!("ImmutableDB: snapshot persisted");
         Ok(())
@@ -483,33 +491,48 @@ impl LsmImmutableDB {
 
 /// Open (or restore) an LSM tree.
 ///
-/// If a `"latest"` snapshot exists (from a previous [`persist()`] call),
-/// the tree is restored via `open_snapshot`.  Otherwise a fresh tree is
-/// created with `open`.  If the snapshot is corrupt, it is removed and we
-/// fall back to a fresh open.
+/// Tries snapshots in order: `latest`, `previous`, `latest_tmp`.
+/// If a snapshot is corrupt, it is removed and the next one is tried.
+/// Falls back to a fresh open if all snapshots fail.
 fn open_tree(path: &Path, config: LsmConfig) -> Result<LsmTree, LsmImmutableDBError> {
-    let snapshot_dir = path.join("snapshots").join("latest");
-    if snapshot_dir.exists() {
-        match LsmTree::open_snapshot(path, "latest") {
+    let snapshots_dir = path.join("snapshots");
+
+    for snapshot_name in &["latest", "previous", "latest_tmp"] {
+        let snapshot_dir = snapshots_dir.join(snapshot_name);
+        if !snapshot_dir.exists() {
+            continue;
+        }
+        match LsmTree::open_snapshot(path, snapshot_name) {
             Ok(tree) => {
-                debug!("Restored from persisted snapshot");
+                if *snapshot_name != "latest" {
+                    info!(
+                        snapshot = snapshot_name,
+                        "Recovered from fallback snapshot (latest was corrupted)"
+                    );
+                } else {
+                    debug!("Restored from persisted snapshot");
+                }
                 return Ok(tree);
             }
             Err(e) => {
-                // Show only the first line of the error to avoid multi-line noise
                 let first_line = e
                     .to_string()
                     .lines()
                     .next()
                     .unwrap_or("unknown")
                     .to_string();
-                warn!("Failed to open snapshot, removing and retrying: {first_line}");
+                warn!(
+                    snapshot = snapshot_name,
+                    "Failed to open snapshot, trying next: {first_line}"
+                );
                 if let Err(rm_err) = std::fs::remove_dir_all(&snapshot_dir) {
                     warn!(error = %rm_err, "Failed to remove corrupted snapshot dir");
                 }
             }
         }
     }
+
+    info!("No valid snapshot found, starting fresh");
     Ok(LsmTree::open(path, config)?)
 }
 
