@@ -111,12 +111,13 @@ impl Value {
     }
 
     pub fn add(&self, other: &Value) -> Self {
-        let coin = Lovelace(self.coin.0 + other.coin.0);
+        let coin = self.coin + other.coin; // Lovelace::Add is saturating
         let mut multi_asset = self.multi_asset.clone();
         for (policy, assets) in &other.multi_asset {
             let entry = multi_asset.entry(*policy).or_default();
             for (name, qty) in assets {
-                *entry.entry(name.clone()).or_insert(0) += qty;
+                let e = entry.entry(name.clone()).or_insert(0);
+                *e = e.saturating_add(*qty);
             }
         }
         Value { coin, multi_asset }
@@ -192,5 +193,100 @@ mod tests {
         assert!(!v.is_pure_ada());
         assert_eq!(v.policy_count(), 1);
         assert_eq!(v.asset_count(), 1);
+    }
+
+    // ========================================================================
+    // Lovelace saturating arithmetic tests
+    // ========================================================================
+
+    #[test]
+    fn test_lovelace_add_normal() {
+        let a = Lovelace(5_000_000);
+        let b = Lovelace(3_000_000);
+        assert_eq!(a + b, Lovelace(8_000_000));
+    }
+
+    #[test]
+    fn test_lovelace_add_saturates() {
+        let a = Lovelace(u64::MAX);
+        let b = Lovelace(1);
+        assert_eq!(a + b, Lovelace(u64::MAX));
+    }
+
+    #[test]
+    fn test_lovelace_add_both_large() {
+        let a = Lovelace(u64::MAX / 2 + 1);
+        let b = Lovelace(u64::MAX / 2 + 1);
+        assert_eq!(a + b, Lovelace(u64::MAX));
+    }
+
+    #[test]
+    fn test_lovelace_sub_normal() {
+        let a = Lovelace(5_000_000);
+        let b = Lovelace(3_000_000);
+        assert_eq!(a - b, Lovelace(2_000_000));
+    }
+
+    #[test]
+    fn test_lovelace_sub_saturates() {
+        let a = Lovelace(3_000_000);
+        let b = Lovelace(5_000_000);
+        assert_eq!(a - b, Lovelace(0));
+    }
+
+    #[test]
+    fn test_lovelace_add_assign_normal() {
+        let mut a = Lovelace(5_000_000);
+        a += Lovelace(3_000_000);
+        assert_eq!(a, Lovelace(8_000_000));
+    }
+
+    #[test]
+    fn test_lovelace_add_assign_saturates() {
+        let mut a = Lovelace(u64::MAX);
+        a += Lovelace(1);
+        assert_eq!(a, Lovelace(u64::MAX));
+    }
+
+    #[test]
+    fn test_lovelace_checked_add() {
+        assert_eq!(Lovelace(5).checked_add(Lovelace(3)), Some(Lovelace(8)));
+        assert_eq!(Lovelace(u64::MAX).checked_add(Lovelace(1)), None);
+    }
+
+    #[test]
+    fn test_lovelace_checked_sub() {
+        assert_eq!(Lovelace(5).checked_sub(Lovelace(3)), Some(Lovelace(2)));
+        assert_eq!(Lovelace(3).checked_sub(Lovelace(5)), None);
+    }
+
+    #[test]
+    fn test_value_add_saturates_coin() {
+        let v1 = Value::lovelace(u64::MAX);
+        let v2 = Value::lovelace(1);
+        let sum = v1.add(&v2);
+        assert_eq!(sum.coin, Lovelace(u64::MAX));
+    }
+
+    #[test]
+    fn test_value_add_merges_multi_asset() {
+        let policy = Hash28::from_bytes([1u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+
+        let mut v1 = Value::lovelace(1_000_000);
+        v1.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 50);
+
+        let mut v2 = Value::lovelace(2_000_000);
+        v2.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 30);
+
+        let sum = v1.add(&v2);
+        assert_eq!(sum.coin, Lovelace(3_000_000));
+        assert_eq!(sum.multi_asset[&policy][&asset], 80);
     }
 }
