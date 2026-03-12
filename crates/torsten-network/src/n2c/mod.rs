@@ -855,15 +855,27 @@ mod tests {
         buf
     }
 
-    /// Build MsgSubmitTx payload: [0, [era_id, tx_bytes]]
+    /// Build MsgSubmitTx payload matching cardano-node wire format.
+    ///
+    /// Format: `[0, [2, era_idx, tag(24, bstr(tx_bytes))]]`
+    ///   - outer [2]: MsgSubmitTx wrapper
+    ///   - inner [2, era_idx, ...]: NS (N-ary sum) encoding for GenTx (HardForkBlock xs)
+    ///   - tag(24, bstr(...)): CBOR-in-CBOR via wrapCBORinCBOR toCBOR
     fn build_submit_payload(era_id: u32, tx_bytes: &[u8]) -> Vec<u8> {
         let mut payload = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut payload);
-        enc.array(2).unwrap();
-        enc.u32(0).unwrap(); // MsgSubmitTx
-        enc.array(2).unwrap();
-        enc.u32(era_id).unwrap();
-        enc.bytes(tx_bytes).unwrap();
+        {
+            let mut enc = minicbor::Encoder::new(&mut payload);
+            enc.array(2).unwrap();
+            enc.u32(0).unwrap(); // MsgSubmitTx tag
+
+            // encodeNS: [era_idx, payload] (2-element list)
+            enc.array(2).unwrap();
+            enc.u8(era_id as u8).unwrap();
+
+            // wrapCBORinCBOR: tag(24, bstr(tx_bytes))
+            enc.tag(minicbor::data::Tag::new(24)).unwrap();
+            enc.bytes(tx_bytes).unwrap();
+        }
         payload
     }
 

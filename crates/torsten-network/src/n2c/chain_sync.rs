@@ -95,28 +95,33 @@ pub(crate) async fn handle_local_chainsync(
 
                         let tip = provider.get_tip();
 
-                        // Extract era tag from block CBOR: [era_tag, ...]
-                        let era_id = {
+                        // Stored CBOR is the multi-era wrapped form: [era_tag, block_body].
+                        // Extract era tag and the inner block body separately.
+                        // N2C LocalChainSync uses HFC encoding: [era_id, tag(24, bstr(block_body))]
+                        // where block_body is the era-specific block CBOR (without era wrapper).
+                        let (era_id, block_body) = {
                             let mut d = minicbor::Decoder::new(&cbor);
                             d.array().ok();
-                            d.u32().unwrap_or(6) // default Conway if parse fails
+                            let era = d.u32().unwrap_or(6);
+                            let body_start = d.position();
+                            (era, &cbor[body_start..])
                         };
 
                         let mut buf = Vec::new();
                         let mut enc = minicbor::Encoder::new(&mut buf);
-                        // MsgRollForward [2, [era_id, tagged(24, block_cbor)], tip]
+                        // MsgRollForward [2, [era_id, tag(24, block_body)], tip]
                         enc.array(3)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         enc.u32(2)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                        // Wrapped block: [era_id, tag(24) block_bytes]
+                        // HFC block: encodeNS [era_id, wrapCBORinCBOR block]
                         enc.array(2)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         enc.u32(era_id)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         enc.tag(minicbor::data::Tag::new(24))
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                        enc.bytes(&cbor)
+                        enc.bytes(block_body)
                             .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                         // tip
                         let tip_h = Hash32::from_bytes(tip.hash);

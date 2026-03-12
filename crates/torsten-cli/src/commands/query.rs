@@ -301,29 +301,55 @@ impl QueryCmd {
                     decoder.set_position(pos);
                 }
 
-                let arr_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                // UTxO result is a CBOR Map<[tx_hash, index], TransactionOutput>
+                let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
 
                 println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
                 println!("{}", "-".repeat(96));
 
-                if arr_len == 0 {
+                if map_len == 0 {
                     return Ok(());
                 }
 
-                for _ in 0..arr_len {
-                    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                    let mut tx_hash = String::new();
-                    let mut output_index = 0u32;
+                for _ in 0..map_len {
+                    // Key: [tx_hash_bytes, output_index]
+                    let _ = decoder.array(); // consume array(2)
+                    let tx_hash = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let output_index = decoder.u32().unwrap_or(0);
+
+                    // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, ...}
                     let mut lovelace = 0u64;
                     let mut has_datum = false;
-
-                    for _ in 0..map_len {
-                        let key = decoder.str().unwrap_or("");
+                    let output_map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                    for _ in 0..output_map_len {
+                        let key = decoder.u32().unwrap_or(999);
                         match key {
-                            "tx_hash" => tx_hash = hex::encode(decoder.bytes().unwrap_or(&[])),
-                            "output_index" => output_index = decoder.u32().unwrap_or(0),
-                            "lovelace" => lovelace = decoder.u64().unwrap_or(0),
-                            "has_datum" => has_datum = decoder.bool().unwrap_or(false),
+                            0 => {
+                                // address bytes — skip
+                                decoder.skip().ok();
+                            }
+                            1 => {
+                                // value: either integer (ADA-only) or [coin, multiasset_map]
+                                let val_pos = decoder.position();
+                                if let Ok(coin) = decoder.u64() {
+                                    lovelace = coin;
+                                } else {
+                                    decoder.set_position(val_pos);
+                                    if let Ok(Some(_)) = decoder.array() {
+                                        lovelace = decoder.u64().unwrap_or(0);
+                                        decoder.skip().ok(); // skip multiasset map
+                                    }
+                                }
+                            }
+                            2 => {
+                                // datum
+                                has_datum = true;
+                                decoder.skip().ok();
+                            }
+                            3 => {
+                                // script_ref
+                                decoder.skip().ok();
+                            }
                             _ => {
                                 decoder.skip().ok();
                             }
@@ -335,7 +361,7 @@ impl QueryCmd {
                     println!("{utxo_ref:<68} {datum_str:>6} {lovelace:>20}");
                 }
 
-                println!("\nTotal UTxOs: {arr_len}");
+                println!("\nTotal UTxOs: {map_len}");
                 Ok(())
             }
             QuerySubcommand::ProtocolParameters {

@@ -157,10 +157,13 @@ pub(crate) async fn handle_tx_monitor(
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.u32(6)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
+                    // GenTx encoding: encodeNS [era_id, wrapCBORinCBOR tx]
                     enc.array(2)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.u32(6)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // era 6 = Conway
+                    enc.tag(minicbor::data::Tag::new(24))
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.bytes(&tx_cbor)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     found = true;

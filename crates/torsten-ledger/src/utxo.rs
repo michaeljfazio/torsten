@@ -5,6 +5,12 @@ use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
 use torsten_primitives::value::Lovelace;
 
+/// Default for `indexing_enabled` during serde deserialization.
+/// Returns `true` so that address indexing is active by default after loading.
+fn default_indexing_enabled() -> bool {
+    true
+}
+
 /// The UTxO set: maps transaction inputs to their unspent outputs.
 /// Uses HashMap for O(1) amortized lookups (vs BTreeMap O(log n)).
 /// Maintains a secondary index by address for O(1) address queries.
@@ -17,7 +23,7 @@ pub struct UtxoSet {
     address_index: HashMap<Address, Vec<TransactionInput>>,
     /// When false, address index operations are skipped (for fast replay).
     /// Call `rebuild_address_index()` after re-enabling.
-    #[serde(skip)]
+    #[serde(skip, default = "default_indexing_enabled")]
     indexing_enabled: bool,
 }
 
@@ -55,6 +61,11 @@ impl UtxoSet {
 
     pub fn is_empty(&self) -> bool {
         self.utxos.is_empty()
+    }
+
+    /// Number of addresses in the secondary index
+    pub fn address_index_size(&self) -> usize {
+        self.address_index.len()
     }
 
     /// Look up a UTxO by input reference

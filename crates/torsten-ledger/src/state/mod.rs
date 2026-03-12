@@ -896,6 +896,9 @@ impl LedgerState {
                 LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
             })?;
         state.utxo_set.rebuild_address_index();
+        // Re-enable indexing so subsequent insert/remove operations maintain the index.
+        // The #[serde(skip)] on indexing_enabled defaults to false after deserialization.
+        state.utxo_set.set_indexing_enabled(true);
         // After loading a snapshot, incremental stake tracking may have drifted.
         // Rebuild stake distribution from the full UTxO set immediately, then
         // recompute pool_stake for all existing snapshots (mark/set/go).

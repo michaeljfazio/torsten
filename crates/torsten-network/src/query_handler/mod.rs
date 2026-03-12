@@ -6,7 +6,7 @@ mod utxo;
 
 use std::sync::Arc;
 use torsten_primitives::block::Point;
-use tracing::debug;
+use tracing::{debug, warn};
 
 // Re-export all public types for backwards compatibility
 pub use types::{
@@ -118,15 +118,17 @@ impl QueryHandler {
                     }
                     3 => {
                         // Outer tag 3 = GetChainPoint (QueryVersion2, N2C v16+)
+                        // Returns Point: [] for Origin, [slot, hash] for Specific
                         debug!("Query: GetChainPoint");
-                        let (slot, hash) = match &self.state.tip.point {
-                            Point::Origin => (0, vec![0u8; 32]),
-                            Point::Specific(s, h) => (s.0, h.to_vec()),
-                        };
-                        QueryResult::ChainTip {
-                            slot,
-                            hash,
-                            block_no: self.state.block_number.0,
+                        match &self.state.tip.point {
+                            Point::Origin => QueryResult::ChainPoint {
+                                slot: 0,
+                                hash: vec![],
+                            },
+                            Point::Specific(s, h) => QueryResult::ChainPoint {
+                                slot: s.0,
+                                hash: h.to_vec(),
+                            },
                         }
                     }
                     _ => {
@@ -145,17 +147,16 @@ impl QueryHandler {
                     }
                     1 => QueryResult::SystemStart(self.state.system_start.clone()),
                     2 => QueryResult::ChainBlockNo(self.state.block_number.0),
-                    3 => {
-                        let (slot, hash) = match &self.state.tip.point {
-                            Point::Origin => (0, vec![0u8; 32]),
-                            Point::Specific(s, h) => (s.0, h.to_vec()),
-                        };
-                        QueryResult::ChainTip {
-                            slot,
-                            hash,
-                            block_no: self.state.block_number.0,
-                        }
-                    }
+                    3 => match &self.state.tip.point {
+                        Point::Origin => QueryResult::ChainPoint {
+                            slot: 0,
+                            hash: vec![],
+                        },
+                        Point::Specific(s, h) => QueryResult::ChainPoint {
+                            slot: s.0,
+                            hash: h.to_vec(),
+                        },
+                    },
                     _ => self.dispatch_era_query(decoder),
                 }
             }
@@ -176,28 +177,114 @@ impl QueryHandler {
         }
     }
 
-    /// Dispatch an era-specific query
+    /// Dispatch a BlockQuery (the inner encoding after outer tag 0 in QueryVersion2).
+    ///
+    /// The HFC `BlockQuery (HardForkBlock xs)` has three constructors:
+    ///   `[0, ns_query]`    = QueryIfCurrent — NS-encoded era-specific Shelley query
+    ///   `[1, anytime_q]`   = QueryAnytime   — GetEraStart, GetCurrentEra
+    ///   `[2, hf_query]`    = QueryHardFork   — GetInterpreter (EraHistory), GetCurrentEra
+    ///
+    /// QueryIfCurrent inner encoding (NS): `[era_idx, [shelley_tag, ...]]`
+    /// QueryAnytime inner encoding: `[sub_tag]` (0=GetEraStart, 2=GetCurrentEra)
+    /// QueryHardFork inner encoding: `[sub_tag]` (0=GetInterpreter, 1=GetCurrentEra)
+    ///
+    /// We also accept a simplified (non-standard) format from torsten-cli
+    /// where the Shelley query is sent directly without BlockQuery/NS wrapping.
     fn dispatch_era_query(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
-        // Try to parse inner query: [query_tag, ...]
-        // HFC query nesting:
-        //   [0, [era_id, [shelley_tag, ...]]] = QueryIfCurrent
-        //   [2, [hf_tag, ...]]                = QueryHardFork
+        let pos = decoder.position();
+
         match decoder.array() {
-            Ok(_) => {
-                let query_tag = decoder.u32().unwrap_or(999);
-                // Check if this is a QueryHardFork tag
-                if query_tag == 2 {
-                    return self.handle_hard_fork_query(decoder);
+            Ok(Some(2)) => {
+                let block_query_tag = decoder.u32().unwrap_or(999);
+                match block_query_tag {
+                    0 => {
+                        // QueryIfCurrent: NS-encoded [era_idx, [shelley_tag, ...]]
+                        debug!("dispatch_era_query: QueryIfCurrent");
+                        self.dispatch_query_if_current(decoder)
+                    }
+                    1 => {
+                        // QueryAnytime: [sub_tag]
+                        debug!("dispatch_era_query: QueryAnytime");
+                        self.handle_query_anytime(decoder)
+                    }
+                    2 => {
+                        // QueryHardFork: [sub_tag]
+                        debug!("dispatch_era_query: QueryHardFork");
+                        self.handle_hard_fork_query(decoder)
+                    }
+                    other => {
+                        // Might be a direct Shelley query [tag, args] from torsten-cli
+                        debug!(query_tag = other, "dispatch_era_query: direct [tag, args]");
+                        self.handle_shelley_query(other, decoder)
+                    }
                 }
+            }
+            Ok(Some(len)) => {
+                // Length != 2: direct Shelley query [tag] or [tag, arg1, ...]
+                let query_tag = decoder.u32().unwrap_or(999);
+                debug!(query_tag, len, "dispatch_era_query: direct Shelley query");
                 self.handle_shelley_query(query_tag, decoder)
             }
-            Err(_) => {
-                // Try as a simple integer tag
+            Ok(None) => {
                 let query_tag = decoder.u32().unwrap_or(999);
-                if query_tag == 2 {
-                    return self.handle_hard_fork_query(decoder);
-                }
                 self.handle_shelley_query(query_tag, decoder)
+            }
+            Err(e) => {
+                decoder.set_position(pos);
+                warn!("dispatch_era_query: array decode failed: {e}");
+                let query_tag = decoder.u32().unwrap_or(999);
+                self.handle_shelley_query(query_tag, decoder)
+            }
+        }
+    }
+
+    /// Parse a QueryIfCurrent query: NS-encoded `[era_idx, [shelley_tag, ...]]`
+    fn dispatch_query_if_current(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
+        match decoder.array() {
+            Ok(Some(2)) => {
+                let era_idx = decoder.u32().unwrap_or(0);
+                // Parse the inner Shelley query
+                match decoder.array() {
+                    Ok(_) => {
+                        let query_tag = decoder.u32().unwrap_or(999);
+                        debug!(era_idx, query_tag, "QueryIfCurrent: NS Shelley query");
+                        self.handle_shelley_query(query_tag, decoder)
+                    }
+                    Err(_) => {
+                        let query_tag = decoder.u32().unwrap_or(999);
+                        self.handle_shelley_query(query_tag, decoder)
+                    }
+                }
+            }
+            Ok(_) => {
+                // Non-standard: might be direct [shelley_tag] from torsten-cli
+                let query_tag = decoder.u32().unwrap_or(999);
+                self.handle_shelley_query(query_tag, decoder)
+            }
+            Err(_) => QueryResult::Error("Invalid QueryIfCurrent encoding".into()),
+        }
+    }
+
+    /// Handle QueryAnytime queries (embedded in BlockQuery).
+    /// Sub-tags: 0=GetEraStart, 2=GetCurrentEra
+    fn handle_query_anytime(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
+        let sub_tag = match decoder.array() {
+            Ok(_) => decoder.u32().unwrap_or(999),
+            Err(_) => decoder.u32().unwrap_or(999),
+        };
+        match sub_tag {
+            0 => {
+                debug!("QueryAnytime: GetEraStart");
+                // Return era start info — for now return system start
+                QueryResult::SystemStart(self.state.system_start.clone())
+            }
+            2 => {
+                debug!("QueryAnytime: GetCurrentEra");
+                QueryResult::CurrentEra(self.state.era)
+            }
+            other => {
+                warn!("Unknown QueryAnytime sub-tag: {other}");
+                QueryResult::Error(format!("Unknown QueryAnytime sub-tag: {other}"))
             }
         }
     }
@@ -223,11 +310,27 @@ impl QueryHandler {
     }
 
     /// Handle QueryHardFork queries (GetInterpreter = GetEraHistory)
-    fn handle_hard_fork_query(&self, _decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
-        // QueryHardFork tag 2 contains GetInterpreter [1, 0]
-        // We return era summaries regardless of the sub-tag
-        debug!("Query: GetEraHistory (QueryHardFork/GetInterpreter)");
-        QueryResult::EraHistory(self.state.era_summaries.clone())
+    /// Handle QueryHardFork queries (embedded in BlockQuery tag 2).
+    /// Sub-tags: 0=GetInterpreter (EraHistory), 1=GetCurrentEra
+    fn handle_hard_fork_query(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
+        let sub_tag = match decoder.array() {
+            Ok(_) => decoder.u32().unwrap_or(999),
+            Err(_) => decoder.u32().unwrap_or(999),
+        };
+        match sub_tag {
+            0 => {
+                debug!("QueryHardFork: GetInterpreter (EraHistory)");
+                QueryResult::EraHistory(self.state.era_summaries.clone())
+            }
+            1 => {
+                debug!("QueryHardFork: GetCurrentEra");
+                QueryResult::HardForkCurrentEra(self.state.era)
+            }
+            other => {
+                warn!("Unknown QueryHardFork sub-tag: {other}");
+                QueryResult::Error(format!("Unknown QueryHardFork sub-tag: {other}"))
+            }
+        }
     }
 
     /// Handle Shelley-era queries by tag.
@@ -286,7 +389,26 @@ impl QueryHandler {
             27 => governance::handle_committee_state(&self.state),
             28 => governance::handle_filtered_vote_delegatees(&self.state, decoder),
             29 => protocol::handle_account_state(&self.state),
-            // Tags 30-39: not implemented
+            30 => {
+                // Tag 30: GetSPOStakeDistr — SPO stake distribution
+                debug!("Query: GetSPOStakeDistr (stub)");
+                QueryResult::StakeDistribution(vec![])
+            }
+            31 => {
+                // Tag 31: GetProposals — returns governance proposals
+                debug!("Query: GetProposals (stub)");
+                QueryResult::EmptyProposals
+            }
+            32 => {
+                // Tag 32: GetRatifyState
+                debug!("Query: GetRatifyState (stub)");
+                QueryResult::EmptyRatifyState
+            }
+            33 => {
+                // Tag 33: GetFuturePParams — returns Maybe PParams (Nothing)
+                debug!("Query: GetFuturePParams");
+                QueryResult::NoFuturePParams
+            }
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");
                 QueryResult::Error(format!("Unsupported query: tag {query_tag}"))

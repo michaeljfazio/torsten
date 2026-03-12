@@ -13,6 +13,11 @@ pub enum QueryResult {
     CurrentEra(u32),
     SystemStart(String),
     ChainBlockNo(u64),
+    /// GetChainPoint result: Point encoding ([slot, hash] or [] for Origin)
+    ChainPoint {
+        slot: u64,
+        hash: Vec<u8>,
+    },
     ProtocolParams(Box<ProtocolParamsSnapshot>),
     StakeDistribution(Vec<StakePoolSnapshot>),
     GovState(Box<GovStateSnapshot>),
@@ -49,6 +54,8 @@ pub enum QueryResult {
     FilteredVoteDelegatees(Vec<VoteDelegateeEntry>),
     /// Era history: list of era summaries for slot/time conversions
     EraHistory(Vec<EraSummary>),
+    /// QueryHardFork GetCurrentEra: encoded as raw word8 (EraIndex)
+    HardForkCurrentEra(u32),
     /// GetCBOR (tag 9): wraps an inner query result as CBOR-in-CBOR (tag 24)
     WrappedCbor(Box<QueryResult>),
     /// DebugEpochState (tag 8): serialized epoch state (simplified)
@@ -78,6 +85,12 @@ pub enum QueryResult {
     },
     /// GetRewardInfoPools (tag 18): per-pool reward info
     RewardInfoPools(Vec<PoolRewardInfo>),
+    /// GetProposals (tag 31): returns empty Seq for now
+    EmptyProposals,
+    /// GetRatifyState (tag 32): stub
+    EmptyRatifyState,
+    /// GetFuturePParams (tag 33): returns Nothing (no future params)
+    NoFuturePParams,
     Error(String),
 }
 
@@ -111,6 +124,8 @@ pub struct EraSummary {
     pub slot_length_ms: u64,
     /// Safe zone (number of slots past era end where predictions are still valid)
     pub safe_zone: u64,
+    /// Genesis window (security parameter k * 2, typically 36000 for mainnet)
+    pub genesis_window: u64,
 }
 
 /// Era boundary

@@ -39,9 +39,11 @@ pub(crate) async fn handle_state_query(
     };
 
     match msg_tag {
-        0 => {
-            // MsgAcquire(point)
-            debug!("LocalStateQuery: MsgAcquire");
+        0 | 8 => {
+            // MsgAcquire(point) [0] or MsgAcquireNoPoint [8]
+            // Tag 8 acquires at current tip without specifying a point.
+            // Used by newer cardano-cli versions.
+            debug!("LocalStateQuery: MsgAcquire (tag {msg_tag})");
             // Respond with MsgAcquired [1]
             let mut resp = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut resp);
@@ -58,10 +60,18 @@ pub(crate) async fn handle_state_query(
         }
         3 => {
             // MsgQuery(query)
-            debug!("LocalStateQuery: MsgQuery");
+            debug!(
+                query_hex = %format!("{:02x?}", &payload[..payload.len().min(32)]),
+                "LocalStateQuery: MsgQuery"
+            );
             let handler = query_handler.read().await;
             let result = handler.handle_query_cbor(payload);
             let response_cbor = encode_query_result(&result);
+            debug!(
+                response_hex = %format!("{:02x?}", &response_cbor[..response_cbor.len().min(32)]),
+                response_len = response_cbor.len(),
+                "LocalStateQuery: MsgResult"
+            );
 
             Ok(Some(Segment {
                 transmission_time: 0,
@@ -70,9 +80,9 @@ pub(crate) async fn handle_state_query(
                 payload: response_cbor,
             }))
         }
-        5 => {
-            // MsgReAcquire(point)
-            debug!("LocalStateQuery: MsgReAcquire");
+        5 | 10 => {
+            // MsgReAcquire(point) [5] or MsgReAcquireNoPoint [10]
+            debug!("LocalStateQuery: MsgReAcquire (tag {msg_tag})");
             // Respond with MsgAcquired [1]
             let mut resp = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut resp);
@@ -500,6 +510,15 @@ fn parse_utctime(s: &str) -> (u64, u64, u64) {
     (year, day_of_year, picos)
 }
 
+/// Encode SystemStart as UTCTime: [year, day_of_year, pico_of_day]
+fn encode_system_start(enc: &mut minicbor::Encoder<&mut Vec<u8>>, time_str: &str) {
+    let (year, day_of_year, picos) = parse_utctime(time_str);
+    enc.array(3).ok();
+    enc.u64(year).ok();
+    enc.u64(day_of_year).ok();
+    enc.u64(picos).ok();
+}
+
 /// Encode legacy Shelley PParams as array(18) (N2C V16-V20 legacy format).
 fn encode_shelley_pparams(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
@@ -548,22 +567,47 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     enc.array(2).ok();
     enc.u32(4).ok(); // MsgResult tag
 
-    // Determine if this is a BlockQuery result that needs HFC wrapping.
-    // QueryAnytime (CurrentEra, SystemStart) and QueryHardFork (ChainBlockNo, ChainTip)
-    // do NOT get the HFC wrapper. Only BlockQuery (Shelley/Conway) results DO.
-    let needs_hfc_wrapper = !matches!(
+    // QueryVersion2 (N2C v16+) response encoding for BlockQuery:
+    //
+    // Top-level queries (outer tags 1/2/3: GetSystemStart/GetChainBlockNo/GetChainPoint):
+    //   [4, toCBOR result]  — result directly, no HFC wrapping
+    //
+    // BlockQuery > QueryIfCurrent results (Shelley era queries):
+    //   [4, array(1), result]  — EitherMismatch Right (success) wrapper
+    //   The array(1) = Right in the Either encoding. No NS era index on results.
+    //
+    // BlockQuery > QueryAnytime results (GetCurrentEra, GetEraStart):
+    //   [4, result]  — no EitherMismatch wrapping
+    //
+    // BlockQuery > QueryHardFork results (GetCurrentEra, GetInterpreter):
+    //   [4, result]  — no EitherMismatch wrapping (raw word8 for era, encoded summary for history)
+    let needs_either_mismatch = !matches!(
         result,
-        QueryResult::CurrentEra(_)
-            | QueryResult::SystemStart(_)
+        // Top-level queries (no wrapping)
+        QueryResult::SystemStart(_)
             | QueryResult::ChainBlockNo(_)
             | QueryResult::ChainTip { .. }
+            | QueryResult::ChainPoint { .. }
+            // BlockQuery > QueryAnytime results (no wrapping)
+            | QueryResult::CurrentEra(_)
+            // BlockQuery > QueryHardFork results (no wrapping)
+            | QueryResult::HardForkCurrentEra(_)
             | QueryResult::EraHistory(_)
     );
 
-    if needs_hfc_wrapper {
-        enc.array(1).ok(); // HFC success wrapper: array(1) = Right
+    if needs_either_mismatch {
+        // QueryIfCurrent results get EitherMismatch Right wrapper: array(1) = success
+        enc.array(1).ok();
     }
 
+    encode_query_result_value(&mut enc, result);
+
+    buf
+}
+
+/// Encode just the query result value (no MsgResult wrapper, no HFC wrapper).
+/// Used by `encode_query_result` for normal encoding and by `WrappedCbor` for inner encoding.
+fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: &QueryResult) {
     match result {
         QueryResult::EpochNo(epoch) => {
             enc.u64(*epoch).ok();
@@ -585,13 +629,30 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.u32(*era).ok();
         }
         QueryResult::SystemStart(time_str) => {
-            enc.str(time_str).ok();
+            // SystemStart is a UTCTime, encoded as [year, day_of_year, pico_of_day]
+            // Parse the ISO 8601 date string and convert to ordinal date representation
+            encode_system_start(enc, time_str);
         }
         QueryResult::ChainBlockNo(block_no) => {
+            // WithOrigin encoding (generic Serialise):
+            //   Origin = [0] (constructor 0)
+            //   At blockNo = [1, blockNo] (constructor 1)
+            enc.array(2).ok();
+            enc.u8(1).ok(); // At constructor
             enc.u64(*block_no).ok();
         }
+        QueryResult::ChainPoint { slot, hash } => {
+            // Point encoding: [] for Origin, [slot, hash] for Specific
+            if hash.is_empty() {
+                enc.array(0).ok();
+            } else {
+                enc.array(2).ok();
+                enc.u64(*slot).ok();
+                enc.bytes(hash).ok();
+            }
+        }
         QueryResult::ProtocolParams(pp) => {
-            encode_protocol_params_cbor(&mut enc, pp);
+            encode_protocol_params_cbor(enc, pp);
         }
         QueryResult::StakeDistribution(pools) => {
             // Wire format: Map<pool_hash(28), IndividualPoolStake>
@@ -602,7 +663,7 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.array(2).ok();
                 // Stake fraction as tagged rational
                 let total = pool.total_active_stake.max(1); // avoid div by zero
-                encode_tagged_rational(&mut enc, pool.stake, total);
+                encode_tagged_rational(enc, pool.stake, total);
                 enc.bytes(&pool.vrf_keyhash).ok();
             }
         }
@@ -660,7 +721,7 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u64(p.deposit).ok();
                 enc.bytes(&p.return_addr).ok();
                 // gov_action = sum type tagged by action type
-                encode_gov_action_tag(&mut enc, &p.action_type);
+                encode_gov_action_tag(enc, &p.action_type);
                 // anchor = array(2) [url, hash]
                 enc.array(2).ok();
                 enc.str(&p.anchor_url).ok();
@@ -689,9 +750,9 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 }
                 // UnitInterval (quorum threshold)
                 if let Some((num, den)) = gov.committee.threshold {
-                    encode_tagged_rational(&mut enc, num, den);
+                    encode_tagged_rational(enc, num, den);
                 } else {
-                    encode_tagged_rational(&mut enc, 2, 3); // default 2/3
+                    encode_tagged_rational(enc, 2, 3); // default 2/3
                 }
             }
 
@@ -709,10 +770,10 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             }
 
             // [3] curPParams = array(31)
-            encode_protocol_params_cbor(&mut enc, &gov.cur_pparams);
+            encode_protocol_params_cbor(enc, &gov.cur_pparams);
 
             // [4] prevPParams = array(31)
-            encode_protocol_params_cbor(&mut enc, &gov.prev_pparams);
+            encode_protocol_params_cbor(enc, &gov.prev_pparams);
 
             // [5] FuturePParams = Sum: [0] = NoPParamsUpdate
             enc.array(1).ok();
@@ -765,10 +826,12 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 }
                 // [2] drepDeposit (Coin)
                 enc.u64(drep.deposit).ok();
-                // [3] drepDelegs: tag(258) Set of Credential
+                // [3] drepDelegs: tag(258) Set of Credential — sorted for canonical CBOR
+                let mut sorted_delegators = drep.delegator_hashes.clone();
+                sorted_delegators.sort();
                 enc.tag(minicbor::data::Tag::new(258)).ok();
-                enc.array(drep.delegator_hashes.len() as u64).ok();
-                for dh in &drep.delegator_hashes {
+                enc.array(sorted_delegators.len() as u64).ok();
+                for dh in &sorted_delegators {
                     enc.array(2).ok();
                     enc.u8(0).ok(); // KeyHashObj
                     enc.bytes(dh).ok();
@@ -827,7 +890,7 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             // [1] Maybe UnitInterval (threshold)
             if let Some((num, den)) = committee.threshold {
                 enc.array(1).ok();
-                encode_tagged_rational(&mut enc, num, den);
+                encode_tagged_rational(enc, num, den);
             } else {
                 enc.array(0).ok();
             }
@@ -844,7 +907,7 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u32(utxo.output_index).ok();
 
                 // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, ...}
-                encode_utxo_output(&mut enc, utxo);
+                encode_utxo_output(enc, utxo);
             }
         }
         QueryResult::StakeAddressInfo(addrs) => {
@@ -901,9 +964,12 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
         }
         QueryResult::StakePools(pool_ids) => {
             // Wire format: tag(258) Set<KeyHash StakePool>
+            // CBOR canonical Set requires elements in sorted order
+            let mut sorted_ids = pool_ids.clone();
+            sorted_ids.sort();
             enc.tag(minicbor::data::Tag::new(258)).ok();
-            enc.array(pool_ids.len() as u64).ok();
-            for pid in pool_ids {
+            enc.array(sorted_ids.len() as u64).ok();
+            for pid in &sorted_ids {
                 enc.bytes(pid).ok();
             }
         }
@@ -928,18 +994,20 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u64(pool.pledge).ok();
                 enc.u64(pool.cost).ok();
                 // margin as tagged rational
-                encode_tagged_rational(&mut enc, pool.margin_num, pool.margin_den);
+                encode_tagged_rational(enc, pool.margin_num, pool.margin_den);
                 enc.bytes(&pool.reward_account).ok();
-                // owners as set (tag 258)
+                // owners as set (tag 258) — must be sorted for canonical CBOR
+                let mut sorted_owners = pool.owners.clone();
+                sorted_owners.sort();
                 enc.tag(minicbor::data::Tag::new(258)).ok();
-                enc.array(pool.owners.len() as u64).ok();
-                for owner in &pool.owners {
+                enc.array(sorted_owners.len() as u64).ok();
+                for owner in &sorted_owners {
                     enc.bytes(owner).ok();
                 }
                 // relays
                 enc.array(pool.relays.len() as u64).ok();
                 for relay in &pool.relays {
-                    encode_relay_cbor(&mut enc, relay);
+                    encode_relay_cbor(enc, relay);
                 }
                 // metadata
                 if let Some(url) = &pool.metadata_url {
@@ -1005,7 +1073,7 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             enc.u64(gc.max_lovelace_supply).ok();
 
             // [11] protocolParams: legacy Shelley PParams array(18)
-            encode_shelley_pparams(&mut enc, &gc.protocol_params);
+            encode_shelley_pparams(enc, &gc.protocol_params);
 
             // [12] genDelegs: Map<hash28 -> array(2)[hash28, hash32]>
             enc.map(gc.gen_delegs.len() as u64).ok();
@@ -1132,22 +1200,23 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
             }
         }
         QueryResult::EraHistory(summaries) => {
-            // Wire format: array of EraSummary entries (no HFC wrapper)
-            // Each EraSummary = [start_bound, era_end, era_params]
-            // Bound = [relative_time_pico, slot_no, epoch_no]
-            // EraEnd = Bound | null
-            // EraParams = [epoch_size, slot_length_ms, safe_zone, genesis_window]
-            // SafeZone: StandardSafeZone(n) = [3, 0, n, [1, 0]]
-            //           UnsafeIndefiniteSafeZone = [1, 1]
-            enc.array(summaries.len() as u64).ok();
+            // Wire format matching Haskell ouroboros-consensus Serialise instances:
+            // Indefinite-length array of EraSummary entries.
+            // Each EraSummary = array(3) [start_bound, era_end, era_params]
+            // Bound = array(3) [relative_time_pico, slot_no, epoch_no]
+            // EraEnd: EraEnd(bound) = encode bound directly; EraUnbounded = null (0xf6)
+            // EraParams = array(4) [epoch_size, slot_length_ms, safe_zone, genesis_window]
+            // SafeZone: StandardSafeZone(n) = array(3) [0, n, array(1)[0]]
+            //           UnsafeIndefiniteSafeZone = array(1) [1]
+            enc.begin_array().ok(); // indefinite-length array (0x9f)
             for (i, summary) in summaries.iter().enumerate() {
                 enc.array(3).ok();
-                // Start bound
+                // Start bound: [time_pico, slot, epoch]
                 enc.array(3).ok();
                 enc.u64(summary.start_time_pico).ok();
                 enc.u64(summary.start_slot).ok();
                 enc.u64(summary.start_epoch).ok();
-                // Era end
+                // Era end: EraEnd(bound) = Bound directly, EraUnbounded = null
                 if let Some(end) = &summary.end {
                     enc.array(3).ok();
                     enc.u64(end.time_pico).ok();
@@ -1162,30 +1231,29 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u64(summary.slot_length_ms).ok();
                 // Safe zone encoding
                 let is_last = i == summaries.len() - 1;
-                if is_last {
-                    // Current era: UnsafeIndefiniteSafeZone = [1, 1]
-                    enc.array(2).ok();
-                    enc.u64(1).ok();
-                    enc.u64(1).ok();
+                if is_last && summary.end.is_none() {
+                    // Current/unbounded era: UnsafeIndefiniteSafeZone = array(1) [1]
+                    enc.array(1).ok();
+                    enc.u8(1).ok();
                 } else {
-                    // Past era: StandardSafeZone(n) = [3, 0, n, [1, 0]]
-                    enc.array(4).ok();
-                    enc.u64(3).ok();
-                    enc.u64(0).ok();
+                    // Past era or bounded: StandardSafeZone(n) = array(3) [0, n, [0]]
+                    enc.array(3).ok();
+                    enc.u8(0).ok();
                     enc.u64(summary.safe_zone).ok();
-                    enc.array(2).ok();
-                    enc.u64(1).ok();
-                    enc.u64(0).ok();
+                    enc.array(1).ok();
+                    enc.u8(0).ok();
                 }
-                // genesis_window = null (optional, only in Peras)
-                enc.null().ok();
+                enc.u64(summary.genesis_window).ok();
             }
+            enc.end().ok(); // end indefinite-length array (0xff)
         }
         QueryResult::WrappedCbor(inner) => {
-            // GetCBOR (tag 9): encode the inner result as CBOR, then wrap it in tag(24)
-            // First, encode the inner result to get its CBOR bytes
-            let inner_buf = encode_query_result(inner);
-            // Wrap in CBOR tag 24 (encoded CBOR data item)
+            // GetCBOR (tag 9): encode the inner result value as CBOR, then wrap in tag(24).
+            // The inner encoding must NOT include the MsgResult [4,...] or HFC wrappers —
+            // those are already provided by the outer encode_query_result call.
+            let mut inner_buf = Vec::new();
+            let mut inner_enc = minicbor::Encoder::new(&mut inner_buf);
+            encode_query_result_value(&mut inner_enc, inner);
             enc.tag(minicbor::data::Tag::new(24)).ok();
             enc.bytes(&inner_buf).ok();
         }
@@ -1253,10 +1321,33 @@ pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
                 enc.u64(pool.cost).ok();
             }
         }
+        QueryResult::HardForkCurrentEra(era) => {
+            // QueryHardFork GetCurrentEra result: EraIndex as raw word8
+            enc.u8(*era as u8).ok();
+        }
+        QueryResult::EmptyProposals => {
+            // GetProposals result: Seq (GovActionState) = empty array
+            enc.array(0).ok();
+        }
+        QueryResult::EmptyRatifyState => {
+            // GetRatifyState stub: simplified empty ratify state
+            // RatifyState = (enacted_seq, expired_seq, bool_delayed)
+            enc.array(4).ok();
+            enc.array(0).ok(); // enacted: Seq
+            enc.array(0).ok(); // expired: Seq
+            enc.bool(false).ok(); // delayed
+                                  // future pparams: NoPParamsUpdate [0]
+            enc.array(1).ok();
+            enc.u32(0).ok();
+        }
+        QueryResult::NoFuturePParams => {
+            // GetFuturePParams result: Maybe PParams = Nothing
+            // Generic Serialise: Nothing = [0] (constructor 0)
+            enc.array(1).ok();
+            enc.u8(0).ok();
+        }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();
         }
     }
-
-    buf
 }

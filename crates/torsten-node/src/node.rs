@@ -107,19 +107,35 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
     fn utxos_at_address_bytes(&self, addr_bytes: &[u8]) -> Vec<UtxoSnapshot> {
         let addr = match torsten_primitives::address::Address::from_bytes(addr_bytes) {
             Ok(a) => a,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::warn!(
+                    "UTxO query: address decode failed: {e} (bytes len={})",
+                    addr_bytes.len()
+                );
+                return vec![];
+            }
         };
         // Use try_read to avoid blocking — return empty if locked
         let ledger = match self.ledger.try_read() {
             Ok(l) => l,
-            Err(_) => return vec![],
+            Err(_) => {
+                tracing::debug!("UTxO query: ledger lock held, returning empty");
+                return vec![];
+            }
         };
-        ledger
+        let results: Vec<_> = ledger
             .utxo_set
             .utxos_at_address(&addr)
             .into_iter()
             .map(|(input, output)| utxo_to_snapshot(input, output))
-            .collect()
+            .collect();
+        tracing::debug!(
+            addr_type = ?std::mem::discriminant(&addr),
+            index_size = ledger.utxo_set.address_index_size(),
+            utxos_found = results.len(),
+            "UTxO query by address"
+        );
+        results
     }
 
     fn utxos_by_tx_inputs(&self, inputs: &[(Vec<u8>, u32)]) -> Vec<UtxoSnapshot> {
@@ -3600,72 +3616,240 @@ impl Node {
     /// We produce a simplified summary covering Byron (if mainnet) + Shelley-through-Conway.
     fn build_era_summaries(
         &self,
-        _ls: &torsten_ledger::LedgerState,
+        ls: &torsten_ledger::LedgerState,
     ) -> Vec<torsten_network::query_handler::EraSummary> {
         use torsten_network::query_handler::{EraBound, EraSummary};
 
-        let epoch_length = self
+        let shelley_epoch_length = self
             .shelley_genesis
             .as_ref()
             .map(|g| g.epoch_length)
             .unwrap_or(432000);
-        let slot_length_ms = self
+        let shelley_slot_length_ms = self
             .shelley_genesis
             .as_ref()
             .map(|g| g.slot_length * 1000)
             .unwrap_or(1000);
-        let safe_zone = self
+        let k = self
             .shelley_genesis
             .as_ref()
-            .map(|g| g.security_param * 2)
-            .unwrap_or(4320);
+            .map(|g| g.security_param)
+            .unwrap_or(2160);
+        let active_slots_coeff = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.active_slots_coeff)
+            .unwrap_or(0.05);
 
         let is_mainnet = self.network_magic == 764824073;
 
-        if is_mainnet {
-            // Mainnet: Byron era (slots 0..4492800, epochs 0..208, 20s slots, 21600 epoch)
-            // then Shelley+ from slot 4492800, epoch 208
-            let byron_epoch_len: u64 = 21600;
-            let byron_slot_len_ms: u64 = 20000;
-            let byron_slots = 208 * byron_epoch_len; // 4492800
-            let byron_time_pico =
-                (byron_slots as u128 * byron_slot_len_ms as u128 * 1_000_000_000) as u64;
+        // Byron params: epoch length from genesis, slot length always 20s
+        let byron_epoch_len: u64 = if self.byron_epoch_length > 0 {
+            self.byron_epoch_length
+        } else if is_mainnet {
+            21600
+        } else {
+            4320
+        };
+        let byron_slot_len_ms: u64 = 20000; // 20 seconds for all networks
+        let byron_safe_zone = k * 2; // Byron safe zone = 2k (864 for preview, matches Haskell)
+        let byron_genesis_window = k * 2;
 
-            vec![
+        // Shelley+ safe zone and genesis window: 3 * k / f
+        let shelley_safe_zone = (3.0 * k as f64 / active_slots_coeff).floor() as u64;
+        let shelley_genesis_window = shelley_safe_zone;
+
+        if is_mainnet {
+            // Mainnet: Byron ran for 208 epochs with 21600-slot epochs at 20s slots
+            let byron_end_epoch: u64 = 208;
+            let byron_end_slot = byron_end_epoch * byron_epoch_len;
+            let byron_end_time_pico =
+                byron_end_slot as u128 * byron_slot_len_ms as u128 * 1_000_000_000;
+
+            // Compute how many Shelley slots have elapsed since Byron ended
+            let shelley_start_slot = byron_end_slot;
+            let shelley_start_epoch = byron_end_epoch;
+
+            // Current epoch determines how far the Shelley+ eras extend
+            let current_epoch = ls.epoch.0;
+
+            // For mainnet, Babbage started at epoch 365, Conway at epoch 517
+            let babbage_epoch: u64 = 365;
+            let conway_epoch: u64 = 517;
+
+            let babbage_slot =
+                shelley_start_slot + (babbage_epoch - shelley_start_epoch) * shelley_epoch_length;
+            let babbage_time_pico = byron_end_time_pico
+                + (babbage_slot - shelley_start_slot) as u128
+                    * shelley_slot_length_ms as u128
+                    * 1_000_000_000;
+
+            let conway_slot =
+                shelley_start_slot + (conway_epoch - shelley_start_epoch) * shelley_epoch_length;
+            let conway_time_pico = byron_end_time_pico
+                + (conway_slot - shelley_start_slot) as u128
+                    * shelley_slot_length_ms as u128
+                    * 1_000_000_000;
+
+            let shelley_era =
+                |start_slot, start_epoch, start_time: u128, end: Option<EraBound>| EraSummary {
+                    start_slot,
+                    start_epoch,
+                    start_time_pico: start_time as u64,
+                    end,
+                    epoch_size: shelley_epoch_length,
+                    slot_length_ms: shelley_slot_length_ms,
+                    safe_zone: shelley_safe_zone,
+                    genesis_window: shelley_genesis_window,
+                };
+
+            let bound = |slot, epoch, time_pico: u128| EraBound {
+                slot,
+                epoch,
+                time_pico: time_pico as u64,
+            };
+
+            let mut summaries = vec![
+                // Byron
                 EraSummary {
                     start_slot: 0,
                     start_epoch: 0,
                     start_time_pico: 0,
-                    end: Some(EraBound {
-                        slot: byron_slots,
-                        epoch: 208,
-                        time_pico: byron_time_pico,
-                    }),
+                    end: Some(bound(byron_end_slot, byron_end_epoch, byron_end_time_pico)),
                     epoch_size: byron_epoch_len,
                     slot_length_ms: byron_slot_len_ms,
-                    safe_zone: byron_epoch_len, // Byron safe zone = full epoch
+                    safe_zone: byron_safe_zone,
+                    genesis_window: byron_genesis_window,
                 },
-                EraSummary {
-                    start_slot: byron_slots,
-                    start_epoch: 208,
-                    start_time_pico: byron_time_pico,
-                    end: None,
-                    epoch_size: epoch_length,
-                    slot_length_ms,
-                    safe_zone,
-                },
-            ]
+                // Shelley (208..365)
+                shelley_era(
+                    shelley_start_slot,
+                    shelley_start_epoch,
+                    byron_end_time_pico,
+                    if current_epoch >= babbage_epoch {
+                        Some(bound(babbage_slot, babbage_epoch, babbage_time_pico))
+                    } else {
+                        None
+                    },
+                ),
+            ];
+
+            if current_epoch >= babbage_epoch {
+                // Babbage (365..517)
+                summaries.push(shelley_era(
+                    babbage_slot,
+                    babbage_epoch,
+                    babbage_time_pico,
+                    if current_epoch >= conway_epoch {
+                        Some(bound(conway_slot, conway_epoch, conway_time_pico))
+                    } else {
+                        None
+                    },
+                ));
+            }
+            if current_epoch >= conway_epoch {
+                // Conway (517..current)
+                summaries.push(shelley_era(
+                    conway_slot,
+                    conway_epoch,
+                    conway_time_pico,
+                    None,
+                ));
+            }
+
+            summaries
         } else {
-            // Testnets: single era from slot 0
-            vec![EraSummary {
-                start_slot: 0,
-                start_epoch: 0,
-                start_time_pico: 0,
-                end: None,
-                epoch_size: epoch_length,
-                slot_length_ms,
-                safe_zone,
-            }]
+            // Testnets: Byron/Shelley/Allegra/Mary/Alonzo all start at epoch 0 (instant HF)
+            // then Babbage and Conway at their actual transition epochs.
+            //
+            // The Haskell node returns era summaries matching the HFC type list.
+            // For preview: Byron(0) → Shelley(0) → Allegra(0) → Mary(0) → Alonzo(0→3) →
+            //              Babbage(3→646) → Conway(646→...)
+            let origin = EraBound {
+                slot: 0,
+                epoch: 0,
+                time_pico: 0,
+            };
+
+            // Build Shelley-era template (all Shelley+ eras share same params)
+            let shelley_era = |start: EraBound, end: Option<EraBound>| EraSummary {
+                start_slot: start.slot,
+                start_epoch: start.epoch,
+                start_time_pico: start.time_pico,
+                end,
+                epoch_size: shelley_epoch_length,
+                slot_length_ms: shelley_slot_length_ms,
+                safe_zone: shelley_safe_zone,
+                genesis_window: shelley_genesis_window,
+            };
+
+            // Determine era transitions from ledger state
+            // Preview testnet: Byron/Shelley/Allegra/Mary all at epoch 0
+            // Alonzo ends at epoch 3, Babbage at epoch 646, Conway ongoing
+            let current_epoch = ls.epoch.0;
+
+            // For preview: all pre-Alonzo eras are instant (start=end=origin)
+            // Alonzo starts at origin, ends at epoch 3
+            let alonzo_end_epoch: u64 = if current_epoch >= 3 { 3 } else { 0 };
+            let alonzo_end_slot = alonzo_end_epoch * shelley_epoch_length;
+            let alonzo_end_time_pico =
+                alonzo_end_slot as u128 * shelley_slot_length_ms as u128 * 1_000_000_000;
+
+            // Babbage starts at epoch 3, ends at epoch 646
+            let babbage_end_epoch: u64 = 646;
+            let babbage_end_slot = babbage_end_epoch * shelley_epoch_length;
+            let babbage_end_time_pico =
+                babbage_end_slot as u128 * shelley_slot_length_ms as u128 * 1_000_000_000;
+
+            let mut summaries = vec![
+                // Byron (instant transition at epoch 0)
+                EraSummary {
+                    start_slot: 0,
+                    start_epoch: 0,
+                    start_time_pico: 0,
+                    end: Some(origin.clone()),
+                    epoch_size: byron_epoch_len,
+                    slot_length_ms: byron_slot_len_ms,
+                    safe_zone: byron_safe_zone,
+                    genesis_window: byron_genesis_window,
+                },
+                // Shelley (instant at epoch 0)
+                shelley_era(origin.clone(), Some(origin.clone())),
+                // Allegra (instant at epoch 0)
+                shelley_era(origin.clone(), Some(origin.clone())),
+                // Mary (instant at epoch 0)
+                shelley_era(origin.clone(), Some(origin.clone())),
+            ];
+
+            if current_epoch < alonzo_end_epoch {
+                // Still in Alonzo or earlier — unbounded
+                summaries.push(shelley_era(origin, None));
+            } else {
+                let alonzo_end = EraBound {
+                    slot: alonzo_end_slot,
+                    epoch: alonzo_end_epoch,
+                    time_pico: alonzo_end_time_pico as u64,
+                };
+                // Alonzo (epoch 0..3)
+                summaries.push(shelley_era(origin, Some(alonzo_end.clone())));
+
+                if current_epoch < babbage_end_epoch {
+                    // Babbage (epoch 3..unbounded)
+                    summaries.push(shelley_era(alonzo_end, None));
+                } else {
+                    let babbage_end = EraBound {
+                        slot: babbage_end_slot,
+                        epoch: babbage_end_epoch,
+                        time_pico: babbage_end_time_pico as u64,
+                    };
+                    // Babbage (epoch 3..646)
+                    summaries.push(shelley_era(alonzo_end, Some(babbage_end.clone())));
+                    // Conway (epoch 646..unbounded)
+                    summaries.push(shelley_era(babbage_end, None));
+                }
+            }
+
+            summaries
         }
     }
 
