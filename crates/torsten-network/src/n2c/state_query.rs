@@ -17,6 +17,7 @@ use super::{N2CServerError, MINI_PROTOCOL_STATE_QUERY};
 pub(crate) async fn handle_state_query(
     payload: &[u8],
     query_handler: &Arc<RwLock<QueryHandler>>,
+    _negotiated_version: u16,
 ) -> Result<Option<Segment>, N2CServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
 
@@ -1366,6 +1367,48 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
             // Generic Serialise: Nothing = [0] (constructor 0)
             enc.array(1).ok();
             enc.u8(0).ok();
+        }
+        QueryResult::PoolDistr2 {
+            pools,
+            total_active_stake,
+        } => {
+            // SL.PoolDistr: array(2)[pool_map, total_active_stake]
+            // Each pool entry: array(3)[stake_rational, compact_lovelace, vrf_hash]
+            enc.array(2).ok();
+            let total = *total_active_stake;
+            enc.map(pools.len() as u64).ok();
+            for pool in pools {
+                enc.bytes(&pool.pool_id).ok();
+                enc.array(3).ok();
+                // stake as rational fraction
+                if total > 0 {
+                    encode_tagged_rational(enc, pool.stake, total);
+                } else {
+                    encode_tagged_rational(enc, 0, 1);
+                }
+                // compact lovelace (absolute pool stake)
+                enc.u64(pool.stake).ok();
+                // VRF key hash
+                enc.bytes(&pool.vrf_keyhash).ok();
+            }
+            // total active stake
+            enc.u64(total).ok();
+        }
+        QueryResult::MaxMajorProtocolVersion(v) => {
+            // Plain integer
+            enc.u32(*v).ok();
+        }
+        QueryResult::LedgerPeerSnapshot => {
+            // Stub: empty snapshot — encode as empty structure
+            // LedgerPeerSnapshot uses CBOR: map with version + peers
+            enc.array(2).ok();
+            enc.u32(1).ok(); // version
+            enc.array(0).ok(); // empty peer list
+        }
+        QueryResult::StakePoolDefaultVote => {
+            // DefaultVote: NoVote = [2] (constructor index for abstain)
+            enc.array(1).ok();
+            enc.u32(2).ok();
         }
         QueryResult::Error(msg) => {
             enc.str(msg).ok();

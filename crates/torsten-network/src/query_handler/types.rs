@@ -97,6 +97,18 @@ pub enum QueryResult {
         /// Pool deposits: Map<pool_hash, Coin>
         deposits: Vec<(Vec<u8>, u64)>,
     },
+    /// GetStakeDistribution2 / GetPoolDistr2 (tags 36, 37): new PoolDistr format
+    /// array(2)[map{pool_hash -> array(3)[rational, lovelace, vrf_hash]}, total_active_stake]
+    PoolDistr2 {
+        pools: Vec<StakePoolSnapshot>,
+        total_active_stake: u64,
+    },
+    /// GetMaxMajorProtocolVersion (tag 38): plain integer
+    MaxMajorProtocolVersion(u32),
+    /// GetLedgerPeerSnapshot (tag 34): stub
+    LedgerPeerSnapshot,
+    /// QueryStakePoolDefaultVote (tag 35): stub
+    StakePoolDefaultVote,
     /// GetProposals (tag 31): returns empty Seq for now
     EmptyProposals,
     /// GetRatifyState (tag 32): stub

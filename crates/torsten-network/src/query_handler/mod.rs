@@ -409,6 +409,31 @@ impl QueryHandler {
                 debug!("Query: GetFuturePParams");
                 QueryResult::NoFuturePParams
             }
+            34 => {
+                // Tag 34: GetLedgerPeerSnapshot (V19+)
+                debug!("Query: GetLedgerPeerSnapshot (stub)");
+                QueryResult::LedgerPeerSnapshot
+            }
+            35 => {
+                // Tag 35: QueryStakePoolDefaultVote (V20+)
+                debug!("Query: QueryStakePoolDefaultVote (stub)");
+                QueryResult::StakePoolDefaultVote
+            }
+            36 => {
+                // Tag 36: GetPoolDistr2 (V21+) — new format with total active stake
+                debug!("Query: GetPoolDistr2");
+                stake::handle_pool_distr2(&self.state, decoder)
+            }
+            37 => {
+                // Tag 37: GetStakeDistribution2 (V21+) — new PoolDistr format
+                debug!("Query: GetStakeDistribution2");
+                stake::handle_stake_distribution2(&self.state)
+            }
+            38 => {
+                // Tag 38: GetMaxMajorProtocolVersion (V21+)
+                debug!("Query: GetMaxMajorProtocolVersion");
+                QueryResult::MaxMajorProtocolVersion(10)
+            }
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");
                 QueryResult::Error(format!("Unsupported query: tag {query_tag}"))

@@ -106,6 +106,48 @@ pub(crate) fn handle_pool_state(
     }
 }
 
+/// Handle GetStakeDistribution2 (tag 37) — new PoolDistr format.
+///
+/// Returns: array(2)[pool_map, total_active_stake]
+/// Each pool entry: array(3)[stake_rational, compact_lovelace, vrf_hash]
+pub(crate) fn handle_stake_distribution2(state: &NodeStateSnapshot) -> QueryResult {
+    debug!("Query: GetStakeDistribution2");
+    let total_active_stake: u64 = state.stake_pools.iter().map(|p| p.stake).sum();
+    QueryResult::PoolDistr2 {
+        pools: state.stake_pools.clone(),
+        total_active_stake: total_active_stake.max(1), // NonZero
+    }
+}
+
+/// Handle GetPoolDistr2 (tag 36) — filtered new PoolDistr format.
+///
+/// Argument: Maybe (tag(258) Set<KeyHash StakePool>)
+pub(crate) fn handle_pool_distr2(
+    state: &NodeStateSnapshot,
+    decoder: &mut minicbor::Decoder<'_>,
+) -> QueryResult {
+    debug!("Query: GetPoolDistr2");
+    let filter_pools = parse_pool_id_set(decoder);
+    let total_active_stake: u64 = state.stake_pools.iter().map(|p| p.stake).sum();
+    if filter_pools.is_empty() {
+        QueryResult::PoolDistr2 {
+            pools: state.stake_pools.clone(),
+            total_active_stake: total_active_stake.max(1),
+        }
+    } else {
+        let filtered: Vec<_> = state
+            .stake_pools
+            .iter()
+            .filter(|p| filter_pools.iter().any(|h| h == &p.pool_id))
+            .cloned()
+            .collect();
+        QueryResult::PoolDistr2 {
+            pools: filtered,
+            total_active_stake: total_active_stake.max(1),
+        }
+    }
+}
+
 /// Handle GetStakeSnapshots (tag 20).
 pub(crate) fn handle_stake_snapshots(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetStakeSnapshots");

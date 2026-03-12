@@ -283,6 +283,7 @@ async fn handle_n2c_connection(
         position: 0,
         acquired: false,
     };
+    let mut negotiated_version: u16 = 16;
 
     loop {
         let n = stream.read(&mut read_buf).await?;
@@ -313,6 +314,7 @@ async fn handle_n2c_connection(
                         &block_provider,
                         &mut chainsync_cursor,
                         &mut tx_monitor_cursor,
+                        &mut negotiated_version,
                     )
                     .await?;
                     if let Some(resp_segment) = response {
@@ -334,6 +336,7 @@ async fn handle_n2c_connection(
 }
 
 /// Process a single multiplexer segment and optionally return a response
+#[allow(clippy::too_many_arguments)]
 async fn process_segment(
     segment: &Segment,
     query_handler: &Arc<RwLock<QueryHandler>>,
@@ -342,10 +345,20 @@ async fn process_segment(
     block_provider: &Option<Arc<dyn BlockProvider>>,
     chainsync_cursor: &mut ChainSyncCursor,
     tx_monitor_cursor: &mut TxMonitorCursor,
+    negotiated_version: &mut u16,
 ) -> Result<Option<Segment>, N2CServerError> {
     match segment.protocol_id {
-        MINI_PROTOCOL_HANDSHAKE => handle_handshake(&segment.payload),
-        MINI_PROTOCOL_STATE_QUERY => handle_state_query(&segment.payload, query_handler).await,
+        MINI_PROTOCOL_HANDSHAKE => {
+            let result = handle_handshake(&segment.payload)?;
+            // Extract negotiated version from handshake
+            if let Some((version, _)) = parse_highest_version(&segment.payload) {
+                *negotiated_version = version;
+            }
+            Ok(result)
+        }
+        MINI_PROTOCOL_STATE_QUERY => {
+            handle_state_query(&segment.payload, query_handler, *negotiated_version).await
+        }
         MINI_PROTOCOL_TX_SUBMISSION => {
             handle_tx_submission(&segment.payload, mempool, tx_validator)
         }
@@ -453,7 +466,7 @@ fn parse_handshake_magic(payload: &[u8]) -> Option<u64> {
 const N2C_VERSION_BIT: u32 = 1 << 15; // 0x8000
 
 /// Maximum N2C version we support
-const N2C_MAX_VERSION: u32 = 17;
+const N2C_MAX_VERSION: u32 = 22;
 
 /// Minimum N2C version we support
 const N2C_MIN_VERSION: u32 = 16;
