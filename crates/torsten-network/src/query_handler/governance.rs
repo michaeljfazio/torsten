@@ -176,6 +176,9 @@ mod tests {
                     return_addr: vec![0u8; 29],
                     anchor_url: "https://example.com/proposal1".to_string(),
                     anchor_hash: vec![0xAA; 32],
+                    committee_votes: vec![],
+                    drep_votes: vec![(vec![0xCC; 28], 0, 1)], // one DRep Yes vote
+                    spo_votes: vec![],
                 },
                 ProposalSnapshot {
                     tx_id: vec![2u8; 32],
@@ -190,6 +193,9 @@ mod tests {
                     return_addr: vec![0u8; 29],
                     anchor_url: "https://example.com/proposal2".to_string(),
                     anchor_hash: vec![0xBB; 32],
+                    committee_votes: vec![],
+                    drep_votes: vec![],
+                    spo_votes: vec![(vec![0xDD; 28], 0)], // one SPO No vote
                 },
             ],
             ..NodeStateSnapshot::default()

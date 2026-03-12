@@ -540,6 +540,11 @@ pub struct GovStateSnapshot {
     pub enacted_constitution: Option<(Vec<u8>, u32)>,
 }
 
+/// Vote entry: (credential_hash, credential_type, vote)
+/// credential_type: 0=KeyHash, 1=ScriptHash
+/// vote: 0=No, 1=Yes, 2=Abstain
+pub type VoteEntry = (Vec<u8>, u8, u8);
+
 /// Snapshot of a governance proposal (GovActionState)
 #[derive(Debug, Clone)]
 pub struct ProposalSnapshot {
@@ -559,6 +564,12 @@ pub struct ProposalSnapshot {
     pub anchor_url: String,
     /// Anchor data hash (32 bytes)
     pub anchor_hash: Vec<u8>,
+    /// Per-credential committee votes: (credential_hash, cred_type, vote)
+    pub committee_votes: Vec<VoteEntry>,
+    /// Per-credential DRep votes: (credential_hash, cred_type, vote)
+    pub drep_votes: Vec<VoteEntry>,
+    /// SPO votes: (pool_keyhash_28bytes, vote) — SPO uses bare KeyHash, no credential wrapper
+    pub spo_votes: Vec<(Vec<u8>, u8)>,
 }
 
 /// Default vote entry for QueryStakePoolDefaultVote (tag 35)

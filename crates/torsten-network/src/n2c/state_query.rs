@@ -436,12 +436,30 @@ fn encode_gov_action_state(
     enc.array(2).ok();
     enc.bytes(&p.tx_id).ok();
     enc.u32(p.action_index).ok();
-    // [1] committeeVotes = Map<Credential, Vote> (empty for now)
-    enc.map(0).ok();
-    // [2] drepVotes = Map<Credential, Vote> (empty for now)
-    enc.map(0).ok();
-    // [3] spoVotes = Map<Credential, Vote> (empty for now)
-    enc.map(0).ok();
+    // [1] committeeVotes = Map<Credential, Vote>
+    // Credential = [cred_type, hash(28)], Vote = uint (0=No, 1=Yes, 2=Abstain)
+    enc.map(p.committee_votes.len() as u64).ok();
+    for (hash, cred_type, vote) in &p.committee_votes {
+        enc.array(2).ok();
+        enc.u8(*cred_type).ok();
+        enc.bytes(hash).ok();
+        enc.u8(*vote).ok();
+    }
+    // [2] drepVotes = Map<Credential, Vote>
+    enc.map(p.drep_votes.len() as u64).ok();
+    for (hash, cred_type, vote) in &p.drep_votes {
+        enc.array(2).ok();
+        enc.u8(*cred_type).ok();
+        enc.bytes(hash).ok();
+        enc.u8(*vote).ok();
+    }
+    // [3] spoVotes = Map<KeyHash, Vote>
+    // SPO uses bare KeyHash (28 bytes), not wrapped Credential
+    enc.map(p.spo_votes.len() as u64).ok();
+    for (pool_hash, vote) in &p.spo_votes {
+        enc.bytes(pool_hash).ok();
+        enc.u8(*vote).ok();
+    }
     // [4] ProposalProcedure = array(4) [deposit, return_addr, gov_action, anchor]
     enc.array(4).ok();
     enc.u64(p.deposit).ok();

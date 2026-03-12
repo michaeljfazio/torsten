@@ -211,6 +211,15 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
+/// Convert a Credential to (type, hash_bytes) for vote maps.
+/// Returns (0, hash_28) for VerificationKey, (1, hash_28) for Script.
+fn credential_to_bytes(cred: &torsten_primitives::credentials::Credential) -> (u8, Vec<u8>) {
+    match cred {
+        torsten_primitives::credentials::Credential::VerificationKey(h) => (0, h.as_ref().to_vec()),
+        torsten_primitives::credentials::Credential::Script(h) => (1, h.as_ref().to_vec()),
+    }
+}
+
 /// Convert a UTxO entry to a snapshot for N2C queries
 fn utxo_to_snapshot(
     input: &torsten_primitives::transaction::TransactionInput,
@@ -3289,6 +3298,35 @@ impl Node {
                     }
                     torsten_primitives::transaction::GovAction::InfoAction => "InfoAction",
                 };
+                // Build per-credential vote maps from votes_by_action
+                let mut committee_votes = Vec::new();
+                let mut drep_votes = Vec::new();
+                let mut spo_votes = Vec::new();
+                if let Some(votes) = ls.governance.votes_by_action.get(action_id) {
+                    for (voter, procedure) in votes {
+                        let vote_u8 = match procedure.vote {
+                            torsten_primitives::transaction::Vote::No => 0u8,
+                            torsten_primitives::transaction::Vote::Yes => 1u8,
+                            torsten_primitives::transaction::Vote::Abstain => 2u8,
+                        };
+                        use torsten_primitives::transaction::Voter;
+                        match voter {
+                            Voter::ConstitutionalCommittee(cred) => {
+                                let (cred_type, hash) = credential_to_bytes(cred);
+                                committee_votes.push((hash, cred_type, vote_u8));
+                            }
+                            Voter::DRep(cred) => {
+                                let (cred_type, hash) = credential_to_bytes(cred);
+                                drep_votes.push((hash, cred_type, vote_u8));
+                            }
+                            Voter::StakePool(pool_hash) => {
+                                // SPO uses bare KeyHash (28 bytes)
+                                spo_votes.push((pool_hash.as_ref()[..28].to_vec(), vote_u8));
+                            }
+                        }
+                    }
+                }
+
                 ProposalSnapshot {
                     tx_id: action_id.transaction_id.as_ref().to_vec(),
                     action_index: action_id.action_index,
@@ -3302,6 +3340,9 @@ impl Node {
                     return_addr: state.procedure.return_addr.clone(),
                     anchor_url: state.procedure.anchor.url.clone(),
                     anchor_hash: state.procedure.anchor.data_hash.as_ref().to_vec(),
+                    committee_votes,
+                    drep_votes,
+                    spo_votes,
                 }
             })
             .collect();
