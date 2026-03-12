@@ -705,13 +705,16 @@ impl LedgerState {
     fn compute_total_spo_stake(&self) -> u64 {
         // Use "set" snapshot if available (previous epoch), else current pool_stake
         if let Some(ref snapshot) = self.snapshots.set {
-            let total: u64 = snapshot.pool_stake.values().map(|s| s.0).sum();
+            let total: u64 = snapshot
+                .pool_stake
+                .values()
+                .fold(0u64, |acc, s| acc.saturating_add(s.0));
             return total.max(1);
         }
         // Fallback: sum all pool stake from current delegations (UTxO + rewards)
         let mut total = 0u64;
         for stake_cred in self.delegations.keys() {
-            total += self.credential_stake(stake_cred);
+            total = total.saturating_add(self.credential_stake(stake_cred));
         }
         total.max(1)
     }
@@ -744,7 +747,9 @@ impl LedgerState {
             }
             GovAction::TreasuryWithdrawals { withdrawals, .. } => {
                 // Compute total first and cap at available treasury
-                let requested: u64 = withdrawals.values().map(|a| a.0).sum();
+                let requested: u64 = withdrawals
+                    .values()
+                    .fold(0u64, |acc, a| acc.saturating_add(a.0));
                 let available = self.treasury.0;
                 if requested > available {
                     warn!(

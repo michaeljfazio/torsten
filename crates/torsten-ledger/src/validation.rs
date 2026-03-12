@@ -104,6 +104,8 @@ pub enum ValidationError {
     MissingWithdrawalWitness(String),
     #[error("Missing script witness for script-locked withdrawal: {0}")]
     MissingWithdrawalScriptWitness(String),
+    #[error("Value overflow in transaction accounting")]
+    ValueOverflow,
 }
 
 /// Validate a transaction against the current UTxO set and protocol parameters.
@@ -183,11 +185,13 @@ pub fn validate_transaction_with_pools(
     }
 
     // Rule 2: All inputs must exist in UTxO set
-    let mut input_value = Lovelace(0);
+    // Use u128 accumulation to prevent overflow (total ADA supply fits in u64,
+    // but adversarial txs could reference duplicate or crafted UTxOs)
+    let mut input_value: u128 = 0;
     for input in &body.inputs {
         match utxo_set.lookup(input) {
             Some(output) => {
-                input_value = Lovelace(input_value.0 + output.value.coin.0);
+                input_value += output.value.coin.0 as u128;
             }
             None => {
                 errors.push(ValidationError::InputNotFound(input.to_string()));
@@ -200,26 +204,31 @@ pub fn validate_transaction_with_pools(
     // produced = sum(outputs) + fee + deposits
     // consumed must equal produced
     if errors.is_empty() {
-        let output_value: u64 = body.outputs.iter().map(|o| o.value.coin.0).sum();
-        let withdrawal_value: u64 = body.withdrawals.values().map(|l| l.0).sum::<u64>();
+        let output_value: u128 = body.outputs.iter().map(|o| o.value.coin.0 as u128).sum();
+        let withdrawal_value: u128 = body.withdrawals.values().map(|l| l.0 as u128).sum();
 
         // Calculate deposits and refunds from certificates
         let (total_deposits, total_refunds) =
             calculate_deposits_and_refunds(&body.certificates, params, registered_pools);
 
-        // Proposal deposits (Conway governance)
-        let proposal_deposits = body.proposal_procedures.len() as u64 * params.gov_action_deposit.0;
+        // Proposal deposits (Conway governance) — use u128 to prevent mul overflow
+        let proposal_deposits =
+            body.proposal_procedures.len() as u128 * params.gov_action_deposit.0 as u128;
 
         // Treasury donation (Conway)
-        let donation = body.donation.map(|d| d.0).unwrap_or(0);
+        let donation = body.donation.map(|d| d.0 as u128).unwrap_or(0);
 
-        let consumed = input_value.0 + withdrawal_value + total_refunds;
-        let produced = output_value + body.fee.0 + total_deposits + proposal_deposits + donation;
+        let consumed = input_value + withdrawal_value + total_refunds as u128;
+        let produced = output_value
+            + body.fee.0 as u128
+            + total_deposits as u128
+            + proposal_deposits
+            + donation;
 
         if consumed != produced {
             errors.push(ValidationError::ValueNotConserved {
-                inputs: consumed,
-                outputs: output_value,
+                inputs: consumed.min(u64::MAX as u128) as u64,
+                outputs: output_value.min(u64::MAX as u128) as u64,
                 fee: body.fee.0,
             });
         }
@@ -347,14 +356,12 @@ pub fn validate_transaction_with_pools(
             .witness_set
             .redeemers
             .iter()
-            .map(|r| r.ex_units.mem)
-            .sum();
+            .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.mem));
         let total_steps: u64 = tx
             .witness_set
             .redeemers
             .iter()
-            .map(|r| r.ex_units.steps)
-            .sum();
+            .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.steps));
         let mem_cost = if total_mem > 0 && params.execution_costs.mem_price.denominator > 0 {
             // ceil(price_mem * total_mem)
             let num = params.execution_costs.mem_price.numerator as u128 * total_mem as u128;
@@ -371,9 +378,15 @@ pub fn validate_transaction_with_pools(
         } else {
             0
         };
-        mem_cost + step_cost
+        mem_cost.saturating_add(step_cost)
     };
-    let min_fee = Lovelace(params.min_fee(tx_size).0 + ref_script_fee + ex_unit_fee);
+    let min_fee = Lovelace(
+        params
+            .min_fee(tx_size)
+            .0
+            .saturating_add(ref_script_fee)
+            .saturating_add(ex_unit_fee),
+    );
     if body.fee.0 < min_fee.0 {
         errors.push(ValidationError::FeeTooSmall {
             minimum: min_fee.0,
@@ -596,7 +609,7 @@ pub fn validate_transaction_with_pools(
                             errors
                                 .push(ValidationError::CollateralHasTokens(col_input.to_string()));
                         }
-                        collateral_value += output.value.coin.0;
+                        collateral_value = collateral_value.saturating_add(output.value.coin.0);
                     }
                     None => {
                         errors.push(ValidationError::CollateralNotFound(col_input.to_string()));
@@ -631,14 +644,12 @@ pub fn validate_transaction_with_pools(
             .witness_set
             .redeemers
             .iter()
-            .map(|r| r.ex_units.mem)
-            .sum();
+            .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.mem));
         let total_steps: u64 = tx
             .witness_set
             .redeemers
             .iter()
-            .map(|r| r.ex_units.steps)
-            .sum();
+            .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.steps));
         if total_mem > params.max_tx_ex_units.mem || total_steps > params.max_tx_ex_units.steps {
             errors.push(ValidationError::ExUnitsExceeded);
         }

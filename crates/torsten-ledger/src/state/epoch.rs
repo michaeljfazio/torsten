@@ -59,9 +59,10 @@ impl LedgerState {
             .stake_distribution
             .stake_map
             .values()
-            .map(|l| l.0)
-            .sum();
-        let total_pool_stake: u64 = pool_stake.values().map(|l| l.0).sum();
+            .fold(0u64, |acc, l| acc.saturating_add(l.0));
+        let total_pool_stake: u64 = pool_stake
+            .values()
+            .fold(0u64, |acc, l| acc.saturating_add(l.0));
         debug!(
             epoch = new_epoch.0,
             credentials = self.stake_distribution.stake_map.len(),
@@ -370,7 +371,10 @@ impl LedgerState {
             ("go", &mut self.snapshots.go),
         ] {
             if let Some(snap) = snapshot {
-                let old_total: u64 = snap.pool_stake.values().map(|s| s.0).sum();
+                let old_total: u64 = snap
+                    .pool_stake
+                    .values()
+                    .fold(0u64, |acc, s| acc.saturating_add(s.0));
                 let mut new_pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
                     HashMap::new();
                 for (cred_hash, pool_id) in snap.delegations.iter() {
@@ -385,10 +389,12 @@ impl LedgerState {
                         .get(cred_hash)
                         .copied()
                         .unwrap_or(Lovelace(0));
-                    let total_stake = Lovelace(utxo_stake.0 + reward_balance.0);
+                    let total_stake = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
                     *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
                 }
-                let new_total: u64 = new_pool_stake.values().map(|s| s.0).sum();
+                let new_total: u64 = new_pool_stake
+                    .values()
+                    .fold(0u64, |acc, s| acc.saturating_add(s.0));
                 if old_total != new_total {
                     debug!(
                         snapshot = name,

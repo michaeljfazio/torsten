@@ -394,6 +394,7 @@ fn convert_validation_error(e: torsten_ledger::validation::ValidationError) -> T
         VE::MissingWithdrawalScriptWitness(credential) => {
             TxValidationError::MissingWithdrawalScriptWitness { credential }
         }
+        VE::ValueOverflow => TxValidationError::ValueOverflow,
     }
 }
 

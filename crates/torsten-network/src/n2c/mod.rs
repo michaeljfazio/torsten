@@ -120,6 +120,8 @@ pub enum TxValidationError {
     MissingWithdrawalWitness { credential: String },
     #[error("Missing script witness for script-locked withdrawal: {credential}")]
     MissingWithdrawalScriptWitness { credential: String },
+    #[error("Value overflow in transaction accounting")]
+    ValueOverflow,
     #[error("{}", format_multiple_errors(.0))]
     Multiple(Vec<TxValidationError>),
 }

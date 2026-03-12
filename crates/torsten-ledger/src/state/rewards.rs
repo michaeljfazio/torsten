@@ -152,7 +152,10 @@ impl LedgerState {
         }
 
         // Total active stake (for apparent performance denominator)
-        let total_active_stake: u64 = go_snapshot.pool_stake.values().map(|s| s.0).sum();
+        let total_active_stake: u64 = go_snapshot
+            .pool_stake
+            .values()
+            .fold(0u64, |acc, s| acc.saturating_add(s.0));
         if total_active_stake == 0 {
             self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
             return;
