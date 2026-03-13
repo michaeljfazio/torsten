@@ -1722,7 +1722,11 @@ impl Node {
                     info!("Peer disconnected, reconnecting...");
                 }
                 Err(e) => {
-                    peer_manager.write().await.peer_disconnected(&peer_addr);
+                    // Mark as failed (not just disconnected) so PeerManager
+                    // deprioritizes this peer on the next connection attempt.
+                    // This is important after sleep/hibernate where stale peers
+                    // should be avoided in favor of responsive ones.
+                    peer_manager.write().await.peer_failed(&peer_addr);
                     warn!("Sync error: {e}, will reconnect...");
                 }
             }
@@ -2356,6 +2360,28 @@ impl Node {
             None => info!("Sync starting from Origin"),
         }
         info!(remote_tip = %remote_tip, "Remote tip");
+
+        // Stale peer detection: if the remote tip is significantly behind the
+        // current wall-clock slot, this peer is likely stale or stuck. Disconnect
+        // and let the outer loop try a different peer. This handles the case where
+        // the node reconnects after sleep/hibernate and reaches a stale peer.
+        if let Some(wall_clock) = self.current_wall_clock_slot() {
+            let remote_tip_slot = remote_tip.point.slot().map(|s| s.0).unwrap_or(0);
+            let lag_slots = wall_clock.0.saturating_sub(remote_tip_slot);
+            // Allow 120 slots (2 minutes) of lag for normal network propagation
+            if lag_slots > 120 {
+                warn!(
+                    remote_tip_slot,
+                    wall_clock_slot = wall_clock.0,
+                    lag_slots,
+                    "Peer tip is {} slots behind wall clock, skipping stale peer",
+                    lag_slots
+                );
+                return Err(anyhow::anyhow!(
+                    "peer tip is {lag_slots} slots behind wall clock (stale)"
+                ));
+            }
+        }
 
         let use_pool = !fetch_pool.is_empty();
         let use_pipelined = pipelined.is_some();

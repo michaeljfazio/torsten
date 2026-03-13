@@ -249,12 +249,23 @@ impl PipelinedPeerClient {
                     // Server is at tip, no more blocks available right now.
                     // After AwaitReply, the server enters MustReply state and
                     // will send RollForward/RollBackward when a block arrives.
-                    // We wait for that response — the connection stays open.
-                    let wait_response: Message<HeaderContent> =
-                        self.cs_buf
-                            .recv_full_msg()
-                            .await
-                            .map_err(|e| ClientError::ChainSync(format!("recv must-reply: {e}")))?;
+                    // We wait for that response with a timeout — if no block
+                    // arrives within 5 minutes, the connection is likely dead
+                    // (e.g., after machine sleep/hibernate).
+                    const AWAIT_REPLY_TIMEOUT: Duration = Duration::from_secs(300);
+                    let wait_response: Message<HeaderContent> = tokio::time::timeout(
+                        AWAIT_REPLY_TIMEOUT,
+                        self.cs_buf.recv_full_msg(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ClientError::ChainSync(
+                            "AwaitReply timeout: no block received in 5 minutes, \
+                             connection may be stale"
+                                .into(),
+                        )
+                    })?
+                    .map_err(|e| ClientError::ChainSync(format!("recv must-reply: {e}")))?;
                     // This response consumed one more in-flight
                     // (the MustReply is implicit, not counted separately)
 
