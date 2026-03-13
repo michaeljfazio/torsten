@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use torsten_crypto::keys::{PaymentSigningKey, PaymentVerificationKey};
+use torsten_crypto::keys::PaymentSigningKey;
 use torsten_primitives::hash::blake2b_224;
 
 fn bench_ed25519_verify(c: &mut Criterion) {
@@ -39,7 +39,8 @@ fn bench_ed25519_batch_verify(c: &mut Criterion) {
             |b, witnesses| {
                 b.iter(|| {
                     for (vk, msg, sig) in witnesses {
-                        black_box(vk.verify(msg, sig).unwrap());
+                        vk.verify(msg, sig).unwrap();
+                        black_box(());
                     }
                 })
             },

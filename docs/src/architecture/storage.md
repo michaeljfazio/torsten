@@ -180,6 +180,50 @@ cargo bench -p torsten-storage --bench storage_bench
 
 # UTxO store benchmarks (insert, lookup, apply_tx, LSM configs, scaling to 1M entries)
 cargo bench -p torsten-ledger --bench utxo_bench
+
+# Crypto benchmarks (Ed25519, blake2b keyhash)
+cargo bench -p torsten-crypto --bench crypto_bench
+
+# Hash benchmarks (blake2b_256, blake2b_224, batch hashing)
+cargo bench -p torsten-primitives --bench hash_bench
 ```
 
 Results are saved to `target/criterion/` with HTML reports. Baseline results are tracked in `benches/results/`.
+
+### Latest Results (Apple M2 Max, 32GB, 2026-03-14)
+
+#### Block Index Lookup (500 random lookups, mmap vs in-memory HashMap)
+
+| Size | In-Memory | Mmap | Speedup |
+|------|-----------|------|---------|
+| 10K | 10.0µs | 2.83µs | **3.5x** |
+| 100K | 10.1µs | 2.17µs | **4.7x** |
+| 1M | 10.6µs | 2.01µs | **5.3x** |
+
+Mmap lookup advantage grows with scale — at mainnet block counts (~10M), the gap widens further.
+
+#### UTxO Store Scaling (cardano-lsm LSM tree)
+
+| Size | Insert (per-entry) | Lookup (per-entry) | Total Lovelace Scan |
+|------|-------------------|-------------------|-------------------|
+| 10K | 455ns | 191ns | 2.38ms |
+| 100K | 479ns | 236ns | 29.1ms |
+| 1M | 569ns | 308ns | 330ms |
+
+Insert and lookup scale near-linearly. At mainnet scale (~20M UTxOs), estimated full scan ~6.6s.
+
+#### Crypto & Hashing
+
+| Operation | Time |
+|-----------|------|
+| Ed25519 verify (single) | 28.6µs |
+| Blake2b-224 keyhash (32B) | 128ns |
+| Blake2b-256 tx hash (1KB) | 949ns |
+
+A typical block with 50 witnesses: ~1.4ms for signature verification, ~6.4µs for keyhash computation.
+
+#### LSM Config Comparison (100K entries)
+
+All storage profiles perform identically at benchmark scale — config differences emerge at mainnet scale (20M+ UTxOs) where working set exceeds cache capacity.
+
+See `benches/results/2026-03-14-all-profiles.md` for full results.
