@@ -1,7 +1,7 @@
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::Transaction;
@@ -15,6 +15,12 @@ pub struct MempoolConfig {
     pub max_transactions: usize,
     /// Maximum total size in bytes
     pub max_bytes: usize,
+    /// Maximum total execution memory units (sum of all tx redeemers)
+    pub max_ex_mem: u64,
+    /// Maximum total execution step units (sum of all tx redeemers)
+    pub max_ex_steps: u64,
+    /// Maximum total reference script bytes
+    pub max_ref_scripts_bytes: usize,
 }
 
 impl Default for MempoolConfig {
@@ -22,8 +28,24 @@ impl Default for MempoolConfig {
         MempoolConfig {
             max_transactions: 16_384,
             max_bytes: 512 * 1024 * 1024, // 512 MB
+            // 2x block limits (matching Haskell cardano-node defaults)
+            max_ex_mem: 28_000_000_000,       // 2 * 14B mem
+            max_ex_steps: 20_000_000_000_000, // 2 * 10T steps
+            max_ref_scripts_bytes: 1_048_576, // 1 MB
         }
     }
+}
+
+/// Origin of a transaction submission — used for dual-FIFO fairness.
+///
+/// Local clients (wallets connected via N2C) get equal weight to ALL remote
+/// peers combined, matching Haskell's cardano-node fairness model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxOrigin {
+    /// From a local client (N2C connection)
+    Local,
+    /// From a remote peer (N2N connection)
+    Remote,
 }
 
 /// Fee density key for sorted index ordering.
@@ -80,6 +102,9 @@ struct MempoolEntry {
     tx_hash: TransactionHash,
     size_bytes: usize,
     fee: Lovelace,
+    ex_units_mem: u64,
+    ex_units_steps: u64,
+    ref_scripts_bytes: usize,
 }
 
 /// The transaction mempool
@@ -91,6 +116,14 @@ struct MempoolEntry {
 /// Maintains a sorted index by fee density (fee/byte) descending for
 /// efficient block production. The index uses cross-multiplication
 /// comparison to avoid precision loss from integer division.
+///
+/// Capacity is enforced across multiple dimensions: transaction count,
+/// total bytes, execution units (mem + steps), and reference script bytes.
+/// When full, lowest-fee-density transactions are evicted to make room
+/// for higher-density newcomers.
+///
+/// Dual-FIFO fairness ensures local clients get equal admission weight
+/// to all remote peers combined.
 pub struct Mempool {
     /// Transactions indexed by hash
     txs: DashMap<TransactionHash, MempoolEntry>,
@@ -100,12 +133,22 @@ pub struct Mempool {
     fee_index: RwLock<BTreeSet<FeeDensityKey>>,
     /// Current total size
     total_bytes: RwLock<usize>,
+    /// Current total execution memory units
+    total_ex_mem: AtomicU64,
+    /// Current total execution step units
+    total_ex_steps: AtomicU64,
+    /// Current total reference script bytes
+    total_ref_scripts_bytes: AtomicUsize,
     /// Atomic transaction count for race-free capacity checks.
     /// The count is reserved (incremented) before inserting into the DashMap,
     /// preventing the TOCTOU race between `txs.len()` and `txs.insert()`.
     tx_count: AtomicUsize,
     /// Configuration
     config: MempoolConfig,
+    /// Fairness mutex for remote submissions — all remote peers compete for this first
+    remote_fifo: Mutex<()>,
+    /// Fairness mutex for all submissions — local acquires only this, remote acquires both
+    all_fifo: Mutex<()>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +161,8 @@ pub enum MempoolError {
     TooLarge { size: usize },
     #[error("Validation error: {0}")]
     ValidationFailed(String),
+    #[error("Insufficient priority: new tx fee density too low to evict existing transactions")]
+    InsufficientPriority,
 }
 
 /// Result of adding a transaction
@@ -134,8 +179,13 @@ impl Mempool {
             order: RwLock::new(VecDeque::new()),
             fee_index: RwLock::new(BTreeSet::new()),
             total_bytes: RwLock::new(0),
+            total_ex_mem: AtomicU64::new(0),
+            total_ex_steps: AtomicU64::new(0),
+            total_ref_scripts_bytes: AtomicUsize::new(0),
             tx_count: AtomicUsize::new(0),
             config,
+            remote_fifo: Mutex::new(()),
+            all_fifo: Mutex::new(()),
         }
     }
 
@@ -158,10 +208,78 @@ impl Mempool {
         size_bytes: usize,
         fee: Lovelace,
     ) -> Result<MempoolAddResult, MempoolError> {
+        self.add_tx_full(tx_hash, tx, size_bytes, fee, 0, 0, 0, TxOrigin::Local)
+    }
+
+    /// Add a transaction with full multi-dimensional capacity tracking and fairness.
+    ///
+    /// This is the primary admission method. All dimensions (count, bytes, ExUnits,
+    /// reference scripts) are checked. If any dimension is exceeded, the mempool
+    /// attempts to evict lowest-fee-density transactions to make room — but only
+    /// if the new tx has higher fee density than the worst existing tx.
+    ///
+    /// The `origin` parameter controls dual-FIFO fairness: remote submissions are
+    /// serialized through an additional mutex so local clients get equal weight.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tx_full(
+        &self,
+        tx_hash: TransactionHash,
+        tx: Transaction,
+        size_bytes: usize,
+        fee: Lovelace,
+        ex_units_mem: u64,
+        ex_units_steps: u64,
+        ref_scripts_bytes: usize,
+        origin: TxOrigin,
+    ) -> Result<MempoolAddResult, MempoolError> {
+        // Dual-FIFO fairness: remote acquires remote_fifo then all_fifo,
+        // local acquires only all_fifo. This gives local clients equal weight
+        // to ALL remote peers combined.
+        let _remote_guard = if origin == TxOrigin::Remote {
+            Some(self.remote_fifo.lock())
+        } else {
+            None
+        };
+        let _all_guard = self.all_fifo.lock();
+
+        self.add_tx_inner(
+            tx_hash,
+            tx,
+            size_bytes,
+            fee,
+            ex_units_mem,
+            ex_units_steps,
+            ref_scripts_bytes,
+        )
+    }
+
+    /// Inner admission logic (called under fairness locks)
+    #[allow(clippy::too_many_arguments)]
+    fn add_tx_inner(
+        &self,
+        tx_hash: TransactionHash,
+        tx: Transaction,
+        size_bytes: usize,
+        fee: Lovelace,
+        ex_units_mem: u64,
+        ex_units_steps: u64,
+        ref_scripts_bytes: usize,
+    ) -> Result<MempoolAddResult, MempoolError> {
         // Check if already exists
         if self.txs.contains_key(&tx_hash) {
             trace!(hash = %tx_hash.to_hex(), "Mempool: tx already exists");
             return Ok(MempoolAddResult::AlreadyExists);
+        }
+
+        // Try eviction if any dimension would be exceeded
+        if !self.ensure_capacity(
+            size_bytes,
+            fee.0,
+            ex_units_mem,
+            ex_units_steps,
+            ref_scripts_bytes,
+        )? {
+            return Err(MempoolError::InsufficientPriority);
         }
 
         // Atomically reserve a slot: increment tx_count first, then check capacity.
@@ -195,6 +313,9 @@ impl Mempool {
             tx_hash,
             size_bytes,
             fee,
+            ex_units_mem,
+            ex_units_steps,
+            ref_scripts_bytes,
         };
 
         // Insert into fee-density sorted index
@@ -204,15 +325,111 @@ impl Mempool {
         self.txs.insert(tx_hash, entry);
         self.order.write().push_back(tx_hash);
         *self.total_bytes.write() += size_bytes;
+        self.total_ex_mem.fetch_add(ex_units_mem, Ordering::Relaxed);
+        self.total_ex_steps
+            .fetch_add(ex_units_steps, Ordering::Relaxed);
+        self.total_ref_scripts_bytes
+            .fetch_add(ref_scripts_bytes, Ordering::Relaxed);
 
         debug!(
             hash = %tx_hash.to_hex(),
             size_bytes,
+            ex_mem = ex_units_mem,
+            ex_steps = ex_units_steps,
+            ref_scripts = ref_scripts_bytes,
             total_txs = self.tx_count.load(Ordering::Relaxed),
             "Mempool: transaction added"
         );
 
         Ok(MempoolAddResult::Added)
+    }
+
+    /// Ensure capacity across all dimensions by evicting lowest-fee-density txs.
+    /// Returns Ok(true) if capacity is available, Ok(false) if eviction wasn't
+    /// possible (new tx has insufficient priority), or Err on other failures.
+    fn ensure_capacity(
+        &self,
+        new_size: usize,
+        new_fee: u64,
+        new_ex_mem: u64,
+        new_ex_steps: u64,
+        new_ref_scripts: usize,
+    ) -> Result<bool, MempoolError> {
+        loop {
+            let needs_eviction =
+                self.needs_eviction(new_size, new_ex_mem, new_ex_steps, new_ref_scripts);
+            if !needs_eviction {
+                return Ok(true);
+            }
+
+            // Find the worst (lowest fee density) tx
+            let worst = {
+                let fee_index = self.fee_index.read();
+                fee_index.iter().next_back().copied()
+            };
+
+            let worst = match worst {
+                Some(w) => w,
+                None => return Ok(true), // Empty mempool, capacity must be available
+            };
+
+            // Check if new tx has better fee density than the worst existing tx
+            let new_size_cmp = if new_size == 0 {
+                1u128
+            } else {
+                new_size as u128
+            };
+            let new_density = (new_fee as u128) * (worst.size as u128);
+            let worst_density = (worst.fee as u128) * new_size_cmp;
+            if new_density <= worst_density {
+                return Ok(false);
+            }
+
+            // Evict the worst tx
+            debug!(
+                evicted_hash = %worst.tx_hash.to_hex(),
+                evicted_fee = worst.fee,
+                evicted_size = worst.size,
+                "Mempool: evicting lowest-density tx for capacity"
+            );
+            self.remove_tx(&worst.tx_hash);
+        }
+    }
+
+    /// Check if any capacity dimension would be exceeded by adding a tx with the given resources.
+    fn needs_eviction(
+        &self,
+        new_size: usize,
+        new_ex_mem: u64,
+        new_ex_steps: u64,
+        new_ref_scripts: usize,
+    ) -> bool {
+        let count = self.tx_count.load(Ordering::Relaxed);
+        if count >= self.config.max_transactions {
+            return true;
+        }
+
+        let total_bytes = *self.total_bytes.read();
+        if total_bytes + new_size > self.config.max_bytes {
+            return true;
+        }
+
+        let total_ex_mem = self.total_ex_mem.load(Ordering::Relaxed);
+        if total_ex_mem + new_ex_mem > self.config.max_ex_mem {
+            return true;
+        }
+
+        let total_ex_steps = self.total_ex_steps.load(Ordering::Relaxed);
+        if total_ex_steps + new_ex_steps > self.config.max_ex_steps {
+            return true;
+        }
+
+        let total_ref = self.total_ref_scripts_bytes.load(Ordering::Relaxed);
+        if total_ref + new_ref_scripts > self.config.max_ref_scripts_bytes {
+            return true;
+        }
+
+        false
     }
 
     /// Remove a transaction (when included in a block)
@@ -226,6 +443,12 @@ impl Mempool {
             self.fee_index.write().remove(&key);
 
             *self.total_bytes.write() -= entry.size_bytes;
+            self.total_ex_mem
+                .fetch_sub(entry.ex_units_mem, Ordering::Relaxed);
+            self.total_ex_steps
+                .fetch_sub(entry.ex_units_steps, Ordering::Relaxed);
+            self.total_ref_scripts_bytes
+                .fetch_sub(entry.ref_scripts_bytes, Ordering::Relaxed);
             debug!(
                 hash = %tx_hash.to_hex(),
                 remaining = self.tx_count.load(Ordering::Relaxed),
@@ -303,6 +526,21 @@ impl Mempool {
     /// Total bytes used
     pub fn total_bytes(&self) -> usize {
         *self.total_bytes.read()
+    }
+
+    /// Total execution memory units across all mempool transactions
+    pub fn total_ex_mem(&self) -> u64 {
+        self.total_ex_mem.load(Ordering::Relaxed)
+    }
+
+    /// Total execution step units across all mempool transactions
+    pub fn total_ex_steps(&self) -> u64 {
+        self.total_ex_steps.load(Ordering::Relaxed)
+    }
+
+    /// Total reference script bytes across all mempool transactions
+    pub fn total_ref_scripts_bytes(&self) -> usize {
+        self.total_ref_scripts_bytes.load(Ordering::Relaxed)
     }
 
     /// Maximum number of transactions the mempool can hold
@@ -409,6 +647,40 @@ impl Mempool {
         conflicting
     }
 
+    /// Revalidate all mempool transactions against a validator closure.
+    ///
+    /// Replays transactions in FIFO order through `is_valid`. Any transaction
+    /// for which the closure returns `false` is removed. This replaces the
+    /// piecemeal post-block cleanup (remove_txs + revalidate_against_inputs +
+    /// evict_expired) with a single pass that catches all invalidity reasons.
+    ///
+    /// Returns the hashes of removed transactions.
+    pub fn revalidate_all<F>(&self, mut is_valid: F) -> Vec<TransactionHash>
+    where
+        F: FnMut(&Transaction) -> bool,
+    {
+        // Snapshot FIFO order to iterate deterministically
+        let hashes: Vec<TransactionHash> = self.order.read().iter().copied().collect();
+        let mut removed = Vec::new();
+
+        for hash in hashes {
+            let valid = self.txs.get(&hash).map(|entry| is_valid(&entry.tx));
+            if valid == Some(false) {
+                self.remove_tx(&hash);
+                removed.push(hash);
+            }
+        }
+
+        if !removed.is_empty() {
+            info!(
+                removed = removed.len(),
+                remaining = self.len(),
+                "Mempool: revalidation removed invalid transactions"
+            );
+        }
+        removed
+    }
+
     /// Clear all transactions
     pub fn clear(&self) {
         let count = self.tx_count.swap(0, Ordering::Relaxed);
@@ -416,6 +688,9 @@ impl Mempool {
         self.order.write().clear();
         self.fee_index.write().clear();
         *self.total_bytes.write() = 0;
+        self.total_ex_mem.store(0, Ordering::Relaxed);
+        self.total_ex_steps.store(0, Ordering::Relaxed);
+        self.total_ref_scripts_bytes.store(0, Ordering::Relaxed);
         if count > 0 {
             info!(removed = count, "Mempool: cleared all transactions");
         }
@@ -577,9 +852,13 @@ mod tests {
         }
     }
 
+    fn default_config() -> MempoolConfig {
+        MempoolConfig::default()
+    }
+
     #[test]
     fn test_add_and_get() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let tx = make_dummy_tx();
         let hash = Hash32::from_bytes([1u8; 32]);
 
@@ -594,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_add() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let tx = make_dummy_tx();
         let hash = Hash32::from_bytes([1u8; 32]);
 
@@ -606,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let tx = make_dummy_tx();
         let hash = Hash32::from_bytes([1u8; 32]);
 
@@ -624,7 +903,7 @@ mod tests {
     fn test_capacity_limit() {
         let config = MempoolConfig {
             max_transactions: 2,
-            max_bytes: 1024 * 1024,
+            ..default_config()
         };
         let mempool = Mempool::new(config);
 
@@ -640,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_get_txs_for_block() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         for i in 1..=5u8 {
             mempool
@@ -654,7 +933,7 @@ mod tests {
 
     #[test]
     fn test_snapshot() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         mempool
             .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500)
             .unwrap();
@@ -670,7 +949,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         mempool
             .add_tx(Hash32::from_bytes([1u8; 32]), make_dummy_tx(), 500)
             .unwrap();
@@ -681,6 +960,9 @@ mod tests {
         mempool.clear();
         assert!(mempool.is_empty());
         assert_eq!(mempool.total_bytes(), 0);
+        assert_eq!(mempool.total_ex_mem(), 0);
+        assert_eq!(mempool.total_ex_steps(), 0);
+        assert_eq!(mempool.total_ref_scripts_bytes(), 0);
         assert!(mempool.fee_index.read().is_empty());
     }
 
@@ -707,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_evict_expired_ttl() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         // Add tx with TTL at slot 100
         mempool
@@ -750,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_fee_based_priority() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         // Add 3 txs with different fees, same size
         let size = 500;
@@ -789,7 +1071,7 @@ mod tests {
 
     #[test]
     fn test_revalidate_against_inputs() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         let input_a = TransactionInput {
             transaction_id: Hash32::from_bytes([10u8; 32]),
@@ -839,7 +1121,7 @@ mod tests {
 
     #[test]
     fn test_add_tx_with_fee() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let tx = make_tx_with_fee(500_000);
         let hash = Hash32::from_bytes([1u8; 32]);
 
@@ -852,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_get_txs_for_block_fee_priority() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         // Add 3 transactions with different fee densities
         // tx1: low fee density (100_000 fee / 500 bytes = 200 per byte)
@@ -897,7 +1179,7 @@ mod tests {
     fn test_atomic_tx_count_consistency() {
         let config = MempoolConfig {
             max_transactions: 5,
-            max_bytes: 1024 * 1024,
+            ..default_config()
         };
         let mempool = Mempool::new(config);
 
@@ -962,6 +1244,7 @@ mod tests {
         let config = MempoolConfig {
             max_transactions: 10,
             max_bytes: 200, // very small byte limit
+            ..default_config()
         };
         let mempool = Mempool::new(config);
 
@@ -981,7 +1264,7 @@ mod tests {
     fn test_fee_density_no_overflow_near_u64_max() {
         // A fee near u64::MAX would overflow when multiplied without u128.
         // This test ensures no panic occurs and ordering is correct.
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         let huge_fee = u64::MAX - 1; // 18_446_744_073_709_551_614
         let tx = make_tx_with_fee(huge_fee);
@@ -1010,7 +1293,7 @@ mod tests {
     fn test_mempool_provider_trait_object() {
         use torsten_primitives::mempool::MempoolProvider;
 
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let provider: &dyn MempoolProvider = &mempool;
 
         assert_eq!(provider.len(), 0);
@@ -1049,7 +1332,7 @@ mod tests {
         use std::sync::Arc;
         use torsten_primitives::mempool::MempoolProvider;
 
-        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let mempool = Arc::new(Mempool::new(default_config()));
         let provider: Arc<dyn MempoolProvider> = mempool;
 
         assert_eq!(provider.len(), 0);
@@ -1067,7 +1350,7 @@ mod tests {
     fn test_mempool_provider_add_with_fee() {
         use torsten_primitives::mempool::MempoolProvider;
 
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let provider: &dyn MempoolProvider = &mempool;
 
         let hash = Hash32::from_bytes([1u8; 32]);
@@ -1097,7 +1380,7 @@ mod tests {
 
         let config = MempoolConfig {
             max_transactions: 1,
-            max_bytes: 1024 * 1024,
+            ..default_config()
         };
         let mempool = Mempool::new(config);
         let provider: &dyn MempoolProvider = &mempool;
@@ -1110,18 +1393,18 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.0.contains("full"),
-            "error should mention 'full': {}",
+            err.0.contains("full") || err.0.contains("priority"),
+            "error should mention 'full' or 'priority': {}",
             err.0
         );
     }
 
-    // ========================== New fee-density ordering tests ==========================
+    // ========================== Fee-density ordering tests ==========================
 
     #[test]
     fn test_fee_density_ordering_different_sizes() {
         // Transactions with different fees AND sizes — fee density matters, not raw fee
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         // tx1: 1_000_000 fee / 2000 bytes = 500 lovelace/byte
         mempool
@@ -1164,7 +1447,7 @@ mod tests {
     #[test]
     fn test_fee_density_same_density_deterministic_hash_tiebreak() {
         // Two transactions with identical fee density should be ordered deterministically by hash
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         let hash_a = Hash32::from_bytes([0xAA; 32]);
         let hash_b = Hash32::from_bytes([0x11; 32]);
@@ -1192,7 +1475,7 @@ mod tests {
     fn test_fee_density_proportional_same_density() {
         // 200 fee / 100 bytes = 2 per byte  (same as 400 fee / 200 bytes)
         // Cross-multiplication should detect these as equal
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         mempool
             .add_tx_with_fee(
@@ -1222,7 +1505,7 @@ mod tests {
     #[test]
     fn test_fee_density_zero_fee() {
         // Zero-fee transactions should sort last
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         mempool
             .add_tx_with_fee(
@@ -1251,7 +1534,7 @@ mod tests {
     fn test_fee_density_zero_size_treated_as_one() {
         // A zero-size transaction should not cause division by zero;
         // it's treated as size=1 for density calculation
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         mempool
             .add_tx_with_fee(
@@ -1280,7 +1563,7 @@ mod tests {
 
     #[test]
     fn test_remove_maintains_fee_index_consistency() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         mempool
             .add_tx_with_fee(
@@ -1323,7 +1606,7 @@ mod tests {
     #[test]
     fn test_insertion_order_does_not_affect_fee_ordering() {
         // Insert low, high, medium — result should always be high, medium, low
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let size = 500;
 
         // Insert in non-sorted order: low, high, medium
@@ -1361,7 +1644,7 @@ mod tests {
     #[test]
     fn test_get_txs_for_block_skips_oversized_includes_smaller() {
         // When a high-density tx doesn't fit, lower-density smaller txs can still be included
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         // tx1: high density, large size (won't fit in budget after tx2)
         mempool
@@ -1406,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_fee_index_consistent_after_batch_remove() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         for i in 1..=5u8 {
             mempool
@@ -1443,7 +1726,7 @@ mod tests {
         // tx2: 5 fee / 2 bytes = 2.5     (integer div = 2)
         // Integer division would say they're equal; cross-multiplication should
         // correctly rank tx2 higher.
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         mempool
             .add_tx_with_fee(
@@ -1490,7 +1773,7 @@ mod tests {
 
     #[test]
     fn test_evict_expired_maintains_fee_index() {
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         let mut tx1 = make_tx_with_fee(300);
         tx1.body.ttl = Some(SlotNo(50));
@@ -1519,7 +1802,7 @@ mod tests {
     #[test]
     fn test_many_txs_ordering_stability() {
         // Insert 100 transactions with varying densities and verify stable ordering
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
 
         for i in 1..=100u32 {
             let fee = (i as u64) * 1000;
@@ -1563,7 +1846,7 @@ mod tests {
     #[test]
     fn test_add_remove_add_same_hash() {
         // Add, remove, re-add same transaction — fee index should be consistent
-        let mempool = Mempool::new(MempoolConfig::default());
+        let mempool = Mempool::new(default_config());
         let hash = Hash32::from_bytes([42u8; 32]);
 
         mempool
@@ -1583,5 +1866,432 @@ mod tests {
         let txs = mempool.get_txs_for_block(10, 100_000);
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].body.fee.0, 200);
+    }
+
+    // ========================== Multi-dimensional capacity tests ==========================
+
+    #[test]
+    fn test_ex_units_capacity_enforcement() {
+        let config = MempoolConfig {
+            max_ex_mem: 1000,
+            max_ex_steps: 5000,
+            ..default_config()
+        };
+        let mempool = Mempool::new(config);
+
+        // Add tx with 600 mem, 2000 steps
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                600,
+                2000,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.total_ex_mem(), 600);
+        assert_eq!(mempool.total_ex_steps(), 2000);
+
+        // Add tx with 300 mem, 2000 steps — should fit
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                300,
+                2000,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.total_ex_mem(), 900);
+        assert_eq!(mempool.total_ex_steps(), 4000);
+
+        // Add tx with 200 mem — would exceed max_ex_mem (900+200=1100 > 1000)
+        // New tx has same fee density as existing, so eviction should fail
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([3u8; 32]),
+            make_dummy_tx(),
+            100,
+            Lovelace(500),
+            200,
+            500,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ref_scripts_capacity_enforcement() {
+        let config = MempoolConfig {
+            max_ref_scripts_bytes: 500,
+            ..default_config()
+        };
+        let mempool = Mempool::new(config);
+
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                0,
+                0,
+                300,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.total_ref_scripts_bytes(), 300);
+
+        // Would exceed ref script limit (300+300=600 > 500)
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([2u8; 32]),
+            make_dummy_tx(),
+            100,
+            Lovelace(500),
+            0,
+            0,
+            300,
+            TxOrigin::Local,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eviction_frees_all_dimensions() {
+        let config = MempoolConfig {
+            max_transactions: 2,
+            max_ex_mem: 1000,
+            ..default_config()
+        };
+        let mempool = Mempool::new(config);
+
+        // tx1: low fee density, high ex_mem
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(100),
+                800,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // tx2: medium fee density
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(200),
+                100,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        assert_eq!(mempool.len(), 2);
+        assert_eq!(mempool.total_ex_mem(), 900);
+
+        // tx3: highest fee density — should evict tx1 (lowest density)
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([3u8; 32]),
+            make_dummy_tx(),
+            100,
+            Lovelace(500),
+            50,
+            0,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_ok());
+        assert_eq!(mempool.len(), 2);
+        assert!(!mempool.contains(&Hash32::from_bytes([1u8; 32]))); // evicted
+        assert!(mempool.contains(&Hash32::from_bytes([2u8; 32])));
+        assert!(mempool.contains(&Hash32::from_bytes([3u8; 32])));
+        // ex_mem should be 100 (tx2) + 50 (tx3) = 150
+        assert_eq!(mempool.total_ex_mem(), 150);
+    }
+
+    #[test]
+    fn test_eviction_insufficient_priority() {
+        let config = MempoolConfig {
+            max_transactions: 2,
+            ..default_config()
+        };
+        let mempool = Mempool::new(config);
+
+        // Fill with high-fee txs
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(1000),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(900),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Try to add low-fee tx — should fail with InsufficientPriority
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([3u8; 32]),
+            make_dummy_tx(),
+            100,
+            Lovelace(50),
+            0,
+            0,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(matches!(result, Err(MempoolError::InsufficientPriority)));
+        assert_eq!(mempool.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_decrements_ex_units() {
+        let mempool = Mempool::new(default_config());
+
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                1000,
+                2000,
+                300,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.total_ex_mem(), 1000);
+        assert_eq!(mempool.total_ex_steps(), 2000);
+        assert_eq!(mempool.total_ref_scripts_bytes(), 300);
+
+        mempool.remove_tx(&Hash32::from_bytes([1u8; 32]));
+        assert_eq!(mempool.total_ex_mem(), 0);
+        assert_eq!(mempool.total_ex_steps(), 0);
+        assert_eq!(mempool.total_ref_scripts_bytes(), 0);
+    }
+
+    // ========================== Dual-FIFO fairness tests ==========================
+
+    #[test]
+    fn test_tx_origin_local_and_remote() {
+        let mempool = Mempool::new(default_config());
+
+        // Local submission
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Remote submission
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(500),
+                0,
+                0,
+                0,
+                TxOrigin::Remote,
+            )
+            .unwrap();
+
+        assert_eq!(mempool.len(), 2);
+        // Both should be in FIFO order
+        let hashes = mempool.tx_hashes_ordered();
+        assert_eq!(hashes[0], Hash32::from_bytes([1u8; 32]));
+        assert_eq!(hashes[1], Hash32::from_bytes([2u8; 32]));
+    }
+
+    #[test]
+    fn test_dual_fifo_fairness_contention() {
+        use std::sync::Arc;
+
+        let config = MempoolConfig {
+            max_transactions: 100,
+            ..default_config()
+        };
+        let mempool = Arc::new(Mempool::new(config));
+
+        // Simulate concurrent local and remote submissions
+        let m1 = mempool.clone();
+        let local_handle = std::thread::spawn(move || {
+            for i in 0..10u8 {
+                let mut hash_bytes = [0u8; 32];
+                hash_bytes[0] = 0xAA;
+                hash_bytes[1] = i;
+                let _ = m1.add_tx_full(
+                    Hash32::from_bytes(hash_bytes),
+                    make_dummy_tx(),
+                    100,
+                    Lovelace(500),
+                    0,
+                    0,
+                    0,
+                    TxOrigin::Local,
+                );
+            }
+        });
+
+        let m2 = mempool.clone();
+        let remote_handle = std::thread::spawn(move || {
+            for i in 0..10u8 {
+                let mut hash_bytes = [0u8; 32];
+                hash_bytes[0] = 0xBB;
+                hash_bytes[1] = i;
+                let _ = m2.add_tx_full(
+                    Hash32::from_bytes(hash_bytes),
+                    make_dummy_tx(),
+                    100,
+                    Lovelace(500),
+                    0,
+                    0,
+                    0,
+                    TxOrigin::Remote,
+                );
+            }
+        });
+
+        local_handle.join().unwrap();
+        remote_handle.join().unwrap();
+
+        // All 20 txs should be added (no deadlock, no data corruption)
+        assert_eq!(mempool.len(), 20);
+    }
+
+    // ========================== Revalidation tests ==========================
+
+    #[test]
+    fn test_revalidate_all_removes_invalid() {
+        let mempool = Mempool::new(default_config());
+
+        // Add 5 txs with different fees
+        for i in 1..=5u8 {
+            mempool
+                .add_tx_with_fee(
+                    Hash32::from_bytes([i; 32]),
+                    make_tx_with_fee(i as u64 * 100),
+                    500,
+                    Lovelace(i as u64 * 100),
+                )
+                .unwrap();
+        }
+        assert_eq!(mempool.len(), 5);
+
+        // Revalidate: reject txs with fee < 300
+        let removed = mempool.revalidate_all(|tx| tx.body.fee.0 >= 300);
+
+        assert_eq!(removed.len(), 2); // tx1 (100) and tx2 (200) removed
+        assert_eq!(mempool.len(), 3);
+        assert!(!mempool.contains(&Hash32::from_bytes([1u8; 32])));
+        assert!(!mempool.contains(&Hash32::from_bytes([2u8; 32])));
+        assert!(mempool.contains(&Hash32::from_bytes([3u8; 32])));
+        assert!(mempool.contains(&Hash32::from_bytes([4u8; 32])));
+        assert!(mempool.contains(&Hash32::from_bytes([5u8; 32])));
+    }
+
+    #[test]
+    fn test_revalidate_all_keeps_all_valid() {
+        let mempool = Mempool::new(default_config());
+
+        for i in 1..=3u8 {
+            mempool
+                .add_tx(Hash32::from_bytes([i; 32]), make_dummy_tx(), 100)
+                .unwrap();
+        }
+
+        let removed = mempool.revalidate_all(|_| true);
+        assert!(removed.is_empty());
+        assert_eq!(mempool.len(), 3);
+    }
+
+    #[test]
+    fn test_revalidate_all_removes_all_invalid() {
+        let mempool = Mempool::new(default_config());
+
+        for i in 1..=3u8 {
+            mempool
+                .add_tx(Hash32::from_bytes([i; 32]), make_dummy_tx(), 100)
+                .unwrap();
+        }
+
+        let removed = mempool.revalidate_all(|_| false);
+        assert_eq!(removed.len(), 3);
+        assert!(mempool.is_empty());
+        assert_eq!(mempool.total_bytes(), 0);
+    }
+
+    #[test]
+    fn test_revalidate_all_maintains_counters() {
+        let mempool = Mempool::new(default_config());
+
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_tx_with_fee(100),
+                500,
+                Lovelace(100),
+                1000,
+                2000,
+                300,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_tx_with_fee(200),
+                600,
+                Lovelace(200),
+                500,
+                1000,
+                100,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Remove tx1 via revalidation
+        mempool.revalidate_all(|tx| tx.body.fee.0 >= 200);
+
+        assert_eq!(mempool.len(), 1);
+        assert_eq!(mempool.total_bytes(), 600);
+        assert_eq!(mempool.total_ex_mem(), 500);
+        assert_eq!(mempool.total_ex_steps(), 1000);
+        assert_eq!(mempool.total_ref_scripts_bytes(), 100);
     }
 }

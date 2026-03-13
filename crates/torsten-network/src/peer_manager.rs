@@ -43,12 +43,34 @@ pub enum PeerSource {
     Ledger,
 }
 
+/// Peer category for governor-driven target management.
+///
+/// Categories determine protection levels and target buckets, matching
+/// Haskell cardano-node's peer classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerCategory {
+    /// From topology localRoots — NEVER demoted by governor
+    LocalRoot,
+    /// From topology publicRoots
+    PublicRoot,
+    /// SPO in top 90% of stake (big ledger peer)
+    BigLedgerPeer,
+    /// Any SPO relay (not in top 90%)
+    LedgerPeer,
+    /// Discovered via peer sharing
+    Shared,
+    /// From topology bootstrapPeers
+    Bootstrap,
+}
+
 /// Tracked peer state
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub address: SocketAddr,
     pub temperature: PeerTemperature,
     pub source: PeerSource,
+    /// Governor category for target-driven management
+    pub category: PeerCategory,
     pub last_connected: Option<Instant>,
     pub last_failed: Option<Instant>,
     pub failure_count: u32,
@@ -171,10 +193,16 @@ impl PeerPerformance {
 
 impl PeerInfo {
     pub fn new(address: SocketAddr, source: PeerSource) -> Self {
+        let category = match source {
+            PeerSource::Config => PeerCategory::PublicRoot,
+            PeerSource::PeerSharing => PeerCategory::Shared,
+            PeerSource::Ledger => PeerCategory::LedgerPeer,
+        };
         PeerInfo {
             address,
             temperature: PeerTemperature::Cold,
             source,
+            category,
             last_connected: None,
             last_failed: None,
             failure_count: 0,
@@ -303,13 +331,66 @@ impl PeerManager {
         }
     }
 
-    /// Add a peer from the topology/config
+    /// Add a peer from the topology/config.
+    /// Trustable peers are marked as LocalRoot (protected from demotion).
     pub fn add_config_peer(&mut self, addr: SocketAddr, trustable: bool, advertise: bool) {
         let mut info = PeerInfo::new(addr, PeerSource::Config);
         info.is_trustable = trustable;
         info.advertise = advertise;
+        if trustable {
+            info.category = PeerCategory::LocalRoot;
+        }
         self.cold_peers.insert(addr);
         self.peers.insert(addr, info);
+    }
+
+    /// Add a big ledger peer (SPO in top 90% of stake)
+    pub fn add_big_ledger_peer(&mut self, addr: SocketAddr) {
+        if let Some(info) = self.peers.get_mut(&addr) {
+            // Upgrade existing peer to BLP category
+            info.category = PeerCategory::BigLedgerPeer;
+            return;
+        }
+        if self.peers.len() >= self.config.target_known_peers && !self.try_evict_cold_peer() {
+            return;
+        }
+        let mut info = PeerInfo::new(addr, PeerSource::Ledger);
+        info.category = PeerCategory::BigLedgerPeer;
+        self.cold_peers.insert(addr);
+        self.peers.insert(addr, info);
+        debug!(%addr, "Added big ledger peer");
+    }
+
+    /// Count of big ledger peers across all temperatures
+    pub fn big_ledger_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|p| p.category == PeerCategory::BigLedgerPeer)
+            .count()
+    }
+
+    /// Count of active (hot) big ledger peers
+    pub fn active_big_ledger_peer_count(&self) -> usize {
+        self.hot_peers
+            .iter()
+            .filter(|addr| {
+                self.peers
+                    .get(addr)
+                    .is_some_and(|p| p.category == PeerCategory::BigLedgerPeer)
+            })
+            .count()
+    }
+
+    /// Check if a peer is a local root (protected from demotion)
+    pub fn is_local_root(&self, addr: &SocketAddr) -> bool {
+        self.peers
+            .get(addr)
+            .is_some_and(|p| p.category == PeerCategory::LocalRoot)
+    }
+
+    /// Get peer category
+    pub fn peer_category(&self, addr: &SocketAddr) -> Option<PeerCategory> {
+        self.peers.get(addr).map(|p| p.category)
     }
 
     /// Add a peer discovered from the ledger (SPO relay registrations)

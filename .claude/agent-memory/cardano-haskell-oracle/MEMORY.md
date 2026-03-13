@@ -68,6 +68,7 @@
 - [utxo-hd-snapshot-format.md](utxo-hd-snapshot-format.md) - UTxO-HD in-memory backend snapshot: version wrapper array(2)[1,ext], HFC telescope, per-era version array(2)[2,...], NewEpochState array(7), EMPTY UTxO in state file, tables written separately
 - [query-version2-wire-format.md](query-version2-wire-format.md) - QueryVersion2 three-level nesting: Query(tag 0-4) → HFC(tag 0-2) → NS(era_idx, shelley_tag), EitherMismatch wrapping rules, golden test hex values
 - [ledger-peer-snapshot-encoding.md](ledger-peer-snapshot-encoding.md) - GetLedgerPeerSnapshot (tag 34): V1/V2/V3 wire format, relay CBOR, Rational encoding, big vs all peers
+- [genesis-bootstrap-protocol.md](genesis-bootstrap-protocol.md) - Ouroboros Genesis bootstrap: GSM (PreSyncing/Syncing/CaughtUp), LoE/GDD, CSJ, bootstrap peers, FetchModeGenesis, peer targets, HAA, caught-up detection
 
 ## N2C Key Facts
 - Shelley query CBOR tags: 40 queries (0-39), see n2c-protocol-details.md
@@ -88,6 +89,12 @@
 - CDDL specs: `cardano-diffusion/protocols/cddl/specs/`
 - Diffusion config: `cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs`
 - KeepAlive client: `ouroboros-network/lib/Ouroboros/Network/KeepAlive.hs`
+
+## Mempool Implementation
+- See [mempool-implementation.md](mempool-implementation.md) - FIFO ordering (NOT fee-based), StrictFingerTree, dual-FIFO fairness, multi-dimensional capacity, revalidation, snapshotting
+
+## P2P Governor
+- See [p2p-governor-architecture.md](p2p-governor-architecture.md) - Complete governor architecture: state machine, targets, churn, promotion/demotion, big ledger peers, connection manager, all constants
 
 ## N2N Protocol Status (cardano-node 10.6.2)
 - Active versions: V14 (Plomin HF, mandatory), V15 (SRV DNS)

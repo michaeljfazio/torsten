@@ -1,4 +1,5 @@
 pub mod client;
+pub mod governor;
 pub mod miniprotocols;
 pub mod multiplexer;
 pub mod n2c;
@@ -18,11 +19,14 @@ pub use miniprotocols::txsubmission::{TxSubmissionClient, TxSubmissionError, TxS
 pub use n2c::{N2CServer, TxValidationError, TxValidator};
 pub use n2c_client::N2CClient;
 // Re-export mempool trait and types from torsten-primitives for convenience
+pub use governor::{Governor, GovernorEvent, PeerTargets};
 pub use n2n_server::{
     BlockAnnouncement, BlockProvider, N2NRateLimitConfig, N2NServer, RollbackAnnouncement, TipInfo,
 };
 pub use peer::PeerConnection;
-pub use peer_manager::{DiffusionMode, PeerManager, PeerManagerConfig, PeerPerformance};
+pub use peer_manager::{
+    DiffusionMode, PeerCategory, PeerManager, PeerManagerConfig, PeerPerformance,
+};
 pub use pipelined::PipelinedPeerClient;
 pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};
 pub use server::NodeServer;
