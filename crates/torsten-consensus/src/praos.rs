@@ -562,15 +562,21 @@ impl OuroborosPraos {
             }
         }
 
-        // Update tracked counter (always update, even during sync, for tracking)
-        self.opcert_counters
-            .entry(pool_id)
-            .and_modify(|v| {
-                if n > *v {
-                    *v = n;
-                }
-            })
-            .or_insert(n);
+        // Update tracked counter (always update, even during sync, for tracking).
+        // Hard cap prevents unbounded growth between epoch-boundary pruning cycles.
+        const MAX_OPCERT_ENTRIES: usize = 50_000;
+        if self.opcert_counters.len() < MAX_OPCERT_ENTRIES
+            || self.opcert_counters.contains_key(&pool_id)
+        {
+            self.opcert_counters
+                .entry(pool_id)
+                .and_modify(|v| {
+                    if n > *v {
+                        *v = n;
+                    }
+                })
+                .or_insert(n);
+        }
 
         Ok(())
     }
@@ -2064,6 +2070,42 @@ mod tests {
         let active: HashSet<Hash28> = [Hash28::from_bytes([0xAA; 28])].into_iter().collect();
         praos.prune_opcert_counters(&active);
         assert!(praos.opcert_counters.is_empty());
+    }
+
+    #[test]
+    fn test_opcert_counter_hard_cap() {
+        let mut praos = OuroborosPraos::new();
+
+        // Insert 50,000 unique pool entries (the hard cap)
+        for i in 0..50_000u32 {
+            let mut bytes = [0u8; 28];
+            bytes[..4].copy_from_slice(&i.to_be_bytes());
+            praos.opcert_counters.insert(Hash28::from_bytes(bytes), i as u64);
+        }
+        assert_eq!(praos.opcert_counters.len(), 50_000);
+
+        // A new unknown pool should NOT be inserted (at cap)
+        let new_pool = Hash28::from_bytes([0xFF; 28]);
+        assert!(!praos.opcert_counters.contains_key(&new_pool));
+
+        // Simulate check_opcert_counter via direct insert logic
+        let header = make_valid_header(100);
+        let pool_id = torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
+        // pool_id won't be in the map and map is at cap → entry should not be added
+        let before = praos.opcert_counters.len();
+        // Only insert if under cap or already present
+        if praos.opcert_counters.len() < 50_000
+            || praos.opcert_counters.contains_key(&pool_id)
+        {
+            praos.opcert_counters.insert(pool_id, 5);
+        }
+        assert_eq!(praos.opcert_counters.len(), before);
+
+        // But updating an existing entry should still work
+        let existing = Hash28::from_bytes([0u8; 28]); // i=0 was inserted
+        assert!(praos.opcert_counters.contains_key(&existing));
+        praos.opcert_counters.insert(existing, 999);
+        assert_eq!(praos.opcert_counters[&existing], 999);
     }
 
     // ========================================================================

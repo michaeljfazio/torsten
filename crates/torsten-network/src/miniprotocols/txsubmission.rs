@@ -65,7 +65,10 @@ impl TxSubmissionClient {
     /// Receive a full CBOR message, reassembling chunks.
     ///
     /// Reads chunks until we have a complete CBOR value by checking decode success.
+    /// Enforces a maximum reassembly size to prevent memory exhaustion from malicious peers.
     async fn recv_raw(&mut self, wait: Duration) -> Result<Vec<u8>, TxSubmissionError> {
+        /// Maximum reassembled message size (8 MB — well above any legitimate tx submission message).
+        const MAX_REASSEMBLY_SIZE: usize = 8 * 1024 * 1024;
         self.recv_buf.clear();
         loop {
             let chunk = timeout(wait, self.channel.dequeue_chunk())
@@ -73,6 +76,13 @@ impl TxSubmissionClient {
                 .map_err(|_| TxSubmissionError::Timeout("waiting for response".into()))?
                 .map_err(|e| TxSubmissionError::Channel(e.to_string()))?;
             self.recv_buf.extend_from_slice(&chunk);
+
+            if self.recv_buf.len() > MAX_REASSEMBLY_SIZE {
+                return Err(TxSubmissionError::Protocol(format!(
+                    "reassembled message exceeds {} bytes",
+                    MAX_REASSEMBLY_SIZE
+                )));
+            }
 
             // Try to decode — if successful, we have a complete message
             let mut probe = minicbor::Decoder::new(&self.recv_buf);
@@ -145,7 +155,12 @@ impl TxSubmissionClient {
             .map(|(hash, _)| *hash)
             .collect();
 
-        // Track all tx IDs from this batch
+        // Track all tx IDs from this batch (cap to prevent unbounded memory growth)
+        const MAX_KNOWN_TX_IDS: usize = 10_000;
+        if self.known_tx_ids.len() + tx_ids.len() > MAX_KNOWN_TX_IDS {
+            // Evict oldest entries by clearing and re-inserting recent batch
+            self.known_tx_ids.clear();
+        }
         for (hash, _) in tx_ids {
             self.known_tx_ids.insert(*hash);
         }

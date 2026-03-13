@@ -293,6 +293,8 @@ async fn handle_n2c_connection(
     let mut read_buf = vec![0u8; 65536];
     // Persistent buffer for partial segments across reads
     let mut pending = Vec::new();
+    /// Maximum accumulated buffer size before declaring a misbehaving client (4 MB).
+    const MAX_PENDING_BUFFER: usize = 4 * 1024 * 1024;
     let mut chainsync_cursor = ChainSyncCursor {
         cursor_slot: 0,
         has_intersection: false,
@@ -311,6 +313,17 @@ async fn handle_n2c_connection(
         }
 
         pending.extend_from_slice(&read_buf[..n]);
+
+        // Guard against buffer exhaustion from misbehaving clients
+        if pending.len() > MAX_PENDING_BUFFER {
+            warn!(
+                buffer_size = pending.len(),
+                "N2C pending buffer exceeded limit, disconnecting client"
+            );
+            return Err(N2CServerError::Protocol(
+                "accumulated buffer too large".into(),
+            ));
+        }
 
         // Parse as many complete segments as possible from the pending buffer
         let mut offset = 0;
@@ -764,6 +777,9 @@ mod tests {
             reserves: 5_000_000,
             stake_pool_count: 10,
             utxo_count: 5000,
+            active_stake: 1_000_000_000,
+            delegations: 100,
+            rewards: 500_000,
         };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
@@ -780,6 +796,8 @@ mod tests {
             epoch: 100,
             block_number: 12345,
             slot: 67890,
+            protocol_major: 10,
+            protocol_minor: 0,
         };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
@@ -790,7 +808,13 @@ mod tests {
 
     #[test]
     fn test_encode_debug_chain_dep_state() {
-        let result = QueryResult::DebugChainDepState { last_slot: 999 };
+        let result = QueryResult::DebugChainDepState {
+            last_slot: 999,
+            epoch_nonce: vec![0xAA; 32],
+            evolving_nonce: vec![0xBB; 32],
+            candidate_nonce: vec![0xCC; 32],
+            lab_nonce: vec![0xDD; 32],
+        };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
         let mut dec = minicbor::Decoder::new(&cbor);

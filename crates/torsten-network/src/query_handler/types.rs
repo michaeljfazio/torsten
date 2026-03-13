@@ -58,23 +58,32 @@ pub enum QueryResult {
     HardForkCurrentEra(u32),
     /// GetCBOR (tag 9): wraps an inner query result as CBOR-in-CBOR (tag 24)
     WrappedCbor(Box<QueryResult>),
-    /// DebugEpochState (tag 8): serialized epoch state (simplified)
+    /// DebugEpochState (tag 8): epoch state summary
     DebugEpochState {
         epoch: u64,
         treasury: u64,
         reserves: u64,
         stake_pool_count: u64,
         utxo_count: u64,
+        active_stake: u64,
+        delegations: u64,
+        rewards: u64,
     },
-    /// DebugNewEpochState (tag 12): new epoch state dump (simplified)
+    /// DebugNewEpochState (tag 12): new epoch state summary
     DebugNewEpochState {
         epoch: u64,
         block_number: u64,
         slot: u64,
+        protocol_major: u64,
+        protocol_minor: u64,
     },
     /// DebugChainDepState (tag 13): consensus chain dependent state
     DebugChainDepState {
         last_slot: u64,
+        epoch_nonce: Vec<u8>,
+        evolving_nonce: Vec<u8>,
+        candidate_nonce: Vec<u8>,
+        lab_nonce: Vec<u8>,
     },
     /// GetRewardProvenance (tag 14): reward calculation provenance
     RewardProvenance {
@@ -718,6 +727,23 @@ pub struct NodeStateSnapshot {
     pub ratify_expired: Vec<GovActionId>,
     /// Whether ratification was delayed by a delaying action
     pub ratify_delayed: bool,
+    /// Epoch nonce (32 bytes) for DebugChainDepState
+    pub epoch_nonce: Vec<u8>,
+    /// Evolving nonce (32 bytes) for DebugChainDepState
+    pub evolving_nonce: Vec<u8>,
+    /// Candidate nonce (32 bytes) for DebugChainDepState
+    pub candidate_nonce: Vec<u8>,
+    /// Lab nonce (32 bytes, derived from latest VRF output) for DebugChainDepState
+    pub lab_nonce: Vec<u8>,
+    /// Total active stake for DebugEpochState
+    pub total_active_stake: u64,
+    /// Per-stake-address reward accounts total for DebugEpochState
+    pub total_rewards: u64,
+    /// Number of active stake delegations for DebugEpochState
+    pub active_delegations: u64,
+    /// Protocol version (major.minor) for DebugNewEpochState
+    pub protocol_version_major: u64,
+    pub protocol_version_minor: u64,
 }
 
 impl Default for NodeStateSnapshot {
@@ -770,6 +796,15 @@ impl Default for NodeStateSnapshot {
             ratify_enacted: Vec::new(),
             ratify_expired: Vec::new(),
             ratify_delayed: false,
+            epoch_nonce: vec![0u8; 32],
+            evolving_nonce: vec![0u8; 32],
+            candidate_nonce: vec![0u8; 32],
+            lab_nonce: vec![0u8; 32],
+            total_active_stake: 0,
+            total_rewards: 0,
+            active_delegations: 0,
+            protocol_version_major: 10,
+            protocol_version_minor: 0,
         }
     }
 }

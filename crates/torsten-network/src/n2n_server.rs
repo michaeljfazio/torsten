@@ -494,6 +494,9 @@ async fn handle_n2n_connection(
     let mut partial = Vec::new();
     let mut peer_state = PeerState::new();
 
+    /// Maximum accumulated buffer size before declaring a misbehaving peer (16 MB).
+    const MAX_PARTIAL_BUFFER: usize = 16 * 1024 * 1024;
+
     loop {
         tokio::select! {
             // Listen for peer messages
@@ -504,6 +507,18 @@ async fn handle_n2n_connection(
                 }
 
                 partial.extend_from_slice(&buf[..n]);
+
+                // Guard against slow-drip buffer exhaustion
+                if partial.len() > MAX_PARTIAL_BUFFER {
+                    warn!(
+                        peer = %peer_addr,
+                        buffer_size = partial.len(),
+                        "N2N partial buffer exceeded limit, disconnecting"
+                    );
+                    return Err(N2NServerError::Protocol(
+                        "accumulated buffer too large".into(),
+                    ));
+                }
 
                 // Process all complete segments
                 let mut offset = 0;
@@ -1385,10 +1400,28 @@ fn handle_n2n_txsubmission(
                 peer_state.tx_inflight.clear();
             }
 
+            // Enforce inflight cap: reject if peer hasn't acknowledged and we're at limit
+            const MAX_TX_INFLIGHT: usize = 1000;
+            if peer_state.tx_inflight.len() >= MAX_TX_INFLIGHT {
+                warn!(
+                    inflight = peer_state.tx_inflight.len(),
+                    "TxSubmission2: inflight cap reached, peer must acknowledge before requesting more"
+                );
+                return Err(N2NServerError::Protocol(
+                    "TxSubmission2 inflight cap exceeded".into(),
+                ));
+            }
+
+            // Cap requested count to prevent oversized responses
+            const MAX_TX_IDS_PER_REQUEST: usize = 100;
+            let capped_req = req_count.min(MAX_TX_IDS_PER_REQUEST);
+
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
 
             // Get new tx IDs from mempool, excluding those already inflight
+            let remaining_cap = MAX_TX_INFLIGHT - peer_state.tx_inflight.len();
+            let effective_count = capped_req.min(remaining_cap);
             let txs: Vec<_> = if let Some(mp) = mempool {
                 let snapshot = mp.snapshot();
                 snapshot
@@ -1401,15 +1434,14 @@ fn handle_n2n_txsubmission(
                             .iter()
                             .any(|inflight| inflight == bytes)
                     })
-                    .take(req_count.max(1))
+                    .take(effective_count.max(1))
                     .filter_map(|h| mp.get_tx_size(h).map(|size| (*h.as_bytes(), size)))
                     .collect()
             } else {
                 vec![]
             };
 
-            // Track newly sent tx IDs as inflight (capped to prevent memory growth)
-            const MAX_TX_INFLIGHT: usize = 1000;
+            // Track newly sent tx IDs as inflight
             for (tx_hash, _) in &txs {
                 if peer_state.tx_inflight.len() < MAX_TX_INFLIGHT {
                     peer_state.tx_inflight.push(*tx_hash);
@@ -1445,15 +1477,17 @@ fn handle_n2n_txsubmission(
         }
         // MsgRequestTxs: [2, [tx_ids]]
         2 => {
-            // Parse requested tx IDs
+            // Parse requested tx IDs (capped to prevent memory exhaustion)
             let requested_len = decoder
                 .array()
                 .map_err(|e| N2NServerError::Protocol(e.to_string()))?
                 .unwrap_or(0);
+            const MAX_TX_BODY_REQUEST: u64 = 1000;
+            let capped_len = requested_len.min(MAX_TX_BODY_REQUEST);
 
             let mut tx_bodies = Vec::new();
             if let Some(mp) = mempool {
-                for _ in 0..requested_len {
+                for _ in 0..capped_len {
                     if let Ok(tx_hash_bytes) = decoder.bytes() {
                         if let Ok(hash_arr) = <[u8; 32]>::try_from(tx_hash_bytes) {
                             let hash = torsten_primitives::hash::Hash32::from_bytes(hash_arr);
@@ -1989,6 +2023,60 @@ mod tests {
 
         let _result2 = handle_n2n_txsubmission(&buf2, &mut peer_state, &no_mempool).unwrap();
         assert!(peer_state.tx_inflight.is_empty());
+    }
+
+    #[test]
+    fn test_txsubmission_inflight_cap_rejects() {
+        let mut peer_state = PeerState::new();
+        peer_state.tx_submission_init_sent = true;
+
+        // Fill inflight to the cap (1000)
+        for i in 0..1000u32 {
+            let mut hash = [0u8; 32];
+            hash[..4].copy_from_slice(&i.to_be_bytes());
+            peer_state.tx_inflight.push(hash);
+        }
+        assert_eq!(peer_state.tx_inflight.len(), 1000);
+
+        // MsgRequestTxIds with ack_count=0 should fail because inflight is at cap
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(4).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        enc.u16(0).unwrap(); // no ack
+        enc.u16(10).unwrap(); // request 10
+
+        let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
+        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool);
+        assert!(result.is_err(), "Should reject when inflight cap reached");
+    }
+
+    #[test]
+    fn test_txsubmission_inflight_cap_allows_after_ack() {
+        let mut peer_state = PeerState::new();
+        peer_state.tx_submission_init_sent = true;
+
+        // Fill inflight to cap
+        for i in 0..1000u32 {
+            let mut hash = [0u8; 32];
+            hash[..4].copy_from_slice(&i.to_be_bytes());
+            peer_state.tx_inflight.push(hash);
+        }
+
+        // MsgRequestTxIds with ack_count=500 should succeed (drains 500, then 500 < 1000)
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(4).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        enc.u16(500).unwrap(); // ack 500
+        enc.u16(10).unwrap();
+
+        let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
+        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool);
+        assert!(result.is_ok(), "Should allow after acknowledgment");
+        assert_eq!(peer_state.tx_inflight.len(), 500);
     }
 
     #[test]

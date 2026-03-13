@@ -1381,30 +1381,54 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
             reserves,
             stake_pool_count,
             utxo_count,
+            active_stake,
+            delegations,
+            rewards,
         } => {
-            // Simplified epoch state: array(5) [epoch, treasury, reserves, pool_count, utxo_count]
-            enc.array(5).ok();
+            // Epoch state summary: array(8)
+            // [epoch, treasury, reserves, pool_count, utxo_count, active_stake, delegations, rewards]
+            enc.array(8).ok();
             enc.u64(*epoch).ok();
             enc.u64(*treasury).ok();
             enc.u64(*reserves).ok();
             enc.u64(*stake_pool_count).ok();
             enc.u64(*utxo_count).ok();
+            enc.u64(*active_stake).ok();
+            enc.u64(*delegations).ok();
+            enc.u64(*rewards).ok();
         }
         QueryResult::DebugNewEpochState {
             epoch,
             block_number,
             slot,
+            protocol_major,
+            protocol_minor,
         } => {
-            // Simplified new epoch state: array(3) [epoch, block_number, slot]
-            enc.array(3).ok();
+            // New epoch state summary: array(5)
+            // [epoch, block_number, slot, protocol_major, protocol_minor]
+            enc.array(5).ok();
             enc.u64(*epoch).ok();
             enc.u64(*block_number).ok();
             enc.u64(*slot).ok();
+            enc.u64(*protocol_major).ok();
+            enc.u64(*protocol_minor).ok();
         }
-        QueryResult::DebugChainDepState { last_slot } => {
-            // Simplified chain dep state: array(1) [last_slot]
-            enc.array(1).ok();
+        QueryResult::DebugChainDepState {
+            last_slot,
+            epoch_nonce,
+            evolving_nonce,
+            candidate_nonce,
+            lab_nonce,
+        } => {
+            // Chain dep state: array(5)
+            // [last_slot, epoch_nonce(bytes32), evolving_nonce(bytes32),
+            //  candidate_nonce(bytes32), lab_nonce(bytes32)]
+            enc.array(5).ok();
             enc.u64(*last_slot).ok();
+            enc.bytes(epoch_nonce).ok();
+            enc.bytes(evolving_nonce).ok();
+            enc.bytes(candidate_nonce).ok();
+            enc.bytes(lab_nonce).ok();
         }
         QueryResult::RewardProvenance {
             epoch,

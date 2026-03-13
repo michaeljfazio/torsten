@@ -158,6 +158,9 @@ pub(crate) fn handle_debug_epoch_state(state: &NodeStateSnapshot) -> QueryResult
         reserves: state.reserves,
         stake_pool_count: state.pool_count as u64,
         utxo_count: state.utxo_count as u64,
+        active_stake: state.total_active_stake,
+        delegations: state.active_delegations,
+        rewards: state.total_rewards,
     }
 }
 
@@ -172,6 +175,8 @@ pub(crate) fn handle_debug_new_epoch_state(state: &NodeStateSnapshot) -> QueryRe
         epoch: state.epoch.0,
         block_number: state.block_number.0,
         slot,
+        protocol_major: state.protocol_version_major,
+        protocol_minor: state.protocol_version_minor,
     }
 }
 
@@ -182,7 +187,13 @@ pub(crate) fn handle_debug_new_epoch_state(state: &NodeStateSnapshot) -> QueryRe
 pub(crate) fn handle_debug_chain_dep_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: DebugChainDepState");
     let last_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
-    QueryResult::DebugChainDepState { last_slot }
+    QueryResult::DebugChainDepState {
+        last_slot,
+        epoch_nonce: state.epoch_nonce.clone(),
+        evolving_nonce: state.evolving_nonce.clone(),
+        candidate_nonce: state.candidate_nonce.clone(),
+        lab_nonce: state.lab_nonce.clone(),
+    }
 }
 
 /// Handle GetRewardProvenance (tag 14) — reward calculation provenance.
@@ -259,6 +270,7 @@ mod tests {
                 reserves,
                 stake_pool_count,
                 utxo_count,
+                ..
             } => {
                 assert_eq!(epoch, 42);
                 assert_eq!(treasury, 1_000_000_000);
@@ -279,6 +291,7 @@ mod tests {
                 epoch,
                 block_number,
                 slot,
+                ..
             } => {
                 assert_eq!(epoch, 42);
                 assert_eq!(block_number, 999);
@@ -293,7 +306,7 @@ mod tests {
         let state = make_state();
         let result = handle_debug_chain_dep_state(&state);
         match result {
-            QueryResult::DebugChainDepState { last_slot } => {
+            QueryResult::DebugChainDepState { last_slot, .. } => {
                 assert_eq!(last_slot, 0); // origin tip
             }
             _ => panic!("Expected DebugChainDepState"),

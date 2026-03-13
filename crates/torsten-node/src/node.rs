@@ -4022,6 +4022,25 @@ impl Node {
                 })
                 .collect(),
             ratify_delayed: ls.governance.last_ratify_delayed,
+            epoch_nonce: ls.epoch_nonce.as_ref().to_vec(),
+            evolving_nonce: ls.evolving_nonce.as_ref().to_vec(),
+            candidate_nonce: ls.candidate_nonce.as_ref().to_vec(),
+            lab_nonce: ls.lab_nonce.as_ref().to_vec(),
+            total_active_stake: ls
+                .pool_params
+                .keys()
+                .filter_map(|pid| {
+                    ls.snapshots
+                        .set
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pid))
+                        .map(|s| s.0)
+                })
+                .sum(),
+            total_rewards: ls.reward_accounts.values().map(|r| r.0).sum(),
+            active_delegations: ls.delegations.len() as u64,
+            protocol_version_major: ls.protocol_params.protocol_version_major,
+            protocol_version_minor: ls.protocol_params.protocol_version_minor,
             genesis_config: self.shelley_genesis.as_ref().map(|g| {
                 let gp = &g.protocol_params;
                 // Convert a0 from f64 to rational

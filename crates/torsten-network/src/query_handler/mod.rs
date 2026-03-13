@@ -1104,6 +1104,7 @@ mod tests {
                 reserves,
                 stake_pool_count,
                 utxo_count,
+                ..
             } => {
                 assert_eq!(epoch, 55);
                 assert_eq!(treasury, 2_000_000);
@@ -1156,10 +1157,14 @@ mod tests {
                 epoch,
                 block_number,
                 slot,
+                protocol_major,
+                protocol_minor,
             } => {
                 assert_eq!(epoch, 10);
                 assert_eq!(block_number, 500);
                 assert_eq!(slot, 12345);
+                assert_eq!(protocol_major, 10); // default
+                assert_eq!(protocol_minor, 0);
             }
             other => panic!("Expected DebugNewEpochState, got {other:?}"),
         }
@@ -1179,8 +1184,18 @@ mod tests {
             ..NodeStateSnapshot::default()
         });
         match query(&handler, 13) {
-            QueryResult::DebugChainDepState { last_slot } => {
+            QueryResult::DebugChainDepState {
+                last_slot,
+                epoch_nonce,
+                evolving_nonce,
+                candidate_nonce,
+                lab_nonce,
+            } => {
                 assert_eq!(last_slot, 99999);
+                assert_eq!(epoch_nonce.len(), 32);
+                assert_eq!(evolving_nonce.len(), 32);
+                assert_eq!(candidate_nonce.len(), 32);
+                assert_eq!(lab_nonce.len(), 32);
             }
             other => panic!("Expected DebugChainDepState, got {other:?}"),
         }
