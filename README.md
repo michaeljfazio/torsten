@@ -204,38 +204,7 @@ The block production pipeline is **implemented but untested on a live network**:
 
 ## Performance
 
-Measured on Apple M2 Max (32 GB), Preview testnet, release build (`cargo build --release`).
-
-### Resource Usage
-
-| Metric | Value |
-|--------|-------|
-| Binary size | 9.0 MB |
-| Memory at tip (RSS) | ~4.5 GB |
-| Memory peak (snapshot load) | ~6.4 GB |
-| CPU at tip (idle) | <1% |
-| ImmutableDB size | 12 GB |
-| Ledger snapshot size | 1.1 GB |
-| Total database | 16 GB |
-
-### Sync Performance
-
-| Phase | Speed |
-|-------|-------|
-| Mithril import (4M blocks) | ~2 minutes |
-| Block replay from snapshot | ~10,600 blocks/s |
-| Pipelined ChainSync (bulk) | ~275 blocks/s |
-| At-tip block processing | 1 block/~20s (network rate) |
-
-### Chain State (Preview Testnet)
-
-| Metric | Value |
-|--------|-------|
-| UTxO count | ~2.9M |
-| Delegations | ~11.5K |
-| Stake pools | ~657 |
-| DReps | ~8.8K |
-| Active proposals | 2 |
+See the [latest benchmark results](benches/results/2026-03-14-all-profiles.md) for detailed storage, UTxO, and cryptographic operation benchmarks across all storage profiles.
 
 ### Prometheus Metrics (port 12798)
 
