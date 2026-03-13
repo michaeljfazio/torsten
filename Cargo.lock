@@ -211,6 +211,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2b_simd"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b79834656f71332577234b50bfc009996f7449e0c056884e6a02492ded0ca2f3"
+dependencies = [
+ "arrayref",
+ "arrayvec 0.7.6",
+ "constant_time_eq",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3327,7 +3338,6 @@ name = "torsten-consensus"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "blake2",
  "futures",
  "minicbor 0.25.1",
  "num-bigint",
@@ -3350,7 +3360,6 @@ dependencies = [
 name = "torsten-crypto"
 version = "0.1.0"
 dependencies = [
- "blake2",
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
  "dashu-base",
  "dashu-int",
@@ -3394,6 +3403,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
@@ -3493,7 +3503,7 @@ name = "torsten-primitives"
 version = "0.1.0"
 dependencies = [
  "bech32 0.11.1",
- "blake2",
+ "blake2b_simd",
  "bytes",
  "chrono",
  "derive_more",

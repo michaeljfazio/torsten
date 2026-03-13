@@ -44,7 +44,7 @@ base64 = "0.22"
 
 # Cryptography
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
-blake2 = "0.10"
+blake2b_simd = "1"
 sha2 = "0.10"
 rand = "0.8"
 rand_chacha = "0.3"

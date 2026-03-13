@@ -21,7 +21,6 @@ num-traits = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
-blake2 = { workspace = true }
 minicbor = { workspace = true }
 
 [dev-dependencies]

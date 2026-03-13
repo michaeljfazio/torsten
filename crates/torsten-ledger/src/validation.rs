@@ -1,5 +1,7 @@
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoSet;
+#[cfg(feature = "parallel-verification")]
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::{Hash28, Hash32, PolicyId};
@@ -825,50 +827,21 @@ pub fn validate_transaction_with_pools(
     }
 
     // Rule 14: Witness signature verification
-    // Each vkey witness must contain a valid Ed25519 signature over the tx body hash
+    // Each vkey witness must contain a valid Ed25519 signature over the tx body hash.
+    // With the `parallel-verification` feature, verification is parallelized via rayon.
     if errors.is_empty() {
-        for witness in &tx.witness_set.vkey_witnesses {
-            if witness.vkey.len() == 32 && witness.signature.len() == 64 {
-                match torsten_crypto::keys::PaymentVerificationKey::from_bytes(&witness.vkey) {
-                    Ok(vk) => {
-                        if vk.verify(tx.hash.as_bytes(), &witness.signature).is_err() {
-                            errors.push(ValidationError::InvalidWitnessSignature(format!(
-                                "{:?}",
-                                &witness.vkey[..8]
-                            )));
-                        }
-                    }
-                    Err(_) => {
-                        errors.push(ValidationError::InvalidWitnessSignature(format!(
-                            "{:?}",
-                            &witness.vkey[..8.min(witness.vkey.len())]
-                        )));
-                    }
-                }
-            }
-        }
+        let tx_hash_bytes = tx.hash.as_bytes();
 
-        // Bootstrap witnesses (Byron): Ed25519 signature verification
-        for witness in &tx.witness_set.bootstrap_witnesses {
-            if witness.vkey.len() == 32 && witness.signature.len() == 64 {
-                match torsten_crypto::keys::PaymentVerificationKey::from_bytes(&witness.vkey) {
-                    Ok(vk) => {
-                        if vk.verify(tx.hash.as_bytes(), &witness.signature).is_err() {
-                            errors.push(ValidationError::InvalidWitnessSignature(format!(
-                                "bootstrap:{:?}",
-                                &witness.vkey[..8]
-                            )));
-                        }
-                    }
-                    Err(_) => {
-                        errors.push(ValidationError::InvalidWitnessSignature(format!(
-                            "bootstrap:{:?}",
-                            &witness.vkey[..8.min(witness.vkey.len())]
-                        )));
-                    }
-                }
-            }
-        }
+        errors.extend(verify_witness_signatures(
+            &tx.witness_set.vkey_witnesses,
+            tx_hash_bytes,
+            "",
+        ));
+        errors.extend(verify_witness_signatures(
+            &tx.witness_set.bootstrap_witnesses,
+            tx_hash_bytes,
+            "bootstrap:",
+        ));
     }
 
     if errors.is_empty() {
@@ -888,6 +861,84 @@ pub fn validate_transaction_with_pools(
 /// Calculate total deposits and refunds from certificates in a transaction.
 ///
 /// Deposits are required for: stake registration, pool registration (new only), DRep registration,
+/// Verify Ed25519 signatures for a slice of witnesses.
+/// With `parallel-verification`, uses rayon to verify across CPU cores.
+/// Without it, verifies sequentially (better for low-core devices like Raspberry Pi).
+trait HasWitnessFields {
+    fn vkey(&self) -> &[u8];
+    fn signature(&self) -> &[u8];
+}
+
+impl HasWitnessFields for torsten_primitives::transaction::VKeyWitness {
+    fn vkey(&self) -> &[u8] {
+        &self.vkey
+    }
+    fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+impl HasWitnessFields for torsten_primitives::transaction::BootstrapWitness {
+    fn vkey(&self) -> &[u8] {
+        &self.vkey
+    }
+    fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+fn verify_single_witness<W: HasWitnessFields>(
+    witness: &W,
+    tx_hash_bytes: &[u8],
+    prefix: &str,
+) -> Option<ValidationError> {
+    let vkey = witness.vkey();
+    let sig = witness.signature();
+    if vkey.len() != 32 || sig.len() != 64 {
+        return None;
+    }
+    match torsten_crypto::keys::PaymentVerificationKey::from_bytes(vkey) {
+        Ok(vk) => {
+            if vk.verify(tx_hash_bytes, sig).is_err() {
+                Some(ValidationError::InvalidWitnessSignature(format!(
+                    "{prefix}{:?}",
+                    &vkey[..8]
+                )))
+            } else {
+                None
+            }
+        }
+        Err(_) => Some(ValidationError::InvalidWitnessSignature(format!(
+            "{prefix}{:?}",
+            &vkey[..8.min(vkey.len())]
+        ))),
+    }
+}
+
+#[cfg(feature = "parallel-verification")]
+fn verify_witness_signatures<W: HasWitnessFields + Sync>(
+    witnesses: &[W],
+    tx_hash_bytes: &[u8],
+    prefix: &str,
+) -> Vec<ValidationError> {
+    witnesses
+        .par_iter()
+        .filter_map(|w| verify_single_witness(w, tx_hash_bytes, prefix))
+        .collect()
+}
+
+#[cfg(not(feature = "parallel-verification"))]
+fn verify_witness_signatures<W: HasWitnessFields>(
+    witnesses: &[W],
+    tx_hash_bytes: &[u8],
+    prefix: &str,
+) -> Vec<ValidationError> {
+    witnesses
+        .iter()
+        .filter_map(|w| verify_single_witness(w, tx_hash_bytes, prefix))
+        .collect()
+}
+
 /// stake+delegation registration.
 /// Refunds are returned for: stake deregistration, DRep unregistration.
 ///

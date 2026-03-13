@@ -1,7 +1,3 @@
-use blake2::digest::consts::U28;
-use blake2::digest::consts::U32;
-use blake2::Blake2b;
-use blake2::Digest;
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -110,24 +106,20 @@ impl<const N: usize> TryFrom<&[u8]> for Hash<N> {
     }
 }
 
-/// Blake2b-256 hash
+/// Blake2b-256 hash (SIMD-accelerated via blake2b_simd)
 pub fn blake2b_256(data: &[u8]) -> Hash32 {
-    let mut hasher = Blake2b::<U32>::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&result);
-    Hash(hash)
+    let hash = blake2b_simd::Params::new().hash_length(32).hash(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(hash.as_bytes());
+    Hash(out)
 }
 
-/// Blake2b-224 hash (used for addresses, key hashes)
+/// Blake2b-224 hash (SIMD-accelerated, used for addresses, key hashes)
 pub fn blake2b_224(data: &[u8]) -> Hash28 {
-    let mut hasher = Blake2b::<U28>::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut hash = [0u8; 28];
-    hash.copy_from_slice(&result);
-    Hash(hash)
+    let hash = blake2b_simd::Params::new().hash_length(28).hash(data);
+    let mut out = [0u8; 28];
+    out.copy_from_slice(hash.as_bytes());
+    Hash(out)
 }
 
 #[cfg(test)]

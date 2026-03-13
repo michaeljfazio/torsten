@@ -7,7 +7,6 @@ description = "Cryptographic primitives for the Torsten Cardano node"
 [dependencies]
 torsten-primitives = { workspace = true }
 ed25519-dalek = { workspace = true }
-blake2 = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }

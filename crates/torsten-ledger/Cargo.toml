@@ -20,6 +20,11 @@ bincode = { workspace = true }
 uplc = { workspace = true }
 cardano-lsm = { workspace = true }
 tempfile = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["parallel-verification"]
+parallel-verification = ["rayon"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
