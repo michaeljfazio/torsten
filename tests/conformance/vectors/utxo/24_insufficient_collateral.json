@@ -1,0 +1,96 @@
+{
+  "rule": "UTXO",
+  "description": "Insufficient collateral for Plutus transaction (below 150% of fee threshold)",
+  "environment": {
+    "slot": 1000,
+    "protocol_params": {
+      "min_fee_a": 44,
+      "min_fee_b": 155381,
+      "max_tx_size": 16384,
+      "key_deposit": 2000000,
+      "pool_deposit": 500000000,
+      "ada_per_utxo_byte": 4310,
+      "max_val_size": 5000,
+      "collateral_percentage": 150,
+      "max_collateral_inputs": 3,
+      "max_tx_ex_mem": 14000000000,
+      "max_tx_ex_steps": 10000000000000,
+      "drep_deposit": 500000000,
+      "gov_action_deposit": 100000000000,
+      "min_fee_ref_script_cost_per_byte": 15
+    },
+    "treasury": 0
+  },
+  "input_state": {
+    "utxo": [
+      {
+        "tx_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "index": 0,
+        "output": {
+          "address": {
+            "type": "enterprise",
+            "network": 0,
+            "payment": { "type": "script", "hash": "11111111111111111111111111111111111111111111111111111111" }
+          },
+          "lovelace": 10000000,
+          "assets": {}
+        }
+      },
+      {
+        "tx_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "index": 0,
+        "output": {
+          "address": {
+            "type": "enterprise",
+            "network": 0,
+            "payment": { "type": "vkey", "hash": "0d6a577e9441ad8ed9663931906e4d43ece8f82c712b1d0235affb06" }
+          },
+          "lovelace": 100000,
+          "assets": {}
+        }
+      }
+    ],
+    "fees": 0,
+    "deposits": 0,
+    "donations": 0
+  },
+  "signal": {
+    "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "inputs": [
+      { "tx_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "index": 0 }
+    ],
+    "outputs": [
+      {
+        "address": {
+          "type": "enterprise",
+          "network": 0,
+          "payment": { "type": "vkey", "hash": "008b47844d92812fc30d1f0ac9b6fbf38778ccba9db8312ad9079079" }
+        },
+        "lovelace": 9700000,
+        "assets": {}
+      }
+    ],
+    "fee": 300000,
+    "ttl": 2000,
+    "tx_size": 400,
+    "is_valid": true,
+    "has_redeemers": true,
+    "certificates": [],
+    "withdrawals": {},
+    "mint": {},
+    "required_signers": [],
+    "collateral": [
+      { "tx_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "index": 0 }
+    ],
+    "collateral_return": null,
+    "total_collateral": null,
+    "reference_inputs": [],
+    "proposal_procedures": [],
+    "donation": null,
+    "validity_start": null
+  },
+  "expected_output": {
+    "type": "failure",
+    "errors": ["InsufficientCollateral"]
+  }
+}

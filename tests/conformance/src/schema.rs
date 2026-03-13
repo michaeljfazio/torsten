@@ -249,6 +249,9 @@ pub struct TestTransaction {
     /// Whether auxiliary data is present (simulated).
     #[serde(default)]
     pub has_auxiliary_data: bool,
+    /// Whether the transaction has Plutus redeemers (triggers collateral checks).
+    #[serde(default)]
+    pub has_redeemers: bool,
 }
 
 fn default_true() -> bool {

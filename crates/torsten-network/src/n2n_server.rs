@@ -673,8 +673,8 @@ fn handle_n2n_handshake(
     }
 
     // Parse version map to find the highest version we support
-    // N2N versions: 14 (Plomin HF) and 15 (SRV DNS support)
-    // We support versions 14-15 (matching current cardano-node)
+    // N2N versions: 14 (Plomin HF), 15 (SRV DNS support), 16 (latest)
+    // We support versions 14-16 (matching current cardano-node 10.x)
     let mut best_version: Option<u32> = None;
     let mut magic_mismatch_version: Option<u32> = None;
     let map_len = decoder
@@ -703,8 +703,8 @@ fn handle_n2n_handshake(
             .skip()
             .map_err(|e| N2NServerError::HandshakeFailed(e.to_string()))?;
 
-        // Accept versions 14-15 (current cardano-node N2N)
-        if (14..=15).contains(&version) {
+        // Accept versions 14-16 (current cardano-node N2N)
+        if (14..=16).contains(&version) {
             if let Some(pm) = peer_magic {
                 if pm != network_magic {
                     magic_mismatch_version = Some(version);
@@ -743,11 +743,13 @@ fn handle_n2n_handshake(
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 enc.u32(0)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                enc.array(2)
+                enc.array(3)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 enc.u32(14)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 enc.u32(15)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(16)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
             }
 
@@ -1522,12 +1524,12 @@ mod tests {
 
     #[test]
     fn test_handle_n2n_handshake_accept() {
-        // Build a MsgProposeVersions: [0, {14: [magic, false, 0, false], 15: [magic, false, 0, false]}]
+        // Build a MsgProposeVersions: [0, {14: [...], 15: [...], 16: [...]}]
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(0).unwrap(); // MsgProposeVersions
-        enc.map(2).unwrap();
+        enc.map(3).unwrap();
         // Version 14
         enc.u32(14).unwrap();
         enc.array(4).unwrap();
@@ -1542,6 +1544,13 @@ mod tests {
         enc.bool(false).unwrap();
         enc.u32(0).unwrap();
         enc.bool(false).unwrap();
+        // Version 16
+        enc.u32(16).unwrap();
+        enc.array(4).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
 
         let result =
             handle_n2n_handshake(&buf, 2, true, PeerSharingMode::PeerSharingEnabled).unwrap();
@@ -1550,13 +1559,56 @@ mod tests {
         assert_eq!(seg.protocol_id, MINI_PROTOCOL_HANDSHAKE);
         assert!(seg.is_responder);
 
-        // Verify response contains MsgAcceptVersion (tag 1) with version 15
+        // Verify response contains MsgAcceptVersion (tag 1) with version 16
         let mut dec = minicbor::Decoder::new(&seg.payload);
         dec.array().unwrap();
         let tag = dec.u32().unwrap();
         assert_eq!(tag, 1); // MsgAcceptVersion
         let version = dec.u32().unwrap();
-        assert_eq!(version, 15); // highest supported
+        assert_eq!(version, 16); // highest supported
+    }
+
+    #[test]
+    fn test_handle_n2n_handshake_accept_v16_preferred() {
+        // Client proposes V14+V15+V16, server should select V16 as highest
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(0).unwrap(); // MsgProposeVersions
+        enc.map(3).unwrap();
+        // Version 14
+        enc.u32(14).unwrap();
+        enc.array(4).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        // Version 15
+        enc.u32(15).unwrap();
+        enc.array(4).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        // Version 16
+        enc.u32(16).unwrap();
+        enc.array(4).unwrap();
+        enc.u64(2).unwrap();
+        enc.bool(false).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+
+        let result =
+            handle_n2n_handshake(&buf, 2, true, PeerSharingMode::PeerSharingEnabled).unwrap();
+        assert!(result.is_some());
+        let seg = result.unwrap();
+
+        let mut dec = minicbor::Decoder::new(&seg.payload);
+        dec.array().unwrap();
+        let tag = dec.u32().unwrap();
+        assert_eq!(tag, 1); // MsgAcceptVersion
+        let version = dec.u32().unwrap();
+        assert_eq!(version, 16); // V16 is highest
     }
 
     #[test]

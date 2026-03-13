@@ -191,13 +191,33 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
                 Ok(()) => {
                     // Validation passed. Now apply the transaction and compare state.
                     let mut result_utxo = utxo_set.clone();
-                    if let Err(e) =
-                        result_utxo.apply_transaction(&tx.hash, &tx.body.inputs, &tx.body.outputs)
-                    {
-                        return ConformanceTestResult {
-                            details: Some(format!("UTxO apply failed: {}", e)),
-                            ..base
-                        };
+
+                    if tx.is_valid {
+                        // Valid transaction: consume inputs, produce outputs
+                        if let Err(e) = result_utxo.apply_transaction(
+                            &tx.hash,
+                            &tx.body.inputs,
+                            &tx.body.outputs,
+                        ) {
+                            return ConformanceTestResult {
+                                details: Some(format!("UTxO apply failed: {}", e)),
+                                ..base
+                            };
+                        }
+                    } else {
+                        // Invalid transaction (is_valid: false): consume collateral inputs,
+                        // skip regular inputs/outputs, optionally add collateral return output
+                        for col_input in &tx.body.collateral {
+                            result_utxo.remove(col_input);
+                        }
+                        if let Some(ref col_return) = tx.body.collateral_return {
+                            let col_return_input =
+                                torsten_primitives::transaction::TransactionInput {
+                                    transaction_id: tx.hash,
+                                    index: tx.body.outputs.len() as u32,
+                                };
+                            result_utxo.insert(col_return_input, col_return.clone());
+                        }
                     }
 
                     // Convert back to test state for comparison

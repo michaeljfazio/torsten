@@ -441,7 +441,16 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
             plutus_v2_scripts: Vec::new(),
             plutus_v3_scripts: Vec::new(),
             plutus_data: Vec::new(),
-            redeemers: Vec::new(),
+            redeemers: if tx.has_redeemers {
+                vec![transaction::Redeemer {
+                    tag: transaction::RedeemerTag::Spend,
+                    index: 0,
+                    data: transaction::PlutusData::Integer(0),
+                    ex_units: transaction::ExUnits { mem: 0, steps: 0 },
+                }]
+            } else {
+                Vec::new()
+            },
         },
         is_valid: tx.is_valid,
         auxiliary_data: if tx.has_auxiliary_data {

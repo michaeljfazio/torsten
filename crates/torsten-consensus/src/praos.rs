@@ -764,6 +764,9 @@ impl OuroborosPraos {
 
         let opcert = &header.operational_cert;
         if opcert.hot_vkey.len() != 32 || header.kes_signature.len() != 448 {
+            if self.strict_verification {
+                return Err(ConsensusError::InvalidKesSignature);
+            }
             debug!(
                 slot = header.slot.0,
                 kes_sig_len = header.kes_signature.len(),
@@ -974,6 +977,9 @@ impl OuroborosPraos {
 
         let opcert = &header.operational_cert;
         if opcert.hot_vkey.len() != 32 || header.kes_signature.len() != 448 {
+            if params.strict_verification {
+                return Err(ConsensusError::InvalidKesSignature);
+            }
             return Ok(());
         }
 
@@ -2214,5 +2220,58 @@ mod tests {
         // k=500, f=0.1 → 3*500/0.1 = 15000
         let praos2 = OuroborosPraos::with_params(0.1, 500, EpochLength(86400));
         assert_eq!(praos2.stability_window(), 15000);
+    }
+
+    #[test]
+    fn test_kes_size_mismatch_rejected_strict() {
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        let mut header = make_valid_header(100);
+        // Set a non-empty but wrong-size KES signature (should be 448 bytes)
+        header.kes_signature = vec![0u8; 447];
+
+        // Call verify_kes_signature directly to test KES size validation in isolation
+        // (validate_header would fail on opcert verification first with dummy data)
+        let result = praos.verify_kes_signature(&header);
+        assert!(
+            matches!(result, Err(ConsensusError::InvalidKesSignature)),
+            "Expected InvalidKesSignature for wrong-size KES sig in strict mode, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_kes_size_mismatch_ok_non_strict() {
+        let praos = OuroborosPraos::new();
+
+        let mut header = make_valid_header(100);
+        // Set a non-empty but wrong-size KES signature
+        header.kes_signature = vec![0u8; 447];
+
+        // Call verify_kes_signature directly to test KES size validation in isolation
+        let result = praos.verify_kes_signature(&header);
+        assert!(
+            result.is_ok(),
+            "Expected Ok for wrong-size KES sig in non-strict mode, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_strict_mode_with_invalid_proof() {
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+        praos.nonce_established = true;
+
+        let mut header = make_valid_header(100);
+        // Set VRF key/proof to valid sizes but garbage data
+        header.vrf_vkey = vec![99u8; 32];
+        header.vrf_result.proof = vec![88u8; 80];
+        header.vrf_result.output = vec![77u8; 32];
+
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
+        assert!(
+            matches!(result, Err(ConsensusError::VrfVerification(_))),
+            "Expected VrfVerification error for invalid proof in strict mode with nonce established, got: {result:?}"
+        );
     }
 }
