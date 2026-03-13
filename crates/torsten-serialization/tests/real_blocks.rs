@@ -74,6 +74,16 @@ fn cross_check_block(name: &str, expected_era: Era) {
 }
 
 #[test]
+fn test_shelley_block() {
+    cross_check_block("shelley", Era::Shelley);
+}
+
+#[test]
+fn test_mary_block() {
+    cross_check_block("mary", Era::Mary);
+}
+
+#[test]
 fn test_alonzo_block() {
     cross_check_block("alonzo", Era::Alonzo);
 }

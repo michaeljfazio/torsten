@@ -22,5 +22,6 @@ pallas-crypto = { workspace = true }
 pallas-traverse = { workspace = true }
 
 [dev-dependencies]
+hex = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

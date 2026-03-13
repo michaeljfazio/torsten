@@ -2459,4 +2459,281 @@ mod tests {
         strip_hfc(&mut dec);
         assert_eq!(dec.u64().unwrap(), 10);
     }
+
+    // ---- CBOR golden hex tests ----
+
+    /// Helper: encode ProtocolParamsSnapshot directly (bypassing QueryResult envelope)
+    /// to isolate the pparams CBOR for golden comparison.
+    fn encode_pparams_raw(pp: &ProtocolParamsSnapshot) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        encode_protocol_params_cbor(&mut enc, pp);
+        buf
+    }
+
+    /// Golden test: tagged rational tag(30)[n, d] produces exact bytes.
+    #[test]
+    fn golden_hex_tagged_rational() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        encode_tagged_rational(&mut enc, 3, 10);
+        let actual = hex::encode(&buf);
+        // tag(30) = d8 1e, array(2) = 82, 3 = 03, 10 = 0a
+        assert_eq!(
+            actual, "d81e82030a",
+            "Tagged rational tag(30)[3,10] CBOR encoding changed"
+        );
+    }
+
+    /// Golden test: tagged rational with larger values.
+    #[test]
+    fn golden_hex_tagged_rational_large() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        encode_tagged_rational(&mut enc, 577, 10000);
+        let actual = hex::encode(&buf);
+        // tag(30) = d8 1e, array(2) = 82, 577 = 19 0241, 10000 = 19 2710
+        assert_eq!(
+            actual, "d81e82190241192710",
+            "Tagged rational tag(30)[577,10000] CBOR encoding changed"
+        );
+    }
+
+    /// Golden test: default ProtocolParamsSnapshot encodes to a stable hex string.
+    /// If the encoding logic or default values change, this test will fail —
+    /// update the expected hex only after verifying correctness.
+    #[test]
+    fn golden_hex_default_protocol_params() {
+        let pp = ProtocolParamsSnapshot::default();
+        let buf = encode_pparams_raw(&pp);
+        let actual = hex::encode(&buf);
+
+        // Capture the golden value. This was generated from the current encoding
+        // of ProtocolParamsSnapshot::default() and must remain stable.
+        let expected = GOLDEN_DEFAULT_PPARAMS_HEX;
+        assert_eq!(
+            actual, expected,
+            "Default ProtocolParamsSnapshot CBOR encoding changed!\n\
+             If this is intentional, update GOLDEN_DEFAULT_PPARAMS_HEX.\n\
+             Actual:   {actual}\n\
+             Expected: {expected}"
+        );
+    }
+
+    /// Golden test: protocol params with cost models populated.
+    #[test]
+    fn golden_hex_protocol_params_with_cost_models() {
+        let pp = ProtocolParamsSnapshot {
+            min_fee_a: 44,
+            min_fee_b: 155381,
+            max_block_body_size: 90112,
+            max_tx_size: 16384,
+            max_block_header_size: 1100,
+            key_deposit: 2_000_000,
+            pool_deposit: 500_000_000,
+            e_max: 18,
+            n_opt: 500,
+            a0_num: 3,
+            a0_den: 10,
+            rho_num: 3,
+            rho_den: 1000,
+            tau_num: 2,
+            tau_den: 10,
+            min_pool_cost: 170_000_000,
+            ada_per_utxo_byte: 4310,
+            // 3 cost model values each for simplicity
+            cost_models_v1: Some(vec![100, 200, 300]),
+            cost_models_v2: Some(vec![400, 500, 600]),
+            cost_models_v3: None,
+            execution_costs_mem_num: 577,
+            execution_costs_mem_den: 10000,
+            execution_costs_step_num: 721,
+            execution_costs_step_den: 10000000,
+            max_tx_ex_mem: 14_000_000,
+            max_tx_ex_steps: 10_000_000_000,
+            max_block_ex_mem: 62_000_000,
+            max_block_ex_steps: 40_000_000_000,
+            max_val_size: 5000,
+            collateral_percentage: 150,
+            max_collateral_inputs: 3,
+            protocol_version_major: 9,
+            protocol_version_minor: 0,
+            min_fee_ref_script_cost_per_byte: 15,
+            drep_deposit: 500_000_000,
+            drep_activity: 20,
+            gov_action_deposit: 100_000_000_000,
+            gov_action_lifetime: 6,
+            committee_min_size: 7,
+            committee_max_term_length: 146,
+            dvt_pp_network_group_num: 67,
+            dvt_pp_network_group_den: 100,
+            dvt_pp_economic_group_num: 67,
+            dvt_pp_economic_group_den: 100,
+            dvt_pp_technical_group_num: 67,
+            dvt_pp_technical_group_den: 100,
+            dvt_pp_gov_group_num: 67,
+            dvt_pp_gov_group_den: 100,
+            dvt_hard_fork_num: 60,
+            dvt_hard_fork_den: 100,
+            dvt_no_confidence_num: 67,
+            dvt_no_confidence_den: 100,
+            dvt_committee_normal_num: 67,
+            dvt_committee_normal_den: 100,
+            dvt_committee_no_confidence_num: 60,
+            dvt_committee_no_confidence_den: 100,
+            dvt_constitution_num: 75,
+            dvt_constitution_den: 100,
+            dvt_treasury_withdrawal_num: 67,
+            dvt_treasury_withdrawal_den: 100,
+            pvt_motion_no_confidence_num: 51,
+            pvt_motion_no_confidence_den: 100,
+            pvt_committee_normal_num: 51,
+            pvt_committee_normal_den: 100,
+            pvt_committee_no_confidence_num: 51,
+            pvt_committee_no_confidence_den: 100,
+            pvt_hard_fork_num: 51,
+            pvt_hard_fork_den: 100,
+            pvt_pp_security_group_num: 51,
+            pvt_pp_security_group_den: 100,
+        };
+        let buf = encode_pparams_raw(&pp);
+        let actual = hex::encode(&buf);
+
+        let expected = GOLDEN_COST_MODELS_PPARAMS_HEX;
+        assert_eq!(
+            actual, expected,
+            "ProtocolParamsSnapshot with cost models CBOR encoding changed!\n\
+             If this is intentional, update GOLDEN_COST_MODELS_PPARAMS_HEX.\n\
+             Actual:   {actual}\n\
+             Expected: {expected}"
+        );
+    }
+
+    /// Golden test: empty cost models produce map(0) at position [15].
+    #[test]
+    fn golden_hex_empty_cost_models() {
+        let pp = ProtocolParamsSnapshot {
+            cost_models_v1: None,
+            cost_models_v2: None,
+            cost_models_v3: None,
+            ..ProtocolParamsSnapshot::default()
+        };
+        let buf = encode_pparams_raw(&pp);
+        let actual = hex::encode(&buf);
+
+        // The default already has no cost models, so this should match
+        let default_buf = encode_pparams_raw(&ProtocolParamsSnapshot::default());
+        assert_eq!(
+            buf, default_buf,
+            "Empty cost models should produce same encoding as default (no cost models)"
+        );
+
+        // Verify the cost models section contains map(0) = a0
+        // Find it by checking the encoding contains the map(0) byte
+        assert!(
+            actual.contains("a0"),
+            "Empty cost models should encode as CBOR map(0)"
+        );
+    }
+
+    /// Golden test: full QueryResult::ProtocolParams envelope (MsgResult + HFC wrapper).
+    #[test]
+    fn golden_hex_protocol_params_envelope() {
+        let pp = ProtocolParamsSnapshot {
+            min_fee_a: 44,
+            min_fee_b: 155381,
+            max_block_body_size: 65536,
+            max_tx_size: 16384,
+            max_block_header_size: 1100,
+            key_deposit: 2_000_000,
+            pool_deposit: 500_000_000,
+            e_max: 18,
+            n_opt: 150,
+            a0_num: 1,
+            a0_den: 2,
+            rho_num: 3,
+            rho_den: 1000,
+            tau_num: 2,
+            tau_den: 10,
+            min_pool_cost: 340_000_000,
+            ada_per_utxo_byte: 4310,
+            cost_models_v1: None,
+            cost_models_v2: None,
+            cost_models_v3: None,
+            execution_costs_mem_num: 577,
+            execution_costs_mem_den: 10000,
+            execution_costs_step_num: 721,
+            execution_costs_step_den: 10000000,
+            max_tx_ex_mem: 10_000_000,
+            max_tx_ex_steps: 10_000_000_000,
+            max_block_ex_mem: 50_000_000,
+            max_block_ex_steps: 40_000_000_000,
+            max_val_size: 5000,
+            collateral_percentage: 150,
+            max_collateral_inputs: 3,
+            protocol_version_major: 10,
+            protocol_version_minor: 0,
+            min_fee_ref_script_cost_per_byte: 15,
+            drep_deposit: 500_000_000,
+            drep_activity: 20,
+            gov_action_deposit: 100_000_000_000,
+            gov_action_lifetime: 6,
+            committee_min_size: 7,
+            committee_max_term_length: 146,
+            dvt_pp_network_group_num: 2,
+            dvt_pp_network_group_den: 3,
+            dvt_pp_economic_group_num: 2,
+            dvt_pp_economic_group_den: 3,
+            dvt_pp_technical_group_num: 2,
+            dvt_pp_technical_group_den: 3,
+            dvt_pp_gov_group_num: 2,
+            dvt_pp_gov_group_den: 3,
+            dvt_hard_fork_num: 3,
+            dvt_hard_fork_den: 5,
+            dvt_no_confidence_num: 2,
+            dvt_no_confidence_den: 3,
+            dvt_committee_normal_num: 2,
+            dvt_committee_normal_den: 3,
+            dvt_committee_no_confidence_num: 3,
+            dvt_committee_no_confidence_den: 5,
+            dvt_constitution_num: 3,
+            dvt_constitution_den: 4,
+            dvt_treasury_withdrawal_num: 2,
+            dvt_treasury_withdrawal_den: 3,
+            pvt_motion_no_confidence_num: 51,
+            pvt_motion_no_confidence_den: 100,
+            pvt_committee_normal_num: 51,
+            pvt_committee_normal_den: 100,
+            pvt_committee_no_confidence_num: 51,
+            pvt_committee_no_confidence_den: 100,
+            pvt_hard_fork_num: 51,
+            pvt_hard_fork_den: 100,
+            pvt_pp_security_group_num: 51,
+            pvt_pp_security_group_den: 100,
+        };
+        let buf = encode(&QueryResult::ProtocolParams(Box::new(pp)));
+        let actual = hex::encode(&buf);
+
+        let expected = GOLDEN_PPARAMS_ENVELOPE_HEX;
+        assert_eq!(
+            actual, expected,
+            "Full ProtocolParams QueryResult envelope CBOR encoding changed!\n\
+             If this is intentional, update GOLDEN_PPARAMS_ENVELOPE_HEX.\n\
+             Actual:   {actual}\n\
+             Expected: {expected}"
+        );
+    }
+
+    // Golden reference hex values for CBOR encoding stability.
+    // These were captured from the current (known-correct) encoding implementation.
+    // Update ONLY after verifying the new encoding is correct and intentional.
+
+    /// Default ProtocolParamsSnapshot encoded as CBOR array(31).
+    const GOLDEN_DEFAULT_PPARAMS_HEX: &str = "981f182c1a00025ef51a0001600019400019044c1a001e84801a1dcd6500121901f4d81e82030ad81e82031903e8d81e82020a8209001a0a21fe801910d6a082d81e82190241192710d81e821902d11a00989680821a00d59f801b00000002540be400821a03b20b801b00000009502f900019138818960385d81e8218331864d81e8218331864d81e8218331864d81e8218331864d81e82183318648ad81e8218431864d81e8218431864d81e82183c1864d81e82184b1864d81e82183c1864d81e8218431864d81e8218431864d81e8218431864d81e8218431864d81e8218431864071892061b000000174876e8001a1dcd650014d81e820f01";
+
+    /// ProtocolParamsSnapshot with V1+V2 cost models (3 values each).
+    const GOLDEN_COST_MODELS_PPARAMS_HEX: &str = "981f182c1a00025ef51a0001600019400019044c1a001e84801a1dcd6500121901f4d81e82030ad81e82031903e8d81e82020a8209001a0a21fe801910d6a20083186418c819012c01831901901901f419025882d81e82190241192710d81e821902d11a00989680821a00d59f801b00000002540be400821a03b20b801b00000009502f900019138818960385d81e8218331864d81e8218331864d81e8218331864d81e8218331864d81e82183318648ad81e8218431864d81e8218431864d81e82183c1864d81e82184b1864d81e82183c1864d81e8218431864d81e8218431864d81e8218431864d81e8218431864d81e8218431864071892061b000000174876e8001a1dcd650014d81e820f01";
+
+    /// Full QueryResult::ProtocolParams with MsgResult envelope + HFC wrapper.
+    const GOLDEN_PPARAMS_ENVELOPE_HEX: &str = "820481981f182c1a00025ef51a0001000019400019044c1a001e84801a1dcd6500121896d81e820102d81e82031903e8d81e82020a820a001a1443fd001910d6a082d81e82190241192710d81e821902d11a00989680821a009896801b00000002540be400821a02faf0801b00000009502f900019138818960385d81e8218331864d81e8218331864d81e8218331864d81e8218331864d81e82183318648ad81e820203d81e820203d81e820305d81e820304d81e820305d81e820203d81e820203d81e820203d81e820203d81e820203071892061b000000174876e8001a1dcd650014d81e820f01";
 }

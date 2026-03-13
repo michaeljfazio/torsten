@@ -2080,7 +2080,9 @@ mod tests {
         for i in 0..50_000u32 {
             let mut bytes = [0u8; 28];
             bytes[..4].copy_from_slice(&i.to_be_bytes());
-            praos.opcert_counters.insert(Hash28::from_bytes(bytes), i as u64);
+            praos
+                .opcert_counters
+                .insert(Hash28::from_bytes(bytes), i as u64);
         }
         assert_eq!(praos.opcert_counters.len(), 50_000);
 
@@ -2094,9 +2096,7 @@ mod tests {
         // pool_id won't be in the map and map is at cap → entry should not be added
         let before = praos.opcert_counters.len();
         // Only insert if under cap or already present
-        if praos.opcert_counters.len() < 50_000
-            || praos.opcert_counters.contains_key(&pool_id)
-        {
+        if praos.opcert_counters.len() < 50_000 || praos.opcert_counters.contains_key(&pool_id) {
             praos.opcert_counters.insert(pool_id, 5);
         }
         assert_eq!(praos.opcert_counters.len(), before);

@@ -3426,6 +3426,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "futures",
+ "hex",
  "minicbor 0.25.1",
  "pallas-crypto 1.0.0-alpha.5",
  "pallas-network",

@@ -254,19 +254,17 @@ impl PipelinedPeerClient {
                     // (e.g., after machine sleep/hibernate). 90s is ~4.5x the
                     // expected mainnet block interval (20s average).
                     const AWAIT_REPLY_TIMEOUT: Duration = Duration::from_secs(90);
-                    let wait_response: Message<HeaderContent> = tokio::time::timeout(
-                        AWAIT_REPLY_TIMEOUT,
-                        self.cs_buf.recv_full_msg(),
-                    )
-                    .await
-                    .map_err(|_| {
-                        ClientError::ChainSync(
-                            "AwaitReply timeout: no block received in 90 seconds, \
+                    let wait_response: Message<HeaderContent> =
+                        tokio::time::timeout(AWAIT_REPLY_TIMEOUT, self.cs_buf.recv_full_msg())
+                            .await
+                            .map_err(|_| {
+                                ClientError::ChainSync(
+                                    "AwaitReply timeout: no block received in 90 seconds, \
                              connection may be stale"
-                                .into(),
-                        )
-                    })?
-                    .map_err(|e| ClientError::ChainSync(format!("recv must-reply: {e}")))?;
+                                        .into(),
+                                )
+                            })?
+                            .map_err(|e| ClientError::ChainSync(format!("recv must-reply: {e}")))?;
                     // This response consumed one more in-flight
                     // (the MustReply is implicit, not counted separately)
 
