@@ -24,7 +24,7 @@ struct Cli {
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Run the node
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Import a Mithril snapshot for fast initial sync
     MithrilImport(MithrilImportArgs),
 }
@@ -107,6 +107,30 @@ struct RunArgs {
     #[arg(long, default_value = "360")]
     snapshot_bulk_min_secs: u64,
 
+    /// Storage profile: high-memory (default) or low-memory
+    #[arg(long, default_value = "high-memory")]
+    storage_profile: String,
+
+    /// Override: block index type (in-memory or mmap)
+    #[arg(long)]
+    immutable_index_type: Option<String>,
+
+    /// Override: UTxO backend (in-memory or lsm)
+    #[arg(long)]
+    utxo_backend: Option<String>,
+
+    /// Override: LSM memtable size in MB
+    #[arg(long)]
+    utxo_memtable_size_mb: Option<u64>,
+
+    /// Override: LSM block cache size in MB
+    #[arg(long)]
+    utxo_block_cache_size_mb: Option<u64>,
+
+    /// Override: LSM bloom filter bits per key
+    #[arg(long)]
+    utxo_bloom_filter_bits: Option<u32>,
+
     // Block producer options (optional — enables block production mode)
     /// Path to the KES signing key file
     #[arg(long)]
@@ -173,13 +197,13 @@ async fn main() -> Result<()> {
 
     // Extract log args and initialize logging before any work
     let log_args = match &cli.command {
-        Command::Run(args) => &args.log,
-        Command::MithrilImport(args) => &args.log,
+        Command::Run(ref args) => &args.log,
+        Command::MithrilImport(ref args) => &args.log,
     };
     let _log_guard = logging::init(&build_logging_opts(log_args)?)?;
 
     match cli.command {
-        Command::Run(args) => run_node(args).await,
+        Command::Run(args) => run_node(*args).await,
         Command::MithrilImport(args) => run_mithril_import(args).await,
     }
 }
@@ -242,6 +266,29 @@ async fn run_node(args: RunArgs) -> Result<()> {
         "Topology",
     );
 
+    // Resolve storage configuration: profile < config file < CLI
+    let storage_profile: torsten_storage::StorageProfile = args
+        .storage_profile
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!(e))?;
+    let storage_config = torsten_storage::config::resolve_storage_config(
+        storage_profile,
+        node_config.storage.as_ref(),
+        args.immutable_index_type.as_deref(),
+        args.utxo_backend.as_deref(),
+        args.utxo_memtable_size_mb,
+        args.utxo_block_cache_size_mb,
+        args.utxo_bloom_filter_bits,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    info!(
+        profile = %storage_profile,
+        index = ?storage_config.immutable.index_type,
+        utxo = ?storage_config.utxo.backend,
+        "Storage",
+    );
+
     // Initialize the node
     let mut node = node::Node::new(node::NodeArgs {
         config: node_config,
@@ -261,6 +308,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         snapshot_max_retained: args.snapshot_max_retained,
         snapshot_bulk_min_blocks: args.snapshot_bulk_min_blocks,
         snapshot_bulk_min_secs: args.snapshot_bulk_min_secs,
+        storage_config,
     })?;
 
     info!("");

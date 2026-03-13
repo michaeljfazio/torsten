@@ -94,6 +94,34 @@ impl UtxoStore {
         })
     }
 
+    /// Open or create a UTxO store with custom LSM configuration.
+    ///
+    /// `memtable_size_mb`, `block_cache_size_mb`, and `bloom_filter_bits_per_key`
+    /// override the defaults from `utxo_lsm_config()`.
+    pub fn open_with_config(
+        path: impl AsRef<Path>,
+        memtable_size_mb: u64,
+        block_cache_size_mb: u64,
+        bloom_filter_bits_per_key: u32,
+    ) -> Result<Self, UtxoStoreError> {
+        let path = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&path)?;
+        let config = LsmConfig {
+            memtable_size: memtable_size_mb as usize * 1024 * 1024,
+            block_cache_size: block_cache_size_mb as usize * 1024 * 1024,
+            bloom_filter_bits_per_key: bloom_filter_bits_per_key as usize,
+            ..LsmConfig::default()
+        };
+        let tree = LsmTree::open(&path, config)?;
+        Ok(UtxoStore {
+            tree,
+            path,
+            count: 0,
+            address_index: HashMap::new(),
+            indexing_enabled: true,
+        })
+    }
+
     /// Open a UTxO store from a persistent snapshot.
     pub fn open_from_snapshot(
         path: impl AsRef<Path>,
@@ -589,5 +617,39 @@ mod tests {
         let decoded = decode_key(&key);
         assert_eq!(decoded.transaction_id, input.transaction_id);
         assert_eq!(decoded.index, input.index);
+    }
+
+    #[test]
+    fn test_open_with_custom_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let utxo_path = dir.path().join("utxo");
+
+        // Open with custom LSM config
+        let mut store = UtxoStore::open_with_config(&utxo_path, 64, 128, 10).unwrap();
+
+        // Basic operations should work
+        store.insert(make_input(1, 0), make_output(5_000_000));
+        store.insert(make_input(2, 0), make_output(3_000_000));
+        assert_eq!(store.len(), 2);
+        assert!(store.contains(&make_input(1, 0)));
+
+        let found = store.lookup(&make_input(1, 0)).unwrap();
+        assert_eq!(found.value.coin.0, 5_000_000);
+
+        let removed = store.remove(&make_input(1, 0)).unwrap();
+        assert_eq!(removed.value.coin.0, 5_000_000);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn test_open_with_small_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let utxo_path = dir.path().join("utxo");
+
+        // Small config (low-memory profile values)
+        let mut store = UtxoStore::open_with_config(&utxo_path, 32, 64, 5).unwrap();
+        store.insert(make_input(1, 0), make_output(1_000_000));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.total_lovelace(), Lovelace(1_000_000));
     }
 }

@@ -15,7 +15,9 @@
 //! `io-uring` feature for kernel-bypassed async I/O via `io_uring`,
 //! which improves throughput on NVMe storage for large sequential scans.
 
+use crate::block_index::{BlockIndex, BlockLocation, InMemoryBlockIndex};
 use crate::chunk_reader::{self, ChunkReaderTrait};
+use crate::config::ImmutableConfig;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,14 +43,6 @@ pub enum ImmutableDBError {
 fn read_be_u64(data: &[u8]) -> Option<u64> {
     let bytes: [u8; 8] = data.try_into().ok()?;
     Some(u64::from_be_bytes(bytes))
-}
-
-/// Location of a block within a chunk file.
-#[derive(Debug, Clone)]
-struct BlockLocation {
-    chunk_num: u64,
-    block_offset: u64,
-    block_end: u64,
 }
 
 /// Per-chunk metadata for slot-based lookups.
@@ -100,7 +94,7 @@ impl SecondaryEntry {
 pub struct ImmutableDB {
     dir: PathBuf,
     chunks: Vec<ChunkMeta>,
-    hash_index: HashMap<Hash32, BlockLocation>,
+    block_index: BlockIndex,
     total_blocks: u64,
     tip_slot: u64,
     tip_hash: Hash32,
@@ -110,13 +104,21 @@ pub struct ImmutableDB {
 }
 
 impl ImmutableDB {
-    /// Open an ImmutableDB from a directory of chunk files.
+    /// Open an ImmutableDB from a directory of chunk files using default (in-memory) config.
     ///
     /// Scans all `.chunk` and `.secondary` files and builds an in-memory
     /// hash index for O(1) block lookups. For preview (~4M blocks) this
     /// uses ~300 MB of memory; mainnet will need an on-disk index.
     pub fn open(dir: &Path) -> Result<Self, ImmutableDBError> {
-        debug!(dir = %dir.display(), "Opening ImmutableDB");
+        Self::open_with_config(dir, &ImmutableConfig::default())
+    }
+
+    /// Open an ImmutableDB from a directory of chunk files with the given config.
+    pub fn open_with_config(
+        dir: &Path,
+        config: &ImmutableConfig,
+    ) -> Result<Self, ImmutableDBError> {
+        debug!(dir = %dir.display(), index_type = ?config.index_type, "Opening ImmutableDB");
 
         let mut chunk_nums = Vec::new();
         for entry in fs::read_dir(dir)? {
@@ -133,10 +135,11 @@ impl ImmutableDB {
 
         if chunk_nums.is_empty() {
             debug!("ImmutableDB: no chunk files found");
+            let block_index = BlockIndex::new(config, dir)?;
             return Ok(ImmutableDB {
                 dir: dir.to_path_buf(),
                 chunks: Vec::new(),
-                hash_index: HashMap::new(),
+                block_index,
                 total_blocks: 0,
                 tip_slot: 0,
                 tip_hash: Hash32::ZERO,
@@ -145,11 +148,15 @@ impl ImmutableDB {
             });
         }
 
-        let mut hash_index = HashMap::new();
+        // First pass: count total entries for pre-allocation
+        let mut total_entry_count = 0usize;
         let mut chunks = Vec::with_capacity(chunk_nums.len());
         let mut total_blocks = 0u64;
         let mut tip_slot = 0u64;
         let mut tip_hash = Hash32::ZERO;
+
+        // Collect all (hash, location) pairs for building the index
+        let mut all_entries: Vec<(Hash32, BlockLocation)> = Vec::new();
 
         for &chunk_num in &chunk_nums {
             let secondary_path = dir.join(format!("{chunk_num:05}.secondary"));
@@ -229,14 +236,14 @@ impl ImmutableDB {
                 };
 
                 let hash = Hash32::from_bytes(header_hash);
-                hash_index.insert(
+                all_entries.push((
                     hash,
                     BlockLocation {
                         chunk_num,
                         block_offset,
                         block_end,
                     },
-                );
+                ));
 
                 if slot < first_slot {
                     first_slot = slot;
@@ -256,13 +263,56 @@ impl ImmutableDB {
                 last_slot,
             });
             total_blocks += entry_count as u64;
+            total_entry_count += entry_count;
         }
+
+        // Build the block index from collected entries
+        let block_index = match config.index_type {
+            crate::config::BlockIndexType::InMemory => {
+                let mut idx = InMemoryBlockIndex::with_capacity(total_entry_count);
+                for (hash, loc) in &all_entries {
+                    idx.insert(*hash, *loc);
+                }
+                BlockIndex::InMemory(idx)
+            }
+            crate::config::BlockIndexType::Mmap => {
+                // Try to reuse existing mmap file if count matches
+                let mmap_path = dir.join("hash_index.dat");
+                let reuse = if mmap_path.exists() {
+                    match crate::block_index::MmapBlockIndex::new(dir, config.mmap_load_factor) {
+                        Ok(idx) if idx.count_matches(total_blocks) => {
+                            debug!("Reusing existing mmap block index");
+                            Some(idx)
+                        }
+                        Ok(_) => {
+                            debug!("Mmap block index count mismatch, rebuilding");
+                            None
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
+                match reuse {
+                    Some(idx) => BlockIndex::Mmap(idx),
+                    None => {
+                        let idx = crate::block_index::MmapBlockIndex::build_from_entries(
+                            dir,
+                            &all_entries,
+                            config.mmap_load_factor,
+                        )?;
+                        BlockIndex::Mmap(idx)
+                    }
+                }
+            }
+        };
 
         debug!(
             chunks = chunks.len(),
             total_blocks,
             tip_slot,
-            hash_index_entries = hash_index.len(),
+            index_entries = block_index.len(),
             "ImmutableDB opened"
         );
 
@@ -274,7 +324,7 @@ impl ImmutableDB {
         Ok(ImmutableDB {
             dir: dir.to_path_buf(),
             chunks,
-            hash_index,
+            block_index,
             total_blocks,
             tip_slot,
             tip_hash,
@@ -288,16 +338,16 @@ impl ImmutableDB {
         // Check active chunk's pending blocks first (not yet on disk via memmap)
         if let Some(ref active) = self.active_chunk {
             if let Some(cbor) = active.pending_blocks.get(hash) {
-                return Some(cbor.clone());
+                return Some(Vec::clone(cbor));
             }
         }
-        let loc = self.hash_index.get(hash)?;
-        self.read_block_at(loc)
+        let loc = self.block_index.lookup(hash)?;
+        self.read_block_at(&loc)
     }
 
     /// Check if a block exists by header hash.
     pub fn has_block(&self, hash: &Hash32) -> bool {
-        self.hash_index.contains_key(hash)
+        self.block_index.contains(hash)
     }
 
     /// Total number of blocks across all chunk files.
@@ -516,7 +566,15 @@ impl ImmutableDB {
     /// Scans existing chunks read-only (like `open`), then prepares the
     /// next chunk number for writing.
     pub fn open_for_writing(dir: &Path) -> Result<Self, ImmutableDBError> {
-        let mut db = Self::open(dir)?;
+        Self::open_for_writing_with_config(dir, &ImmutableConfig::default())
+    }
+
+    /// Open an ImmutableDB for writing with the given config.
+    pub fn open_for_writing_with_config(
+        dir: &Path,
+        config: &ImmutableConfig,
+    ) -> Result<Self, ImmutableDBError> {
+        let mut db = Self::open_with_config(dir, config)?;
 
         // Determine next chunk number
         let next_chunk = db.chunks.last().map_or(0, |c| c.chunk_num + 1);
@@ -571,9 +629,9 @@ impl ImmutableDB {
         });
         active.pending_blocks.insert(*hash, cbor.to_vec());
 
-        // Update in-memory index for immediate reads
+        // Update index for immediate reads
         let block_end = active.current_offset;
-        self.hash_index.insert(
+        self.block_index.insert(
             *hash,
             BlockLocation {
                 chunk_num: active.chunk_num,
@@ -688,6 +746,9 @@ impl ImmutableDB {
         if self.tip_slot > 0 {
             Self::write_tip_meta(&self.dir, self.tip_slot, &self.tip_hash, self.tip_block_no)?;
         }
+
+        // Persist block index (mmap flush)
+        self.block_index.persist()?;
 
         debug!(
             chunk = active.chunk_num,
@@ -1128,5 +1189,154 @@ mod tests {
 
         let blocks = db.get_blocks_in_slot_range(5, 25);
         assert_eq!(blocks.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mmap block index integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_open_with_mmap_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = [42u8; 32];
+        create_test_chunk(dir.path(), 0, &[(b"block_data", hash, 100)]);
+
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let db = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db.total_blocks(), 1);
+        assert!(db.has_block(&Hash32::from_bytes(hash)));
+        assert_eq!(
+            db.get_block(&Hash32::from_bytes(hash)).unwrap(),
+            b"block_data"
+        );
+        // hash_index.dat should be created
+        assert!(dir.path().join("hash_index.dat").exists());
+    }
+
+    #[test]
+    fn test_mmap_multiple_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_chunk(
+            dir.path(),
+            0,
+            &[(b"block_a", [1u8; 32], 10), (b"block_b", [2u8; 32], 20)],
+        );
+        create_test_chunk(dir.path(), 1, &[(b"block_c", [3u8; 32], 30)]);
+
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let db = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db.total_blocks(), 3);
+        assert_eq!(db.tip_slot(), 30);
+        assert!(db.has_block(&Hash32::from_bytes([1u8; 32])));
+        assert!(db.has_block(&Hash32::from_bytes([3u8; 32])));
+    }
+
+    #[test]
+    fn test_mmap_reuses_existing_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+
+        create_test_chunk(dir.path(), 0, &[(b"b1", [1u8; 32], 10)]);
+
+        // First open — builds hash_index.dat
+        let db1 = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db1.total_blocks(), 1);
+        drop(db1);
+
+        // Second open — should reuse existing hash_index.dat (count matches)
+        let db2 = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db2.total_blocks(), 1);
+        assert!(db2.has_block(&Hash32::from_bytes([1u8; 32])));
+    }
+
+    #[test]
+    fn test_mmap_rebuild_when_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+
+        create_test_chunk(dir.path(), 0, &[(b"b1", [1u8; 32], 10)]);
+
+        // First open — builds hash_index.dat
+        let db1 = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        drop(db1);
+
+        // Add another chunk — now the index is stale
+        create_test_chunk(dir.path(), 1, &[(b"b2", [2u8; 32], 20)]);
+
+        // Reopen — should rebuild since count changed
+        let db2 = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db2.total_blocks(), 2);
+        assert!(db2.has_block(&Hash32::from_bytes([1u8; 32])));
+        assert!(db2.has_block(&Hash32::from_bytes([2u8; 32])));
+    }
+
+    #[test]
+    fn test_open_empty_dir_with_mmap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let db = ImmutableDB::open_with_config(dir.path(), &config).unwrap();
+        assert_eq!(db.total_blocks(), 0);
+        assert_eq!(db.tip_slot(), 0);
+    }
+
+    #[test]
+    fn test_open_for_writing_with_mmap_config() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_chunk(dir.path(), 0, &[(b"b1", [1u8; 32], 10)]);
+
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let mut db = ImmutableDB::open_for_writing_with_config(dir.path(), &config).unwrap();
+        assert!(db.is_writable());
+        assert_eq!(db.total_blocks(), 1);
+
+        // Append a block
+        let new_hash = Hash32::from_bytes([99u8; 32]);
+        db.append_block(20, 2, &new_hash, b"new_block").unwrap();
+        assert!(db.has_block(&new_hash));
+        assert_eq!(db.get_block(&new_hash).unwrap(), b"new_block");
+        assert_eq!(db.total_blocks(), 2);
+    }
+
+    #[test]
+    fn test_default_config_matches_original_behavior() {
+        // Default config should produce identical results to open()
+        let dir = tempfile::tempdir().unwrap();
+        create_test_chunk(
+            dir.path(),
+            0,
+            &[(b"b1", [1u8; 32], 10), (b"b2", [2u8; 32], 20)],
+        );
+
+        let db_default = ImmutableDB::open(dir.path()).unwrap();
+        let db_config =
+            ImmutableDB::open_with_config(dir.path(), &ImmutableConfig::default()).unwrap();
+
+        assert_eq!(db_default.total_blocks(), db_config.total_blocks());
+        assert_eq!(db_default.tip_slot(), db_config.tip_slot());
+        assert_eq!(db_default.tip_hash(), db_config.tip_hash());
     }
 }

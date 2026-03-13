@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 use torsten_primitives::network::NetworkId;
+use torsten_storage::StorageConfigJson;
 
 /// Node configuration (compatible with cardano-node config format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,10 @@ pub struct NodeConfig {
     /// Minimum severity for logging
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
+
+    /// Storage configuration (optional overrides for storage profiles)
+    #[serde(default)]
+    pub storage: Option<StorageConfigJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -251,6 +256,7 @@ impl Default for NodeConfig {
             target_number_of_known_peers: 100,
             trace_options: TraceOptions::default(),
             min_severity: "Info".to_string(),
+            storage: None,
         }
     }
 }

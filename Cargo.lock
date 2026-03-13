@@ -3387,6 +3387,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "cardano-lsm",
+ "criterion",
  "minicbor 0.25.1",
  "num-bigint",
  "num-rational",

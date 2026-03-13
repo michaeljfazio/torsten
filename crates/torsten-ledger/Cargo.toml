@@ -24,3 +24,9 @@ tempfile = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "utxo_bench"
+harness = false

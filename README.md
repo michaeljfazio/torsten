@@ -269,6 +269,42 @@ cargo fmt --all -- --check
 
 Zero-warning policy enforced — all code must compile cleanly with clippy and pass formatting checks.
 
+### Running Benchmarks
+
+Torsten includes Criterion-based benchmarks for the storage and ledger subsystems:
+
+```bash
+# Storage benchmarks (ChainDB, ImmutableDB, BlockIndex, scaling)
+cargo bench -p torsten-storage --bench storage_bench
+
+# UTxO store benchmarks (insert, lookup, apply_tx, LSM configs, scaling)
+cargo bench -p torsten-ledger --bench utxo_bench
+
+# Run a specific benchmark group
+cargo bench -p torsten-storage --bench storage_bench -- "scaling/"
+cargo bench -p torsten-ledger --bench utxo_bench -- "utxo_scaling/"
+```
+
+Results are saved to `target/criterion/` with HTML reports at `target/criterion/report/index.html`. Baseline results are tracked in `benches/results/`.
+
+### Storage Profiles
+
+Torsten supports configurable storage profiles via `--storage-profile`:
+
+```bash
+# Default: mmap block index, 128MB memtable, 256MB cache
+./target/release/torsten-node run --storage-profile high-memory ...
+
+# Constrained environments: mmap, 64MB memtable, 128MB cache
+./target/release/torsten-node run --storage-profile low-memory ...
+
+# Individual parameter overrides
+./target/release/torsten-node run \
+  --storage-profile high-memory \
+  --utxo-memtable-size-mb 256 \
+  --utxo-block-cache-size-mb 512 ...
+```
+
 ## License
 
 MIT

@@ -15,6 +15,7 @@ use torsten_primitives::hash::{BlockHeaderHash, Hash32};
 use torsten_primitives::time::{BlockNo, SlotNo};
 use tracing::{debug, trace, warn};
 
+use crate::config::ImmutableConfig;
 use crate::immutable_db::ImmutableDB;
 use crate::volatile_db::VolatileDB;
 
@@ -57,19 +58,27 @@ pub struct ChainDB {
 }
 
 impl ChainDB {
-    /// Open or create a ChainDB at the given path.
+    /// Open or create a ChainDB at the given path using default (in-memory) config.
     ///
     /// Opens ImmutableDB from `<path>/immutable/` for both reading existing
     /// chunk files and writing new ones. VolatileDB starts empty (re-synced
     /// from peers on restart).
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
-        debug!(path = %db_path.display(), k = SECURITY_PARAM_K, "Opening ChainDB");
+        Self::open_with_config(db_path, &ImmutableConfig::default())
+    }
+
+    /// Open or create a ChainDB at the given path with the given ImmutableDB config.
+    pub fn open_with_config(
+        db_path: &Path,
+        config: &ImmutableConfig,
+    ) -> Result<Self, ChainDBError> {
+        debug!(path = %db_path.display(), k = SECURITY_PARAM_K, index_type = ?config.index_type, "Opening ChainDB");
         std::fs::create_dir_all(db_path)?;
 
         let immutable_dir = db_path.join("immutable");
         std::fs::create_dir_all(&immutable_dir)?;
 
-        let immutable = ImmutableDB::open_for_writing(&immutable_dir)?;
+        let immutable = ImmutableDB::open_for_writing_with_config(&immutable_dir, config)?;
 
         let immutable_tip = if immutable.total_blocks() > 0 {
             Some((
@@ -990,5 +999,69 @@ mod tests {
         assert_eq!(slot, SlotNo(500));
         assert_eq!(h, hash);
         assert_eq!(block_no, BlockNo(100));
+    }
+
+    #[test]
+    fn test_open_with_mmap_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let mut db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+
+        let hash = make_hash(1);
+        let prev = make_hash(0);
+        db.add_block(hash, SlotNo(100), BlockNo(50), prev, b"data".to_vec())
+            .unwrap();
+
+        assert!(db.has_block(&hash));
+        assert_eq!(
+            db.get_block(&hash).unwrap().as_deref(),
+            Some(b"data".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_open_with_config_persist_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ImmutableConfig {
+            index_type: crate::config::BlockIndexType::Mmap,
+            mmap_load_factor: 0.7,
+            mmap_initial_capacity: 0,
+        };
+        let hash = make_hash(1);
+
+        {
+            let mut db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+            db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1")])
+                .unwrap();
+            db.persist().unwrap();
+        }
+
+        // Reopen with mmap config — should find the block
+        let db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+        assert!(db.has_block(&hash));
+        assert_eq!(db.tip_slot(), SlotNo(100));
+    }
+
+    #[test]
+    fn test_default_config_backward_compatible() {
+        // open() and open_with_config(default) should behave identically
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut db = ChainDB::open(dir.path()).unwrap();
+        db.add_block(
+            make_hash(1),
+            SlotNo(10),
+            BlockNo(1),
+            make_hash(0),
+            b"b1".to_vec(),
+        )
+        .unwrap();
+
+        assert!(db.has_block(&make_hash(1)));
+        assert_eq!(db.tip_slot(), SlotNo(10));
     }
 }

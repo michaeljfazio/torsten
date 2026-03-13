@@ -52,6 +52,8 @@ pub struct NodeArgs {
     pub snapshot_bulk_min_blocks: u64,
     /// Minimum seconds between bulk-sync snapshots
     pub snapshot_bulk_min_secs: u64,
+    /// Storage configuration (block index type, UTxO backend, LSM tuning)
+    pub storage_config: torsten_storage::StorageConfig,
 }
 
 /// Provides block data from ChainDB for the N2N server
@@ -664,7 +666,10 @@ pub struct Node {
 
 impl Node {
     pub fn new(args: NodeArgs) -> Result<Self> {
-        let chain_db = Arc::new(RwLock::new(ChainDB::open(&args.database_path)?));
+        let chain_db = Arc::new(RwLock::new(ChainDB::open_with_config(
+            &args.database_path,
+            &args.storage_config.immutable,
+        )?));
 
         let mut protocol_params = ProtocolParameters::mainnet_defaults();
 
@@ -903,6 +908,38 @@ impl Node {
                 conway_committee_members.len()
             );
         }
+
+        // Wire up on-disk UTxO store if LSM backend is configured
+        if matches!(
+            args.storage_config.utxo.backend,
+            torsten_storage::UtxoBackend::Lsm
+        ) {
+            let utxo_path = args.database_path.join("utxo-store");
+            let utxo_cfg = &args.storage_config.utxo;
+            match torsten_ledger::utxo_store::UtxoStore::open_with_config(
+                &utxo_path,
+                utxo_cfg.memtable_size_mb,
+                utxo_cfg.block_cache_size_mb,
+                utxo_cfg.bloom_filter_bits_per_key,
+            ) {
+                Ok(store) => {
+                    info!(
+                        path = %utxo_path.display(),
+                        memtable_mb = utxo_cfg.memtable_size_mb,
+                        cache_mb = utxo_cfg.block_cache_size_mb,
+                        "UTxO store attached (LSM)"
+                    );
+                    ledger.attach_utxo_store(store);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to open UTxO store at {}: {e}, continuing with in-memory UTxOs",
+                        utxo_path.display()
+                    );
+                }
+            }
+        }
+
         let ledger_state = Arc::new(RwLock::new(ledger));
 
         let consensus = if let Some(ref genesis) = shelley_genesis {
