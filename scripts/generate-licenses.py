@@ -60,7 +60,7 @@ def main():
         "cardano-lsm", "uplc",
         "tokio", "hyper", "reqwest", "clap",
         "serde", "serde_json", "bincode",
-        "blake2", "sha2", "ed25519-dalek", "curve25519-dalek", "blst", "k256",
+        "blake2b_simd", "sha2", "ed25519-dalek", "curve25519-dalek", "blst", "k256",
         "minicbor",
         "tracing", "tracing-subscriber",
         "dashmap", "crossbeam",

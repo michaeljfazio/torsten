@@ -166,11 +166,13 @@ RUST_LOG=trace torsten-node run ...
 
 ### Log to file
 
-Redirect stderr to a file:
+Use the built-in file logging:
 
 ```bash
-torsten-node run ... 2>&1 | tee node.log
+torsten-node run --log-output file --log-dir /var/log/torsten ...
 ```
+
+Log files are rotated daily by default. See [Logging](../running/logging.md) for rotation options and multi-target output.
 
 ## SIGHUP Topology Reload
 

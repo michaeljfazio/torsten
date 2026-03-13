@@ -23,7 +23,7 @@ The Cardano ecosystem benefits from client diversity. Running multiple independe
 - **Pipelined multi-peer sync** -- Header collection from a primary peer with parallel block fetching from multiple peers.
 - **Plutus script execution** -- Plutus V1/V2/V3 evaluation via the uplc CEK machine.
 - **Node-to-Node (N2N) protocol** -- Full Ouroboros mini-protocol suite: ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing.
-- **Node-to-Client (N2C) protocol** -- Unix domain socket server with LocalStateQuery, LocalTxSubmission, and LocalTxMonitor.
+- **Node-to-Client (N2C) protocol** -- Unix domain socket server with LocalChainSync, LocalStateQuery, LocalTxSubmission, and LocalTxMonitor.
 - **cardano-cli compatible CLI** -- Key generation, transaction building, signing, submission, queries, and governance commands.
 - **Prometheus metrics** -- Real-time node metrics on port 12798.
 - **P2P networking** -- Peer manager with cold/warm/hot lifecycle, DNS multi-resolution, ledger-based peer discovery, and inbound rate limiting.

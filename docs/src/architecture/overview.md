@@ -63,7 +63,7 @@ Other key dependencies:
 - **cardano-lsm** -- Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)
 - **minicbor** -- CBOR encoding for custom types
 - **ed25519-dalek** -- Ed25519 signatures
-- **blake2** -- Blake2b hashing
+- **blake2b_simd** -- SIMD-accelerated Blake2b hashing
 - **uplc** -- Plutus CEK machine for script evaluation
 - **clap** -- CLI argument parsing
 - **tracing** -- Structured logging
