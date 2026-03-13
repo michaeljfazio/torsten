@@ -52,24 +52,48 @@ torsten_peers_connected 8
 
 ## Health Endpoint
 
-The metrics server also exposes a `/health` endpoint for load balancer and Kubernetes liveness/readiness probes:
+The metrics server exposes a `/health` endpoint for monitoring node status:
 
 ```
 GET http://localhost:12798/health
 ```
 
-Returns JSON:
+Returns JSON with three possible statuses:
+- **healthy**: Sync progress >= 99.9%
+- **syncing**: Actively catching up to chain tip
+- **stalled**: No blocks received for > 5 minutes AND sync < 99%
 
 ```json
 {
-  "status": "ok",
+  "status": "healthy",
   "uptime_seconds": 3421,
   "slot": 142857392,
   "block": 11283746,
   "epoch": 512,
-  "sync_progress": 95.42,
-  "peers": 8
+  "sync_progress": 99.95,
+  "peers": 8,
+  "last_block_received": "2026-03-14T12:34:56.789Z"
 }
+```
+
+## Readiness Endpoint
+
+For Kubernetes readiness probes:
+
+```
+GET http://localhost:12798/ready
+```
+
+Returns **200 OK** when `sync_progress >= 99.9%`, **503 Service Unavailable** otherwise:
+
+```json
+{"ready": true}
+```
+
+or:
+
+```json
+{"ready": false, "sync_progress": 75.42}
 ```
 
 ## Available Metrics
@@ -118,6 +142,10 @@ Returns JSON:
 | `torsten_disk_available_bytes` | Available disk space on the database volume |
 | `torsten_n2n_connections_active` | Currently active N2N connections |
 | `torsten_n2c_connections_active` | Currently active N2C connections |
+| `torsten_tip_age_seconds` | Seconds since the tip slot time |
+| `torsten_chainsync_idle_seconds` | Seconds since last ChainSync RollForward event |
+| `torsten_ledger_replay_duration_seconds` | Duration of last ledger replay in seconds |
+| `torsten_mem_resident_bytes` | Resident set size (RSS) in bytes |
 
 ### Histograms
 
