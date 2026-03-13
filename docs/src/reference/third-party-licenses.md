@@ -3,14 +3,14 @@
 Torsten depends on a number of open-source Rust crates. This page documents
 all third-party dependencies and their license terms.
 
-**Total dependencies:** 392
+**Total dependencies:** 393
 
 ## License Summary
 
 | License | Count |
 |---------|-------|
 | MIT OR Apache-2.0 | 205 |
-| MIT | 70 |
+| MIT | 71 |
 | Apache-2.0 OR MIT | 33 |
 | Unicode-3.0 | 18 |
 | Apache-2.0 | 17 |
@@ -59,7 +59,7 @@ backe... |
 | [serde](https://github.com/serde-rs/serde) | 1.0.228 | MIT OR Apache-2.0 | A generic serialization/deserialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.0.149 | MIT OR Apache-2.0 | A JSON serialization file format |
 | [bincode](https://github.com/servo/bincode) | 1.3.3 | MIT | A binary serialization / deserialization strategy that uses Serde for transfo... |
-| [blake2](https://github.com/RustCrypto/hashes) | 0.10.6 | MIT OR Apache-2.0 | BLAKE2 hash functions |
+| [blake2b_simd](https://github.com/oconnor663/blake2_simd) | 1.0.4 | MIT | a pure Rust BLAKE2b implementation with dynamic SIMD |
 | [sha2](https://github.com/RustCrypto/hashes) | 0.9.9 | MIT OR Apache-2.0 | Pure Rust implementation of the SHA-2 hash function family
 including SHA-224,... |
 | [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek) | 2.2.0 | BSD-3-Clause | Fast and efficient ed25519 EdDSA key generations, signing, and verification i... |
@@ -120,6 +120,7 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [bitflags](https://github.com/bitflags/bitflags) | 2.11.0 | MIT OR Apache-2.0 |
 | [bitvec](https://github.com/bitvecto-rs/bitvec) | 1.0.1 | MIT |
 | [blake2](https://github.com/RustCrypto/hashes) | 0.10.6 | MIT OR Apache-2.0 |
+| [blake2b_simd](https://github.com/oconnor663/blake2_simd) | 1.0.4 | MIT |
 | [blake3](https://github.com/BLAKE3-team/BLAKE3) | 1.8.3 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | [block-buffer](https://github.com/RustCrypto/utils) | 0.9.0 | MIT OR Apache-2.0 |
 | [blst](https://github.com/supranational/blst) | 0.3.16 | Apache-2.0 |

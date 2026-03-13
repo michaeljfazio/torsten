@@ -35,6 +35,12 @@ torsten-node run [OPTIONS]
 | `--snapshot-max-retained` | `2` | Maximum number of ledger snapshots to retain on disk |
 | `--snapshot-bulk-min-blocks` | `50000` | Minimum blocks between bulk-sync snapshots |
 | `--snapshot-bulk-min-secs` | `360` | Minimum seconds between bulk-sync snapshots |
+| `--storage-profile` | `high-memory` | Storage profile: `ultra-memory` (32GB), `high-memory` (16GB), `low-memory` (8GB), or `minimal` (4GB) |
+| `--immutable-index-type` | | Override block index type: `in-memory` or `mmap` |
+| `--utxo-backend` | | Override UTxO backend: `in-memory` or `lsm` |
+| `--utxo-memtable-size-mb` | | Override LSM memtable size in MB |
+| `--utxo-block-cache-size-mb` | | Override LSM block cache size in MB |
+| `--utxo-bloom-filter-bits` | | Override LSM bloom filter bits per key |
 
 ### Relay Node (default)
 
