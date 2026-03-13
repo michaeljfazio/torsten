@@ -14,8 +14,9 @@ pub(crate) use governance::{
 #[doc(hidden)]
 pub use rewards::Rat;
 
-use crate::plutus::SlotConfig;
+use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoSet;
+use crate::validation::{validate_transaction, ValidationError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -39,6 +40,18 @@ pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
 /// Maximum allowed snapshot file size (10 GiB).
 /// Prevents OOM from loading maliciously crafted or corrupted snapshot files.
 pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024 * 1024;
+
+/// Controls whether `apply_block()` re-evaluates Plutus scripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockValidationMode {
+    /// Full Phase-1 + Phase-2 Plutus evaluation for new network blocks.
+    /// Rejects the block if the `is_valid` flag doesn't match the actual
+    /// script evaluation result (`ValidationTagMismatch`).
+    ValidateAll,
+    /// Trust the block producer's `is_valid` flag without re-evaluating scripts.
+    /// Used for ImmutableDB replay, Mithril import, rollback replay, and self-forged blocks.
+    ApplyOnly,
+}
 
 fn default_update_quorum() -> u64 {
     5 // Mainnet default: 5 out of 7 genesis delegates
@@ -484,8 +497,16 @@ impl LedgerState {
         );
     }
 
-    /// Apply a block to the ledger state
-    pub fn apply_block(&mut self, block: &Block) -> Result<(), LedgerError> {
+    /// Apply a block to the ledger state.
+    ///
+    /// When `mode` is `ValidateAll`, each transaction is independently validated
+    /// (Phase-1 + Phase-2 Plutus evaluation) and the result is compared against
+    /// the block producer's `is_valid` flag. A mismatch rejects the block.
+    pub fn apply_block(
+        &mut self,
+        block: &Block,
+        mode: BlockValidationMode,
+    ) -> Result<(), LedgerError> {
         trace!(
             slot = block.slot().0,
             block_no = block.block_number().0,
@@ -564,6 +585,13 @@ impl LedgerState {
             );
         }
 
+        // Pre-compute cost_models CBOR once per block (doesn't change within a block)
+        let cost_models_cbor = if mode == BlockValidationMode::ValidateAll {
+            self.protocol_params.cost_models.to_cbor()
+        } else {
+            None
+        };
+
         // Track processed tx hashes to skip duplicates within a block
         let mut processed_tx_hashes =
             std::collections::HashSet::with_capacity(block.transactions.len());
@@ -578,6 +606,69 @@ impl LedgerState {
                 );
                 continue;
             }
+            // Phase-1 + Phase-2 validation when ValidateAll mode is active.
+            // Verifies the block producer's is_valid flag matches actual evaluation.
+            if mode == BlockValidationMode::ValidateAll {
+                let has_redeemers = !tx.witness_set.redeemers.is_empty();
+
+                if tx.is_valid {
+                    // Producer claims tx is valid — verify with full validation.
+                    // Use tx raw_cbor size as tx_size (approximate, sufficient for validation).
+                    let tx_size = tx.raw_cbor.as_ref().map_or(0, |c| c.len() as u64);
+                    let result = validate_transaction(
+                        tx,
+                        &self.utxo_set,
+                        &self.protocol_params,
+                        block.slot().0,
+                        tx_size,
+                        Some(&self.slot_config),
+                    );
+                    if let Err(errors) = result {
+                        // Distinguish Phase-1 failures from Phase-2 (script) failures
+                        let has_script_failure = errors
+                            .iter()
+                            .any(|e| matches!(e, ValidationError::ScriptFailed(_)));
+                        if has_script_failure {
+                            // Producer said valid but scripts fail → ValidationTagMismatch
+                            return Err(LedgerError::ValidationTagMismatch {
+                                tx_hash: tx.hash.to_hex(),
+                                block_flag: true,
+                                eval_result: false,
+                            });
+                        }
+                        // Phase-1 failure — block is invalid
+                        let err_str: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+                        return Err(LedgerError::BlockTxValidationFailed {
+                            slot: block.slot().0,
+                            tx_hash: tx.hash.to_hex(),
+                            errors: err_str.join("; "),
+                        });
+                    }
+                } else if has_redeemers {
+                    // Producer claims tx is invalid (is_valid=false) with scripts present.
+                    // Verify scripts actually fail; if they pass, producer is stealing collateral.
+                    let max_ex = (
+                        self.protocol_params.max_tx_ex_units.mem,
+                        self.protocol_params.max_tx_ex_units.steps,
+                    );
+                    let eval_result = evaluate_plutus_scripts(
+                        tx,
+                        &self.utxo_set,
+                        cost_models_cbor.as_deref(),
+                        max_ex,
+                        &self.slot_config,
+                    );
+                    if eval_result.is_ok() {
+                        // Scripts actually pass but producer says invalid → mismatch
+                        return Err(LedgerError::ValidationTagMismatch {
+                            tx_hash: tx.hash.to_hex(),
+                            block_flag: false,
+                            eval_result: true,
+                        });
+                    }
+                }
+            }
+
             // Handle invalid transactions (phase-2 validation failure):
             // - Collateral inputs are consumed (forfeit to block producer)
             // - Regular inputs/outputs/certificates are NOT applied
@@ -1012,6 +1103,18 @@ pub enum LedgerError {
     EpochTransition(String),
     #[error("Invalid protocol parameter: {0}")]
     InvalidProtocolParam(String),
+    #[error("Validation tag mismatch for tx {tx_hash}: block flag is_valid={block_flag} but evaluation result is_valid={eval_result}")]
+    ValidationTagMismatch {
+        tx_hash: String,
+        block_flag: bool,
+        eval_result: bool,
+    },
+    #[error("Transaction validation failed at slot {slot} tx {tx_hash}: {errors}")]
+    BlockTxValidationFailed {
+        slot: u64,
+        tx_hash: String,
+        errors: String,
+    },
 }
 
 #[cfg(test)]
@@ -1171,7 +1274,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // The genesis UTxO should be spent, new one created
         assert_eq!(state.utxo_set.len(), 1);
@@ -1247,7 +1352,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // UTxO should be unchanged since tx was invalid
         assert_eq!(state.utxo_set.len(), 1);
@@ -1448,12 +1555,16 @@ mod tests {
 
         // Apply a block in epoch 0
         let block = make_test_block(50, 1, Hash32::ZERO, vec![]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
         assert_eq!(state.epoch, EpochNo(0));
 
         // Apply a block in epoch 1 (slot 100+)
         let block = make_test_block(150, 2, *block.hash(), vec![]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
         assert_eq!(state.epoch, EpochNo(1));
         assert!(state.snapshots.mark.is_some());
     }
@@ -1530,7 +1641,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         assert_eq!(state.epoch_fees, Lovelace(200_000));
     }
@@ -1946,7 +2059,9 @@ mod tests {
         let mut block = make_test_block(10, 1, Hash32::ZERO, vec![]);
         block.header.vrf_result.output = vec![42u8; 32];
         block.header.issuer_vkey = vec![1u8; 32];
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Evolving nonce should have been updated
         assert_ne!(state.evolving_nonce, genesis_hash);
@@ -1961,7 +2076,9 @@ mod tests {
         let mut block2 = make_test_block(70, 2, *block.hash(), vec![]);
         block2.header.vrf_result.output = vec![99u8; 32];
         block2.header.issuer_vkey = vec![1u8; 32];
-        state.apply_block(&block2).unwrap();
+        state
+            .apply_block(&block2, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Evolving nonce should STILL update (always updates)
         assert_ne!(state.evolving_nonce, evolving_before);
@@ -2481,7 +2598,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         assert_eq!(state.treasury, Lovelace(1_000_000));
     }
@@ -4415,7 +4534,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // The staking credential should have stake = 7_000_000 (output) - 0 (initial was never tracked as registered)
         // Actually: genesis UTxO was not tracked (inserted directly), but the output is tracked.
@@ -5003,7 +5124,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Fee should be the collateral amount (5 ADA), NOT the declared fee (0.2 ADA)
         assert_eq!(state.epoch_fees, Lovelace(5_000_000));
@@ -5085,7 +5208,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Fee should be 10M - 7M = 3M (collateral forfeited), NOT 500_000 (declared fee)
         assert_eq!(state.epoch_fees, Lovelace(3_000_000));
@@ -5156,7 +5281,9 @@ mod tests {
         };
 
         let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Fee should be the explicit total_collateral value
         assert_eq!(state.epoch_fees, Lovelace(2_500_000));
@@ -5523,7 +5650,9 @@ mod tests {
 
         // Skip from epoch 0 directly to epoch 5 via a block at slot 500
         let block = make_test_block(500, 1, Hash32::ZERO, vec![]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Both pools should be retired since we should have processed
         // epochs 1, 2, 3, 4, and 5
@@ -5573,7 +5702,9 @@ mod tests {
 
         // Skip from epoch 0 directly to epoch 4 (4 transitions)
         let block = make_test_block(400, 1, Hash32::ZERO, vec![]);
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         assert_eq!(state.epoch, EpochNo(4));
         // After 4 transitions: mark, set, and go should all be populated
@@ -6190,7 +6321,9 @@ mod tests {
 
         // This should NOT panic; the candidate nonce should be frozen
         // because the extreme slot is definitely in the stabilisation window.
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
 
         // Evolving nonce updated (always updates)
         assert_ne!(state.evolving_nonce, genesis_hash);
@@ -6236,7 +6369,9 @@ mod tests {
         let mut block = make_test_block(59, 1, Hash32::ZERO, vec![]);
         block.header.vrf_result.output = vec![42u8; 32];
         block.header.issuer_vkey = vec![1u8; 32];
-        state.apply_block(&block).unwrap();
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .unwrap();
         assert_eq!(state.candidate_nonce, state.evolving_nonce);
 
         // Slot 60 is the FIRST slot in the stabilisation window
@@ -6245,7 +6380,9 @@ mod tests {
         let mut block2 = make_test_block(60, 2, *block.hash(), vec![]);
         block2.header.vrf_result.output = vec![99u8; 32];
         block2.header.issuer_vkey = vec![1u8; 32];
-        state.apply_block(&block2).unwrap();
+        state
+            .apply_block(&block2, BlockValidationMode::ApplyOnly)
+            .unwrap();
         assert_eq!(state.candidate_nonce, candidate_before);
         assert_ne!(state.evolving_nonce, candidate_before);
     }

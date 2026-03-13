@@ -2,6 +2,7 @@ mod config;
 mod disk_monitor;
 mod forge;
 mod genesis;
+mod gsm;
 mod logging;
 mod metrics;
 mod mithril;
@@ -130,6 +131,15 @@ struct RunArgs {
     /// Override: LSM bloom filter bits per key
     #[arg(long)]
     utxo_bloom_filter_bits: Option<u32>,
+
+    /// Consensus mode: praos (default) or genesis (enables genesis bootstrap from empty DB)
+    #[arg(long, default_value = "praos")]
+    consensus_mode: String,
+
+    /// Force full Phase-2 Plutus validation on all blocks, even during initial sync.
+    /// Normally only blocks at tip are fully validated; this enables paranoid/auditing mode.
+    #[arg(long)]
+    validate_all_blocks: bool,
 
     // Block producer options (optional — enables block production mode)
     /// Path to the KES signing key file
@@ -309,6 +319,8 @@ async fn run_node(args: RunArgs) -> Result<()> {
         snapshot_bulk_min_blocks: args.snapshot_bulk_min_blocks,
         snapshot_bulk_min_secs: args.snapshot_bulk_min_secs,
         storage_config,
+        consensus_mode: args.consensus_mode,
+        validate_all_blocks: args.validate_all_blocks,
     })?;
 
     info!("");

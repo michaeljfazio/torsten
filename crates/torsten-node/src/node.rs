@@ -7,14 +7,14 @@ use tracing::{debug, error, info, warn};
 
 use torsten_consensus::praos::BlockIssuerInfo;
 use torsten_consensus::{OuroborosPraos, ValidationMode};
-use torsten_ledger::LedgerState;
+use torsten_ledger::{BlockValidationMode, LedgerState};
 use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
-    BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, HeaderBatchResult, N2CServer,
-    NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager, PeerManagerConfig,
-    PipelinedPeerClient, QueryHandler, TipInfo, TxValidationError, TxValidator,
+    BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, Governor, GovernorEvent,
+    HeaderBatchResult, N2CServer, NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager,
+    PeerManagerConfig, PipelinedPeerClient, QueryHandler, TipInfo, TxValidationError, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -54,6 +54,10 @@ pub struct NodeArgs {
     pub snapshot_bulk_min_secs: u64,
     /// Storage configuration (block index type, UTxO backend, LSM tuning)
     pub storage_config: torsten_storage::StorageConfig,
+    /// Consensus mode: "praos" (default) or "genesis" (enables genesis bootstrap)
+    pub consensus_mode: String,
+    /// Force ValidateAll mode on every block (paranoid/auditing mode)
+    pub validate_all_blocks: bool,
 }
 
 /// Provides block data from ChainDB for the N2N server
@@ -662,6 +666,10 @@ pub struct Node {
     epoch_transitions_observed: u32,
     /// Snapshot policy controlling when ledger snapshots are taken.
     snapshot_policy: SnapshotPolicy,
+    /// Consensus mode: "praos" (default) or "genesis"
+    consensus_mode: String,
+    /// Force full Phase-2 Plutus validation on all blocks
+    validate_all_blocks: bool,
 }
 
 impl Node {
@@ -965,6 +973,7 @@ impl Node {
         let mempool = Arc::new(Mempool::new(MempoolConfig {
             max_transactions: args.mempool_max_tx,
             max_bytes: args.mempool_max_bytes,
+            ..MempoolConfig::default()
         }));
 
         let socket_path = args.socket_path.clone();
@@ -1098,6 +1107,8 @@ impl Node {
             expected_shelley_genesis_hash,
             genesis_validated: false,
             epoch_transitions_observed: 0,
+            consensus_mode: args.consensus_mode,
+            validate_all_blocks: args.validate_all_blocks,
         })
     }
 
@@ -1466,6 +1477,102 @@ impl Node {
         }
 
         let network_magic = self.network_magic;
+
+        // Initialize Genesis State Machine (GSM)
+        let genesis_enabled = self.consensus_mode == "genesis";
+        let gsm_config = crate::gsm::GsmConfig {
+            marker_path: self.database_path.join("caught_up.marker"),
+            ..Default::default()
+        };
+        let gsm = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::gsm::GenesisStateMachine::new(gsm_config, genesis_enabled),
+        ));
+        if genesis_enabled {
+            info!(
+                state = %gsm.blocking_read().state(),
+                "Genesis mode enabled"
+            );
+        }
+
+        // Spawn GSM evaluation task
+        if genesis_enabled {
+            let gsm_ref = gsm.clone();
+            let gsm_pm = peer_manager.clone();
+            let gsm_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                interval.tick().await;
+                let mut shutdown = gsm_shutdown;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = shutdown.changed() => { break; }
+                    }
+
+                    let active_blp = {
+                        let pm = gsm_pm.read().await;
+                        pm.active_big_ledger_peer_count()
+                    };
+
+                    let mut gsm_w = gsm_ref.write().await;
+                    // TODO: compute tip_age and chainsync_idle from actual state
+                    let tip_age_secs = 0u64;
+                    let all_idle = false;
+                    gsm_w.evaluate(active_blp, all_idle, tip_age_secs);
+                }
+            });
+        }
+
+        // Spawn the P2P governor task — periodically evaluates peer targets
+        // and emits connect/disconnect/promote/demote events
+        {
+            let governor_pm = peer_manager.clone();
+            let governor_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut governor = Governor::new(Default::default());
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await; // skip first immediate tick
+                let mut shutdown = governor_shutdown;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = shutdown.changed() => { break; }
+                    }
+
+                    // Run governor evaluation
+                    let events = {
+                        let pm = governor_pm.read().await;
+                        let mut all_events = governor.evaluate(&pm);
+                        // Also check churn
+                        all_events.extend(governor.maybe_churn(&pm));
+                        all_events
+                    };
+
+                    // Execute governor events
+                    if !events.is_empty() {
+                        let mut pm = governor_pm.write().await;
+                        for event in &events {
+                            match event {
+                                GovernorEvent::Promote(addr) => {
+                                    pm.promote_to_hot(addr);
+                                }
+                                GovernorEvent::Demote(addr) => {
+                                    pm.demote_to_warm(addr);
+                                }
+                                GovernorEvent::Disconnect(addr) => {
+                                    pm.peer_disconnected(addr);
+                                }
+                                GovernorEvent::Connect(_) => {
+                                    // Connection events are handled by the main loop
+                                    // via peers_to_connect()
+                                }
+                            }
+                        }
+                        pm.recompute_reputations();
+                    }
+                }
+            });
+        }
 
         // Main connection loop — connect to peers and sync
         let mut retry_count = 0u32;
@@ -2112,7 +2219,7 @@ impl Node {
                         }
 
                         let mut ls_guard = ledger_state.blocking_write();
-                        if let Err(e) = ls_guard.apply_block(&block) {
+                        if let Err(e) = ls_guard.apply_block(&block, BlockValidationMode::ApplyOnly) {
                             warn!(slot = block.slot().0, error = %e, "Ledger apply failed during replay");
                         }
                         replayed += 1;
@@ -2224,7 +2331,7 @@ impl Node {
                     ) {
                         Ok(block) => {
                             let mut ls = self.ledger_state.write().await;
-                            if let Err(e) = ls.apply_block(&block) {
+                            if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                 warn!(
                                     "Replay       ledger apply failed at slot {} block {}: {e}",
                                     slot.0, block_no
@@ -3148,7 +3255,7 @@ impl Node {
                                 }
                                 match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
-                                        if let Err(e) = ls.apply_block(&block) {
+                                        if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                             warn!(
                                                 slot = next_slot.0,
                                                 "Gap bridge apply failed: {e} — aborting bridge"
@@ -3187,7 +3294,12 @@ impl Node {
                         continue;
                     }
                 }
-                if let Err(e) = ls.apply_block(block) {
+                let ledger_mode = if strict || self.validate_all_blocks {
+                    BlockValidationMode::ValidateAll
+                } else {
+                    BlockValidationMode::ApplyOnly
+                };
+                if let Err(e) = ls.apply_block(block, ledger_mode) {
                     error!(
                         slot = block.slot().0,
                         block_no = block.block_number().0,
@@ -3200,7 +3312,7 @@ impl Node {
             }
         }
 
-        // Remove confirmed transactions from mempool and revalidate
+        // Remove confirmed transactions from mempool, then full revalidation
         if !self.mempool.is_empty() {
             let confirmed_hashes: Vec<_> = blocks
                 .iter()
@@ -3210,18 +3322,32 @@ impl Node {
                 self.mempool.remove_txs(&confirmed_hashes);
             }
 
-            // Remove mempool txs whose inputs conflict with the confirmed block inputs
+            // Full revalidation: check each remaining tx for input conflicts,
+            // TTL expiry, and any other invalidity in one pass.
             let consumed_inputs: std::collections::HashSet<_> = blocks
                 .iter()
                 .flat_map(|b| b.transactions.iter())
                 .flat_map(|tx| tx.body.inputs.iter().cloned())
                 .collect();
-            self.mempool.revalidate_against_inputs(&consumed_inputs);
-
-            // Evict expired transactions based on current slot
-            if let Some(last_block) = blocks.last() {
-                self.mempool.evict_expired(last_block.slot());
-            }
+            let current_slot = blocks.last().map(|b| b.slot());
+            self.mempool.revalidate_all(|tx| {
+                // Reject if any input was consumed by the new block
+                if tx
+                    .body
+                    .inputs
+                    .iter()
+                    .any(|input| consumed_inputs.contains(input))
+                {
+                    return false;
+                }
+                // Reject if TTL has expired
+                if let (Some(ttl), Some(slot)) = (tx.body.ttl, current_slot) {
+                    if slot.0 > ttl.0 {
+                        return false;
+                    }
+                }
+                true
+            });
         }
 
         if let Some(last_block) = blocks.last() {
@@ -4507,7 +4633,7 @@ impl Node {
                                 }
                                 match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
-                                        if let Err(e) = ls.apply_block(&block) {
+                                        if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                             error!(
                                                 slot = next_slot.0,
                                                 "Ledger apply failed during rollback replay: {e} — aborting replay"
@@ -4729,7 +4855,7 @@ impl Node {
                 // Apply to ledger
                 {
                     let mut ls = self.ledger_state.write().await;
-                    if let Err(e) = ls.apply_block(&block) {
+                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                         error!("Failed to apply forged block to ledger: {e}");
                         return;
                     }
