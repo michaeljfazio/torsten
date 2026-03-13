@@ -4,8 +4,8 @@
 - Node binary: `./target/release/torsten-node`
 - CLI binary: `./target/release/torsten-cli`
 - Config dir: `./config/` (preview-config.json, preview-topology.json)
-- Preview DB: `./db-preview/` — slot ~106.686M, block ~4.1018M, epoch 1234
-- Ledger snapshot: `<db>/ledger-snapshot.bin` (~1,111 MB)
+- Preview DB: `./db-preview/` — slot ~106.778M, block ~4.1048M, epoch 1235
+- Ledger snapshot: `<db>/ledger-snapshot.bin` (~65 MB without UTxOs — see Known Issues #3)
 - Node logs: `/tmp/torsten-validation-run.log`
 
 ## Startup Command Pattern
@@ -21,96 +21,97 @@ TORSTEN_PIPELINE_DEPTH=150 ./target/release/torsten-node run \
 NOTE: Always `pkill -f torsten-node && rm -f ./node.sock` before restart.
 NOTE: Delete `db-preview/ledger-snapshot.bin` to force fresh replay with genesis seeding.
 
-## Preview Testnet Baselines (2026-03-13, run #4 — main v0.1.0-alpha.14)
-- DB at slot ~106.699M / block ~4.1022M / epoch 1234 (after shutdown flush)
-- Peer connected: 3.134.226.73:3001 rtt_ms=587 (5 hot peers total)
-- Snapshot loaded with v1→v2 VERSION MISMATCH WARN but succeeded (new fields at end of struct)
-- Catch-up to tip after snapshot load: 39 blocks in ~23s
-- At-tip block reception: new blocks every ~20-60s, txs=1-2
-- Flush on SIGTERM: 44 volatile blocks flushed → 4.5s snapshot save → clean shutdown
-- 1 warning: "Snapshot version mismatch — snapshot may fail to load" (non-fatal this time)
-- Build time: 32.61s (incremental, 7 crates recompiled)
-
-## Preview Testnet Baselines (2026-03-13, run #3 — main v0.1.0-alpha.13)
-- DB at slot ~106.698M / block ~4.1022M / epoch 1234 (after shutdown flush)
-- Peer connected: 13.58.19.0:3001 rtt_ms=586 (5 hot peers total)
-- Snapshot FAILED to load (bincode struct change — see Known Issues #1)
-- Genesis replay: 4,102,144 blocks in 112s at 36,577 blk/s — fast!
-- Catch-up to tip after replay: 53 blocks
-- At-tip block reception: new blocks every ~20-60s, txs=0-6
-- Flush on SIGTERM: 57 volatile blocks flushed → 4.5s snapshot save → clean shutdown
-- 1 warning: snapshot deserialization failure (bincode break)
-- Build time: 32.60s (incremental, 7 crates recompiled)
+## Preview Testnet Baselines (2026-03-14, run #6 — main 6b32d4c)
+- DB at slot ~106.778M / block ~4.1048M / epoch 1235 (resumed from run #5 snapshot)
+- Build: already built (incremental, 0.17s) — previous release binary still valid
+- New commits: 4806c2a (Phase-2 Plutus, P2P governor, GSM, enhanced mempool), 6b32d4c (MsgRejectTx CBOR)
+- Snapshot loaded: epoch=1235, utxos=0 (UTxO-HD LSM persistence bug still present, unfixed)
+- Single peer connected at startup: 3.74.40.92:3001 rtt_ms=738 (5 hot peers total)
+- Catch-up to tip after snapshot load: 9 blocks in ~86s (slower due to sparse blocks at tip)
+- "Caught up to chain tip blocks_applied=9" at T+86s
+- At-tip block reception: 3 blocks received each with 1 tx, all failed to apply (UTxO bug)
+- Rollbacks observed: 0
+- Flush on SIGTERM: 12 volatile blocks flushed → 65.3 MB snapshot saved → Shutdown complete
+- Cascading UTxO divergence observed: tx outputs from failed blocks referenced by subsequent blocks
 
 ## Prometheus Metrics Port Conflict Note
 - Haskell cardano-node also runs on `localhost:12798` (127.0.0.1 only)
 - Torsten binds to `*:12798` (all interfaces)
 - `curl http://localhost:12798/metrics` hits the HASKELL node (more specific binding wins)
-- Use `curl http://192.168.1.111:12798/metrics` (LAN IP) to reach Torsten metrics
+- Use `curl http://192.168.1.112:12798/metrics` (LAN IP) to reach Torsten metrics (IP may vary)
 - Or: kill the Haskell node before running Torsten for exclusive port access
+- NOTE: Metrics gauges show 0 for ~30s after startup before first update. This is normal.
 
 ## N2C Client Bug: Large Response Reassembly (2026-03-13, OPEN)
 - **BUG**: `recv_segment()` in `crates/torsten-network/src/n2c_client.rs:687` only handles ONE mux segment
 - Fix needed: collect multiple segments with same protocol_id until CBOR is complete
 - Queries affected: `query drep-state` and `query pool-params` (and any large response)
 - Error message: `Error: Failed to query DRep state: Protocol error: response too large`
-- Root cause: fixed 65536-byte buffer; responses >65535 bytes need multi-segment reassembly
-- The send path already handles chunking (`encode()` splits payloads), but recv does not reassemble
-- Buffer at line 688: `let mut buf = vec![0u8; 65536];`
 
 ## Storage Architecture (post-redesign, commit 83c4f11)
 - ImmutableDB: append-only `.chunk` + `.secondary` files (db-preview/immutable/)
 - tip.meta file tracks immutable tip (binary: slot u64 BE + hash32 + block_no u64 BE)
 - VolatileDB: in-memory HashMap, last k=2160 blocks, LOST ON RESTART
 - ChainDB: routes volatile→immutable for blocks deeper than k
-- UtxoStore: cardano-lsm in `db-preview/snapshots/latest/` for UTxO-HD (on-disk UTxO set)
+- UtxoStore: cardano-lsm in `db-preview/utxo-store/` (active/, snapshots/ subdirs)
 - Ledger snapshot: bincode-serialized LedgerState, epoch-numbered + latest symlink
 
 ## FIXED: Shutdown Flush (2026-03-13, validated multiple runs)
 - On SIGTERM: volatile blocks flushed to ImmutableDB FIRST, then snapshot saved
-- Log sequence: "Flushed volatile blocks to ImmutableDB blocks=N" → "Snapshot saved" → "Shutdown complete"
-- On restart: snapshot loads in ~7-9 seconds (NO replay) — confirmed working
-- File: `crates/torsten-storage/src/chain_db.rs` line 417 (flush_all_to_immutable)
-- File: `crates/torsten-node/src/node.rs` line ~1547 (shutdown flow)
+- Log: "Flushed volatile blocks to ImmutableDB blocks=N" → "Snapshot saved" → "Shutdown complete"
+- On restart: snapshot loads in <1 second (NO replay) — confirmed working
+- File: `crates/torsten-storage/src/chain_db.rs` (flush_all_to_immutable)
+- File: `crates/torsten-node/src/node.rs` line ~1890 (shutdown flow)
 
-## Known Issues (Current — 2026-03-13, v0.1.0-alpha.14)
-1. **WARNING: Bincode snapshot version mismatch on struct field addition** — adding new fields to
-   bincode-serialized structs can break existing snapshots. Version bump + end-of-struct appending
-   partially mitigates this. The v1→v2 migration succeeded this run (fields appended at end) but
-   the warning fires. Future: implement proper migration chain or use serde_json/postcard.
-   - Commit 9eb94b1 bumped SNAPSHOT_VERSION to 2; commit 8e00ce4 added fields to GovernanceState
-   - Warning: `WARN torsten_ledger::state: Snapshot version mismatch — snapshot may fail to load. snapshot_version=1 current_version=2`
+## CRITICAL BUG: UTxO-HD LSM Store Not Persisted (2026-03-14, OPEN — unfixed in run #6)
+- Root cause: `open_with_config()` called on startup instead of loading existing LSM data
+- Also: `save_utxo_snapshot()` in `crates/torsten-ledger/src/state/mod.rs:863` is NEVER called
+- Effect: every restart loses entire UTxO state → blocks with transactions fail to apply
+- Error pattern: `InputNotFound("txhash#N")` for ALL inputs in any tx-containing block
+- Symptom: `utxo_count=0` in Prometheus metrics, snapshot is ~65MB (not ~1.1GB)
+- Cascading divergence: failed tx outputs get referenced by later blocks, compounding failures
+- Files to fix:
+  1. `crates/torsten-node/src/node.rs` ~line 927: call `open_from_snapshot()` if snapshot exists
+  2. `crates/torsten-ledger/src/state/mod.rs:863`: `save_utxo_snapshot()` exists but is dead code
+  3. Shutdown: add call to `save_utxo_snapshot()` alongside snapshot save
+
+## Known Issues (Current — 2026-03-14, run #6)
+1. **Bincode snapshot version mismatch on struct field addition** — non-fatal, warning fires
+   - Warning: `WARN torsten_ledger::state: Snapshot version mismatch — snapshot may fail to load.`
    - File: `crates/torsten-ledger/src/state/mod.rs` (SNAPSHOT_VERSION = 2, load_snapshot)
-   - Impact: warning fires but snapshot loads successfully IF new fields were appended at end
 2. **N2C large response reassembly** — `recv_segment` only handles one 65535-byte segment
    - Affects: `query drep-state`, `query pool-params`
    - File: `crates/torsten-network/src/n2c_client.rs:687`
+3. **CRITICAL: UTxO-HD LSM store not persisted between restarts** — see CRITICAL BUG section above
 
-## Working Features Confirmed (2026-03-13, run #4, main branch v0.1.0-alpha.14)
-- Build: WORKS — clean, zero warnings, compiles in 32.61s (incremental)
-- Snapshot load (v1→v2 mismatch): WORKS with warning — no replay needed
-- Peer connections: WORKS — 3.134.226.73:3001 rtt_ms=587, 5 hot peers
-- Catch-up to tip: WORKS — 39 blocks applied in ~23s after snapshot restore
-- At-tip block reception: WORKS — Conway blocks every ~20-60s, txs=1-2
-- N2C query tip: WORKS — syncProgress=100.00%, era=Conway, slot 106699813
-- N2C ratify-state: WORKS — enacted=0, expired=0, delayed=false (new in v0.1.0-alpha.14)
-- N2C treasury: WORKS — Treasury=42,301,639,077 ADA, Reserves=2,625,733,633 ADA
+## Working Features Confirmed (2026-03-14, run #6, main branch 6b32d4c)
+- Build: WORKS — incremental compile, 0.17s (no crates recompiled)
+- Snapshot load: WORKS — epoch=1235, instant load, no warning
+- Peer connections: WORKS — 3.74.40.92:3001 rtt_ms=738, 5 hot peers
+- Catch-up to tip: WORKS — 9 blocks applied in ~86s after snapshot restore
+- Empty-block processing: WORKS — blocks with txs=0 apply cleanly
+- N2C query tip: WORKS — syncProgress=100.00%, era=Conway, epoch=1235, slot=106778502
+- N2C treasury: WORKS — Treasury=9,141,780,486 ADA, Reserves=2,620,888,790 ADA
 - N2C constitution: WORKS — empty URL + zero hash + no guardrail (expected on preview)
 - N2C protocol-parameters: WORKS — full Conway PParams with Plutus V1/V3 cost models
 - N2C stake-distribution: WORKS — 657 pools listed with fractions
-- N2C gov-state: WORKS — committee_members=1, active_proposals=2 (TreasuryWithdrawals)
-- Prometheus metrics: WORKS — http://192.168.1.111:12798/metrics (use LAN IP)
-  - blocks_applied=44, sync_progress=10000 (100.00%), utxo_count=2,937,685
-  - peers_connected=5, hot=5, epoch=1234, treasury=42.3T lovelace
-  - drep_count=8791, proposal_count=2, pool_count=657, delegation_count=11522
-- SIGTERM shutdown: WORKS — flushes 44 volatile blocks, saves 1112.8 MB snapshot in 4.5s
+- N2C gov-state: WORKS — committee_members=7, active_proposals=2 (TreasuryWithdrawals)
+- N2C ratify-state: WORKS — enacted=0, expired=0, delayed=false
+- N2C constitution: WORKS — empty URL, zero hash, no guardrail script
+- Prometheus metrics: WORKS — http://192.168.1.112:12798/metrics (use LAN IP)
+  - blocks_applied=12, sync_progress=10000 (100.00%), utxo_count=0 (BUG)
+  - peers_connected=5, hot=5, epoch=1235, treasury=9.14T lovelace
+  - drep_count=8791, proposal_count=2, pool_count=657, delegation_count=11560
+  - NOTE: metrics show zeros for ~30s on startup before first update — normal behavior
+- SIGTERM shutdown: WORKS — flushes 12 volatile blocks, saves 65.3 MB snapshot instantly
+- MsgRejectTx CBOR encoding: NEW in 6b32d4c — not tested (no mempool tx submission done)
+- GSM/P2P governor/enhanced mempool: NEW in 4806c2a — code present, no GSM state visible in logs
 
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress
 - N2N port 3001 / Metrics port 12798 — conflict if old node running
 - No `torsten-config.json` — use `config/preview-config.json` directly
-- On restart after clean SIGTERM: snapshot loads in ~7-9 seconds (NO replay) — FIXED
-- On restart after crash/SIGKILL: still does full replay (~110s) — volatile data lost without flush
-- `TORSTEN_REPLAY_LIMIT=0` skips replay (old behavior, wrong ledger state)
-- Snapshot grows to ~1.1GB with full UTxO state
+- On restart after clean SIGTERM: snapshot loads in <1 second (NO replay) — WORKS
+- On restart after crash/SIGKILL: still does full replay — volatile data lost without flush
 - CLI subcommand is `query treasury` (not `query account-state`)
+- gov-state shows committee_members=7 — governance active on preview
