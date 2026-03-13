@@ -1901,10 +1901,20 @@ impl Node {
         Ok(())
     }
 
-    /// Save a ledger state snapshot to the database directory
+    /// Save a ledger state snapshot to the database directory.
+    ///
+    /// When the UTxO store is backed by LSM (cardano-lsm), this also flushes
+    /// the memtable to SST files on disk via `save_utxo_snapshot()`.
+    /// cardano-lsm has no WAL — without this flush, all UTxO data is lost
+    /// on restart.
     async fn save_ledger_snapshot(&self) {
-        let ls = self.ledger_state.read().await;
+        let mut ls = self.ledger_state.write().await;
         let epoch = ls.epoch.0;
+
+        // Flush UTxO store to disk FIRST (cardano-lsm has no WAL)
+        if let Err(e) = ls.save_utxo_snapshot() {
+            error!("Failed to save UTxO store snapshot: {e}");
+        }
 
         // Save epoch-numbered snapshot for rollback safety
         let epoch_path = self
@@ -2285,9 +2295,12 @@ impl Node {
                 debug!("Rebuilt address index and stake distribution after chunk replay");
             }
 
-            // Save final snapshot
+            // Save final snapshot (write lock to flush UTxO store — no WAL)
             {
-                let ls = ledger_state.blocking_read();
+                let mut ls = ledger_state.blocking_write();
+                if let Err(e) = ls.save_utxo_snapshot() {
+                    error!("Failed to save UTxO store after replay: {e}");
+                }
                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                     error!("Failed to save ledger snapshot after replay: {e}");
                 }
@@ -2409,9 +2422,12 @@ impl Node {
             debug!("Rebuilt address index and stake distribution after LSM replay");
         }
 
-        // Save final snapshot after replay
+        // Save final snapshot after replay (write lock to flush UTxO store — no WAL)
         {
-            let ls = self.ledger_state.read().await;
+            let mut ls = self.ledger_state.write().await;
+            if let Err(e) = ls.save_utxo_snapshot() {
+                error!("Failed to save UTxO store after replay: {e}");
+            }
             if let Err(e) = ls.save_snapshot(&snapshot_path) {
                 error!("Failed to save ledger snapshot after replay: {e}");
             }
@@ -4614,9 +4630,15 @@ impl Node {
                 Ok(snapshot_state) => {
                     let snapshot_slot = snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
 
-                    // Restore from snapshot and replay forward to rollback point
+                    // Restore from snapshot and replay forward to rollback point.
+                    // Detach the UtxoStore before replacing state so it survives
+                    // the replacement (bincode snapshot has utxos=0 in LSM mode).
                     let mut ls = self.ledger_state.write().await;
+                    let utxo_store = ls.utxo_set.detach_store();
                     *ls = snapshot_state;
+                    if let Some(store) = utxo_store {
+                        ls.attach_utxo_store(store);
+                    }
                     let replay_from = snapshot_slot;
 
                     // 3. Replay blocks from snapshot tip to rollback point
@@ -4667,13 +4689,21 @@ impl Node {
                 Err(e) => {
                     error!("Failed to load ledger snapshot for rollback: {e}");
                     let mut ls = self.ledger_state.write().await;
+                    let utxo_store = ls.utxo_set.detach_store();
                     *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+                    if let Some(store) = utxo_store {
+                        ls.attach_utxo_store(store);
+                    }
                 }
             }
         } else {
             warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
             let mut ls = self.ledger_state.write().await;
+            let utxo_store = ls.utxo_set.detach_store();
             *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+            if let Some(store) = utxo_store {
+                ls.attach_utxo_store(store);
+            }
         }
 
         // 4. Clear mempool — UTxO set has changed, existing txs may be invalid
