@@ -68,7 +68,7 @@ vrf_dalek = { git = "https://github.com/input-output-hk/vrf", branch = "main" }
 curve25519-dalek-fork = { package = "curve25519-dalek", git = "https://github.com/iquerejeta/curve25519-dalek", branch = "ietf03_vrf_compat_ell2" }
 
 # Storage
-cardano-lsm = "1.0.1"
+cardano-lsm = { git = "https://github.com/michaeljfazio/cardano-lsm-rust.git", branch = "fix/index-based-get" }
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 

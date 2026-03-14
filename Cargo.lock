@@ -295,8 +295,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "cardano-lsm"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6689cb8e1c76c54391bfc88ed8426fd98ada43c942ee6452fff1028690ad5eaf"
+source = "git+https://github.com/michaeljfazio/cardano-lsm-rust.git?branch=fix%2Findex-based-get#0b8831eb44ce86bdda0088588f11e91bb99bba9c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3535,6 +3534,7 @@ dependencies = [
 name = "torsten-mempool"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "dashmap",
  "parking_lot",
  "thiserror 2.0.18",
@@ -3643,6 +3643,7 @@ name = "torsten-serialization"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "criterion",
  "hex",
  "minicbor 0.25.1",
  "pallas-addresses 1.0.0-alpha.5",
