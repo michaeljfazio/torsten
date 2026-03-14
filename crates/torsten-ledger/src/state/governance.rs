@@ -179,16 +179,34 @@ impl LedgerState {
             .collect();
         candidates.sort_by_key(|(_, action, _)| gov_action_priority(action));
 
+        info!(
+            epoch = self.epoch.0,
+            active_proposals = candidates.len(),
+            total_drep_stake,
+            total_spo_stake,
+            no_confidence_stake,
+            bootstrap = self.is_bootstrap_phase(),
+            protocol_version = self.protocol_params.protocol_version_major,
+            cc_members = self.governance.committee_expiration.len(),
+            cc_hot_keys = self.governance.committee_hot_keys.len(),
+            cc_threshold = ?self.governance.committee_threshold,
+            "Governance ratification: evaluating proposals"
+        );
+
         let mut ratified = Vec::new();
         let mut delayed = false;
 
         for (action_id, action, _expires) in &candidates {
             // Check prev_action_id chain
             if !prev_action_as_expected(action, &self.governance) {
-                debug!(
+                info!(
                     action_id = %action_id.transaction_id.to_hex(),
                     action_type = ?std::mem::discriminant(action),
-                    "Governance proposal: prev_action_id chain mismatch"
+                    enacted_pparam = ?self.governance.enacted_pparam_update.as_ref().map(|id| id.transaction_id.to_hex()),
+                    enacted_committee = ?self.governance.enacted_committee.as_ref().map(|id| id.transaction_id.to_hex()),
+                    enacted_hard_fork = ?self.governance.enacted_hard_fork.as_ref().map(|id| id.transaction_id.to_hex()),
+                    enacted_constitution = ?self.governance.enacted_constitution.as_ref().map(|id| id.transaction_id.to_hex()),
+                    "Governance proposal: prev_action_id chain mismatch — skipping"
                 );
                 continue;
             }
@@ -204,6 +222,14 @@ impl LedgerState {
 
             // Check voting thresholds
             if let Some(state) = self.governance.proposals.get(action_id) {
+                // Compute vote counts for logging
+                let (drep_yes, drep_total, spo_yes, _spo_voted, cc_yes, cc_total) = self
+                    .count_votes_by_type(
+                        action_id,
+                        &state.procedure.gov_action,
+                        &drep_power_cache,
+                        no_confidence_stake,
+                    );
                 let met = self.check_ratification(
                     action_id,
                     state,
@@ -213,10 +239,12 @@ impl LedgerState {
                     no_confidence_stake,
                 );
                 if met {
-                    debug!(
+                    info!(
                         action_id = %action_id.transaction_id.to_hex(),
                         action_type = ?std::mem::discriminant(action),
-                        "Governance proposal ratified"
+                        drep_yes, drep_total, spo_yes, total_spo_stake,
+                        cc_yes, cc_total,
+                        "Governance proposal RATIFIED"
                     );
                     // Enact immediately and update roots (for chain validation of subsequent proposals)
                     self.enact_gov_action(action);
@@ -226,10 +254,13 @@ impl LedgerState {
                         delayed = true;
                     }
                 } else if !matches!(action, GovAction::InfoAction) {
-                    debug!(
+                    info!(
                         action_id = %action_id.transaction_id.to_hex(),
                         action_type = ?std::mem::discriminant(action),
-                        "Governance proposal not yet ratified"
+                        drep_yes, drep_total, spo_yes, total_spo_stake,
+                        cc_yes, cc_total,
+                        bootstrap = self.is_bootstrap_phase(),
+                        "Governance proposal NOT ratified"
                     );
                 }
             }
@@ -1083,6 +1114,10 @@ pub(crate) fn pp_change_spo_threshold(
 }
 
 pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> bool {
+    // A zero threshold always passes (e.g., DRep thresholds during Conway bootstrap)
+    if threshold.is_zero() {
+        return true;
+    }
     if total == 0 {
         return false;
     }
