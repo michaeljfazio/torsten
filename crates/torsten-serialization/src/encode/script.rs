@@ -308,3 +308,95 @@ pub(crate) fn encode_language_views(
     }
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_script_data_hash_from_real_tx_cbor() {
+        // Real failing tx from preview testnet (Alonzo-style array redeemers in Conway era)
+        // Expected script_data_hash from tx body field 0b:
+        let expected_hex = "7482063745239a453494a4700d4e9e481c745603355fa31fdc5cee2ca0c20d3d";
+        let expected = Hash32::from_hex(expected_hex).unwrap();
+
+        // The full tx CBOR (from Koios)
+        let tx_cbor_hex = include_str!("../../test_data/script_data_hash_test_tx.hex");
+        let tx_cbor = hex::decode(tx_cbor_hex.trim()).unwrap();
+
+        // Use preview cost models (V2 only - this tx uses V2 scripts)
+        let cost_models = CostModels {
+            plutus_v1: None,
+            plutus_v2: Some(vec![
+                100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4,
+                16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100,
+                16000, 100, 94375, 32, 132994, 32, 61462, 4, 72010, 178, 0, 1, 22151, 32, 91189,
+                769, 4, 2, 85848, 228465, 122, 0, 1, 1, 1000, 42921, 4, 2, 24548, 29498, 38, 1,
+                898148, 27279, 1, 51775, 558, 1, 39184, 1000, 60594, 1, 141895, 32, 83150, 32,
+                15299, 32, 76049, 1, 13169, 4, 22100, 10, 28999, 74, 1, 28999, 74, 1, 43285, 552,
+                1, 44749, 541, 1, 33852, 32, 68246, 32, 72362, 32, 7243, 32, 7391, 32, 11546, 32,
+                85848, 228465, 122, 0, 1, 1, 90434, 519, 0, 1, 74433, 32, 85848, 228465, 122, 0, 1,
+                1, 85848, 228465, 122, 0, 1, 1, 955506, 213312, 0, 2, 270652, 22588, 4, 1457325,
+                64566, 4, 20467, 1, 4, 0, 141992, 32, 100788, 420, 1, 1, 81663, 32, 59498, 32,
+                20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32, 43053543, 10, 53384111,
+                14333, 10, 43574283, 26308, 10,
+            ]),
+            plutus_v3: None,
+        };
+
+        let result = compute_script_data_hash_from_cbor(&tx_cbor, &cost_models, false, true, false);
+
+        assert_eq!(
+            result,
+            Some(expected),
+            "Script data hash from real tx CBOR should match declared hash"
+        );
+    }
+
+    #[test]
+    fn test_script_data_hash_survives_reencode() {
+        // Verify that decoding + re-encoding a tx preserves the script_data_hash
+        let tx_cbor_hex = include_str!("../../test_data/script_data_hash_test_tx.hex");
+        let tx_cbor = hex::decode(tx_cbor_hex.trim()).unwrap();
+
+        // Decode with pallas and re-encode (simulating what tx.encode() does)
+        let tx: pallas_primitives::conway::Tx = pallas_codec::minicbor::decode(&tx_cbor).unwrap();
+        let reencoded = pallas_codec::minicbor::to_vec(&tx).unwrap();
+
+        let cost_models = CostModels {
+            plutus_v1: None,
+            plutus_v2: Some(vec![
+                100788, 420, 1, 1, 1000, 173, 0, 1, 1000, 59957, 4, 1, 11183, 32, 201305, 8356, 4,
+                16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 16000, 100, 100, 100,
+                16000, 100, 94375, 32, 132994, 32, 61462, 4, 72010, 178, 0, 1, 22151, 32, 91189,
+                769, 4, 2, 85848, 228465, 122, 0, 1, 1, 1000, 42921, 4, 2, 24548, 29498, 38, 1,
+                898148, 27279, 1, 51775, 558, 1, 39184, 1000, 60594, 1, 141895, 32, 83150, 32,
+                15299, 32, 76049, 1, 13169, 4, 22100, 10, 28999, 74, 1, 28999, 74, 1, 43285, 552,
+                1, 44749, 541, 1, 33852, 32, 68246, 32, 72362, 32, 7243, 32, 7391, 32, 11546, 32,
+                85848, 228465, 122, 0, 1, 1, 90434, 519, 0, 1, 74433, 32, 85848, 228465, 122, 0, 1,
+                1, 85848, 228465, 122, 0, 1, 1, 955506, 213312, 0, 2, 270652, 22588, 4, 1457325,
+                64566, 4, 20467, 1, 4, 0, 141992, 32, 100788, 420, 1, 1, 81663, 32, 59498, 32,
+                20142, 32, 24588, 32, 20744, 32, 25933, 32, 24623, 32, 43053543, 10, 53384111,
+                14333, 10, 43574283, 26308, 10,
+            ]),
+            plutus_v3: None,
+        };
+
+        // Original CBOR should work
+        let original =
+            compute_script_data_hash_from_cbor(&tx_cbor, &cost_models, false, true, false);
+        // Re-encoded CBOR should also work
+        let from_reencoded =
+            compute_script_data_hash_from_cbor(&reencoded, &cost_models, false, true, false);
+
+        let expected_hex = "7482063745239a453494a4700d4e9e481c745603355fa31fdc5cee2ca0c20d3d";
+        let expected = Hash32::from_hex(expected_hex).unwrap();
+
+        assert_eq!(original, Some(expected), "Original CBOR hash mismatch");
+        assert_eq!(
+            from_reencoded,
+            Some(expected),
+            "Re-encoded CBOR hash mismatch"
+        );
+    }
+}
