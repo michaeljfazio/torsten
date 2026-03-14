@@ -1232,23 +1232,57 @@ fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
 /// Divides the script size into 25KiB tiers, each tier costs 1.2x the previous.
 /// base_fee_per_byte is applied at the first tier, then multiplied by 1.2 for each
 /// subsequent tier.
+/// CIP-0112 tiered reference script fee using exact rational arithmetic.
+///
+/// Matches Haskell's `tierRefScriptFee` which accumulates all tier fees
+/// as exact `Rational` values and applies `floor` only once at the end.
+/// This avoids integer truncation at each tier boundary which causes
+/// cumulative rounding errors.
 fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u64 {
     const TIER_SIZE: u64 = 25_600; // 25 KiB
-    const MULTIPLIER_NUM: u64 = 12;
-    const MULTIPLIER_DEN: u64 = 10;
+    const MULT_NUM: u128 = 6; // 1.2 = 6/5
+    const MULT_DEN: u128 = 5;
 
     let mut remaining = total_size;
-    let mut fee: u64 = 0;
-    let mut tier_rate = base_fee_per_byte;
+    // Accumulator as rational: acc_num / acc_den
+    let mut acc_num: u128 = 0;
+    let mut acc_den: u128 = 1;
+    // Current tier price as rational: price_num / price_den
+    let mut price_num: u128 = base_fee_per_byte as u128;
+    let mut price_den: u128 = 1;
 
     while remaining > 0 {
         let chunk = remaining.min(TIER_SIZE);
-        fee = fee.saturating_add(tier_rate * chunk);
+        // acc += chunk * (price_num / price_den)
+        acc_num = acc_num * price_den + chunk as u128 * price_num * acc_den;
+        acc_den *= price_den;
         remaining -= chunk;
-        // Apply 1.2x multiplier for next tier
-        tier_rate = tier_rate * MULTIPLIER_NUM / MULTIPLIER_DEN;
+        // price *= 6/5 (exact rational multiplication)
+        price_num *= MULT_NUM;
+        price_den *= MULT_DEN;
+        // Reduce to prevent overflow
+        let g = gcd_u128(price_num, price_den);
+        price_num /= g;
+        price_den /= g;
+        let g2 = gcd_u128(acc_num, acc_den);
+        acc_num /= g2;
+        acc_den /= g2;
     }
-    fee
+    // floor(acc_num / acc_den) — single floor at the end
+    (acc_num / acc_den) as u64
+}
+
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    if a == 0 {
+        1
+    } else {
+        a
+    }
 }
 
 /// Estimate the CBOR-encoded size of a Value.
@@ -2755,6 +2789,19 @@ mod tests {
 
         // Zero size = zero fee
         assert_eq!(calculate_ref_script_tiered_fee(15, 0), 0);
+
+        // Multi-tier with rational accumulation test (matches Haskell exact Rational)
+        // With base_fee=15 and multiplier=1.2, tier rates are:
+        // tier 0: 15, tier 1: 18, tier 2: 21.6, tier 3: 25.92, ...
+        // At tier 2, integer truncation would give 21 instead of 21.6
+        // With exact rational: 3 full tiers = 15*25600 + 18*25600 + 21.6*25600
+        //   = 384000 + 460800 + 552960 = 1,397,760
+        // With integer truncation: 384000 + 460800 + 21*25600 = 384000 + 460800 + 537600 = 1,382,400
+        assert_eq!(
+            calculate_ref_script_tiered_fee(15, 25_600 * 3),
+            1_397_760,
+            "3 tiers must use exact rational arithmetic (21.6 not 21)"
+        );
     }
 
     #[test]
