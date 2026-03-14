@@ -1206,7 +1206,11 @@ impl Node {
         // Replay blocks from ChainDB if the ledger is behind storage.
         // This happens after a Mithril snapshot import — blocks are in storage
         // but the ledger hasn't processed them yet.
-        self.replay_ledger_from_storage().await;
+        self.replay_ledger_from_storage(shutdown_rx.clone()).await;
+        if *shutdown_rx.borrow() {
+            info!("Shutdown requested during replay, exiting");
+            return Ok(());
+        }
 
         // Initialize query state from current ledger so N2C queries
         // work immediately (before we reach chain tip or the periodic timer fires)
@@ -2137,7 +2141,7 @@ impl Node {
     ///    files are laid out sequentially on disk.
     /// 2. **LSM replay** (fallback): Reads blocks by block number from the LSM tree.
     ///    Slower due to random I/O but works when chunk files aren't available.
-    async fn replay_ledger_from_storage(&mut self) {
+    async fn replay_ledger_from_storage(&mut self, shutdown_rx: watch::Receiver<bool>) {
         // Migrate legacy immutable-replay/ to immutable/ (backwards compat)
         let legacy_dir = self.database_path.join("immutable-replay");
         let immutable_dir = self.database_path.join("immutable");
@@ -2178,7 +2182,7 @@ impl Node {
                     immutable_tip_slot = imm_tip_slot,
                     "Replaying ledger from chunk files",
                 );
-                self.replay_from_chunk_files(dir).await;
+                self.replay_from_chunk_files(dir, shutdown_rx.clone()).await;
                 return;
             }
         }
@@ -2225,14 +2229,18 @@ impl Node {
             ledger_slot,
             db_tip_slot, blocks_behind, "Replaying ledger from ChainDB (LSM mode)",
         );
-        self.replay_from_lsm(db_tip).await;
+        self.replay_from_lsm(db_tip, shutdown_rx).await;
     }
 
     /// Fast replay: read blocks sequentially from chunk files.
     ///
     /// Runs in a blocking thread since chunk file I/O and ledger application
     /// are CPU-bound synchronous work.
-    async fn replay_from_chunk_files(&self, replay_dir: &std::path::Path) {
+    async fn replay_from_chunk_files(
+        &self,
+        replay_dir: &std::path::Path,
+        shutdown_rx: watch::Receiver<bool>,
+    ) {
         let ledger_state = self.ledger_state.clone();
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
         let replay_dir = replay_dir.to_path_buf();
@@ -2272,6 +2280,12 @@ impl Node {
             }
 
             let result = crate::mithril::replay_from_chunk_files(&replay_dir, |cbor| {
+                // Check shutdown every 1000 blocks
+                if replayed.is_multiple_of(1000) && *shutdown_rx.borrow() {
+                    info!("Shutdown requested during chunk replay at block {replayed}");
+                    return Err(anyhow::anyhow!("shutdown requested"));
+                }
+
                 match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
                     cbor, bel,
                 ) {
@@ -2370,7 +2384,11 @@ impl Node {
     }
 
     /// Fallback replay: read blocks from LSM tree by block number.
-    async fn replay_from_lsm(&mut self, db_tip: torsten_primitives::block::Tip) {
+    async fn replay_from_lsm(
+        &mut self,
+        db_tip: torsten_primitives::block::Tip,
+        shutdown_rx: watch::Receiver<bool>,
+    ) {
         let start = std::time::Instant::now();
         let mut replayed = 0u64;
         let mut last_log = std::time::Instant::now();
@@ -2385,6 +2403,19 @@ impl Node {
         let end_block_no = db_tip.block_number.0;
 
         for block_no in start_block_no..=end_block_no {
+            // Check shutdown every 1000 blocks
+            if block_no.is_multiple_of(1000) && *shutdown_rx.borrow() {
+                info!(
+                    block_no,
+                    "Shutdown requested during LSM replay, saving snapshot"
+                );
+                let ls = self.ledger_state.write().await;
+                if let Err(e) = ls.save_snapshot(&snapshot_path) {
+                    warn!("Failed to save snapshot on shutdown: {e}");
+                }
+                break;
+            }
+
             let block_data = {
                 let db = self.chain_db.read().await;
                 db.get_block_by_number(torsten_primitives::time::BlockNo(block_no))
