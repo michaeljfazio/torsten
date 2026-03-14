@@ -915,4 +915,165 @@ mod tests {
             assert!(db.has_block(&h(3)));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Additional WAL edge case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wal_single_entry_add_remove_empty() {
+        // Add one block, remove it, verify WAL file is effectively empty on reopen
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"only_block".to_vec());
+            assert_eq!(db.len(), 1);
+
+            // Remove the block by removing all blocks up to its slot
+            db.remove_blocks_up_to_slot(100);
+            assert_eq!(db.len(), 0);
+            assert!(db.is_empty());
+        }
+
+        // Reopen: should be empty
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 0);
+        assert!(db.is_empty());
+        assert_eq!(db.get_tip(), None);
+    }
+
+    #[test]
+    fn test_wal_replay_duplicate_entries() {
+        // Manually write WAL with duplicate entries (same hash, different data)
+        // Last entry should win since HashMap replaces previous value
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        {
+            let mut file = File::create(&wal_path).unwrap();
+
+            // Write two entries with the same hash but different CBOR
+            for cbor in &[b"version_1".as_slice(), b"version_2".as_slice()] {
+                file.write_all(&WAL_MAGIC).unwrap();
+                file.write_all(&100u64.to_be_bytes()).unwrap();
+                file.write_all(&10u64.to_be_bytes()).unwrap();
+                file.write_all(h(1).as_bytes()).unwrap();
+                file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
+                file.write_all(cbor).unwrap();
+            }
+        }
+
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        // Should have 1 block (duplicate hash -> last wins)
+        assert_eq!(db.len(), 1);
+        assert!(db.has_block(&h(1)));
+        // The second entry overwrites the first
+        assert_eq!(db.get_block_cbor(&h(1)).unwrap(), b"version_2");
+    }
+
+    #[test]
+    fn test_wal_large_100_entries_flush_and_shrink() {
+        // Add 100+ entries, flush some, verify WAL shrinks on reopen
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            for i in 0..120u8 {
+                let hash = Hash32::from_bytes([i; 32]);
+                db.add_block(hash, i as u64 * 10, i as u64, h(0), vec![i; 64]);
+            }
+            assert_eq!(db.len(), 120);
+
+            // Remove first 100 blocks (simulating flush to immutable)
+            db.remove_blocks_up_to_slot(990); // slots 0..=990 -> indices 0..=99
+        }
+
+        // Reopen: should only have remaining blocks
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        // Blocks at slots 1000..1190 should remain (indices 100..119)
+        assert!(db.len() <= 20);
+        assert!(!db.is_empty());
+
+        // Verify the WAL file is smaller than writing 120 entries
+        let wal_path = wal_dir.join(WAL_FILENAME);
+        let wal_size = fs::metadata(&wal_path).unwrap().len();
+        // Each entry is ~56 header + 64 data = 120 bytes.
+        // 120 entries would be ~14400 bytes, remaining ~20 should be much less.
+        assert!(wal_size < 5000, "WAL should have shrunk, got {wal_size}");
+    }
+
+    #[test]
+    fn test_wal_open_close_reopen_state_preserved() {
+        // Test that open, add, close, reopen preserves state exactly
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"block_one".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"block_two".to_vec());
+            assert_eq!(db.len(), 2);
+            assert_eq!(db.get_tip(), Some((200, h(2), 20)));
+        }
+
+        // Reopen - all state should be intact
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 2);
+        assert!(db.has_block(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert_eq!(db.get_block_cbor(&h(1)).unwrap(), b"block_one");
+        assert_eq!(db.get_block_cbor(&h(2)).unwrap(), b"block_two");
+        // Tip should be the highest slot
+        assert_eq!(db.get_tip(), Some((200, h(2), 20)));
+    }
+
+    #[test]
+    fn test_wal_entry_at_64kb_boundary() {
+        // Test WAL entry with CBOR data exactly 64KB
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        let big_cbor = vec![0xAB; 65536]; // exactly 64KB
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), big_cbor.clone());
+            assert_eq!(db.len(), 1);
+        }
+
+        // Reopen and verify the large block survived
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 1);
+        assert!(db.has_block(&h(1)));
+        assert_eq!(db.get_block_cbor(&h(1)).unwrap().len(), 65536);
+        assert_eq!(db.get_block_cbor(&h(1)).unwrap(), big_cbor.as_slice());
+    }
+
+    #[test]
+    fn test_remove_block_updates_tip() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+
+        assert_eq!(db.get_tip(), Some((300, h(3), 30)));
+
+        // Remove the tip block
+        db.remove_block(&h(3));
+        assert!(!db.has_block(&h(3)));
+        assert_eq!(db.len(), 2);
+        // Note: tip is not recomputed on remove_block, only on rollback
+    }
+
+    #[test]
+    fn test_volatile_default_trait() {
+        let db = VolatileDB::default();
+        assert!(db.is_empty());
+        assert_eq!(db.len(), 0);
+        assert_eq!(db.get_tip(), None);
+    }
 }

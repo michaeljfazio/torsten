@@ -5453,4 +5453,207 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Validation Error Path Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fee_too_small_with_zero_fee() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        // Fee = 0, output = 10M (value conserved but fee is zero)
+        let tx = make_simple_tx(input, 10_000_000, 0);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::FeeTooSmall { .. })),
+            "Expected FeeTooSmall error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_output_too_small_one_lovelace() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        // Output with just 1 lovelace, rest as fee
+        let tx = make_simple_tx(input, 1, 9_999_999);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::OutputTooSmall { .. })),
+            "Expected OutputTooSmall error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_input_not_found_nonexistent_utxo() {
+        let (utxo_set, _) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let fake_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xFF; 32]),
+            index: 99,
+        };
+        let tx = make_simple_tx(fake_input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InputNotFound(_))),
+            "Expected InputNotFound error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_ttl_expired_with_ttl_less_than_current_slot() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.ttl = Some(SlotNo(10)); // TTL = 10, current slot = 100
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TtlExpired { .. })),
+            "Expected TtlExpired error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_duplicate_input_error() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input.clone(), 9_800_000, 200_000);
+        // Add the same input again
+        tx.body.inputs.push(input);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateInput(_))),
+            "Expected DuplicateInput error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_value_not_conserved_outputs_exceed_inputs() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        // Input is 10M, but output (11M) + fee (200K) = 11.2M > 10M
+        let tx = make_simple_tx(input, 11_000_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })),
+            "Expected ValueNotConserved error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_collateral_has_tokens_error_path() {
+        // This test verifies that collateral with multi-asset tokens triggers
+        // CollateralHasTokens. It reuses the same pattern as the existing
+        // test_plutus_collateral_has_tokens test but exercises the error path
+        // from a different angle.
+        let policy = Hash28::from_bytes([0xAA; 28]);
+        let asset = torsten_primitives::value::AssetName(vec![0x01]);
+        let mut utxo_set = UtxoSet::new();
+
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        // Create collateral UTxO with tokens
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        let mut col_value = Value::lovelace(5_000_000);
+        col_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 100);
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: col_value,
+                datum: OutputDatum::None,
+                script_ref: None,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CollateralHasTokens(_))),
+            "Expected CollateralHasTokens error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_missing_required_signer() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        // Add a required signer that has no matching vkey witness
+        tx.body
+            .required_signers
+            .push(Hash32::from_bytes([0xEE; 32]));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRequiredSigner(_))),
+            "Expected MissingRequiredSigner error, got: {:?}",
+            errors
+        );
+    }
 }

@@ -1541,4 +1541,150 @@ mod tests {
             assert!(db.checksums.contains_key(hash));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_append_block_at_slot_zero() {
+        // First block at slot 0 should work correctly
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+
+        let hash = Hash32::from_bytes([1u8; 32]);
+        db.append_block(0, 0, &hash, b"genesis_block").unwrap();
+
+        assert_eq!(db.total_blocks(), 1);
+        assert_eq!(db.tip_slot(), 0);
+        assert!(db.has_block(&hash));
+        assert_eq!(db.get_block(&hash).unwrap(), b"genesis_block");
+    }
+
+    #[test]
+    fn test_append_block_at_max_slot() {
+        // Block at u64::MAX slot should work
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+
+        let hash = Hash32::from_bytes([1u8; 32]);
+        db.append_block(u64::MAX, 1, &hash, b"far_future_block")
+            .unwrap();
+
+        assert_eq!(db.total_blocks(), 1);
+        assert_eq!(db.tip_slot(), u64::MAX);
+        assert!(db.has_block(&hash));
+        assert_eq!(db.get_block(&hash).unwrap(), b"far_future_block");
+    }
+
+    #[test]
+    fn test_secondary_index_survives_flush_and_reopen() {
+        // Write blocks, flush, reopen and verify all data survives
+        let dir = tempfile::tempdir().unwrap();
+        let hashes: Vec<Hash32> = (1..=5u8).map(|i| Hash32::from_bytes([i; 32])).collect();
+
+        {
+            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+            for (i, hash) in hashes.iter().enumerate() {
+                let cbor = format!("block_{}", i + 1);
+                db.append_block((i as u64 + 1) * 100, i as u64 + 1, hash, cbor.as_bytes())
+                    .unwrap();
+            }
+            db.flush().unwrap();
+        }
+
+        // Reopen and verify all blocks
+        let db = ImmutableDB::open(dir.path()).unwrap();
+        assert_eq!(db.total_blocks(), 5);
+        assert_eq!(db.tip_slot(), 500);
+        for (i, hash) in hashes.iter().enumerate() {
+            assert!(db.has_block(hash));
+            let cbor = db.get_block(hash).unwrap();
+            assert_eq!(cbor, format!("block_{}", i + 1).as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_secondary_index_missing_chunk_file_read() {
+        // Create chunk + secondary, then delete chunk file.
+        // has_block returns true (index exists) but get_block returns None (can't read).
+        let dir = tempfile::tempdir().unwrap();
+        let hash = [42u8; 32];
+        create_test_chunk(dir.path(), 0, &[(b"block_data", hash, 100)]);
+
+        // Delete the chunk file but keep secondary
+        fs::remove_file(dir.path().join("00000.chunk")).unwrap();
+
+        let db = ImmutableDB::open(dir.path()).unwrap();
+        // Chunk file is gone so no blocks discovered (chunks found by .chunk files)
+        assert_eq!(db.total_blocks(), 0);
+    }
+
+    #[test]
+    fn test_crc32_mismatch_still_returns_data() {
+        // Corrupt the block data on disk, verify get_block still returns it
+        // (CRC mismatch only logs a warning, doesn't reject)
+        let dir = tempfile::tempdir().unwrap();
+        let hash = Hash32::from_bytes([42u8; 32]);
+        let original = b"original_block_data_here";
+
+        {
+            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+            db.append_block(100, 1, &hash, original).unwrap();
+            db.flush().unwrap();
+        }
+
+        // Corrupt the chunk file (overwrite with same-length different content)
+        let chunk_path = dir.path().join("00000.chunk");
+        let corrupted = b"CORRUPTED_block_data_hXX";
+        assert_eq!(corrupted.len(), original.len());
+        fs::write(&chunk_path, corrupted).unwrap();
+
+        // Reopen - CRC mismatch should warn but still return data
+        let db = ImmutableDB::open(dir.path()).unwrap();
+        let result = db.get_block(&hash);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), corrupted.as_slice());
+    }
+
+    #[test]
+    fn test_finalize_and_reopen() {
+        // Write blocks to active chunk, finalize, write more, flush, reopen
+        let dir = tempfile::tempdir().unwrap();
+        let h1 = Hash32::from_bytes([1u8; 32]);
+        let h2 = Hash32::from_bytes([2u8; 32]);
+        let h3 = Hash32::from_bytes([3u8; 32]);
+
+        {
+            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+            db.append_block(10, 1, &h1, b"epoch0_block1").unwrap();
+            db.append_block(20, 2, &h2, b"epoch0_block2").unwrap();
+            db.finalize_chunk().unwrap();
+            db.append_block(30, 3, &h3, b"epoch1_block1").unwrap();
+            db.flush().unwrap();
+        }
+
+        // Reopen and verify all blocks across finalized + active chunks
+        let db = ImmutableDB::open(dir.path()).unwrap();
+        assert_eq!(db.total_blocks(), 3);
+        assert!(db.has_block(&h1));
+        assert!(db.has_block(&h2));
+        assert!(db.has_block(&h3));
+        assert_eq!(db.get_block(&h1).unwrap(), b"epoch0_block1");
+        assert_eq!(db.get_block(&h3).unwrap(), b"epoch1_block1");
+    }
+
+    #[test]
+    fn test_read_crc32_from_entry_helper() {
+        // Short entry returns 0
+        assert_eq!(read_crc32_from_entry(&[0u8; 10]), 0);
+
+        // Entry with CRC at bytes 12..16
+        let mut entry = [0u8; 56];
+        entry[12..16].copy_from_slice(&42u32.to_be_bytes());
+        assert_eq!(read_crc32_from_entry(&entry), 42);
+
+        // All-zero CRC field
+        assert_eq!(read_crc32_from_entry(&[0u8; 56]), 0);
+    }
 }

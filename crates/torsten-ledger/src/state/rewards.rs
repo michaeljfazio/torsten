@@ -462,3 +462,199 @@ impl LedgerState {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Rat;
+
+    // -----------------------------------------------------------------------
+    // GCD correctness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gcd_coprime_numbers() {
+        // 13 and 17 are coprime
+        assert_eq!(Rat::new(13, 17).n, 13);
+        assert_eq!(Rat::new(13, 17).d, 17);
+    }
+
+    #[test]
+    fn test_gcd_reduces_fractions() {
+        let r = Rat::new(6, 9);
+        assert_eq!(r.n, 2);
+        assert_eq!(r.d, 3);
+    }
+
+    #[test]
+    fn test_gcd_large_values() {
+        // GCD(2^60, 2^40) = 2^40
+        let a = 1i128 << 60;
+        let b = 1i128 << 40;
+        let r = Rat::new(a, b);
+        assert_eq!(r.n, 1i128 << 20);
+        assert_eq!(r.d, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rat multiplication near i128::MAX
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_mul_near_i128_max() {
+        // Two large values that would overflow i128 without BigInt fallback
+        let a = Rat::new(i128::MAX / 2, 1);
+        let b = Rat::new(3, 1);
+        let result = a.mul(&b);
+        // Should not panic; result is valid (uses BigInt fallback)
+        assert!(result.d > 0);
+        // (MAX/2)*3 ≈ 1.5*MAX, so result.n should be saturated to i128::MAX
+        // or handled via BigInt
+        assert!(result.n > 0);
+    }
+
+    #[test]
+    fn test_rat_mul_cross_reduce_prevents_overflow() {
+        // (large/small) * (small/large) should cross-reduce cleanly
+        let a = Rat::new(1_000_000_000_000_000, 7);
+        let b = Rat::new(7, 1_000_000_000_000_000);
+        let result = a.mul(&b);
+        assert_eq!(result.n, 1);
+        assert_eq!(result.d, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rat addition near i128::MAX
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_add_near_i128_max() {
+        let a = Rat::new(i128::MAX / 2, 1);
+        let b = Rat::new(i128::MAX / 2, 1);
+        let result = a.add(&b);
+        // Should not panic; uses BigInt fallback
+        assert!(result.n > 0);
+        assert!(result.d > 0);
+    }
+
+    #[test]
+    fn test_rat_add_different_denominators() {
+        let a = Rat::new(1, 3);
+        let b = Rat::new(1, 6);
+        let result = a.add(&b);
+        // 1/3 + 1/6 = 3/6 = 1/2
+        assert_eq!(result.n, 1);
+        assert_eq!(result.d, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Division producing very small fractions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_div_very_small_fraction() {
+        let a = Rat::new(1, 1_000_000_000);
+        let b = Rat::new(1_000_000_000, 1);
+        let result = a.div(&b);
+        // 1/10^9 / 10^9 = 1/10^18
+        assert_eq!(result.n, 1);
+        assert_eq!(result.d, 1_000_000_000_000_000_000);
+    }
+
+    #[test]
+    fn test_rat_div_by_zero_returns_zero() {
+        let a = Rat::new(5, 3);
+        let b = Rat::new(0, 1);
+        let result = a.div(&b);
+        assert_eq!(result.n, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative Rat values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_negative_numerator() {
+        let r = Rat::new(-3, 4);
+        assert_eq!(r.n, -3);
+        assert_eq!(r.d, 4);
+    }
+
+    #[test]
+    fn test_rat_negative_denominator_normalized() {
+        // Negative denominator should be normalized to positive
+        let r = Rat::new(3, -4);
+        assert_eq!(r.n, -3);
+        assert_eq!(r.d, 4);
+    }
+
+    #[test]
+    fn test_rat_both_negative() {
+        let r = Rat::new(-6, -8);
+        assert_eq!(r.n, 3);
+        assert_eq!(r.d, 4);
+    }
+
+    #[test]
+    fn test_rat_sub_produces_negative() {
+        let a = Rat::new(1, 4);
+        let b = Rat::new(3, 4);
+        let result = a.sub(&b);
+        assert_eq!(result.n, -1);
+        assert_eq!(result.d, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Floor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_floor_u64_negative_returns_zero() {
+        let r = Rat::new(-5, 3);
+        assert_eq!(r.floor_u64(), 0);
+    }
+
+    #[test]
+    fn test_rat_floor_u64_exact_division() {
+        let r = Rat::new(10, 5);
+        assert_eq!(r.floor_u64(), 2);
+    }
+
+    #[test]
+    fn test_rat_floor_u64_truncates() {
+        let r = Rat::new(7, 3);
+        assert_eq!(r.floor_u64(), 2); // 7/3 = 2.333...
+    }
+
+    // -----------------------------------------------------------------------
+    // min_rat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_min_rat() {
+        let a = Rat::new(1, 3);
+        let b = Rat::new(1, 2);
+        assert_eq!(a.min_rat(&b), a);
+        assert_eq!(b.min_rat(&a), a);
+    }
+
+    #[test]
+    fn test_rat_min_rat_equal() {
+        let a = Rat::new(2, 4);
+        let b = Rat::new(1, 2);
+        // Both are 1/2 after reduction
+        let result = a.min_rat(&b);
+        assert_eq!(result.n, 1);
+        assert_eq!(result.d, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Zero denominator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rat_zero_denominator() {
+        let r = Rat::new(5, 0);
+        assert_eq!(r.n, 0);
+        assert_eq!(r.d, 1);
+    }
+}

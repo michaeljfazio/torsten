@@ -268,4 +268,152 @@ mod tests {
         assert_eq!(reassembled, payload);
         assert_eq!(offset, encoded.len());
     }
+
+    #[test]
+    fn test_large_payload_chunking_preserves_protocol_id() {
+        // Verify protocol ID is the same in every chunk
+        let payload_size = MAX_SEGMENT_PAYLOAD * 2 + 500;
+        let payload = vec![0xFE; payload_size];
+        let segment = Segment {
+            transmission_time: 99,
+            protocol_id: 7, // arbitrary protocol ID
+            is_responder: false,
+            payload: payload.clone(),
+        };
+
+        let encoded = segment.encode();
+        let mut offset = 0;
+        let mut chunk_count = 0;
+        let mut reassembled = Vec::new();
+
+        while offset < encoded.len() {
+            let (chunk, consumed) = Segment::decode(&encoded[offset..]).unwrap();
+            assert_eq!(chunk.protocol_id, 7, "chunk {chunk_count} protocol_id");
+            assert_eq!(chunk.transmission_time, 99, "chunk {chunk_count} timestamp");
+            assert!(!chunk.is_responder, "chunk {chunk_count} responder flag");
+            reassembled.extend_from_slice(&chunk.payload);
+            offset += consumed;
+            chunk_count += 1;
+        }
+
+        assert_eq!(chunk_count, 3); // 65535 + 65535 + 500
+        assert_eq!(reassembled, payload);
+    }
+
+    #[test]
+    fn test_responder_flag_bit15_encoding() {
+        // Verify bit 15 is correctly set in the wire format
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: 5,
+            is_responder: true,
+            payload: vec![0x42],
+        };
+
+        let encoded = segment.encode();
+        // Protocol word is at bytes 4-5 (big-endian)
+        let protocol_word = u16::from_be_bytes([encoded[4], encoded[5]]);
+        assert_eq!(
+            protocol_word & 0x8000,
+            0x8000,
+            "Bit 15 must be set for responder"
+        );
+        assert_eq!(protocol_word & 0x7FFF, 5, "Protocol ID must be preserved");
+
+        // Non-responder should have bit 15 clear
+        let segment2 = Segment {
+            transmission_time: 0,
+            protocol_id: 5,
+            is_responder: false,
+            payload: vec![0x42],
+        };
+        let encoded2 = segment2.encode();
+        let protocol_word2 = u16::from_be_bytes([encoded2[4], encoded2[5]]);
+        assert_eq!(
+            protocol_word2 & 0x8000,
+            0,
+            "Bit 15 must be clear for initiator"
+        );
+    }
+
+    #[test]
+    fn test_exact_boundary_payload_65535() {
+        // Exactly MAX_SEGMENT_PAYLOAD bytes should NOT be chunked
+        let payload = vec![0xAA; MAX_SEGMENT_PAYLOAD];
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: 1,
+            is_responder: false,
+            payload: payload.clone(),
+        };
+
+        let encoded = segment.encode();
+        // Should be exactly one segment
+        assert_eq!(encoded.len(), SEGMENT_HEADER_SIZE + MAX_SEGMENT_PAYLOAD);
+
+        // Verify the length field in the header
+        let payload_len = u16::from_be_bytes([encoded[6], encoded[7]]);
+        assert_eq!(payload_len, MAX_SEGMENT_PAYLOAD as u16);
+
+        let (decoded, consumed) = Segment::decode(&encoded).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.payload.len(), MAX_SEGMENT_PAYLOAD);
+    }
+
+    #[test]
+    fn test_boundary_plus_one_triggers_chunking() {
+        // MAX_SEGMENT_PAYLOAD + 1 should be chunked into 2 segments
+        let payload = vec![0xBB; MAX_SEGMENT_PAYLOAD + 1];
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: 2,
+            is_responder: false,
+            payload: payload.clone(),
+        };
+
+        let encoded = segment.encode();
+        // Two segments: first with 65535 bytes, second with 1 byte
+        let expected_len = 2 * SEGMENT_HEADER_SIZE + MAX_SEGMENT_PAYLOAD + 1;
+        assert_eq!(encoded.len(), expected_len);
+
+        let (chunk1, consumed1) = Segment::decode(&encoded).unwrap();
+        assert_eq!(chunk1.payload.len(), MAX_SEGMENT_PAYLOAD);
+
+        let (chunk2, consumed2) = Segment::decode(&encoded[consumed1..]).unwrap();
+        assert_eq!(chunk2.payload.len(), 1);
+        assert_eq!(consumed1 + consumed2, encoded.len());
+    }
+
+    #[test]
+    fn test_decode_truncated_payload() {
+        // Header says 100 bytes but only 50 bytes of payload present
+        let mut data = vec![0u8; SEGMENT_HEADER_SIZE + 50];
+        // Set payload length to 100 in header
+        let len_bytes = 100u16.to_be_bytes();
+        data[6] = len_bytes[0];
+        data[7] = len_bytes[1];
+
+        let result = Segment::decode(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_all_protocol_ids_roundtrip() {
+        // Verify various protocol IDs survive encode/decode
+        for proto_id in [0u16, 1, 2, 3, 4, 5, 6, 9, 0x7FFF] {
+            let segment = Segment {
+                transmission_time: 0,
+                protocol_id: proto_id,
+                is_responder: false,
+                payload: vec![0x01],
+            };
+
+            let encoded = segment.encode();
+            let (decoded, _) = Segment::decode(&encoded).unwrap();
+            assert_eq!(
+                decoded.protocol_id, proto_id,
+                "Protocol ID {proto_id} roundtrip failed"
+            );
+        }
+    }
 }

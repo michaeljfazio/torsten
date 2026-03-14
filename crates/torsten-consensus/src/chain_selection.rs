@@ -662,4 +662,92 @@ mod tests {
         assert_eq!(hash_tiebreak(&high, &mid), ChainPreference::PreferCandidate);
         assert_eq!(hash_tiebreak(&mid, &high), ChainPreference::PreferCurrent);
     }
+
+    // -----------------------------------------------------------------------
+    // Chain Selection Edge Cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_equal_length_different_hashes_tiebreaker() {
+        // Two chains of equal length but different tip hashes
+        let low_hash = Hash32::from_bytes([0x10; 32]);
+        let high_hash = Hash32::from_bytes([0x90; 32]);
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(100, 2000, high_hash));
+
+        let candidate = make_tip_with_hash(100, 2000, low_hash);
+
+        // Lower hash should win the tiebreak
+        assert_eq!(
+            cs.prefer_chain(&candidate, Era::Conway, &high_hash, &low_hash),
+            ChainPreference::PreferCandidate,
+            "Lower hash candidate should win on equal-length tiebreak"
+        );
+
+        // Reverse: higher hash candidate should lose
+        let mut cs2 = ChainSelection::new();
+        cs2.set_tip(make_tip_with_hash(100, 2000, low_hash));
+        let candidate2 = make_tip_with_hash(100, 2000, high_hash);
+        assert_eq!(
+            cs2.prefer_chain(&candidate2, Era::Conway, &low_hash, &high_hash),
+            ChainPreference::PreferCurrent,
+            "Higher hash candidate should lose on equal-length tiebreak"
+        );
+    }
+
+    #[test]
+    fn test_higher_block_number_lower_slot_preferred_in_praos() {
+        // Praos uses block number (length), not slot
+        // Chain A: 50 blocks at slot 1000
+        // Chain B: 51 blocks at slot 900 (higher block count, lower slot)
+        let hash_a = Hash32::from_bytes([0xAA; 32]);
+        let hash_b = Hash32::from_bytes([0xBB; 32]);
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(50, 1000, hash_a));
+
+        let candidate = make_tip_with_hash(51, 900, hash_b);
+        assert_eq!(
+            cs.prefer_chain(&candidate, Era::Conway, &hash_a, &hash_b),
+            ChainPreference::PreferCandidate,
+            "Praos should prefer higher block number regardless of slot"
+        );
+    }
+
+    #[test]
+    fn test_byron_density_max_slot_values_no_overflow() {
+        // Test with near-maximum u64 slot values to check u128 overflow protection
+        let hash_a = Hash32::from_bytes([0x11; 32]);
+        let hash_b = Hash32::from_bytes([0x22; 32]);
+
+        let max_slot = u64::MAX / 2;
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(1_000_000, max_slot, hash_a));
+
+        // Candidate has same blocks in fewer slots (higher density)
+        let candidate = make_tip_with_hash(1_000_000, max_slot - 1000, hash_b);
+        let result = cs.prefer_chain(&candidate, Era::Byron, &hash_a, &hash_b);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Should handle large slot values without overflow"
+        );
+    }
+
+    #[test]
+    fn test_praos_block_number_zero_chains() {
+        // Two chains both at block 0 but different slots
+        let hash_a = Hash32::from_bytes([0x55; 32]);
+        let hash_b = Hash32::from_bytes([0x33; 32]);
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(0, 0, hash_a));
+
+        // Block 0, slot 0 vs block 0, slot 5 — equal block number
+        let candidate = make_tip_with_hash(0, 5, hash_b);
+        let result = cs.prefer_chain(&candidate, Era::Shelley, &hash_a, &hash_b);
+        // Equal block numbers → tiebreak by hash: 0x33 < 0x55
+        assert_eq!(result, ChainPreference::PreferCandidate);
+    }
 }

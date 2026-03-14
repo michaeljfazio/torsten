@@ -289,4 +289,158 @@ mod tests {
         assert_eq!(sum.coin, Lovelace(3_000_000));
         assert_eq!(sum.multi_asset[&policy][&asset], 80);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional value and lovelace tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lovelace_display_format() {
+        assert_eq!(format!("{}", Lovelace(0)), "0 lovelace");
+        assert_eq!(format!("{}", Lovelace(1_000_000)), "1000000 lovelace");
+        assert_eq!(
+            format!("{}", Lovelace(u64::MAX)),
+            format!("{} lovelace", u64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_lovelace_zero_identity() {
+        let a = Lovelace(5_000_000);
+        assert_eq!(a + Lovelace::ZERO, a);
+        assert_eq!(a - Lovelace::ZERO, a);
+    }
+
+    #[test]
+    fn test_value_add_disjoint_policies() {
+        // Two values with different policies should merge without conflict
+        let policy_a = Hash28::from_bytes([1u8; 28]);
+        let policy_b = Hash28::from_bytes([2u8; 28]);
+        let asset = AssetName::new(b"Tok".to_vec()).unwrap();
+
+        let mut v1 = Value::lovelace(1_000_000);
+        v1.multi_asset
+            .entry(policy_a)
+            .or_default()
+            .insert(asset.clone(), 100);
+
+        let mut v2 = Value::lovelace(2_000_000);
+        v2.multi_asset
+            .entry(policy_b)
+            .or_default()
+            .insert(asset.clone(), 200);
+
+        let sum = v1.add(&v2);
+        assert_eq!(sum.coin, Lovelace(3_000_000));
+        assert_eq!(sum.policy_count(), 2);
+        assert_eq!(sum.multi_asset[&policy_a][&asset], 100);
+        assert_eq!(sum.multi_asset[&policy_b][&asset], 200);
+    }
+
+    #[test]
+    fn test_value_add_multiple_assets_same_policy() {
+        let policy = Hash28::from_bytes([1u8; 28]);
+        let asset_a = AssetName::new(b"TokenA".to_vec()).unwrap();
+        let asset_b = AssetName::new(b"TokenB".to_vec()).unwrap();
+
+        let mut v1 = Value::lovelace(1_000_000);
+        v1.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset_a.clone(), 10);
+
+        let mut v2 = Value::lovelace(2_000_000);
+        v2.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset_b.clone(), 20);
+
+        let sum = v1.add(&v2);
+        assert_eq!(sum.policy_count(), 1);
+        assert_eq!(sum.asset_count(), 2);
+        assert_eq!(sum.multi_asset[&policy][&asset_a], 10);
+        assert_eq!(sum.multi_asset[&policy][&asset_b], 20);
+    }
+
+    #[test]
+    fn test_value_geq_with_multi_asset() {
+        let policy = Hash28::from_bytes([1u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+
+        let mut v1 = Value::lovelace(5_000_000);
+        v1.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 100);
+
+        let mut v2 = Value::lovelace(3_000_000);
+        v2.multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 50);
+
+        assert!(v1.geq(&v2));
+        assert!(!v2.geq(&v1));
+
+        // Equal values
+        assert!(v1.geq(&v1));
+    }
+
+    #[test]
+    fn test_value_geq_missing_policy() {
+        let policy = Hash28::from_bytes([1u8; 28]);
+        let asset = AssetName::new(b"Tok".to_vec()).unwrap();
+
+        let v1 = Value::lovelace(5_000_000); // no multi-asset
+
+        let mut v2 = Value::lovelace(1_000_000);
+        v2.multi_asset.entry(policy).or_default().insert(asset, 10);
+
+        // v1 has enough ADA but missing the token policy
+        assert!(!v1.geq(&v2));
+    }
+
+    #[test]
+    fn test_value_default_is_zero() {
+        let v = Value::default();
+        assert_eq!(v.coin, Lovelace::ZERO);
+        assert!(v.is_pure_ada());
+        assert_eq!(v.policy_count(), 0);
+        assert_eq!(v.asset_count(), 0);
+    }
+
+    #[test]
+    fn test_asset_name_max_length() {
+        // 32 bytes should succeed
+        let ok = AssetName::new(vec![0u8; 32]);
+        assert!(ok.is_ok());
+
+        // 33 bytes should fail
+        let too_long = AssetName::new(vec![0u8; 33]);
+        assert!(too_long.is_err());
+    }
+
+    #[test]
+    fn test_asset_name_display() {
+        // ASCII-printable should display as text
+        let ascii = AssetName::new(b"MyToken".to_vec()).unwrap();
+        assert_eq!(format!("{ascii}"), "MyToken");
+
+        // Non-UTF8 should display as hex
+        let binary = AssetName::new(vec![0xFF, 0xFE]).unwrap();
+        assert_eq!(format!("{binary}"), "0xfffe");
+
+        // Empty should display as empty string (no bytes to encode)
+        let empty = AssetName::empty();
+        assert_eq!(format!("{empty}"), "");
+    }
+
+    #[test]
+    fn test_lovelace_from_ada() {
+        let l = Lovelace::from_ada(1.5);
+        assert_eq!(l, Lovelace(1_500_000));
+
+        let l2 = Lovelace::from_ada(0.0);
+        assert_eq!(l2, Lovelace(0));
+    }
 }

@@ -209,4 +209,120 @@ mod tests {
         let h28_b = Hash28::from_bytes([2u8; 28]);
         assert_ne!(h28_a.to_hash32_padded(), h28_b.to_hash32_padded());
     }
+
+    // -----------------------------------------------------------------------
+    // Additional hash tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hash32_from_hex_roundtrip_various() {
+        // Test with known hex values
+        let hex_str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let hash = Hash32::from_hex(hex_str).unwrap();
+        assert_eq!(hash.to_hex(), hex_str);
+
+        // All zeros
+        let zero_hex = "0000000000000000000000000000000000000000000000000000000000000000";
+        let zero_hash = Hash32::from_hex(zero_hex).unwrap();
+        assert_eq!(zero_hash, Hash32::ZERO);
+
+        // All ff
+        let ff_hex = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let ff_hash = Hash32::from_hex(ff_hex).unwrap();
+        assert_eq!(ff_hash.to_hex(), ff_hex);
+    }
+
+    #[test]
+    fn test_hash32_from_hex_invalid_odd_length() {
+        // Odd-length hex string should fail
+        let result = Hash32::from_hex("abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hash32_from_hex_invalid_non_hex_chars() {
+        // Non-hex characters should fail
+        let result =
+            Hash32::from_hex("gggggggg00000000000000000000000000000000000000000000000000000000");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hash32_from_hex_wrong_length() {
+        // Valid hex but wrong length (too short)
+        let result = Hash32::from_hex("abcdef");
+        assert!(result.is_err());
+
+        // Valid hex but too long
+        let result =
+            Hash32::from_hex("abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678900");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hash28_to_hash32_and_back() {
+        let original = blake2b_224(b"cardano key hash test");
+        let padded = original.to_hash32_padded();
+
+        // Extract first 28 bytes to recover original
+        let recovered = Hash28::try_from(&padded.as_bytes()[..28]).unwrap();
+        assert_eq!(recovered, original);
+
+        // Last 4 bytes should be zero
+        assert_eq!(&padded.as_bytes()[28..], &[0u8; 4]);
+    }
+
+    #[test]
+    fn test_hash_try_from_slice() {
+        let bytes = [0xABu8; 32];
+        let hash = Hash32::try_from(bytes.as_slice()).unwrap();
+        assert_eq!(hash, Hash32::from_bytes([0xAB; 32]));
+
+        // Wrong length should fail
+        let short = [0u8; 16];
+        assert!(Hash32::try_from(short.as_slice()).is_err());
+    }
+
+    #[test]
+    fn test_hash_default_is_zero() {
+        assert_eq!(Hash32::default(), Hash32::ZERO);
+        assert_eq!(Hash28::default(), Hash28::ZERO);
+    }
+
+    #[test]
+    fn test_hash_ordering() {
+        let h1 = Hash32::from_bytes([0u8; 32]);
+        let h2 = Hash32::from_bytes([1u8; 32]);
+        let h3 = Hash32::from_bytes([255u8; 32]);
+        assert!(h1 < h2);
+        assert!(h2 < h3);
+    }
+
+    #[test]
+    fn test_hash_serde_roundtrip() {
+        let hash = blake2b_256(b"serde test");
+        let json = serde_json::to_string(&hash).unwrap();
+        let recovered: Hash32 = serde_json::from_str(&json).unwrap();
+        assert_eq!(hash, recovered);
+    }
+
+    #[test]
+    fn test_blake2b_256_deterministic() {
+        let a = blake2b_256(b"test input");
+        let b = blake2b_256(b"test input");
+        assert_eq!(a, b);
+
+        let c = blake2b_256(b"different input");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_blake2b_224_deterministic() {
+        let a = blake2b_224(b"test input");
+        let b = blake2b_224(b"test input");
+        assert_eq!(a, b);
+
+        let c = blake2b_224(b"different input");
+        assert_ne!(a, c);
+    }
 }

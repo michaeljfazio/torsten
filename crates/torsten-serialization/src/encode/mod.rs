@@ -708,4 +708,297 @@ mod tests {
         assert_eq!(arr_len, 4); // [tag, prev_id, ppu_map, policy_hash]
         assert_eq!(dec.u64().unwrap(), 0); // ParameterChange tag = 0
     }
+
+    // ===== Value encoding round-trip tests =====
+
+    #[test]
+    fn test_encode_value_zero_coin() {
+        let v = Value::lovelace(0);
+        let encoded = encode_value(&v);
+        assert_eq!(encoded, encode_uint(0));
+        // Decode back and verify
+        let mut dec = minicbor::Decoder::new(&encoded);
+        assert_eq!(dec.u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_encode_value_max_u64_coin() {
+        let v = Value::lovelace(u64::MAX);
+        let encoded = encode_value(&v);
+        assert_eq!(encoded, encode_uint(u64::MAX));
+        // Decode back and verify it parses as valid CBOR
+        let mut dec = minicbor::Decoder::new(&encoded);
+        assert_eq!(dec.u64().unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn test_encode_value_multi_asset_empty_policy_map() {
+        // Multi-asset with an empty inner map should still encode as [coin, {}]
+        let mut v = Value::lovelace(1_000_000);
+        v.multi_asset
+            .insert(Hash28::from_bytes([0xAA; 28]), BTreeMap::new());
+
+        let encoded = encode_value(&v);
+        assert_eq!(encoded[0], 0x82); // array(2)
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2);
+        assert_eq!(dec.u64().unwrap(), 1_000_000); // coin
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1); // one policy
+        let _ = dec.bytes().unwrap(); // policy_id
+        let inner_map_len = dec.map().unwrap().unwrap();
+        assert_eq!(inner_map_len, 0); // empty assets
+    }
+
+    #[test]
+    fn test_encode_value_multi_asset_multiple_policies() {
+        let policy_a = Hash28::from_bytes([0x01; 28]);
+        let policy_b = Hash28::from_bytes([0x02; 28]);
+        let mut v = Value::lovelace(3_000_000);
+
+        let mut assets_a = BTreeMap::new();
+        assets_a.insert(AssetName(b"TokenA".to_vec()), 100);
+        assets_a.insert(AssetName(b"TokenB".to_vec()), 200);
+
+        let mut assets_b = BTreeMap::new();
+        assets_b.insert(AssetName(b"Coin".to_vec()), 50);
+
+        v.multi_asset.insert(policy_a, assets_a);
+        v.multi_asset.insert(policy_b, assets_b);
+
+        let encoded = encode_value(&v);
+        assert_eq!(encoded[0], 0x82); // array(2)
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2);
+        assert_eq!(dec.u64().unwrap(), 3_000_000);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 2); // two policies
+    }
+
+    #[test]
+    fn test_encode_value_ada_only_vs_multi_asset_format() {
+        // ADA-only should be a bare uint, not wrapped in an array
+        let ada_only = Value::lovelace(42);
+        let encoded_ada = encode_value(&ada_only);
+        // Should NOT start with 0x82 (array header)
+        assert_ne!(encoded_ada[0], 0x82);
+
+        // Multi-asset should start with 0x82 (array of 2)
+        let mut multi = Value::lovelace(42);
+        multi
+            .multi_asset
+            .entry(Hash28::from_bytes([0xFF; 28]))
+            .or_default()
+            .insert(AssetName(b"X".to_vec()), 1);
+        let encoded_multi = encode_value(&multi);
+        assert_eq!(encoded_multi[0], 0x82);
+    }
+
+    // ===== Certificate encoding tests =====
+
+    #[test]
+    fn test_encode_certificate_stake_deregistration() {
+        let cert =
+            Certificate::StakeDeregistration(Credential::Script(Hash28::from_bytes([0xBB; 28])));
+        let encoded = encode_certificate(&cert);
+        assert_eq!(encoded[0], 0x82); // array(2)
+        assert_eq!(encoded[1], 0x01); // type 1 (StakeDeregistration)
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2);
+        assert_eq!(dec.u64().unwrap(), 1); // tag
+    }
+
+    #[test]
+    fn test_encode_certificate_pool_registration() {
+        let params = PoolParams {
+            operator: Hash28::from_bytes([0x01; 28]),
+            vrf_keyhash: Hash32::from_bytes([0x02; 32]),
+            pledge: Lovelace(500_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account: vec![0xE0; 29],
+            pool_owners: vec![Hash28::from_bytes([0x03; 28])],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let cert = Certificate::PoolRegistration(params);
+        let encoded = encode_certificate(&cert);
+
+        assert_eq!(encoded[0], 0x8a); // array(10)
+        assert_eq!(encoded[1], 0x03); // type 3 (PoolRegistration)
+    }
+
+    #[test]
+    fn test_encode_certificate_drep_registration() {
+        let cert = Certificate::RegDRep {
+            credential: Credential::VerificationKey(Hash28::from_bytes([0xCC; 28])),
+            deposit: Lovelace(500_000_000),
+            anchor: None,
+        };
+        let encoded = encode_certificate(&cert);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 4); // [tag, cred, deposit, anchor]
+        assert_eq!(dec.u64().unwrap(), 16); // DRep registration tag
+    }
+
+    #[test]
+    fn test_encode_certificate_vote_delegation() {
+        let cert = Certificate::VoteDelegation {
+            credential: Credential::VerificationKey(Hash28::from_bytes([0xDD; 28])),
+            drep: DRep::Abstain,
+        };
+        let encoded = encode_certificate(&cert);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 3); // [tag, cred, drep]
+        assert_eq!(dec.u64().unwrap(), 9); // VoteDelegation tag
+    }
+
+    #[test]
+    fn test_encode_certificate_conway_stake_registration() {
+        let cert = Certificate::ConwayStakeRegistration {
+            credential: Credential::Script(Hash28::from_bytes([0xEE; 28])),
+            deposit: Lovelace(2_000_000),
+        };
+        let encoded = encode_certificate(&cert);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 3); // [tag, cred, deposit]
+        assert_eq!(dec.u64().unwrap(), 7); // Conway Reg tag
+    }
+
+    // ===== Governance encoding tests =====
+
+    #[test]
+    fn test_encode_voting_procedure_yes() {
+        use governance::encode_voting_procedure;
+        let proc = VotingProcedure {
+            vote: Vote::Yes,
+            anchor: None,
+        };
+        let encoded = encode_voting_procedure(&proc);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2); // [vote, anchor]
+        assert_eq!(dec.u64().unwrap(), 1); // Yes = 1
+        assert!(dec.null().is_ok()); // null anchor
+    }
+
+    #[test]
+    fn test_encode_voting_procedure_no() {
+        use governance::encode_voting_procedure;
+        let proc = VotingProcedure {
+            vote: Vote::No,
+            anchor: Some(Anchor {
+                url: "https://vote.example.com".to_string(),
+                data_hash: Hash32::from_bytes([0xAA; 32]),
+            }),
+        };
+        let encoded = encode_voting_procedure(&proc);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2);
+        assert_eq!(dec.u64().unwrap(), 0); // No = 0
+                                           // Anchor should be array(2), not null
+        let anchor_arr = dec.array().unwrap().unwrap();
+        assert_eq!(anchor_arr, 2);
+    }
+
+    #[test]
+    fn test_encode_voting_procedure_abstain() {
+        use governance::encode_voting_procedure;
+        let proc = VotingProcedure {
+            vote: Vote::Abstain,
+            anchor: None,
+        };
+        let encoded = encode_voting_procedure(&proc);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2);
+        assert_eq!(dec.u64().unwrap(), 2); // Abstain = 2
+    }
+
+    #[test]
+    fn test_encode_proposal_procedure_with_anchor() {
+        use governance::encode_proposal_procedure;
+        let pp = ProposalProcedure {
+            deposit: Lovelace(100_000_000_000),
+            return_addr: vec![0xE0; 29],
+            gov_action: GovAction::InfoAction,
+            anchor: Anchor {
+                url: "https://proposal.example.com".to_string(),
+                data_hash: Hash32::from_bytes([0xBB; 32]),
+            },
+        };
+        let encoded = encode_proposal_procedure(&pp);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 4); // [deposit, return_addr, gov_action, anchor]
+    }
+
+    #[test]
+    fn test_encode_gov_action_info() {
+        use governance::encode_gov_action;
+        let encoded = encode_gov_action(&GovAction::InfoAction);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 1); // InfoAction has only the tag
+        assert_eq!(dec.u64().unwrap(), 6); // InfoAction tag = 6
+    }
+
+    #[test]
+    fn test_encode_gov_action_no_confidence() {
+        use governance::encode_gov_action;
+        let encoded = encode_gov_action(&GovAction::NoConfidence {
+            prev_action_id: Some(GovActionId {
+                transaction_id: Hash32::from_bytes([0x11; 32]),
+                action_index: 0,
+            }),
+        });
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 2); // [tag, prev_id]
+        assert_eq!(dec.u64().unwrap(), 3); // NoConfidence tag = 3
+                                           // prev_action_id should be array(2)
+        let prev = dec.array().unwrap().unwrap();
+        assert_eq!(prev, 2);
+    }
+
+    #[test]
+    fn test_encode_gov_action_treasury_withdrawals() {
+        use governance::encode_gov_action;
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(vec![0xE0; 29], Lovelace(50_000_000));
+
+        let encoded = encode_gov_action(&GovAction::TreasuryWithdrawals {
+            withdrawals,
+            policy_hash: None,
+        });
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 3); // [tag, withdrawals_map, policy_hash]
+        assert_eq!(dec.u64().unwrap(), 2); // TreasuryWithdrawals tag = 2
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1); // one withdrawal
+    }
 }

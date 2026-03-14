@@ -374,4 +374,138 @@ mod tests {
         assert_eq!(period, 5);
         assert!(kes_verify(&pk, 5, &sig, message).is_ok());
     }
+
+    // =========================================================================
+    // KES Evolution Edge Cases
+    // =========================================================================
+
+    #[test]
+    fn test_kes_evolve_to_max_period() {
+        // Evolve all the way to period 62 (MAX_KES_EVOLUTIONS)
+        let seed = [0xAB; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+
+        let evolved_sk = kes_evolve_to_period(&sk, MAX_KES_EVOLUTIONS as u32).unwrap();
+        let period = kes_get_period(&evolved_sk).unwrap();
+        assert_eq!(period, MAX_KES_EVOLUTIONS as u32);
+
+        // Sign and verify at max period
+        let message = b"max period test";
+        let (sig, sig_period) = kes_sign_message(&evolved_sk, message).unwrap();
+        assert_eq!(sig_period, MAX_KES_EVOLUTIONS as u32);
+        assert!(kes_verify(&pk, MAX_KES_EVOLUTIONS as u32, &sig, message).is_ok());
+    }
+
+    #[test]
+    fn test_kes_evolve_past_max_period_errors() {
+        // Evolve to max, then try to evolve once more — should error
+        let seed = [0xCD; 32];
+        let (sk, _pk) = kes_keygen(&seed).unwrap();
+
+        let evolved_sk = kes_evolve_to_period(&sk, MAX_KES_EVOLUTIONS as u32).unwrap();
+        let result = kes_update(&evolved_sk);
+        assert!(
+            result.is_err(),
+            "Evolving past MAX_KES_EVOLUTIONS should return an error"
+        );
+        match result.unwrap_err() {
+            KesError::KeyExpired(current, max) => {
+                assert_eq!(current, MAX_KES_EVOLUTIONS);
+                assert_eq!(max, MAX_KES_EVOLUTIONS);
+            }
+            other => panic!("Expected KeyExpired, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_kes_sign_verify_at_period_boundaries() {
+        let seed = [0xEF; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+        let message = b"boundary period message";
+
+        // Test at period 0
+        let (sig_0, _) = kes_sign_message(&sk, message).unwrap();
+        assert!(kes_verify(&pk, 0, &sig_0, message).is_ok());
+
+        // Test at period 1
+        let sk_1 = kes_evolve_to_period(&sk, 1).unwrap();
+        let (sig_1, _) = kes_sign_message(&sk_1, message).unwrap();
+        assert!(kes_verify(&pk, 1, &sig_1, message).is_ok());
+        // Period 0 signature should not verify at period 1
+        assert!(kes_verify(&pk, 1, &sig_0, message).is_err());
+
+        // Test at period 31 (midpoint)
+        let sk_31 = kes_evolve_to_period(&sk, 31).unwrap();
+        let (sig_31, _) = kes_sign_message(&sk_31, message).unwrap();
+        assert!(kes_verify(&pk, 31, &sig_31, message).is_ok());
+        // Wrong period should fail
+        assert!(kes_verify(&pk, 30, &sig_31, message).is_err());
+
+        // Test at period 62 (max)
+        let sk_62 = kes_evolve_to_period(&sk, 62).unwrap();
+        let (sig_62, _) = kes_sign_message(&sk_62, message).unwrap();
+        assert!(kes_verify(&pk, 62, &sig_62, message).is_ok());
+    }
+
+    #[test]
+    fn test_kes_key_serialization_roundtrip() {
+        let seed = [0x42; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+
+        // Verify key size
+        assert_eq!(sk.len(), KES_SECRET_KEY_BUFFER_SIZE);
+
+        // Derive public key from secret key
+        let derived_pk = kes_sk_to_pk(&sk).unwrap();
+        assert_eq!(derived_pk, pk);
+
+        // Evolve, then check round-trip still works
+        let (sk_evolved, period) = kes_update(&sk).unwrap();
+        assert_eq!(period, 1);
+        assert_eq!(sk_evolved.len(), KES_SECRET_KEY_BUFFER_SIZE);
+
+        // Can still derive public key after evolution
+        let derived_pk_evolved = kes_sk_to_pk(&sk_evolved).unwrap();
+        // Public key should remain the same across evolutions
+        assert_eq!(derived_pk_evolved, pk);
+
+        // Get period from evolved key
+        let current_period = kes_get_period(&sk_evolved).unwrap();
+        assert_eq!(current_period, 1);
+    }
+
+    #[test]
+    fn test_kes_evolve_to_same_period_is_noop() {
+        let seed = [0x77; 32];
+        let (sk, _pk) = kes_keygen(&seed).unwrap();
+
+        // Evolve to period 5
+        let sk_5 = kes_evolve_to_period(&sk, 5).unwrap();
+        assert_eq!(kes_get_period(&sk_5).unwrap(), 5);
+
+        // Evolving to 5 again should be a no-op (returns as-is)
+        let sk_5_again = kes_evolve_to_period(&sk_5, 5).unwrap();
+        assert_eq!(kes_get_period(&sk_5_again).unwrap(), 5);
+
+        // Evolving to a lower period should also be a no-op
+        let sk_lower = kes_evolve_to_period(&sk_5, 3).unwrap();
+        assert_eq!(kes_get_period(&sk_lower).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_kes_sign_bytes_roundtrip() {
+        let seed = [0x99; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+        let message = b"sign bytes roundtrip test";
+
+        let (sig_bytes, period) = kes_sign_bytes(&sk, message).unwrap();
+        assert_eq!(period, 0);
+        assert!(!sig_bytes.is_empty());
+
+        // Verify using kes_verify_bytes
+        assert!(kes_verify_bytes(&pk, 0, &sig_bytes, message).is_ok());
+
+        // Wrong message should fail
+        assert!(kes_verify_bytes(&pk, 0, &sig_bytes, b"wrong").is_err());
+    }
 }

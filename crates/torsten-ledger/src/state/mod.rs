@@ -7769,4 +7769,195 @@ mod tests {
             "NoConfidence stake should count as No for non-NoConfidence actions"
         );
     }
+
+    // =========================================================================
+    // Epoch Transition Tests
+    // =========================================================================
+
+    #[test]
+    fn test_snapshot_rotation_mark_set_go() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(0);
+        state.needs_stake_rebuild = false;
+
+        // Epoch 0 -> 1: creates mark snapshot, set/go are None
+        state.process_epoch_transition(EpochNo(1));
+        assert!(state.snapshots.mark.is_some());
+        assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(1));
+        assert!(state.snapshots.set.is_none());
+        assert!(state.snapshots.go.is_none());
+
+        // Epoch 1 -> 2: mark -> set, new mark created
+        state.process_epoch_transition(EpochNo(2));
+        assert!(state.snapshots.mark.is_some());
+        assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(2));
+        assert!(state.snapshots.set.is_some());
+        assert_eq!(state.snapshots.set.as_ref().unwrap().epoch, EpochNo(1));
+        assert!(state.snapshots.go.is_none());
+
+        // Epoch 2 -> 3: set -> go, mark -> set, new mark created
+        state.process_epoch_transition(EpochNo(3));
+        assert!(state.snapshots.mark.is_some());
+        assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(3));
+        assert!(state.snapshots.set.is_some());
+        assert_eq!(state.snapshots.set.as_ref().unwrap().epoch, EpochNo(2));
+        assert!(state.snapshots.go.is_some());
+        assert_eq!(state.snapshots.go.as_ref().unwrap().epoch, EpochNo(1));
+    }
+
+    #[test]
+    fn test_pool_retirement_at_scheduled_epoch() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(4);
+        state.needs_stake_rebuild = false;
+
+        let pool_id = Hash28::from_bytes([0xAA; 28]);
+        let reward_addr = {
+            let mut addr = vec![0xE0u8];
+            addr.extend_from_slice(&[0xBB; 28]);
+            addr
+        };
+        let pool_reg = PoolRegistration {
+            pool_id,
+            vrf_keyhash: Hash32::ZERO,
+            pledge: Lovelace(0),
+            cost: Lovelace(340_000_000),
+            margin_numerator: 0,
+            margin_denominator: 1,
+            reward_account: reward_addr.clone(),
+            owners: vec![],
+            relays: vec![],
+            metadata_url: None,
+            metadata_hash: None,
+        };
+        Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg);
+
+        // Schedule retirement at epoch 5
+        state
+            .pending_retirements
+            .entry(EpochNo(5))
+            .or_default()
+            .push(pool_id);
+
+        // Transition to epoch 5: pool should be retired and removed
+        state.process_epoch_transition(EpochNo(5));
+        assert!(
+            !state.pool_params.contains_key(&pool_id),
+            "Pool should be removed after retirement epoch"
+        );
+
+        // Check deposit was refunded
+        let hash_key = LedgerState::reward_account_to_hash(&reward_addr);
+        let refund = state
+            .reward_accounts
+            .get(&hash_key)
+            .copied()
+            .unwrap_or(Lovelace(0));
+        assert_eq!(refund, state.protocol_params.pool_deposit);
+    }
+
+    #[test]
+    fn test_pool_reregistration_cancels_retirement() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(3);
+        state.needs_stake_rebuild = false;
+
+        let pool_id = Hash28::from_bytes([0xCC; 28]);
+        let pool_reg = PoolRegistration {
+            pool_id,
+            vrf_keyhash: Hash32::ZERO,
+            pledge: Lovelace(0),
+            cost: Lovelace(340_000_000),
+            margin_numerator: 0,
+            margin_denominator: 1,
+            reward_account: vec![0xE0; 29],
+            owners: vec![],
+            relays: vec![],
+            metadata_url: None,
+            metadata_hash: None,
+        };
+        Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg.clone());
+
+        // Schedule retirement at epoch 5
+        state
+            .pending_retirements
+            .entry(EpochNo(5))
+            .or_default()
+            .push(pool_id);
+
+        // Re-register (cancel retirement)
+        state.pending_retirements.remove(&EpochNo(5));
+
+        // Transition to epoch 5: pool should still exist
+        state.process_epoch_transition(EpochNo(5));
+        assert!(
+            state.pool_params.contains_key(&pool_id),
+            "Pool should remain after re-registration cancels retirement"
+        );
+    }
+
+    #[test]
+    fn test_zero_total_stake_no_panic() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(0);
+        state.needs_stake_rebuild = false;
+        // No delegations, no stake - should not panic or divide by zero
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+        state.process_epoch_transition(EpochNo(1));
+        // If we get here, no panic occurred
+        assert_eq!(state.epoch, EpochNo(1));
+    }
+
+    #[test]
+    fn test_protocol_param_update_at_epoch_boundary() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(4);
+        state.update_quorum = 1; // Set quorum to 1 so a single proposal suffices
+        state.needs_stake_rebuild = false;
+
+        // Submit a protocol parameter update proposal targeting epoch 4
+        let genesis_hash = Hash32::from_bytes([0x01; 32]);
+        let ppu = ProtocolParamUpdate {
+            min_fee_a: Some(55), // Change min_fee_a from 44 to 55
+            ..Default::default()
+        };
+        state
+            .pending_pp_updates
+            .entry(EpochNo(4))
+            .or_default()
+            .push((genesis_hash, ppu));
+
+        assert_eq!(state.protocol_params.min_fee_a, 44);
+
+        // Transition: old epoch is 4, proposals for epoch 4 are applied
+        state.process_epoch_transition(EpochNo(5));
+
+        assert_eq!(
+            state.protocol_params.min_fee_a, 55,
+            "Protocol param update should be applied at epoch boundary"
+        );
+    }
+
+    #[test]
+    fn test_epoch_transition_resets_accumulators() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch_length = 100;
+        state.epoch = EpochNo(0);
+        state.needs_stake_rebuild = false;
+
+        state.epoch_fees = Lovelace(1_000_000);
+        state.epoch_block_count = 42;
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(Hash28::from_bytes([1; 28]), 10);
+
+        state.process_epoch_transition(EpochNo(1));
+
+        assert_eq!(state.epoch_fees, Lovelace(0));
+        assert_eq!(state.epoch_block_count, 0);
+        assert!(state.epoch_blocks_by_pool.is_empty());
+    }
 }

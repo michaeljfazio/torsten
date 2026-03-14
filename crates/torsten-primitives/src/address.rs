@@ -495,4 +495,170 @@ mod tests {
         let (decoded, _) = decode_variable_length(&encoded).unwrap();
         assert_eq!(decoded, value);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional address tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_enterprise_address_serialization_roundtrip_script() {
+        // Enterprise address with script credential
+        let addr = Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Mainnet,
+            payment: Credential::Script(make_hash28(0xdd)),
+        });
+        let bytes = addr.to_bytes();
+        assert_eq!(bytes.len(), 29);
+        // type=0b0111, network=1 -> 0x71
+        assert_eq!(bytes[0], 0x71);
+        let decoded = Address::from_bytes(&bytes).unwrap();
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_base_address_roundtrip_mixed_credentials() {
+        // Payment=VK, Stake=Script
+        let addr = Address::Base(BaseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(make_hash28(0x11)),
+            stake: Credential::Script(make_hash28(0x22)),
+        });
+        let bytes = addr.to_bytes();
+        assert_eq!(bytes.len(), 57);
+        // type=0b0010 (payment=VK=0, stake=Script=1), network=0 -> 0x20
+        assert_eq!(bytes[0], 0x20);
+        let decoded = Address::from_bytes(&bytes).unwrap();
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_reward_address_roundtrip_script() {
+        let addr = Address::Reward(RewardAddress {
+            network: NetworkId::Testnet,
+            stake: Credential::Script(make_hash28(0xcc)),
+        });
+        let bytes = addr.to_bytes();
+        assert_eq!(bytes.len(), 29);
+        // type=0b1111, network=0 -> 0xf0
+        assert_eq!(bytes[0], 0xf0);
+        let decoded = Address::from_bytes(&bytes).unwrap();
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_network_id_extraction_mainnet() {
+        let addr = Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Mainnet,
+            payment: Credential::VerificationKey(make_hash28(0xaa)),
+        });
+        assert_eq!(addr.network_id(), Some(NetworkId::Mainnet));
+
+        let bytes = addr.to_bytes();
+        // Network ID is in low nibble of header byte
+        assert_eq!(bytes[0] & 0x0F, 1); // Mainnet = 1
+    }
+
+    #[test]
+    fn test_network_id_extraction_testnet() {
+        let addr = Address::Base(BaseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(make_hash28(0xaa)),
+            stake: Credential::VerificationKey(make_hash28(0xbb)),
+        });
+        assert_eq!(addr.network_id(), Some(NetworkId::Testnet));
+
+        let bytes = addr.to_bytes();
+        assert_eq!(bytes[0] & 0x0F, 0); // Testnet = 0
+    }
+
+    #[test]
+    fn test_byron_address_identification() {
+        // Byron addresses start with 0x82 or 0x83
+        let byron_82 = Address::from_bytes(&[0x82, 0xd8, 0x18, 0x58]).unwrap();
+        assert!(matches!(byron_82, Address::Byron(_)));
+        assert_eq!(byron_82.network_id(), None);
+        assert_eq!(byron_82.payment_credential(), None);
+
+        let byron_83 = Address::from_bytes(&[0x83, 0x00, 0x01, 0x02]).unwrap();
+        assert!(matches!(byron_83, Address::Byron(_)));
+    }
+
+    #[test]
+    fn test_byron_address_roundtrip() {
+        let raw = vec![0x82, 0xd8, 0x18, 0x58, 0x20, 0xAA, 0xBB];
+        let addr = Address::from_bytes(&raw).unwrap();
+        let bytes = addr.to_bytes();
+        assert_eq!(bytes, raw);
+    }
+
+    #[test]
+    fn test_address_type_8_byron() {
+        // Type nibble 0b1000 (0x80 | network) should be Byron
+        let mut bytes = vec![0x80]; // type 8, network 0
+        bytes.extend_from_slice(&[0u8; 56]); // enough padding
+        let addr = Address::from_bytes(&bytes).unwrap();
+        assert!(matches!(addr, Address::Byron(_)));
+    }
+
+    #[test]
+    fn test_invalid_address_type() {
+        // Type nibble 0b1001 (9) is not a valid Shelley address type
+        let mut bytes = vec![0x90]; // type 9, network 0
+        bytes.extend_from_slice(&[0u8; 56]);
+        let result = Address::from_bytes(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pointer_address_zero_values() {
+        let addr = Address::Pointer(PointerAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(make_hash28(0x33)),
+            pointer: Pointer {
+                slot: 0,
+                tx_index: 0,
+                cert_index: 0,
+            },
+        });
+        let bytes = addr.to_bytes();
+        let decoded = Address::from_bytes(&bytes).unwrap();
+        assert_eq!(addr, decoded);
+    }
+
+    #[test]
+    fn test_all_address_types_stake_reference() {
+        let hash = make_hash28(0x55);
+
+        // Reward address has Null stake reference
+        let reward = Address::Reward(RewardAddress {
+            network: NetworkId::Testnet,
+            stake: Credential::VerificationKey(hash),
+        });
+        assert!(matches!(reward.stake_reference(), StakeReference::Null));
+
+        // Byron address has Null stake reference
+        let byron = Address::Byron(ByronAddress {
+            payload: vec![0x82],
+        });
+        assert!(matches!(byron.stake_reference(), StakeReference::Null));
+
+        // Pointer address has Pointer stake reference
+        let pointer = Address::Pointer(PointerAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(hash),
+            pointer: Pointer {
+                slot: 42,
+                tx_index: 1,
+                cert_index: 0,
+            },
+        });
+        match pointer.stake_reference() {
+            StakeReference::Pointer(p) => {
+                assert_eq!(p.slot, 42);
+                assert_eq!(p.tx_index, 1);
+                assert_eq!(p.cert_index, 0);
+            }
+            other => panic!("Expected Pointer, got {other:?}"),
+        }
+    }
 }

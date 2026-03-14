@@ -1082,4 +1082,195 @@ mod tests {
         assert!(db.has_block(&make_hash(1)));
         assert_eq!(db.tip_slot(), SlotNo(10));
     }
+
+    // -----------------------------------------------------------------------
+    // Additional ChainDB integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_tip_returns_highest_across_stores() {
+        // ImmutableDB has a block at slot 100, VolatileDB has one at slot 200.
+        // get_tip should return slot 200.
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Put a block directly into immutable
+        let imm_hash = make_hash(1);
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm_block")])
+            .unwrap();
+
+        // Put a block in volatile with higher slot
+        let vol_hash = make_hash(2);
+        db.add_block(
+            vol_hash,
+            SlotNo(200),
+            BlockNo(2),
+            imm_hash,
+            b"vol_block".to_vec(),
+        )
+        .unwrap();
+
+        let tip = db.get_tip();
+        assert_eq!(tip.point.slot(), Some(SlotNo(200)));
+        assert_eq!(tip.block_number, BlockNo(2));
+    }
+
+    #[test]
+    fn test_get_tip_immutable_higher_than_volatile() {
+        // If immutable tip is higher than volatile tip, immutable wins
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        let imm_hash = make_hash(1);
+        db.put_blocks_batch(&[(SlotNo(500), &imm_hash, BlockNo(50), b"imm_block")])
+            .unwrap();
+
+        let vol_hash = make_hash(2);
+        db.add_block(
+            vol_hash,
+            SlotNo(100),
+            BlockNo(10),
+            Hash32::ZERO,
+            b"vol_block".to_vec(),
+        )
+        .unwrap();
+
+        let tip = db.get_tip();
+        assert_eq!(tip.point.slot(), Some(SlotNo(500)));
+        assert_eq!(tip.block_number, BlockNo(50));
+    }
+
+    #[test]
+    fn test_has_block_checks_both_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        let imm_hash = make_hash(10);
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm")])
+            .unwrap();
+
+        let vol_hash = make_hash(20);
+        db.add_block(vol_hash, SlotNo(200), BlockNo(2), imm_hash, b"vol".to_vec())
+            .unwrap();
+
+        assert!(db.has_block(&imm_hash));
+        assert!(db.has_block(&vol_hash));
+        assert!(!db.has_block(&make_hash(99)));
+    }
+
+    #[test]
+    fn test_volatile_block_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        assert_eq!(db.volatile_block_count(), 0);
+
+        build_chain(&mut db, 5);
+        assert_eq!(db.volatile_block_count(), 5);
+
+        // Remove 2 via rollback
+        db.rollback_to_point(&Point::Specific(SlotNo(3), make_hash(3)))
+            .unwrap();
+        assert_eq!(db.volatile_block_count(), 3);
+    }
+
+    #[test]
+    fn test_flush_then_rollback_consistency() {
+        // After flushing to immutable, rollback only removes volatile blocks.
+        // Immutable blocks should remain accessible.
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Put 5 blocks into immutable via bulk import
+        for i in 1..=5u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            db.put_blocks_batch(&[(SlotNo(i * 10), &hash, BlockNo(i), b"imm")])
+                .unwrap();
+        }
+
+        // Add volatile blocks on top
+        for i in 6..=10u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 10),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("vol_{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(db.volatile_block_count(), 5);
+
+        // Rollback all volatile blocks
+        db.rollback_to_point(&Point::Origin).unwrap();
+        assert_eq!(db.volatile_block_count(), 0);
+
+        // Immutable blocks should still be there
+        for i in 1..=5u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            assert!(db.has_block(&hash));
+        }
+
+        // Tip should be from immutable
+        assert_eq!(db.tip_slot(), SlotNo(50));
+    }
+
+    #[test]
+    fn test_get_block_by_number_in_volatile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut db, 3);
+
+        let result = db.get_block_by_number(BlockNo(2)).unwrap();
+        assert!(result.is_some());
+        let (slot, hash, cbor) = result.unwrap();
+        assert_eq!(slot, SlotNo(2));
+        assert_eq!(hash, make_hash(2));
+        assert_eq!(cbor, b"block2");
+
+        // Non-existent block number
+        assert!(db.get_block_by_number(BlockNo(99)).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_empty_chaindb_origin_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ChainDB::open(dir.path()).unwrap();
+
+        assert_eq!(db.get_tip(), Tip::origin());
+        assert_eq!(db.tip_slot(), SlotNo(0));
+        assert!(!db.has_immutable());
+        assert_eq!(db.volatile_block_count(), 0);
+    }
+
+    #[test]
+    fn test_persist_and_reopen_immutable_tip() {
+        let dir = tempfile::tempdir().unwrap();
+
+        {
+            let mut db = ChainDB::open(dir.path()).unwrap();
+            let h1 = make_hash(1);
+            let h2 = make_hash(2);
+            db.put_blocks_batch(&[
+                (SlotNo(100), &h1, BlockNo(1), b"b1"),
+                (SlotNo(200), &h2, BlockNo(2), b"b2"),
+            ])
+            .unwrap();
+            db.persist().unwrap();
+        }
+
+        // Reopen and verify tip info
+        let db = ChainDB::open(dir.path()).unwrap();
+        let (slot, hash, block_no) = db.get_tip_info().unwrap();
+        assert_eq!(slot, SlotNo(200));
+        assert_eq!(hash, make_hash(2));
+        assert_eq!(block_no, BlockNo(2));
+        assert!(db.has_immutable());
+    }
 }

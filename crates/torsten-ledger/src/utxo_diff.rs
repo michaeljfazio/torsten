@@ -205,4 +205,125 @@ mod tests {
         assert_eq!(rolled_back.len(), 1);
         assert!(seq.is_empty());
     }
+
+    // =========================================================================
+    // Additional DiffSeq Rollback Tests
+    // =========================================================================
+
+    #[test]
+    fn test_apply_k_plus_1_diffs_oldest_purged_via_flush() {
+        let k = 5;
+        let mut seq = DiffSeq::new();
+
+        // Apply K+1 diffs
+        for i in 0..=(k as u64) {
+            let mut diff = UtxoDiff::new();
+            diff.record_insert(make_input(i as u8, 0), make_output(i * 1_000_000));
+            seq.push(SlotNo(i + 1), Hash32::from_bytes([i as u8; 32]), diff);
+        }
+        assert_eq!(seq.len(), k + 1);
+
+        // Flush oldest (up to slot 1) to simulate immutable flush
+        let flushed = seq.flush_up_to(SlotNo(1));
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(seq.len(), k);
+    }
+
+    #[test]
+    fn test_rollback_1_diff_returns_last() {
+        let mut seq = DiffSeq::new();
+
+        let mut diff1 = UtxoDiff::new();
+        diff1.record_insert(make_input(1, 0), make_output(1_000_000));
+        seq.push(SlotNo(10), Hash32::from_bytes([1; 32]), diff1);
+
+        let mut diff2 = UtxoDiff::new();
+        diff2.record_insert(make_input(2, 0), make_output(2_000_000));
+        diff2.record_delete(make_input(1, 0), make_output(1_000_000));
+        seq.push(SlotNo(20), Hash32::from_bytes([2; 32]), diff2);
+
+        // Rollback 1 diff: should get the second diff (most recent)
+        let rolled = seq.rollback(1);
+        assert_eq!(rolled.len(), 1);
+        assert_eq!(rolled[0].0, SlotNo(20));
+        assert_eq!(rolled[0].2.inserts.len(), 1);
+        assert_eq!(rolled[0].2.deletes.len(), 1);
+        assert_eq!(seq.len(), 1);
+    }
+
+    #[test]
+    fn test_rollback_multiple_diffs_in_sequence() {
+        let mut seq = DiffSeq::new();
+        for i in 1..=5u64 {
+            let mut diff = UtxoDiff::new();
+            diff.record_insert(make_input(i as u8, 0), make_output(i * 1_000_000));
+            seq.push(SlotNo(i * 10), Hash32::from_bytes([i as u8; 32]), diff);
+        }
+        assert_eq!(seq.len(), 5);
+
+        // Rollback 2, then 2 more
+        let rb1 = seq.rollback(2);
+        assert_eq!(rb1.len(), 2);
+        assert_eq!(rb1[0].0, SlotNo(50));
+        assert_eq!(rb1[1].0, SlotNo(40));
+        assert_eq!(seq.len(), 3);
+
+        let rb2 = seq.rollback(2);
+        assert_eq!(rb2.len(), 2);
+        assert_eq!(rb2[0].0, SlotNo(30));
+        assert_eq!(rb2[1].0, SlotNo(20));
+        assert_eq!(seq.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_rollback_reapply_cycle() {
+        let mut seq = DiffSeq::new();
+
+        // Apply 3 diffs
+        for i in 1..=3u64 {
+            let mut diff = UtxoDiff::new();
+            diff.record_insert(make_input(i as u8, 0), make_output(i * 1_000_000));
+            seq.push(SlotNo(i * 10), Hash32::from_bytes([i as u8; 32]), diff);
+        }
+        assert_eq!(seq.len(), 3);
+
+        // Rollback last 2
+        let rolled = seq.rollback(2);
+        assert_eq!(rolled.len(), 2);
+        assert_eq!(seq.len(), 1);
+
+        // Re-apply 2 different diffs
+        for i in 4..=5u64 {
+            let mut diff = UtxoDiff::new();
+            diff.record_insert(make_input(i as u8, 0), make_output(i * 1_000_000));
+            seq.push(SlotNo(i * 10), Hash32::from_bytes([i as u8; 32]), diff);
+        }
+        assert_eq!(seq.len(), 3);
+
+        // Verify the first slot is still from the original unrolled diff
+        let final_rolled = seq.rollback(3);
+        assert_eq!(final_rolled[2].0, SlotNo(10)); // Oldest remaining
+    }
+
+    #[test]
+    fn test_empty_diff_block() {
+        let mut seq = DiffSeq::new();
+
+        // Push a non-empty diff followed by an empty diff
+        let mut diff1 = UtxoDiff::new();
+        diff1.record_insert(make_input(1, 0), make_output(1_000_000));
+        seq.push(SlotNo(1), Hash32::from_bytes([1; 32]), diff1);
+
+        let empty_diff = UtxoDiff::new();
+        assert!(empty_diff.is_empty());
+        seq.push(SlotNo(2), Hash32::from_bytes([2; 32]), empty_diff);
+
+        assert_eq!(seq.len(), 2);
+
+        // Rollback the empty diff
+        let rolled = seq.rollback(1);
+        assert_eq!(rolled.len(), 1);
+        assert!(rolled[0].2.is_empty());
+        assert_eq!(seq.len(), 1);
+    }
 }

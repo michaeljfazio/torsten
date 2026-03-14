@@ -2724,6 +2724,248 @@ mod tests {
         );
     }
 
+    // ===== Additional CBOR conformance tests =====
+
+    /// Verify protocol params produces valid CBOR that can be fully decoded field by field.
+    #[test]
+    fn test_protocol_params_full_field_decode() {
+        let pp = ProtocolParamsSnapshot {
+            min_fee_a: 44,
+            min_fee_b: 155381,
+            max_block_body_size: 90112,
+            max_tx_size: 16384,
+            max_block_header_size: 1100,
+            key_deposit: 2_000_000,
+            pool_deposit: 500_000_000,
+            e_max: 18,
+            n_opt: 500,
+            a0_num: 3,
+            a0_den: 10,
+            rho_num: 3,
+            rho_den: 1000,
+            tau_num: 2,
+            tau_den: 10,
+            protocol_version_major: 10,
+            protocol_version_minor: 0,
+            min_pool_cost: 170_000_000,
+            ada_per_utxo_byte: 4310,
+            cost_models_v1: None,
+            cost_models_v2: Some(vec![100, 200, 300]),
+            cost_models_v3: None,
+            execution_costs_mem_num: 577,
+            execution_costs_mem_den: 10000,
+            execution_costs_step_num: 721,
+            execution_costs_step_den: 10000000,
+            max_tx_ex_mem: 14_000_000,
+            max_tx_ex_steps: 10_000_000_000,
+            max_block_ex_mem: 62_000_000,
+            max_block_ex_steps: 40_000_000_000,
+            max_val_size: 5000,
+            collateral_percentage: 150,
+            max_collateral_inputs: 3,
+            min_fee_ref_script_cost_per_byte: 15,
+            ..ProtocolParamsSnapshot::default()
+        };
+        let raw = encode_pparams_raw(&pp);
+        let mut dec = minicbor::Decoder::new(&raw);
+
+        // Must be array(31)
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 31);
+
+        // Fields [0]-[8] are plain integers
+        assert_eq!(dec.u64().unwrap(), 44); // [0] min_fee_a
+        assert_eq!(dec.u64().unwrap(), 155381); // [1] min_fee_b
+        assert_eq!(dec.u64().unwrap(), 90112); // [2] max_block_body_size
+        assert_eq!(dec.u64().unwrap(), 16384); // [3] max_tx_size
+        assert_eq!(dec.u64().unwrap(), 1100); // [4] max_block_header_size
+        assert_eq!(dec.u64().unwrap(), 2_000_000); // [5] key_deposit
+        assert_eq!(dec.u64().unwrap(), 500_000_000); // [6] pool_deposit
+        assert_eq!(dec.u64().unwrap(), 18); // [7] e_max
+        assert_eq!(dec.u64().unwrap(), 500); // [8] n_opt
+
+        // [9] a0 (tagged rational)
+        assert_eq!(dec.tag().unwrap().as_u64(), 30);
+        assert_eq!(dec.array().unwrap().unwrap(), 2);
+        assert_eq!(dec.u64().unwrap(), 3);
+        assert_eq!(dec.u64().unwrap(), 10);
+
+        // [10] rho
+        assert_eq!(dec.tag().unwrap().as_u64(), 30);
+        assert_eq!(dec.array().unwrap().unwrap(), 2);
+        assert_eq!(dec.u64().unwrap(), 3);
+        assert_eq!(dec.u64().unwrap(), 1000);
+
+        // [11] tau
+        assert_eq!(dec.tag().unwrap().as_u64(), 30);
+        assert_eq!(dec.array().unwrap().unwrap(), 2);
+        assert_eq!(dec.u64().unwrap(), 2);
+        assert_eq!(dec.u64().unwrap(), 10);
+
+        // [12] protocolVersion
+        assert_eq!(dec.array().unwrap().unwrap(), 2);
+        assert_eq!(dec.u64().unwrap(), 10);
+        assert_eq!(dec.u64().unwrap(), 0);
+
+        // [13] minPoolCost
+        assert_eq!(dec.u64().unwrap(), 170_000_000);
+        // [14] coinsPerUTxOByte
+        assert_eq!(dec.u64().unwrap(), 4310);
+
+        // [15] costModels: should have 1 entry (v2 only)
+        let cm_map = dec.map().unwrap().unwrap();
+        assert_eq!(cm_map, 1);
+        assert_eq!(dec.u32().unwrap(), 1); // v2 key
+        let cm_arr = dec.array().unwrap().unwrap();
+        assert_eq!(cm_arr, 3);
+        assert_eq!(dec.i64().unwrap(), 100);
+        assert_eq!(dec.i64().unwrap(), 200);
+        assert_eq!(dec.i64().unwrap(), 300);
+    }
+
+    /// Verify stake distribution encoding produces map with tagged rationals.
+    #[test]
+    fn test_stake_distribution_multiple_pools() {
+        let buf = encode(&QueryResult::StakeDistribution(vec![
+            StakePoolSnapshot {
+                pool_id: vec![0x11; 28],
+                stake: 5_000_000,
+                total_active_stake: 100_000_000,
+                vrf_keyhash: vec![0x22; 32],
+            },
+            StakePoolSnapshot {
+                pool_id: vec![0x33; 28],
+                stake: 3_000_000,
+                total_active_stake: 100_000_000,
+                vrf_keyhash: vec![0x44; 32],
+            },
+        ]));
+        let mut dec = decode_msg_result(&buf);
+        strip_hfc(&mut dec);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 2);
+
+        // First pool
+        let pool1_id = dec.bytes().unwrap().to_vec();
+        let arr1 = dec.array().unwrap().unwrap();
+        assert_eq!(arr1, 2);
+        let tag1 = dec.tag().unwrap();
+        assert_eq!(tag1.as_u64(), 30);
+        let _ = dec.array().unwrap(); // [num, den]
+        let _ = dec.u64().unwrap(); // num
+        let _ = dec.u64().unwrap(); // den
+        let vrf1 = dec.bytes().unwrap().to_vec();
+        assert_eq!(vrf1.len(), 32);
+
+        // Second pool
+        let pool2_id = dec.bytes().unwrap().to_vec();
+        assert_ne!(pool1_id, pool2_id);
+        let arr2 = dec.array().unwrap().unwrap();
+        assert_eq!(arr2, 2);
+    }
+
+    /// Verify SystemStart UTC time encoding for non-midnight time.
+    #[test]
+    fn test_system_start_with_time() {
+        let buf = encode(&QueryResult::SystemStart(
+            "2022-10-25T12:30:45Z".to_string(),
+        ));
+        let mut dec = decode_msg_result(&buf);
+        let arr = dec.array().unwrap().unwrap();
+        assert_eq!(arr, 3);
+        let year = dec.u64().unwrap();
+        let day_of_year = dec.u64().unwrap();
+        let picos = dec.u64().unwrap();
+        assert_eq!(year, 2022);
+        assert_eq!(day_of_year, 298); // Oct 25 = day 298
+                                      // 12h30m45s in picoseconds
+        let expected_picos: u64 = (12 * 3600 + 30 * 60 + 45) * 1_000_000_000_000;
+        assert_eq!(picos, expected_picos);
+    }
+
+    /// Verify EraHistory with multiple eras including bounded and unbounded.
+    #[test]
+    fn test_era_history_multiple_eras() {
+        let buf = encode(&QueryResult::EraHistory(vec![
+            crate::query_handler::EraSummary {
+                start_slot: 0,
+                start_epoch: 0,
+                start_time_pico: 0,
+                end: Some(crate::query_handler::EraBound {
+                    time_pico: 1_000_000_000_000,
+                    slot: 100,
+                    epoch: 10,
+                }),
+                slot_length_ms: 20_000,
+                epoch_size: 100,
+                safe_zone: 200,
+                genesis_window: 36000,
+            },
+            crate::query_handler::EraSummary {
+                start_slot: 100,
+                start_epoch: 10,
+                start_time_pico: 1_000_000_000_000,
+                end: None, // unbounded
+                slot_length_ms: 1_000,
+                epoch_size: 432000,
+                safe_zone: 129600,
+                genesis_window: 36000,
+            },
+        ]));
+        let mut dec = decode_msg_result(&buf);
+
+        // Indefinite array
+        let arr_type = dec.array().unwrap();
+        assert!(arr_type.is_none(), "Must be indefinite array");
+
+        // First era: array(3) [start, end, params]
+        let s1 = dec.array().unwrap().unwrap();
+        assert_eq!(s1, 3);
+
+        // Start bound: array(3) [time, slot, epoch]
+        let start1 = dec.array().unwrap().unwrap();
+        assert_eq!(start1, 3);
+        assert_eq!(dec.u64().unwrap(), 0); // time
+        assert_eq!(dec.u64().unwrap(), 0); // slot
+        assert_eq!(dec.u64().unwrap(), 0); // epoch
+
+        // End bound (not null since era has end)
+        let end1 = dec.array().unwrap().unwrap();
+        assert_eq!(end1, 3);
+        assert_eq!(dec.u64().unwrap(), 1_000_000_000_000); // time
+        assert_eq!(dec.u64().unwrap(), 100); // slot
+        assert_eq!(dec.u64().unwrap(), 10); // epoch
+
+        // Era params: array(4) [epoch_size, slot_length, safe_zone, genesis_window]
+        let params1 = dec.array().unwrap().unwrap();
+        assert_eq!(params1, 4);
+
+        let _ = dec.u64().unwrap(); // epoch_size
+        let _ = dec.u64().unwrap(); // slot_length
+                                    // safe_zone: StandardSafeZone = array(3) [0, n, [0]]
+        let sz_arr = dec.array().unwrap().unwrap();
+        assert_eq!(sz_arr, 3);
+        assert_eq!(dec.u8().unwrap(), 0); // StandardSafeZone tag
+        let _ = dec.u64().unwrap(); // safe_zone value
+        let _ = dec.array().unwrap(); // inner [0]
+        let _ = dec.u8().unwrap(); // 0
+        let _ = dec.u64().unwrap(); // genesis_window
+
+        // Second era
+        let s2 = dec.array().unwrap().unwrap();
+        assert_eq!(s2, 3);
+    }
+
+    /// Verify CurrentEra encoding for different era numbers.
+    #[test]
+    fn test_current_era_various() {
+        for era in [0u32, 1, 5, 6] {
+            let buf = encode(&QueryResult::CurrentEra(era));
+            let mut dec = decode_msg_result(&buf);
+            assert_eq!(dec.u32().unwrap(), era);
+        }
+    }
+
     // Golden reference hex values for CBOR encoding stability.
     // These were captured from the current (known-correct) encoding implementation.
     // Update ONLY after verifying the new encoding is correct and intentional.

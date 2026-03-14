@@ -2408,4 +2408,334 @@ mod tests {
         assert_eq!(mempool.total_ex_steps(), 0);
         assert_eq!(mempool.total_ref_scripts_bytes(), 0);
     }
+
+    // ===== Capacity limit tests =====
+
+    #[test]
+    fn test_max_transactions_evicts_lowest_density() {
+        let config = MempoolConfig {
+            max_transactions: 3,
+            max_bytes: 1_000_000,
+            max_ex_mem: u64::MAX,
+            max_ex_steps: u64::MAX,
+            max_ref_scripts_bytes: usize::MAX,
+        };
+        let mempool = Mempool::new(config);
+
+        // Add 3 txs with increasing fee density
+        for i in 1..=3u8 {
+            mempool
+                .add_tx_full(
+                    Hash32::from_bytes([i; 32]),
+                    make_tx_with_fee(i as u64 * 1000),
+                    100,
+                    Lovelace(i as u64 * 1000),
+                    0,
+                    0,
+                    0,
+                    TxOrigin::Local,
+                )
+                .unwrap();
+        }
+        assert_eq!(mempool.len(), 3);
+
+        // Add tx with higher fee density than the lowest - should evict tx [1]
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([4u8; 32]),
+            make_tx_with_fee(5000),
+            100,
+            Lovelace(5000),
+            0,
+            0,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_ok());
+        assert_eq!(mempool.len(), 3);
+        // Lowest fee density (tx [1], fee=1000) should have been evicted
+        assert!(!mempool.contains(&Hash32::from_bytes([1u8; 32])));
+        assert!(mempool.contains(&Hash32::from_bytes([4u8; 32])));
+    }
+
+    #[test]
+    fn test_max_bytes_capacity() {
+        let config = MempoolConfig {
+            max_transactions: 100,
+            max_bytes: 500, // 500 bytes total
+            max_ex_mem: u64::MAX,
+            max_ex_steps: u64::MAX,
+            max_ref_scripts_bytes: usize::MAX,
+        };
+        let mempool = Mempool::new(config);
+
+        // Add tx of 200 bytes
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_tx_with_fee(100),
+                200,
+                Lovelace(100),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Add tx of 200 bytes (total: 400)
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_tx_with_fee(200),
+                200,
+                Lovelace(200),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Add tx of 200 bytes with higher fee density - should evict lowest to make room
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([3u8; 32]),
+            make_tx_with_fee(300),
+            200,
+            Lovelace(300),
+            0,
+            0,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_ok());
+        assert_eq!(mempool.len(), 2);
+        // Lowest density tx should have been evicted
+        assert!(!mempool.contains(&Hash32::from_bytes([1u8; 32])));
+    }
+
+    #[test]
+    fn test_max_ex_mem_capacity() {
+        let config = MempoolConfig {
+            max_transactions: 100,
+            max_bytes: 1_000_000,
+            max_ex_mem: 1000, // tight ex_mem limit
+            max_ex_steps: u64::MAX,
+            max_ref_scripts_bytes: usize::MAX,
+        };
+        let mempool = Mempool::new(config);
+
+        // Add tx consuming 600 ex_mem
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_tx_with_fee(100),
+                100,
+                Lovelace(100),
+                600,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Add tx consuming 600 ex_mem with higher density - should evict first
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([2u8; 32]),
+            make_tx_with_fee(200),
+            100,
+            Lovelace(200),
+            600,
+            0,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_ok());
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.contains(&Hash32::from_bytes([2u8; 32])));
+        assert!(!mempool.contains(&Hash32::from_bytes([1u8; 32])));
+    }
+
+    #[test]
+    fn test_max_ex_steps_capacity() {
+        let config = MempoolConfig {
+            max_transactions: 100,
+            max_bytes: 1_000_000,
+            max_ex_mem: u64::MAX,
+            max_ex_steps: 5000, // tight ex_steps limit
+            max_ref_scripts_bytes: usize::MAX,
+        };
+        let mempool = Mempool::new(config);
+
+        // Add tx consuming 3000 ex_steps
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_tx_with_fee(100),
+                100,
+                Lovelace(100),
+                0,
+                3000,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Add tx consuming 3000 ex_steps with higher density - should evict first
+        let result = mempool.add_tx_full(
+            Hash32::from_bytes([2u8; 32]),
+            make_tx_with_fee(200),
+            100,
+            Lovelace(200),
+            0,
+            3000,
+            0,
+            TxOrigin::Local,
+        );
+        assert!(result.is_ok());
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.contains(&Hash32::from_bytes([2u8; 32])));
+    }
+
+    #[test]
+    fn test_fee_density_ordering_after_eviction() {
+        let config = MempoolConfig {
+            max_transactions: 3,
+            max_bytes: 1_000_000,
+            max_ex_mem: u64::MAX,
+            max_ex_steps: u64::MAX,
+            max_ref_scripts_bytes: usize::MAX,
+        };
+        let mempool = Mempool::new(config);
+
+        // Add 3 txs: fees 100, 200, 300 all same size
+        for i in 1..=3u8 {
+            mempool
+                .add_tx_full(
+                    Hash32::from_bytes([i; 32]),
+                    make_tx_with_fee(i as u64 * 100),
+                    100,
+                    Lovelace(i as u64 * 100),
+                    0,
+                    0,
+                    0,
+                    TxOrigin::Local,
+                )
+                .unwrap();
+        }
+
+        // Get txs for block - should be ordered by fee density descending
+        let txs = mempool.get_txs_for_block(10, 1_000_000);
+        assert_eq!(txs.len(), 3);
+        assert_eq!(txs[0].body.fee, Lovelace(300)); // highest
+        assert_eq!(txs[1].body.fee, Lovelace(200));
+        assert_eq!(txs[2].body.fee, Lovelace(100)); // lowest
+
+        // Evict lowest by adding a higher-fee tx
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([4u8; 32]),
+                make_tx_with_fee(500),
+                100,
+                Lovelace(500),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Ordering should still be maintained
+        let txs2 = mempool.get_txs_for_block(10, 1_000_000);
+        assert_eq!(txs2.len(), 3);
+        assert_eq!(txs2[0].body.fee, Lovelace(500));
+        assert_eq!(txs2[1].body.fee, Lovelace(300));
+        assert_eq!(txs2[2].body.fee, Lovelace(200));
+    }
+
+    #[test]
+    fn test_fifo_fairness_local_vs_remote() {
+        let mempool = Mempool::new(default_config());
+
+        // Add local tx
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([1u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(100),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // Add remote tx
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([2u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(100),
+                0,
+                0,
+                0,
+                TxOrigin::Remote,
+            )
+            .unwrap();
+
+        // Add another local tx
+        mempool
+            .add_tx_full(
+                Hash32::from_bytes([3u8; 32]),
+                make_dummy_tx(),
+                100,
+                Lovelace(100),
+                0,
+                0,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+
+        // FIFO order should be preserved regardless of origin
+        let ordered = mempool.tx_hashes_ordered();
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0], Hash32::from_bytes([1u8; 32]));
+        assert_eq!(ordered[1], Hash32::from_bytes([2u8; 32]));
+        assert_eq!(ordered[2], Hash32::from_bytes([3u8; 32]));
+    }
+
+    #[test]
+    fn test_drain_all_preserves_insertion_order_extended() {
+        let mempool = Mempool::new(default_config());
+
+        // Add txs in specific order with different fees
+        for i in 1..=5u8 {
+            mempool
+                .add_tx_full(
+                    Hash32::from_bytes([i; 32]),
+                    make_tx_with_fee(i as u64 * 50),
+                    100,
+                    Lovelace(i as u64 * 50),
+                    0,
+                    0,
+                    0,
+                    TxOrigin::Local,
+                )
+                .unwrap();
+        }
+
+        let drained = mempool.drain_all();
+        assert_eq!(drained.len(), 5);
+        // drain_all returns FIFO order, NOT fee-density order
+        assert_eq!(drained[0].body.fee, Lovelace(50));
+        assert_eq!(drained[1].body.fee, Lovelace(100));
+        assert_eq!(drained[2].body.fee, Lovelace(150));
+        assert_eq!(drained[3].body.fee, Lovelace(200));
+        assert_eq!(drained[4].body.fee, Lovelace(250));
+
+        assert!(mempool.is_empty());
+        assert_eq!(mempool.total_bytes(), 0);
+    }
 }
