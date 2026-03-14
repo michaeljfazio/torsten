@@ -815,9 +815,11 @@ pub fn validate_transaction_with_pools(
                 let mut has_v2 = !tx.witness_set.plutus_v2_scripts.is_empty();
                 let mut has_v3 = !tx.witness_set.plutus_v3_scripts.is_empty();
 
-                // Also check reference inputs for script_ref (reference scripts)
-                for ref_input in &body.reference_inputs {
-                    if let Some(utxo) = utxo_set.lookup(ref_input) {
+                // Check reference inputs AND spending inputs for script_ref.
+                // Also check spending inputs because reference scripts can be
+                // attached directly to UTxOs being spent.
+                for input in body.inputs.iter().chain(body.reference_inputs.iter()) {
+                    if let Some(utxo) = utxo_set.lookup(input) {
                         match &utxo.script_ref {
                             Some(ScriptRef::PlutusV1(_)) => has_v1 = true,
                             Some(ScriptRef::PlutusV2(_)) => has_v2 = true,
