@@ -580,6 +580,7 @@ impl Transaction {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -639,6 +640,12 @@ pub struct TransactionWitnessSet {
     /// which affect the script_data_hash.
     #[serde(skip)]
     pub raw_plutus_data_cbor: Option<Vec<u8>>,
+    /// Pre-computed script_data_hash from pallas during deserialization.
+    /// This uses pallas's ScriptData::hash() which correctly handles all
+    /// encoding variants (map/array redeemers, KeepRaw datums, etc.).
+    /// When available, validation uses this instead of re-computing.
+    #[serde(skip)]
+    pub pallas_script_data_hash: Option<crate::hash::Hash32>,
 }
 
 /// Verification key witness (signature)

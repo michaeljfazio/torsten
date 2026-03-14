@@ -105,6 +105,7 @@ fn make_realistic_transaction() -> Transaction {
             redeemers: vec![],
             raw_redeemers_cbor: None,
             raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
         },
         is_valid: true,
         auxiliary_data: None,

@@ -827,16 +827,40 @@ pub fn validate_transaction_with_pools(
                     }
                 }
 
-                let computed = torsten_serialization::compute_script_data_hash(
-                    &tx.witness_set.redeemers,
-                    &tx.witness_set.plutus_data,
-                    &params.cost_models,
-                    has_v1,
-                    has_v2,
-                    has_v3,
-                    tx.witness_set.raw_redeemers_cbor.as_deref(),
-                    tx.witness_set.raw_plutus_data_cbor.as_deref(),
-                );
+                // Try pallas-based hash first (uses original CBOR encoding),
+                // fall back to our re-encoding if raw CBOR isn't available.
+                let computed = if let Some(raw) = tx.raw_cbor.as_ref() {
+                    torsten_serialization::compute_script_data_hash_from_cbor(
+                        raw,
+                        &params.cost_models,
+                        has_v1,
+                        has_v2,
+                        has_v3,
+                    )
+                    .unwrap_or_else(|| {
+                        torsten_serialization::compute_script_data_hash(
+                            &tx.witness_set.redeemers,
+                            &tx.witness_set.plutus_data,
+                            &params.cost_models,
+                            has_v1,
+                            has_v2,
+                            has_v3,
+                            tx.witness_set.raw_redeemers_cbor.as_deref(),
+                            tx.witness_set.raw_plutus_data_cbor.as_deref(),
+                        )
+                    })
+                } else {
+                    torsten_serialization::compute_script_data_hash(
+                        &tx.witness_set.redeemers,
+                        &tx.witness_set.plutus_data,
+                        &params.cost_models,
+                        has_v1,
+                        has_v2,
+                        has_v3,
+                        tx.witness_set.raw_redeemers_cbor.as_deref(),
+                        tx.witness_set.raw_plutus_data_cbor.as_deref(),
+                    )
+                };
                 if *declared_hash != computed {
                     errors.push(ValidationError::ScriptDataHashMismatch {
                         expected: declared_hash.to_hex(),
@@ -1438,6 +1462,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -1826,6 +1851,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -1918,6 +1944,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -2914,6 +2941,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -3075,6 +3103,7 @@ mod tests {
                 redeemers: vec![], // No redeemers — missing for the script input
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -3184,6 +3213,7 @@ mod tests {
                 }],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4100,6 +4130,7 @@ mod tests {
                 redeemers,
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4774,6 +4805,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4882,6 +4914,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -5195,6 +5228,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -5301,6 +5335,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,

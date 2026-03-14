@@ -453,6 +453,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
             },
             raw_redeemers_cbor: None,
             raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
         },
         is_valid: tx.is_valid,
         auxiliary_data: if tx.has_auxiliary_data {

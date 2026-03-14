@@ -25,7 +25,9 @@ pub use block::{
     encode_operational_cert, encode_protocol_version, encode_vrf_result,
 };
 pub use certificate::encode_certificate;
-pub use script::{compute_script_data_hash, encode_native_script};
+pub use script::{
+    compute_script_data_hash, compute_script_data_hash_from_cbor, encode_native_script,
+};
 pub use transaction::{
     compute_transaction_hash, encode_auxiliary_data, encode_transaction, encode_transaction_body,
     encode_transaction_output, encode_witness_set,
@@ -160,6 +162,7 @@ mod tests {
             redeemers: vec![],
             raw_redeemers_cbor: None,
             raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
         };
         let encoded = encode_witness_set(&ws);
         assert_eq!(encoded, vec![0xa0]); // empty map
@@ -181,6 +184,7 @@ mod tests {
             redeemers: vec![],
             raw_redeemers_cbor: None,
             raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
         };
         let encoded = encode_witness_set(&ws);
         assert_eq!(encoded[0], 0xa1); // map of 1
@@ -323,6 +327,7 @@ mod tests {
                 redeemers: vec![],
                 raw_redeemers_cbor: None,
                 raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
             },
             is_valid: true,
             auxiliary_data: None,

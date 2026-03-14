@@ -328,6 +328,7 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         redeemers,
         raw_redeemers_cbor,
         raw_plutus_data_cbor,
+        pallas_script_data_hash: None,
     };
 
     let auxiliary_data = convert_auxiliary_data(tx);
