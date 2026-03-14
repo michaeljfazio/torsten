@@ -3,6 +3,11 @@
 //! Covers: ChainDB operations, ImmutableDB (in-memory vs mmap block index),
 //! and BlockIndex raw lookup/insert performance.
 //!
+//! Scales are based on Cardano mainnet reference numbers:
+//! - Total blocks: ~11M immutable + ~2160 volatile
+//! - Block body size: 1-90KB (average ~20KB)
+//! - Flush: k=2160 volatile blocks flushed to immutable
+//!
 //! Run:  cargo bench -p torsten-storage
 //! HTML: target/criterion/report/index.html
 
@@ -15,14 +20,20 @@ use torsten_storage::config::{BlockIndexType, ImmutableConfig};
 use torsten_storage::immutable_db::ImmutableDB;
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants — mainnet-representative scales
 // ---------------------------------------------------------------------------
 
-const NUM_BLOCKS: u64 = 5_000;
+/// Number of blocks for core ChainDB benchmarks — 10K blocks of 20KB each
+const NUM_BLOCKS: u64 = 10_000;
+/// Realistic average mainnet block size (~20KB)
+const BLOCK_SIZE: usize = 20_480;
 const NUM_LOOKUPS: usize = 500;
 
-/// Sizes used for parameterized benchmarks.
-const BLOCK_INDEX_SIZES: &[u64] = &[1_000, 10_000, 50_000];
+/// Sizes used for parameterized block index benchmarks.
+const BLOCK_INDEX_SIZES: &[u64] = &[10_000, 50_000, 100_000];
+
+/// Cardano security parameter k — number of volatile blocks before flush
+const SECURITY_PARAM_K: u64 = 2160;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,7 +83,7 @@ fn populate_chaindb(path: &std::path::Path, count: u64) -> (ChainDB, Vec<Hash32>
         } else {
             make_hash(i - 1)
         };
-        let data = vec![0u8; 1024]; // ~1KB block
+        let data = vec![0u8; BLOCK_SIZE]; // ~20KB block (mainnet average)
         db.add_block(hash, SlotNo(i + 1), BlockNo(i + 1), prev, data)
             .unwrap();
         hashes.push(hash);
@@ -94,7 +105,7 @@ fn populate_chaindb_with_config(
         } else {
             make_hash(i - 1)
         };
-        let data = vec![0u8; 1024];
+        let data = vec![0u8; BLOCK_SIZE];
         db.add_block(hash, SlotNo(i + 1), BlockNo(i + 1), prev, data)
             .unwrap();
         hashes.push(hash);
@@ -102,7 +113,7 @@ fn populate_chaindb_with_config(
     (db, hashes)
 }
 
-/// Create a chunk file + secondary index with `count` blocks.
+/// Create a chunk file + secondary index with `count` blocks of realistic size.
 fn create_chunk_file(dir: &std::path::Path, chunk_num: u64, count: u64) -> Vec<Hash32> {
     use std::io::Write;
     let chunk_path = dir.join(format!("{chunk_num:05}.chunk"));
@@ -111,7 +122,7 @@ fn create_chunk_file(dir: &std::path::Path, chunk_num: u64, count: u64) -> Vec<H
     let mut chunk_file = std::fs::File::create(&chunk_path).unwrap();
     let mut secondary_file = std::fs::File::create(&secondary_path).unwrap();
 
-    let block_data = vec![0u8; 1024]; // 1KB block
+    let block_data = vec![0u8; BLOCK_SIZE]; // 20KB block
     let mut hashes = Vec::with_capacity(count as usize);
     let mut offset = 0u64;
 
@@ -144,11 +155,14 @@ fn random_lookup_hashes(count: usize, max_index: u64) -> Vec<Hash32> {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// 1. ChainDB (existing + in-memory vs mmap comparison)
+// 1. ChainDB — 10K blocks of 20KB each (200MB total)
 // ---------------------------------------------------------------------------
 
 fn bench_chaindb_sequential_insert(c: &mut Criterion) {
-    c.bench_function("chaindb/sequential_insert_5k", |b| {
+    let mut group = c.benchmark_group("chaindb/sequential_insert");
+    group.sample_size(10);
+
+    group.bench_function("10k_20kb", |b| {
         b.iter_batched(
             || tempfile::tempdir().unwrap(),
             |dir| {
@@ -157,27 +171,37 @@ fn bench_chaindb_sequential_insert(c: &mut Criterion) {
             BatchSize::PerIteration,
         );
     });
+
+    group.finish();
 }
 
 fn bench_chaindb_random_read(c: &mut Criterion) {
-    let lookup_hashes = random_lookup_hashes(NUM_LOOKUPS, NUM_BLOCKS);
+    let mut group = c.benchmark_group("chaindb/random_read");
 
-    c.bench_function("chaindb/random_read_by_hash", |b| {
-        b.iter_batched(
-            || {
-                let dir = tempfile::tempdir().unwrap();
-                let (db, _) = populate_chaindb(dir.path(), NUM_BLOCKS);
-                (dir, db, lookup_hashes.clone())
-            },
-            |(_dir, db, hashes)| {
-                for hash in &hashes {
-                    let result = db.get_block(hash).unwrap();
-                    assert!(result.is_some());
-                }
-            },
-            BatchSize::PerIteration,
-        );
-    });
+    // Test with 10K and 100K block databases
+    for &db_size in &[10_000u64, 100_000] {
+        let lookup_hashes = random_lookup_hashes(NUM_LOOKUPS, db_size);
+        let label = format!("{db_size}blks");
+
+        group.bench_function(BenchmarkId::new("by_hash", &label), |b| {
+            b.iter_batched(
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let (db, _) = populate_chaindb(dir.path(), db_size);
+                    (dir, db, lookup_hashes.clone())
+                },
+                |(_dir, db, hashes)| {
+                    for hash in &hashes {
+                        let result = db.get_block(hash).unwrap();
+                        assert!(result.is_some());
+                    }
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+
+    group.finish();
 }
 
 fn bench_chaindb_tip_query(c: &mut Criterion) {
@@ -244,13 +268,42 @@ fn bench_chaindb_slot_range_query(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. ImmutableDB: in-memory vs mmap open time + lookup
+// 2. flush_to_immutable — flush 2160 volatile blocks (k parameter)
+// ---------------------------------------------------------------------------
+
+fn bench_chaindb_flush_to_immutable(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chaindb/flush_to_immutable");
+    group.sample_size(10);
+
+    group.bench_function(
+        BenchmarkId::new("k_2160_blocks_20kb", SECURITY_PARAM_K),
+        |b| {
+            b.iter_batched(
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let (db, _) = populate_chaindb(dir.path(), SECURITY_PARAM_K);
+                    (dir, db)
+                },
+                |(_dir, mut db)| {
+                    let flushed = db.flush_to_immutable().unwrap();
+                    black_box(flushed);
+                },
+                BatchSize::PerIteration,
+            );
+        },
+    );
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 3. ImmutableDB: in-memory vs mmap open time + lookup
 // ---------------------------------------------------------------------------
 
 fn bench_immutabledb_open(c: &mut Criterion) {
     let mut group = c.benchmark_group("immutabledb/open");
 
-    for &size in &[1_000u64, 10_000] {
+    for &size in &[10_000u64, 100_000] {
         let dir = tempfile::tempdir().unwrap();
         create_chunk_file(dir.path(), 0, size);
 
@@ -302,10 +355,8 @@ fn bench_immutabledb_lookup(c: &mut Criterion) {
     let size = 10_000u64;
     let dir = tempfile::tempdir().unwrap();
     let hashes = create_chunk_file(dir.path(), 0, size);
-    let lookup_hashes: Vec<Hash32> = random_lookup_hashes(NUM_LOOKUPS, size)
-        .into_iter()
-        .enumerate()
-        .map(|(i, _)| hashes[(i * 37) % hashes.len()])
+    let lookup_hashes: Vec<Hash32> = (0..NUM_LOOKUPS)
+        .map(|i| hashes[(i * 37) % hashes.len()])
         .collect();
 
     // In-memory
@@ -387,12 +438,10 @@ fn bench_immutabledb_has_block(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. BlockIndex raw operations (insert + lookup throughput)
+// 4. BlockIndex raw operations (insert + lookup throughput)
 // ---------------------------------------------------------------------------
 
 fn bench_block_index_insert(c: &mut Criterion) {
-    use torsten_storage::config::BlockIndexType;
-
     let mut group = c.benchmark_group("block_index/insert");
 
     for &size in BLOCK_INDEX_SIZES {
@@ -412,8 +461,8 @@ fn bench_block_index_insert(c: &mut Criterion) {
                         *hash,
                         torsten_storage::block_index::BlockLocation {
                             chunk_num: 0,
-                            block_offset: i as u64 * 1024,
-                            block_end: (i as u64 + 1) * 1024,
+                            block_offset: i as u64 * BLOCK_SIZE as u64,
+                            block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                         },
                     );
                 }
@@ -436,8 +485,8 @@ fn bench_block_index_insert(c: &mut Criterion) {
                         *hash,
                         torsten_storage::block_index::BlockLocation {
                             chunk_num: 0,
-                            block_offset: i as u64 * 1024,
-                            block_end: (i as u64 + 1) * 1024,
+                            block_offset: i as u64 * BLOCK_SIZE as u64,
+                            block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                         },
                     );
                 }
@@ -450,13 +499,10 @@ fn bench_block_index_insert(c: &mut Criterion) {
 }
 
 fn bench_block_index_lookup(c: &mut Criterion) {
-    use torsten_storage::config::BlockIndexType;
-
     let mut group = c.benchmark_group("block_index/lookup");
 
     for &size in BLOCK_INDEX_SIZES {
         let hashes: Vec<Hash32> = (0..size).map(make_hash).collect();
-        let lookup_indices = random_lookup_hashes(NUM_LOOKUPS, size);
         // Use actual inserted hashes for lookups
         let lookup_hashes: Vec<Hash32> = (0..NUM_LOOKUPS)
             .map(|i| hashes[(i * 37) % hashes.len()])
@@ -475,8 +521,8 @@ fn bench_block_index_lookup(c: &mut Criterion) {
                 *hash,
                 torsten_storage::block_index::BlockLocation {
                     chunk_num: 0,
-                    block_offset: i as u64 * 1024,
-                    block_end: (i as u64 + 1) * 1024,
+                    block_offset: i as u64 * BLOCK_SIZE as u64,
+                    block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                 },
             );
         }
@@ -503,8 +549,8 @@ fn bench_block_index_lookup(c: &mut Criterion) {
                 *hash,
                 torsten_storage::block_index::BlockLocation {
                     chunk_num: 0,
-                    block_offset: i as u64 * 1024,
-                    block_end: (i as u64 + 1) * 1024,
+                    block_offset: i as u64 * BLOCK_SIZE as u64,
+                    block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                 },
             );
         }
@@ -516,16 +562,12 @@ fn bench_block_index_lookup(c: &mut Criterion) {
                 }
             });
         });
-
-        let _ = lookup_indices;
     }
 
     group.finish();
 }
 
 fn bench_block_index_contains_miss(c: &mut Criterion) {
-    use torsten_storage::config::BlockIndexType;
-
     let mut group = c.benchmark_group("block_index/contains_miss");
     let size = 10_000u64;
     let hashes: Vec<Hash32> = (0..size).map(make_hash).collect();
@@ -545,8 +587,8 @@ fn bench_block_index_contains_miss(c: &mut Criterion) {
             *hash,
             torsten_storage::block_index::BlockLocation {
                 chunk_num: 0,
-                block_offset: i as u64 * 1024,
-                block_end: (i as u64 + 1) * 1024,
+                block_offset: i as u64 * BLOCK_SIZE as u64,
+                block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
             },
         );
     }
@@ -573,8 +615,8 @@ fn bench_block_index_contains_miss(c: &mut Criterion) {
             *hash,
             torsten_storage::block_index::BlockLocation {
                 chunk_num: 0,
-                block_offset: i as u64 * 1024,
-                block_end: (i as u64 + 1) * 1024,
+                block_offset: i as u64 * BLOCK_SIZE as u64,
+                block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
             },
         );
     }
@@ -591,11 +633,12 @@ fn bench_block_index_contains_miss(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. ChainDB with mmap profile comparison
+// 5. ChainDB with mmap profile comparison (10K blocks of 20KB)
 // ---------------------------------------------------------------------------
 
 fn bench_chaindb_inmem_vs_mmap(c: &mut Criterion) {
     let mut group = c.benchmark_group("chaindb/profile_comparison");
+    group.sample_size(10);
     let lookup_hashes = random_lookup_hashes(NUM_LOOKUPS, NUM_BLOCKS);
 
     let inmem_config = ImmutableConfig {
@@ -609,7 +652,7 @@ fn bench_chaindb_inmem_vs_mmap(c: &mut Criterion) {
     };
 
     // Insert throughput comparison
-    group.bench_function("insert_5k/in_memory", |b| {
+    group.bench_function("insert_10k_20kb/in_memory", |b| {
         b.iter_batched(
             || tempfile::tempdir().unwrap(),
             |dir| {
@@ -619,7 +662,7 @@ fn bench_chaindb_inmem_vs_mmap(c: &mut Criterion) {
         );
     });
 
-    group.bench_function("insert_5k/mmap", |b| {
+    group.bench_function("insert_10k_20kb/mmap", |b| {
         b.iter_batched(
             || tempfile::tempdir().unwrap(),
             |dir| {
@@ -668,12 +711,12 @@ fn bench_chaindb_inmem_vs_mmap(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. ImmutableDB append throughput
+// 6. ImmutableDB append throughput (20KB blocks)
 // ---------------------------------------------------------------------------
 
 fn bench_immutabledb_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("immutabledb/append");
-    let block_data = vec![0u8; 1024];
+    let block_data = vec![0u8; BLOCK_SIZE];
 
     for &index_type in &["in_memory", "mmap"] {
         let config = ImmutableConfig {
@@ -686,7 +729,7 @@ fn bench_immutabledb_append(c: &mut Criterion) {
             mmap_initial_capacity: 0,
         };
 
-        group.bench_function(BenchmarkId::new("1k_blocks", index_type), |b| {
+        group.bench_function(BenchmarkId::new("1k_blocks_20kb", index_type), |b| {
             b.iter_batched(
                 || {
                     let dir = tempfile::tempdir().unwrap();
@@ -711,7 +754,7 @@ fn bench_immutabledb_append(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. ImmutableDB slot range query (in-memory vs mmap)
+// 7. ImmutableDB slot range query (in-memory vs mmap)
 // ---------------------------------------------------------------------------
 
 fn bench_immutabledb_slot_range(c: &mut Criterion) {
@@ -747,15 +790,15 @@ fn bench_immutabledb_slot_range(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Dataset scaling — measure how performance degrades as dataset grows
+// 8. Dataset scaling — measure how performance degrades as dataset grows
 // ---------------------------------------------------------------------------
 
-/// Scaling sizes: 10K → 50K → 100K → 250K → 500K → 1M (models real-world block counts)
+/// Scaling sizes: 10K -> 50K -> 100K -> 250K -> 500K -> 1M
 const SCALING_SIZES: &[u64] = &[10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 
 fn bench_block_index_scaling_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("scaling/block_index_insert");
-    group.sample_size(10); // larger datasets take longer
+    group.sample_size(10);
 
     for &size in SCALING_SIZES {
         let hashes: Vec<Hash32> = (0..size).map(make_hash).collect();
@@ -774,8 +817,8 @@ fn bench_block_index_scaling_insert(c: &mut Criterion) {
                         *hash,
                         torsten_storage::block_index::BlockLocation {
                             chunk_num: 0,
-                            block_offset: i as u64 * 1024,
-                            block_end: (i as u64 + 1) * 1024,
+                            block_offset: i as u64 * BLOCK_SIZE as u64,
+                            block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                         },
                     );
                 }
@@ -798,8 +841,8 @@ fn bench_block_index_scaling_insert(c: &mut Criterion) {
                         *hash,
                         torsten_storage::block_index::BlockLocation {
                             chunk_num: 0,
-                            block_offset: i as u64 * 1024,
-                            block_end: (i as u64 + 1) * 1024,
+                            block_offset: i as u64 * BLOCK_SIZE as u64,
+                            block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                         },
                     );
                 }
@@ -834,8 +877,8 @@ fn bench_block_index_scaling_lookup(c: &mut Criterion) {
                 *hash,
                 torsten_storage::block_index::BlockLocation {
                     chunk_num: 0,
-                    block_offset: i as u64 * 1024,
-                    block_end: (i as u64 + 1) * 1024,
+                    block_offset: i as u64 * BLOCK_SIZE as u64,
+                    block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                 },
             );
         }
@@ -862,8 +905,8 @@ fn bench_block_index_scaling_lookup(c: &mut Criterion) {
                 *hash,
                 torsten_storage::block_index::BlockLocation {
                     chunk_num: 0,
-                    block_offset: i as u64 * 1024,
-                    block_end: (i as u64 + 1) * 1024,
+                    block_offset: i as u64 * BLOCK_SIZE as u64,
+                    block_end: (i as u64 + 1) * BLOCK_SIZE as u64,
                 },
             );
         }
@@ -925,7 +968,7 @@ fn bench_chaindb_scaling_insert(c: &mut Criterion) {
     let chaindb_sizes: &[u64] = &[10_000, 50_000, 100_000, 250_000];
 
     for &size in chaindb_sizes {
-        group.bench_with_input(BenchmarkId::new("default", size), &size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("default_20kb", size), &size, |b, &size| {
             b.iter_batched(
                 || tempfile::tempdir().unwrap(),
                 |dir| {
@@ -950,6 +993,7 @@ criterion_group!(
     bench_chaindb_tip_query,
     bench_chaindb_has_block,
     bench_chaindb_slot_range_query,
+    bench_chaindb_flush_to_immutable,
     bench_chaindb_inmem_vs_mmap,
 );
 

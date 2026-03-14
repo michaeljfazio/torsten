@@ -25,24 +25,24 @@ flowchart TD
 
 ### ImmutableDB (Append-Only Chunk Files)
 
-The ImmutableDB stores finalized blocks in append-only chunk files on disk. This matches cardano-node's ImmutableDB design -- blocks are simply appended to files and are inherently durable without any snapshot mechanism.
+The ImmutableDB stores finalized blocks in append-only chunk files on disk. This matches cardano-node's ImmutableDB design — blocks are simply appended to files and are inherently durable without any snapshot mechanism.
 
 Properties:
-- **Always durable** -- append-only writes survive process crashes without special persistence logic
-- **No LSM tree** -- plain chunk files, no compaction or memtable overhead
-- **Sequential access** -- optimized for the append-heavy, read-sequential block storage workload
-- **Secondary indexes** -- slot-to-offset and hash-to-slot mappings for efficient lookups
-- **Memory-mapped block index** -- on-disk open-addressing hash table (`hash_index.dat`) provides 3-5x faster lookups than in-memory HashMap while using near-zero RSS
+- **Always durable** — append-only writes survive process crashes without special persistence logic
+- **No LSM tree** — plain chunk files, no compaction or memtable overhead
+- **Sequential access** — optimized for the append-heavy, read-sequential block storage workload
+- **Secondary indexes** — slot-to-offset and hash-to-slot mappings for efficient lookups
+- **Memory-mapped block index** — on-disk open-addressing hash table (`hash_index.dat`) provides 3-5x faster lookups than in-memory HashMap while using near-zero RSS
 
 ### VolatileDB (In-Memory HashMap)
 
 The VolatileDB stores recent blocks (the last k=2160 blocks) in an in-memory `HashMap`. This enables:
 
-- **Fast reads** -- no disk I/O for recent blocks
-- **Efficient rollback** -- blocks can be removed without touching disk
-- **Simple eviction** -- when a block becomes k-deep, it is flushed to the ImmutableDB
+- **Fast reads** — no disk I/O for recent blocks
+- **Efficient rollback** — blocks can be removed without touching disk
+- **Simple eviction** — when a block becomes k-deep, it is flushed to the ImmutableDB
 
-The VolatileDB has no on-disk representation -- it exists only in memory and is rebuilt from the ImmutableDB tip on restart.
+The VolatileDB has no on-disk representation — it exists only in memory and is rebuilt from the ImmutableDB tip on restart.
 
 ### ChainDB
 
@@ -71,10 +71,10 @@ The UTxO set is stored on disk using [cardano-lsm](https://crates.io/crates/card
 
 The `UtxoStore` (in `torsten-ledger`) wraps a cardano-lsm `LsmTree` and provides:
 
-- **Disk-backed UTxO set** -- the full UTxO set lives on disk, not in memory
-- **Efficient point lookups** -- bloom filters for fast negative lookups
-- **Batch writes** -- UTxO inserts and deletes are batched per block
-- **Snapshots** -- periodic snapshots for crash recovery
+- **Disk-backed UTxO set** — the full UTxO set lives on disk, not in memory
+- **Efficient point lookups** — bloom filters for fast negative lookups
+- **Batch writes** — UTxO inserts and deletes are batched per block
+- **Snapshots** — periodic snapshots for crash recovery
 
 cardano-lsm is configured via storage profiles that maximize available system memory:
 
@@ -140,10 +140,10 @@ database-path/
 
 ## Performance Considerations
 
-- **Block writes** -- append-only chunk files provide consistent write performance without compaction pauses
-- **UTxO lookups** -- LSM tree with bloom filters provides efficient point lookups for transaction validation
-- **Memory usage** -- the VolatileDB holds approximately k blocks in memory (typically a few hundred MB). The UTxO set lives on disk, significantly reducing memory pressure compared to an all-in-memory approach
-- **Batch size** -- the flush batch size balances memory usage against write efficiency
+- **Block writes** — append-only chunk files provide consistent write performance without compaction pauses
+- **UTxO lookups** — LSM tree with bloom filters provides efficient point lookups for transaction validation
+- **Memory usage** — the VolatileDB holds approximately k blocks in memory (typically a few hundred MB). The UTxO set lives on disk, significantly reducing memory pressure compared to an all-in-memory approach
+- **Batch size** — the flush batch size balances memory usage against write efficiency
 
 ## Storage Profiles
 

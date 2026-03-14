@@ -16,3 +16,8 @@ dashmap = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "mempool_bench"
+harness = false

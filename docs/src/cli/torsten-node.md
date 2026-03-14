@@ -73,7 +73,7 @@ torsten-node run \
   --shelley-operational-certificate ./keys/opcert.cert
 ```
 
-When all three block producer flags are provided, the node enters block production mode. The cold signing key is not needed at runtime -- the cold verification key is extracted from the operational certificate, matching cardano-node behavior.
+When all three block producer flags are provided, the node enters block production mode. The cold signing key is not needed at runtime — the cold verification key is extracted from the operational certificate, matching cardano-node behavior.
 
 If any of the three flags is missing, the node runs in relay-only mode.
 
@@ -158,6 +158,6 @@ The import process:
 2. Verifies the snapshot digest (SHA256)
 3. Extracts and parses immutable chunk files
 4. Imports blocks into ChainDB with CRC32 verification
-5. Supports resume -- skips blocks already in the database
+5. Supports resume — skips blocks already in the database
 
 On preview testnet, importing ~4M blocks takes approximately 2 minutes.

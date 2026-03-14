@@ -1,17 +1,30 @@
+//! Criterion benchmarks for hash operations.
+//!
+//! Scales based on Cardano mainnet reference numbers:
+//! - Block body size: 1-90KB (average ~20KB)
+//! - Transactions per block: 20-300 (average ~50)
+//! - Transaction size: 200B-16KB (average ~500B)
+//!
+//! Run:  cargo bench -p torsten-primitives
+//! HTML: target/criterion/report/index.html
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use torsten_primitives::hash::{blake2b_224, blake2b_256};
 
 fn bench_blake2b_256(c: &mut Criterion) {
     let mut group = c.benchmark_group("blake2b_256");
 
-    // Typical Cardano payload sizes
+    // Typical Cardano payload sizes, including mainnet max block body
     let sizes: &[(&str, usize)] = &[
         ("32B_txhash", 32),
         ("64B_vkey", 64),
         ("256B_small_tx", 256),
+        ("500B_avg_tx", 500),
         ("1KB_tx_body", 1024),
         ("4KB_large_tx", 4096),
         ("16KB_block_header", 16384),
+        ("20KB_avg_block", 20480),
+        ("90KB_max_block", 92160),
     ];
 
     for (label, size) in sizes {
@@ -46,7 +59,7 @@ fn bench_blake2b_224(c: &mut Criterion) {
 fn bench_blake2b_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("blake2b_batch");
 
-    // Simulate hashing all vkey witnesses in a block (typical: 50-500 witnesses)
+    // Simulate hashing all vkey witnesses in a block (mainnet: 10-500+ witnesses)
     for count in [10, 50, 100, 500] {
         let keys: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 32]).collect();
         group.bench_with_input(
@@ -62,11 +75,12 @@ fn bench_blake2b_batch(c: &mut Criterion) {
         );
     }
 
-    // Simulate hashing transaction bodies in a block
-    for count in [10, 50, 100] {
-        let bodies: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 512]).collect();
+    // Simulate hashing transaction bodies in a block (mainnet: 20-300 txs)
+    // Using 500B average tx size
+    for count in [50, 100, 300] {
+        let bodies: Vec<Vec<u8>> = (0..count).map(|i| vec![i as u8; 500]).collect();
         group.bench_with_input(
-            BenchmarkId::new("256_txbodies", count),
+            BenchmarkId::new("256_txbodies_500B", count),
             &bodies,
             |b, bodies| {
                 b.iter(|| {

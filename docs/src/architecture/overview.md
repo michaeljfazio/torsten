@@ -6,7 +6,7 @@ Torsten is organized as a 10-crate Cargo workspace. Each crate has a focused res
 
 | Crate | Description |
 |-------|-------------|
-| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron--Conway) |
+| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron through Conway) |
 | `torsten-crypto` | Ed25519 keys, VRF, KES, text envelope format |
 | `torsten-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
 | `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N client/server, N2C server, multi-peer block fetch pool |

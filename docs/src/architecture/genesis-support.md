@@ -50,7 +50,7 @@ The following Ouroboros Genesis features are not yet implemented:
 
 ### Lightweight Checkpointing
 
-The Genesis specification calls for lightweight checkpoints -- trusted anchor points that allow a new node to skip validation of ancient history. Without this, Genesis bootstrap must validate the entire chain from the genesis block, which is significantly slower than Mithril snapshot import.
+The Genesis specification calls for lightweight checkpoints — trusted anchor points that allow a new node to skip validation of ancient history. Without this, Genesis bootstrap must validate the entire chain from the genesis block, which is significantly slower than Mithril snapshot import.
 
 ### Genesis-Specific Peer Selection
 

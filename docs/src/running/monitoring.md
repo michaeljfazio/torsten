@@ -175,16 +175,16 @@ scrape_configs:
 
 Torsten ships with a pre-built Grafana dashboard at `config/grafana-dashboard.json`. The dashboard covers all node metrics organized into nine sections:
 
-- **Overview** -- Sync progress gauge, block height, epoch, slot, connected peers, blocks forged
-- **Node Health** -- Uptime, disk available (stat + time series)
-- **Sync & Throughput** -- Sync progress over time, block apply/receive rate (blk/s), block height, rollbacks
-- **Peers** -- Connected peer count over time, peer state breakdown (hot/warm/cold stacked)
-- **Mempool & Transactions** -- Mempool tx count, mempool size (bytes), transaction rate (received/validated/rejected)
-- **Ledger State** -- UTxO set size, stake delegations, treasury balance (ADA), registered stake pools
-- **Governance** -- Registered DReps, active governance proposals
-- **Block Production** -- Total blocks forged, block forge rate (blk/h)
-- **Network Latency** -- Handshake RTT and block fetch latency percentiles (p50/p95/p99), request counts
-- **Validation Errors** -- Error breakdown by type (stacked bars), error totals (bar chart)
+- **Overview** — Sync progress gauge, block height, epoch, slot, connected peers, blocks forged
+- **Node Health** — Uptime, disk available (stat + time series)
+- **Sync & Throughput** — Sync progress over time, block apply/receive rate (blk/s), block height, rollbacks
+- **Peers** — Connected peer count over time, peer state breakdown (hot/warm/cold stacked)
+- **Mempool & Transactions** — Mempool tx count, mempool size (bytes), transaction rate (received/validated/rejected)
+- **Ledger State** — UTxO set size, stake delegations, treasury balance (ADA), registered stake pools
+- **Governance** — Registered DReps, active governance proposals
+- **Block Production** — Total blocks forged, block forge rate (blk/h)
+- **Network Latency** — Handshake RTT and block fetch latency percentiles (p50/p95/p99), request counts
+- **Validation Errors** — Error breakdown by type (stacked bars), error totals (bar chart)
 
 ### Quick Start (Docker)
 
