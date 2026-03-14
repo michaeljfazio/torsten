@@ -834,6 +834,8 @@ pub fn validate_transaction_with_pools(
                     has_v1,
                     has_v2,
                     has_v3,
+                    tx.witness_set.raw_redeemers_cbor.as_deref(),
+                    tx.witness_set.raw_plutus_data_cbor.as_deref(),
                 );
                 if *declared_hash != computed {
                     errors.push(ValidationError::ScriptDataHashMismatch {
@@ -1434,6 +1436,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -1820,6 +1824,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -1910,6 +1916,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -2075,6 +2083,8 @@ mod tests {
             !tx.witness_set.plutus_v1_scripts.is_empty(),
             !tx.witness_set.plutus_v2_scripts.is_empty(),
             !tx.witness_set.plutus_v3_scripts.is_empty(),
+            None,
+            None,
         );
         tx.body.script_data_hash = Some(computed_hash);
         tx
@@ -2902,6 +2912,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -3061,6 +3073,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![], // No redeemers — missing for the script input
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -3168,6 +3182,8 @@ mod tests {
                         steps: 1000,
                     },
                 }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4036,6 +4052,8 @@ mod tests {
             true,  // has v1
             false, // no v2
             false, // no v3
+            None,
+            None,
         );
 
         let tx = Transaction {
@@ -4080,6 +4098,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers,
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4752,6 +4772,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -4858,6 +4880,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -5169,6 +5193,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -5273,6 +5299,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,

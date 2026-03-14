@@ -578,6 +578,8 @@ impl Transaction {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,
@@ -625,6 +627,18 @@ pub struct TransactionWitnessSet {
     pub plutus_v3_scripts: Vec<Vec<u8>>,
     pub plutus_data: Vec<PlutusData>,
     pub redeemers: Vec<Redeemer>,
+    /// Raw CBOR bytes of the redeemers from the original transaction.
+    /// Preserves the encoding format (map in Conway, array in Alonzo)
+    /// which is essential for correct script_data_hash computation.
+    /// Extracted from pallas during deserialization; None when constructing
+    /// new transactions (which use our canonical encoding).
+    #[serde(skip)]
+    pub raw_redeemers_cbor: Option<Vec<u8>>,
+    /// Raw CBOR bytes of the plutus datums from the original transaction.
+    /// Preserves encoding details (definite/indefinite-length arrays, etc.)
+    /// which affect the script_data_hash.
+    #[serde(skip)]
+    pub raw_plutus_data_cbor: Option<Vec<u8>>,
 }
 
 /// Verification key witness (signature)

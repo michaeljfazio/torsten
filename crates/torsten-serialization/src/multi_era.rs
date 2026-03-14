@@ -310,6 +310,13 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
 
     let redeemers = tx.redeemers().iter().map(|r| convert_redeemer(r)).collect();
 
+    // Extract raw CBOR bytes for redeemers and datums from the pallas transaction.
+    // These preserve the original encoding format (map vs array for redeemers,
+    // definite vs indefinite-length for datums) which is essential for
+    // computing the correct script_data_hash.
+    let raw_redeemers_cbor = extract_raw_redeemers_cbor(tx);
+    let raw_plutus_data_cbor = extract_raw_plutus_data_cbor(tx);
+
     let witness_set = TransactionWitnessSet {
         vkey_witnesses,
         native_scripts,
@@ -319,6 +326,8 @@ fn decode_transaction_from_pallas(tx: &PallasTx) -> Result<Transaction, Serializ
         plutus_v3_scripts,
         plutus_data,
         redeemers,
+        raw_redeemers_cbor,
+        raw_plutus_data_cbor,
     };
 
     let auxiliary_data = convert_auxiliary_data(tx);
@@ -562,6 +571,57 @@ fn extract_script_data_hash(tx: &PallasTx) -> Option<Hash32> {
             .script_data_hash
             .as_ref()
             .map(pallas_hash_to_torsten32)
+    } else {
+        None
+    }
+}
+
+/// Extract the raw CBOR encoding of the redeemers from a pallas transaction.
+/// This preserves the exact encoding format (map for Conway, array for Alonzo/Babbage).
+fn extract_raw_redeemers_cbor(tx: &PallasTx) -> Option<Vec<u8>> {
+    if let Some(conway) = tx.as_conway() {
+        conway.transaction_witness_set.redeemer.as_ref().map(|r| {
+            // KeepRaw preserves original CBOR; use raw_cbor() if available
+            r.raw_cbor().to_vec()
+        })
+    } else if let Some(babbage) = tx.as_babbage() {
+        babbage
+            .transaction_witness_set
+            .redeemer
+            .as_ref()
+            .map(|r| pallas_codec::minicbor::to_vec(r).unwrap_or_default())
+    } else if let Some(alonzo) = tx.as_alonzo() {
+        alonzo
+            .transaction_witness_set
+            .redeemer
+            .as_ref()
+            .map(|r| pallas_codec::minicbor::to_vec(r).unwrap_or_default())
+    } else {
+        None
+    }
+}
+
+/// Extract the raw CBOR encoding of the plutus datums from a pallas transaction.
+/// This preserves encoding details (definite/indefinite-length, etc.).
+fn extract_raw_plutus_data_cbor(tx: &PallasTx) -> Option<Vec<u8>> {
+    if let Some(conway) = tx.as_conway() {
+        conway
+            .transaction_witness_set
+            .plutus_data
+            .as_ref()
+            .map(|d| pallas_codec::minicbor::to_vec(d).unwrap_or_default())
+    } else if let Some(babbage) = tx.as_babbage() {
+        babbage
+            .transaction_witness_set
+            .plutus_data
+            .as_ref()
+            .map(|d| pallas_codec::minicbor::to_vec(d).unwrap_or_default())
+    } else if let Some(alonzo) = tx.as_alonzo() {
+        alonzo
+            .transaction_witness_set
+            .plutus_data
+            .as_ref()
+            .map(|d| pallas_codec::minicbor::to_vec(d).unwrap_or_default())
     } else {
         None
     }

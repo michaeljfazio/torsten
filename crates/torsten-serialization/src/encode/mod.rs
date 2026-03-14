@@ -158,6 +158,8 @@ mod tests {
             plutus_v3_scripts: vec![],
             plutus_data: vec![],
             redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
         };
         let encoded = encode_witness_set(&ws);
         assert_eq!(encoded, vec![0xa0]); // empty map
@@ -177,6 +179,8 @@ mod tests {
             plutus_v3_scripts: vec![],
             plutus_data: vec![],
             redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
         };
         let encoded = encode_witness_set(&ws);
         assert_eq!(encoded[0], 0xa1); // map of 1
@@ -317,6 +321,8 @@ mod tests {
                 plutus_v3_scripts: vec![],
                 plutus_data: vec![],
                 redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
             },
             is_valid: true,
             auxiliary_data: None,

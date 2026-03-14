@@ -139,10 +139,15 @@ pub(crate) fn encode_metadata_map(
 /// Per Cardano ledger spec, this is:
 ///   blake2b_256(redeemers_cbor || datums_cbor || language_views_cbor)
 ///
-/// Where:
-/// - redeemers_cbor = CBOR encoding of the redeemers list
-/// - datums_cbor = CBOR encoding of plutus datums (tag 258 array), or empty if no datums
-/// - language_views_cbor = CBOR encoding of cost models for languages used in the tx
+/// When `raw_redeemers_cbor` and `raw_datums_cbor` are provided (from pallas
+/// deserialization), they are used directly instead of re-encoding. This
+/// preserves the original encoding format (map vs array for redeemers,
+/// definite vs indefinite-length arrays for datums), which is essential
+/// for matching the hash computed by the transaction builder.
+///
+/// Only the language views (cost models) are freshly encoded from protocol
+/// parameters, matching what the Haskell cardano-ledger does.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_script_data_hash(
     redeemers: &[Redeemer],
     plutus_data: &[PlutusData],
@@ -150,18 +155,26 @@ pub fn compute_script_data_hash(
     has_v1: bool,
     has_v2: bool,
     has_v3: bool,
+    raw_redeemers_cbor: Option<&[u8]>,
+    raw_datums_cbor: Option<&[u8]>,
 ) -> Hash32 {
     let mut preimage = Vec::new();
 
-    // 1. Encode redeemers as a CBOR array
-    let mut redeemers_buf = encode_array_header(redeemers.len());
-    for r in redeemers {
-        redeemers_buf.extend(encode_redeemer(r));
+    // 1. Redeemers: use raw CBOR when available, otherwise re-encode
+    if let Some(raw) = raw_redeemers_cbor {
+        preimage.extend_from_slice(raw);
+    } else {
+        let mut redeemers_buf = encode_array_header(redeemers.len());
+        for r in redeemers {
+            redeemers_buf.extend(encode_redeemer(r));
+        }
+        preimage.extend(&redeemers_buf);
     }
-    preimage.extend(&redeemers_buf);
 
-    // 2. Encode datums (if any) as #6.258([d1, d2, ...])
-    if !plutus_data.is_empty() {
+    // 2. Datums: use raw CBOR when available, otherwise re-encode
+    if let Some(raw) = raw_datums_cbor {
+        preimage.extend_from_slice(raw);
+    } else if !plutus_data.is_empty() {
         let mut datums_buf = encode_tag(258);
         datums_buf.extend(encode_array_header(plutus_data.len()));
         for d in plutus_data {

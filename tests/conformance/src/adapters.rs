@@ -451,6 +451,8 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
             } else {
                 Vec::new()
             },
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
         },
         is_valid: tx.is_valid,
         auxiliary_data: if tx.has_auxiliary_data {

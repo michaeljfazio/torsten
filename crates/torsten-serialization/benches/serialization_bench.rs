@@ -103,6 +103,8 @@ fn make_realistic_transaction() -> Transaction {
             plutus_v3_scripts: vec![],
             plutus_data: vec![],
             redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
         },
         is_valid: true,
         auxiliary_data: None,
