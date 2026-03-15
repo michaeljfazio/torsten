@@ -8,7 +8,8 @@ use torsten_primitives::hash::{Hash28, Hash32, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::{
-    Certificate, NativeScript, RedeemerTag, ScriptRef, Transaction, TransactionInput,
+    Certificate, GovAction, NativeScript, RedeemerTag, ScriptRef, Transaction, TransactionInput,
+    Voter,
 };
 use torsten_primitives::value::{AssetName, Lovelace};
 use tracing::{debug, trace, warn};
@@ -857,16 +858,67 @@ pub fn validate_transaction_with_pools(
                         }
                     }
                 }
-                // Certificates: extract script credential hashes
+                // Certificates: ALL cert types that can use script credentials.
+                // Per Haskell getScriptWitnessConwayTxCert — every cert with
+                // a credential field can have a script credential that needs
+                // a language entry in the script_data_hash.
                 use torsten_primitives::credentials::Credential as Cred;
                 for cert in &body.certificates {
-                    let cred = match cert {
+                    let cred: Option<&Cred> = match cert {
+                        // Legacy Shelley certs
                         Certificate::StakeDeregistration(c) => Some(c),
                         Certificate::StakeDelegation { credential: c, .. } => Some(c),
+                        // Conway delegation/registration certs
+                        Certificate::ConwayStakeRegistration { credential: c, .. } => Some(c),
+                        Certificate::ConwayStakeDeregistration { credential: c, .. } => Some(c),
+                        Certificate::VoteDelegation { credential: c, .. } => Some(c),
+                        Certificate::StakeVoteDelegation { credential: c, .. } => Some(c),
+                        Certificate::RegStakeDeleg { credential: c, .. } => Some(c),
+                        Certificate::RegStakeVoteDeleg { credential: c, .. } => Some(c),
+                        Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+                        // Conway governance certs
+                        Certificate::CommitteeHotAuth {
+                            cold_credential: c, ..
+                        } => Some(c),
+                        Certificate::CommitteeColdResign {
+                            cold_credential: c, ..
+                        } => Some(c),
+                        Certificate::RegDRep { credential: c, .. } => Some(c),
+                        Certificate::UnregDRep { credential: c, .. } => Some(c),
+                        Certificate::UpdateDRep { credential: c, .. } => Some(c),
                         _ => None,
                     };
                     if let Some(Cred::Script(h)) = cred {
                         scripts_needed.insert(*h);
+                    }
+                }
+
+                // Voting procedures: DRep and CC voter script credentials
+                for voter in body.voting_procedures.keys() {
+                    let cred: Option<&Cred> = match voter {
+                        Voter::DRep(c) => Some(c),
+                        Voter::ConstitutionalCommittee(c) => Some(c),
+                        Voter::StakePool(_) => None,
+                    };
+                    if let Some(Cred::Script(h)) = cred {
+                        scripts_needed.insert(*h);
+                    }
+                }
+
+                // Proposal procedures: guardrail script hashes
+                for proposal in &body.proposal_procedures {
+                    match &proposal.gov_action {
+                        GovAction::ParameterChange {
+                            policy_hash: Some(h),
+                            ..
+                        }
+                        | GovAction::TreasuryWithdrawals {
+                            policy_hash: Some(h),
+                            ..
+                        } => {
+                            scripts_needed.insert(*h);
+                        }
+                        _ => {}
                     }
                 }
 
