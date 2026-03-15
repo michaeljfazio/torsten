@@ -15,7 +15,9 @@ pub mod server;
 pub mod tcp;
 
 pub use bandwidth::TokenBucketRateLimiter;
-pub use client::{BlockFetchPool, ChainSyncEvent, HeaderBatchResult, HeaderInfo, NodeToNodeClient};
+pub use client::{
+    BlockFetchPool, ChainSyncEvent, EbbInfo, HeaderBatchResult, HeaderInfo, NodeToNodeClient,
+};
 pub use dns::DnsResolver;
 pub use miniprotocols::peersharing::{
     request_peers_from, PeerAddress, PeerSharingMessage, PeerSharingState,

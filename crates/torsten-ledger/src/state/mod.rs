@@ -556,6 +556,56 @@ impl LedgerState {
         );
     }
 
+    /// Advance the ledger tip through a Byron Epoch Boundary Block (EBB).
+    ///
+    /// EBBs carry no transactions and do not mutate the UTxO set, stake
+    /// distribution, or any other ledger data.  They exist solely so that
+    /// the next real Byron block can reference them via `prev_hash`, forming
+    /// an unbroken hash chain across epoch boundaries.
+    ///
+    /// This method advances `self.tip` so that the EBB hash becomes the
+    /// current tip hash, allowing the subsequent block's `prev_hash` check
+    /// to pass.  The slot is preserved from the previous real block because
+    /// EBBs do not occupy slots — this prevents incorrect "block already
+    /// applied" skips in the sync loop which compares `block.slot <= ledger_slot`.
+    ///
+    /// # Errors
+    /// Returns `LedgerError::EpochTransition` if called outside the Byron era,
+    /// since EBBs do not exist in Shelley or later eras.
+    pub fn advance_past_ebb(&mut self, ebb_hash: Hash32) -> Result<(), LedgerError> {
+        use torsten_primitives::era::Era;
+
+        // EBBs only exist in the Byron era.  Calling this in Shelley+ is a programming error.
+        if self.era != Era::Byron {
+            return Err(LedgerError::EpochTransition(format!(
+                "EBB advance called in non-Byron era {:?}; EBBs do not exist after Byron",
+                self.era
+            )));
+        }
+
+        // Preserve the slot of the current tip.  The EBB has no slot of its
+        // own; by keeping the previous slot we ensure the next real block's slot
+        // satisfies `slot > ledger_slot` so it is not incorrectly skipped.
+        let preserved_slot = self.tip.point.slot().unwrap_or(SlotNo(0));
+
+        trace!(
+            ebb_hash = %ebb_hash.to_hex(),
+            preserved_slot = preserved_slot.0,
+            current_tip = %self.tip.point,
+            "Ledger: advancing tip through EBB"
+        );
+
+        // Advance the tip hash to the EBB hash while keeping the slot from the
+        // previous block.  Block number is also preserved since EBBs do not
+        // increment the block counter.
+        self.tip = Tip {
+            point: Point::Specific(preserved_slot, ebb_hash),
+            block_number: self.tip.block_number,
+        };
+
+        Ok(())
+    }
+
     /// Apply a block to the ledger state.
     ///
     /// When `mode` is `ValidateAll`, each transaction is independently validated
@@ -8913,6 +8963,247 @@ mod tests {
         assert_eq!(
             state.protocol_params.committee_min_size, 3,
             "committeeMinSize should be updated to 3"
+        );
+    }
+
+    // ===== Byron EBB (Epoch Boundary Block) tests =====
+
+    /// Build a minimal Byron-era block for tests.
+    /// Protocol version 1.x → `Era::Byron`.
+    fn make_byron_block_ebb_test(slot: u64, block_no: u64, prev_hash: Hash32) -> Block {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[..8].copy_from_slice(&block_no.to_be_bytes());
+        hash_bytes[8] = 0xBB; // sentinel: Byron block
+        Block {
+            header: torsten_primitives::block::BlockHeader {
+                header_hash: Hash32::from_bytes(hash_bytes),
+                prev_hash,
+                issuer_vkey: vec![0u8; 32],
+                vrf_vkey: vec![],
+                vrf_result: torsten_primitives::block::VrfOutput {
+                    output: vec![],
+                    proof: vec![],
+                },
+                block_number: BlockNo(block_no),
+                slot: SlotNo(slot),
+                epoch_nonce: Hash32::ZERO,
+                body_size: 0,
+                body_hash: Hash32::ZERO,
+                operational_cert: torsten_primitives::block::OperationalCert {
+                    hot_vkey: vec![],
+                    sequence_number: 0,
+                    kes_period: 0,
+                    sigma: vec![],
+                },
+                protocol_version: torsten_primitives::block::ProtocolVersion { major: 1, minor: 0 },
+                kes_signature: vec![],
+            },
+            transactions: vec![],
+            era: Era::Byron,
+            raw_cbor: None,
+        }
+    }
+
+    /// Construct a synthetic EBB hash for test use.
+    /// The actual EBB hash is Blake2b-256 of the EBB header bytes; we use a
+    /// deterministic placeholder here since we test the ledger's response to
+    /// `advance_past_ebb`, not the hash computation.
+    fn test_ebb_hash(epoch: u8) -> Hash32 {
+        let mut b = [0u8; 32];
+        b[0] = 0xEB; // sentinel: Epoch Boundary Block
+        b[1] = 0xB0;
+        b[2] = epoch;
+        Hash32::from_bytes(b)
+    }
+
+    /// Create a `LedgerState` configured for the Byron era.
+    fn make_byron_ledger_state() -> LedgerState {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.era = Era::Byron;
+        state.epoch = EpochNo(0);
+        // Mainnet Byron configuration
+        state.epoch_length = 432_000;
+        state.shelley_transition_epoch = 208;
+        state.byron_epoch_length = 21_600;
+        state
+    }
+
+    /// `advance_past_ebb` advances the ledger tip hash to the EBB hash while
+    /// preserving the slot from the previous real block.
+    #[test]
+    fn test_advance_past_ebb_updates_tip_hash() {
+        let mut state = make_byron_ledger_state();
+
+        // Place the ledger at a known tip (last block of epoch 0)
+        let epoch0_last_slot = SlotNo(21_599);
+        let epoch0_last_hash = Hash32::from_bytes([0xA0; 32]);
+        state.tip = Tip {
+            point: Point::Specific(epoch0_last_slot, epoch0_last_hash),
+            block_number: BlockNo(100),
+        };
+
+        // Advance through the epoch 0→1 EBB
+        let ebb = test_ebb_hash(0);
+        state
+            .advance_past_ebb(ebb)
+            .expect("advance_past_ebb should succeed in Byron era");
+
+        // The tip hash must now be the EBB hash
+        assert_eq!(
+            state.tip.point.hash(),
+            Some(&ebb),
+            "Ledger tip hash should be the EBB hash after advance"
+        );
+        // The slot must be preserved from the previous block (NOT changed to EBB slot)
+        assert_eq!(
+            state.tip.point.slot(),
+            Some(epoch0_last_slot),
+            "Ledger slot should be preserved from the block before the EBB"
+        );
+        // Block number should not change — EBBs are not real blocks
+        assert_eq!(
+            state.tip.block_number,
+            BlockNo(100),
+            "Block number should not change for an EBB"
+        );
+    }
+
+    /// After `advance_past_ebb`, `apply_block` must succeed for a block whose
+    /// `prev_hash` equals the EBB hash.  This is the core connectivity fix:
+    /// without EBB bridging, the block is rejected with `BlockDoesNotConnect`.
+    #[test]
+    fn test_apply_block_after_ebb_connects() {
+        let mut state = make_byron_ledger_state();
+
+        let epoch0_slot = SlotNo(21_500);
+        let epoch0_hash = Hash32::from_bytes([0xA0; 32]);
+        state.tip = Tip {
+            point: Point::Specific(epoch0_slot, epoch0_hash),
+            block_number: BlockNo(50),
+        };
+
+        let epoch1_ebb = test_ebb_hash(1);
+        state
+            .advance_past_ebb(epoch1_ebb)
+            .expect("advance_past_ebb should succeed");
+
+        // First real block of epoch 1 references the EBB hash as prev_hash
+        let first_epoch1_block = make_byron_block_ebb_test(21_601, 51, epoch1_ebb);
+
+        // Before the fix: this returned BlockDoesNotConnect.
+        // After the fix: this succeeds.
+        state
+            .apply_block(&first_epoch1_block, BlockValidationMode::ApplyOnly)
+            .expect("apply_block should succeed after EBB advance");
+
+        assert_eq!(
+            state.tip.point.hash(),
+            Some(first_epoch1_block.hash()),
+            "Ledger tip hash should be the new block hash"
+        );
+        assert_eq!(state.tip.point.slot(), Some(SlotNo(21_601)));
+        assert_eq!(state.tip.block_number, BlockNo(51));
+    }
+
+    /// EBBs only exist in the Byron era.  Calling `advance_past_ebb` in
+    /// Shelley or later must return an error to prevent accidental tip rewrites.
+    #[test]
+    fn test_advance_past_ebb_rejects_non_byron_era() {
+        let non_byron_eras = [
+            Era::Shelley,
+            Era::Allegra,
+            Era::Mary,
+            Era::Alonzo,
+            Era::Babbage,
+            Era::Conway,
+        ];
+        let params = ProtocolParameters::mainnet_defaults();
+        for era in non_byron_eras {
+            let mut state = LedgerState::new(params.clone());
+            state.era = era;
+            let result = state.advance_past_ebb(test_ebb_hash(0));
+            assert!(
+                result.is_err(),
+                "advance_past_ebb must fail in {era:?} — EBBs do not exist after Byron"
+            );
+        }
+    }
+
+    /// Full sequence: [real_block_epoch0] → EBB → [real_block_epoch1] → [real_block_epoch1+1]
+    ///
+    /// This models the exact mainnet failure at slot 21600 (Byron epoch 0→1).
+    #[test]
+    fn test_ebb_bridge_full_sequence() {
+        let mut state = make_byron_ledger_state();
+
+        // Genesis tip: before any block was applied
+        let genesis_hash = Hash32::from_bytes([0x00; 32]);
+        state.tip = Tip {
+            point: Point::Specific(SlotNo(0), genesis_hash),
+            block_number: BlockNo(0),
+        };
+
+        // Apply a block in epoch 0
+        let epoch0_block = make_byron_block_ebb_test(21_000, 1000, genesis_hash);
+        state
+            .apply_block(&epoch0_block, BlockValidationMode::ApplyOnly)
+            .expect("epoch0 block should apply");
+        assert_eq!(state.tip.block_number, BlockNo(1000));
+
+        // Epoch 0→1 EBB
+        let ebb_for_epoch1 = test_ebb_hash(1);
+
+        // Advance the ledger tip through the EBB
+        state
+            .advance_past_ebb(ebb_for_epoch1)
+            .expect("EBB advance should succeed in Byron era");
+
+        // Verify: tip hash = EBB hash, slot preserved from epoch0_block
+        assert_eq!(state.tip.point.hash(), Some(&ebb_for_epoch1));
+        assert_eq!(state.tip.point.slot(), Some(SlotNo(21_000)));
+
+        // First real block of epoch 1, references the EBB hash as prev_hash
+        let first_epoch1_block = make_byron_block_ebb_test(21_601, 1001, ebb_for_epoch1);
+        state
+            .apply_block(&first_epoch1_block, BlockValidationMode::ApplyOnly)
+            .expect("first epoch1 block should apply after EBB advance");
+
+        assert_eq!(state.tip.point.hash(), Some(first_epoch1_block.hash()));
+        assert_eq!(state.tip.block_number, BlockNo(1001));
+
+        // Subsequent block in epoch 1 connects normally (no EBB)
+        let second_epoch1_block =
+            make_byron_block_ebb_test(21_700, 1002, *first_epoch1_block.hash());
+        state
+            .apply_block(&second_epoch1_block, BlockValidationMode::ApplyOnly)
+            .expect("second epoch1 block should apply normally");
+        assert_eq!(state.tip.block_number, BlockNo(1002));
+    }
+
+    /// Without `advance_past_ebb`, a block whose `prev_hash` equals an EBB hash
+    /// (rather than the current ledger tip hash) must return `BlockDoesNotConnect`.
+    /// This test documents the pre-fix failure mode and ensures the check is still
+    /// present to catch genuine connectivity errors.
+    #[test]
+    fn test_block_does_not_connect_without_ebb_advance() {
+        let mut state = make_byron_ledger_state();
+
+        let epoch0_slot = SlotNo(21_500);
+        let epoch0_hash = Hash32::from_bytes([0xA0; 32]);
+        state.tip = Tip {
+            point: Point::Specific(epoch0_slot, epoch0_hash),
+            block_number: BlockNo(50),
+        };
+
+        // Block whose prev_hash = EBB hash, NOT the current tip hash
+        let ebb = test_ebb_hash(1);
+        let next_block = make_byron_block_ebb_test(21_601, 51, ebb);
+
+        let result = state.apply_block(&next_block, BlockValidationMode::ApplyOnly);
+        assert!(
+            matches!(result, Err(LedgerError::BlockDoesNotConnect { .. })),
+            "Block referencing an EBB without advance_past_ebb must be rejected: {result:?}"
         );
     }
 }

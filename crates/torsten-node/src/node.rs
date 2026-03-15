@@ -12,7 +12,7 @@ use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
-    BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, Governor, GovernorEvent,
+    BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, EbbInfo, Governor, GovernorEvent,
     HeaderBatchResult, N2CServer, NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager,
     PeerManagerConfig, PipelinedPeerClient, QueryHandler, TipInfo, TxValidationError, TxValidator,
 };
@@ -2764,6 +2764,12 @@ impl Node {
                     tip: torsten_primitives::block::Tip,
                     fetch_ms: f64,
                     header_count: u64,
+                    /// Byron EBB hashes encountered while collecting the headers
+                    /// for this batch.  Each entry identifies an EBB whose hash
+                    /// is the `prev_hash` of `next_block_hash`, allowing the
+                    /// ledger apply loop to advance the tip through the EBB
+                    /// before applying the block that references it.
+                    ebb_hashes: Vec<torsten_network::EbbInfo>,
                 },
                 /// Chain rollback — process any preceding blocks, then rollback.
                 Rollback(Point),
@@ -2793,7 +2799,7 @@ impl Node {
                         .request_headers_pipelined_with_depth(header_batch_size, depth)
                         .await;
                     match result {
-                        Ok(HeaderBatchResult::Headers(headers, tip)) => {
+                        Ok(HeaderBatchResult::Headers(headers, tip, ebb_hashes)) => {
                             if headers.is_empty() {
                                 continue;
                             }
@@ -2801,6 +2807,7 @@ impl Node {
                                 header_count = headers.len(),
                                 first_slot = headers[0].slot,
                                 last_slot = headers.last().expect("headers is non-empty").slot,
+                                ebb_count = ebb_hashes.len(),
                                 "Pipeline: headers received"
                             );
                             let fetch_start = std::time::Instant::now();
@@ -2814,6 +2821,7 @@ impl Node {
                                             tip,
                                             fetch_ms,
                                             header_count,
+                                            ebb_hashes,
                                         })
                                         .await
                                         .is_err()
@@ -2833,6 +2841,7 @@ impl Node {
                             headers,
                             tip,
                             rollback_point,
+                            ebb_hashes,
                             ..
                         }) => {
                             // Fetch blocks for headers before the rollback point
@@ -2846,6 +2855,7 @@ impl Node {
                                             tip,
                                             fetch_ms: 0.0,
                                             header_count: headers.len() as u64,
+                                            ebb_hashes,
                                         })
                                         .await;
                                 }
@@ -2863,7 +2873,7 @@ impl Node {
                                 break;
                             }
                         }
-                        Ok(HeaderBatchResult::HeadersAtTip(headers, tip)) => {
+                        Ok(HeaderBatchResult::HeadersAtTip(headers, tip, ebb_hashes)) => {
                             // We got headers AND caught up to tip. Fetch the
                             // blocks, send the batch, then signal AtTip.
                             if !headers.is_empty() {
@@ -2871,6 +2881,7 @@ impl Node {
                                     header_count = headers.len(),
                                     first_slot = headers[0].slot,
                                     last_slot = headers.last().expect("non-empty").slot,
+                                    ebb_count = ebb_hashes.len(),
                                     "Pipeline: headers at tip"
                                 );
                                 let fetch_start = std::time::Instant::now();
@@ -2884,6 +2895,7 @@ impl Node {
                                                 tip,
                                                 fetch_ms,
                                                 header_count,
+                                                ebb_hashes,
                                             })
                                             .await
                                             .is_err()
@@ -2927,7 +2939,7 @@ impl Node {
                 tokio::select! {
                     msg = block_rx.recv() => {
                         match msg {
-                            Some(PipelineMsg::Batch { blocks, tip, fetch_ms, header_count }) => {
+                            Some(PipelineMsg::Batch { blocks, tip, fetch_ms, header_count, ebb_hashes }) => {
                                 if header_count > 0 {
                                     self.metrics.record_block_fetch_latency(fetch_ms / header_count as f64);
                                 }
@@ -2935,7 +2947,8 @@ impl Node {
                                     &peer_addr, fetch_ms, header_count, 0,
                                 );
                                 let applied = self.process_forward_blocks(
-                                    blocks, &tip, &mut blocks_received,
+                                    blocks, &tip, &ebb_hashes,
+                                    &mut blocks_received,
                                     &mut blocks_since_last_log, &mut last_snapshot_epoch,
                                     &mut last_log_time, &mut last_query_update,
                                 ).await;
@@ -3023,7 +3036,7 @@ impl Node {
                             match result {
                                 Ok(batch_result) => {
                                     match batch_result {
-                                        HeaderBatchResult::Headers(headers, tip) => {
+                                        HeaderBatchResult::Headers(headers, tip, ebb_hashes) => {
                                             if headers.len() > 10 && pipeline_depth < max_pipeline_depth {
                                                 pipeline_depth = max_pipeline_depth;
                                             }
@@ -3034,6 +3047,7 @@ impl Node {
                                                     first_block = headers[0].block_no,
                                                     last_slot = headers.last().expect("headers is non-empty").slot,
                                                     last_block = headers.last().expect("headers is non-empty").block_no,
+                                                    ebb_count = ebb_hashes.len(),
                                                     "Headers received from pipelined client"
                                                 );
                                             }
@@ -3059,7 +3073,7 @@ impl Node {
                                                     self.peer_manager.write().await.record_block_fetch(
                                                         &peer_addr, fetch_ms, header_count, 0,
                                                     );
-                                                    let applied = self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                    let applied = self.process_forward_blocks(blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                                     if applied > 0 {
                                                         consecutive_apply_failures = 0;
                                                     } else if header_count > 0 {
@@ -3078,11 +3092,11 @@ impl Node {
                                                 Err(e) => { error!("Block fetch failed: {e}"); break; }
                                             }
                                         }
-                                        HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, .. } => {
+                                        HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, ebb_hashes, .. } => {
                                             if !headers.is_empty() {
                                                 match fetch_pool.fetch_blocks_concurrent(&headers).await {
                                                     Ok(blocks) => {
-                                                        self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                        self.process_forward_blocks(blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                                     }
                                                     Err(e) => { warn!("Pool fetch failed during rollback batch: {e}"); }
                                                 }
@@ -3094,7 +3108,7 @@ impl Node {
                                             warn!("Rollback to {point}");
                                             self.handle_rollback(&point).await;
                                         }
-                                        HeaderBatchResult::HeadersAtTip(headers, tip) => {
+                                        HeaderBatchResult::HeadersAtTip(headers, tip, ebb_hashes) => {
                                             // Got headers AND caught up to tip
                                             if !headers.is_empty() {
                                                 let blocks_result = if fetch_pool.is_empty() {
@@ -3109,7 +3123,7 @@ impl Node {
                                                     }
                                                 };
                                                 if let Ok(blocks) = blocks_result {
-                                                    self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                    self.process_forward_blocks(blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                                 }
                                             }
                                             if !self.consensus.strict_verification() {
@@ -3170,7 +3184,11 @@ impl Node {
                                     if !forward_blocks.is_empty() {
                                         let tip = forward_blocks.last().expect("forward_blocks is non-empty (checked above)").1.clone();
                                         let blocks: Vec<_> = forward_blocks.into_iter().map(|(b, _)| b).collect();
-                                        self.process_forward_blocks(blocks, &tip, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                        // Single-peer serial mode does not use ChainSync header
+                                        // batching, so no EBBs are tracked separately — the
+                                        // serial client fetches full blocks which already handle
+                                        // EBBs via the gap-bridge mechanism.
+                                        self.process_forward_blocks(blocks, &tip, &[], &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                     }
 
                                     for event in other_events {
@@ -3235,6 +3253,7 @@ impl Node {
         &mut self,
         mut blocks: Vec<torsten_primitives::block::Block>,
         tip: &torsten_primitives::block::Tip,
+        ebb_hashes: &[EbbInfo],
         blocks_received: &mut u64,
         blocks_since_last_log: &mut u64,
         last_snapshot_epoch: &mut u64,
@@ -3500,6 +3519,42 @@ impl Node {
                         continue;
                     }
                 }
+
+                // Byron EBB bridge: before applying a block, check if its
+                // prev_hash references a Byron Epoch Boundary Block (EBB)
+                // rather than the current ledger tip.  EBBs carry no transactions
+                // and are never fetched via BlockFetch, so they are not in `blocks`.
+                // Their hashes are tracked in `ebb_hashes` and used here to advance
+                // the ledger tip before applying the block that follows the EBB.
+                //
+                // This handles mainnet Byron epochs 0-207: each epoch boundary
+                // produces one EBB whose hash becomes the prev_hash of the first
+                // real block of the next epoch.
+                let current_tip_hash = ls.tip.point.hash().cloned();
+                if current_tip_hash.as_ref() != Some(block.prev_hash()) {
+                    // Check if this block's prev_hash matches any EBB in the batch.
+                    let ebb_match = ebb_hashes
+                        .iter()
+                        .find(|ebb| ebb.next_block_hash == *block.hash().as_bytes());
+                    if let Some(ebb) = ebb_match {
+                        use torsten_primitives::hash::Hash32;
+                        let ebb_hash = Hash32::from_bytes(ebb.ebb_hash);
+                        debug!(
+                            ebb_hash = %ebb_hash.to_hex(),
+                            block_slot = block.slot().0,
+                            block_no = block.block_number().0,
+                            "Advancing ledger tip through Byron EBB before block application"
+                        );
+                        if let Err(e) = ls.advance_past_ebb(ebb_hash) {
+                            warn!(
+                                slot = block.slot().0,
+                                "EBB advance failed: {e} — skipping block"
+                            );
+                            break;
+                        }
+                    }
+                }
+
                 let ledger_mode = if strict || self.validate_all_blocks {
                     BlockValidationMode::ValidateAll
                 } else {

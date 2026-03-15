@@ -349,12 +349,23 @@ impl NodeToNodeClient {
     }
 
     /// Request a batch of headers only (no block fetching).
-    /// Returns header metadata that can be used for parallel block fetching.
+    /// Returns header metadata that can be used for parallel block fetching,
+    /// along with any Byron EBB hashes encountered in the stream.
+    ///
+    /// EBBs (variant 0, subtag 0) are never fetched as full blocks, but their
+    /// hashes ARE tracked: each EBB hash is the `prev_hash` of the first real
+    /// block of the next Byron epoch.  The `EbbInfo` entries in the result let
+    /// the apply loop advance the ledger tip through each EBB before applying
+    /// the block that references it.
     pub async fn request_headers_batch(
         &mut self,
         batch_size: usize,
     ) -> Result<HeaderBatchResult, ClientError> {
         let mut headers = Vec::with_capacity(batch_size);
+        let mut ebb_hashes: Vec<EbbInfo> = Vec::new();
+        // Hash of the most recently decoded EBB — held until the next real block
+        // is decoded so we can fill in `next_block_hash`.
+        let mut pending_ebb_hash: Option<[u8; 32]> = None;
         let mut latest_tip = None;
 
         for _ in 0..batch_size {
@@ -370,8 +381,33 @@ impl NodeToNodeClient {
                     latest_tip = Some(pallas_tip_to_torsten(&tip));
                     let subtag = header.byron_prefix.map(|(st, _)| st);
 
-                    // Skip EBBs: they contain no transactions
+                    // Byron EBBs: variant 0, subtag 0.
+                    // They carry no transactions; compute and record their hash
+                    // so the ledger can advance its tip through them.
                     if header.variant == 0 && subtag == Some(0) {
+                        match MultiEraHeader::decode(header.variant, subtag, &header.cbor) {
+                            Ok(ebb_header) => {
+                                let hash_vec = ebb_header.hash().to_vec();
+                                if hash_vec.len() == 32 {
+                                    let mut ebb_hash_bytes = [0u8; 32];
+                                    ebb_hash_bytes.copy_from_slice(&hash_vec);
+                                    // Store as pending — the next real block will
+                                    // supply its hash as `next_block_hash`.
+                                    pending_ebb_hash = Some(ebb_hash_bytes);
+                                    tracing::debug!(
+                                        ebb_hash = %hex::encode(ebb_hash_bytes),
+                                        "ChainSync: recorded EBB hash for tip advance"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                // Non-fatal: if we can't decode the EBB header we
+                                // log a warning and continue.  A subsequent decode
+                                // error on the following real block will surface the
+                                // underlying issue.
+                                tracing::warn!("Failed to decode EBB header: {e}");
+                            }
+                        }
                         continue;
                     }
 
@@ -399,6 +435,16 @@ impl NodeToNodeClient {
                     let mut hash_bytes = [0u8; 32];
                     let hash_vec = hash.to_vec();
                     hash_bytes.copy_from_slice(&hash_vec);
+
+                    // If there was a pending EBB before this block, finalise it
+                    // now that we know the hash of the block that follows it.
+                    if let Some(ebb_hash) = pending_ebb_hash.take() {
+                        ebb_hashes.push(EbbInfo {
+                            ebb_hash,
+                            next_block_hash: hash_bytes,
+                        });
+                    }
+
                     headers.push(HeaderInfo {
                         slot,
                         hash: hash_bytes,
@@ -413,6 +459,7 @@ impl NodeToNodeClient {
                             tip: torsten_tip.clone(),
                             rollback_point: pallas_point_to_torsten(&point),
                             rollback_tip: torsten_tip,
+                            ebb_hashes,
                         });
                     }
                     return Ok(HeaderBatchResult::RollBackward(
@@ -426,6 +473,7 @@ impl NodeToNodeClient {
                         return Ok(HeaderBatchResult::Headers(
                             headers,
                             latest_tip.expect("tip set by prior RollForward"),
+                            ebb_hashes,
                         ));
                     }
                     return Ok(HeaderBatchResult::Await);
@@ -434,7 +482,7 @@ impl NodeToNodeClient {
         }
 
         match latest_tip {
-            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip)),
+            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip, ebb_hashes)),
             // batch_size was 0 or no RollForward was received
             None => Ok(HeaderBatchResult::Await),
         }
@@ -572,11 +620,33 @@ pub struct HeaderInfo {
     pub block_no: u64,
 }
 
+/// Hash of a Byron Epoch Boundary Block (EBB), paired with the hash of the
+/// block that FOLLOWS it.  This lets the ledger apply loop identify which
+/// incoming block should be preceded by which EBB advance.
+///
+/// EBBs carry no transactions and are never fetched via BlockFetch.  They
+/// are detected in the ChainSync header stream and their hashes are passed
+/// through so the ledger tip can be advanced before applying the next block.
+#[derive(Debug, Clone)]
+pub struct EbbInfo {
+    /// Blake2b-256 hash of the EBB header (= next block's `prev_hash`).
+    pub ebb_hash: [u8; 32],
+    /// Hash of the first real block that comes after this EBB.
+    /// The ledger should advance through the EBB just before applying this block.
+    pub next_block_hash: [u8; 32],
+}
+
 /// Result of a header-only batch request.
 #[derive(Debug)]
 pub enum HeaderBatchResult {
-    /// Got a batch of headers
-    Headers(Vec<HeaderInfo>, Tip),
+    /// Got a batch of headers, plus any EBB hashes encountered in this batch.
+    ///
+    /// `ebb_hashes` contains the hashes of any Byron Epoch Boundary Blocks
+    /// that appeared in the ChainSync stream within this batch.  Each EBB hash
+    /// is the `prev_hash` of the block that follows it.  The apply loop must
+    /// advance the ledger tip through these EBBs before applying the blocks
+    /// that reference them.
+    Headers(Vec<HeaderInfo>, Tip, Vec<EbbInfo>),
     /// Got a rollback
     RollBackward(Point, Tip),
     /// Got headers followed by a rollback in the same batch
@@ -585,13 +655,15 @@ pub enum HeaderBatchResult {
         tip: Tip,
         rollback_point: Point,
         rollback_tip: Tip,
+        /// EBB hashes encountered before the rollback point.
+        ebb_hashes: Vec<EbbInfo>,
     },
     /// Caught up to tip (no headers available)
     Await,
     /// Got headers AND caught up to tip (server sent MsgAwaitReply after
     /// delivering these headers). The caller should process the headers
     /// then switch to tip-following mode.
-    HeadersAtTip(Vec<HeaderInfo>, Tip),
+    HeadersAtTip(Vec<HeaderInfo>, Tip, Vec<EbbInfo>),
 }
 
 /// A pool of peer connections for concurrent block fetching.

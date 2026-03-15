@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::net::ToSocketAddrs;
 use tracing::{debug, trace, warn};
 
-use crate::client::{ClientError, HeaderBatchResult, HeaderInfo};
+use crate::client::{ClientError, EbbInfo, HeaderBatchResult, HeaderInfo};
 use torsten_primitives::block::{Point, Tip as TorstenTip};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::SlotNo;
@@ -183,12 +183,22 @@ impl PipelinedPeerClient {
     /// responses (up to `batch_size`). Does NOT refill the pipeline during
     /// reading — this ensures in_flight reaches 0 before returning, preventing
     /// channel buffer backpressure during the caller's block fetch phase.
+    ///
+    /// Byron Epoch Boundary Blocks (EBBs) are detected in the stream and their
+    /// hashes are recorded in the returned `EbbInfo` list so the ledger apply
+    /// loop can advance the tip through them before applying the next real block.
     pub async fn request_headers_pipelined_with_depth(
         &mut self,
         batch_size: usize,
         pipeline_depth: usize,
     ) -> Result<HeaderBatchResult, ClientError> {
         let mut headers = Vec::with_capacity(batch_size);
+        // EBB hashes encountered in this batch; each entry is finalised once
+        // the hash of the following real block is known.
+        let mut ebb_hashes: Vec<EbbInfo> = Vec::new();
+        // Hash of the most recently seen EBB; held until the next real block
+        // is decoded so `next_block_hash` can be filled in.
+        let mut pending_ebb_hash: Option<[u8; 32]> = None;
         let mut latest_tip = None;
 
         // Send pipeline of MsgRequestNext messages
@@ -216,17 +226,32 @@ impl PipelinedPeerClient {
                     latest_tip = Some(pallas_to_torsten_tip(&tip));
 
                     match decode_header_info(&header, self.byron_epoch_length) {
-                        Ok(Some(info)) => {
+                        Ok(Some(DecodedHeader::Block(info))) => {
                             trace!(
                                 slot = info.slot,
                                 block_no = info.block_no,
                                 "pipelined header received"
                             );
+                            // Finalise any pending EBB with this block's hash.
+                            if let Some(ebb_hash) = pending_ebb_hash.take() {
+                                ebb_hashes.push(EbbInfo {
+                                    ebb_hash,
+                                    next_block_hash: info.hash,
+                                });
+                            }
                             headers.push(info);
                         }
+                        Ok(Some(DecodedHeader::Ebb(ebb_hash))) => {
+                            // Record EBB hash; next real block will finalise it.
+                            trace!(
+                                ebb_hash = %hex::encode(ebb_hash),
+                                "pipelined: recorded EBB hash for tip advance"
+                            );
+                            pending_ebb_hash = Some(ebb_hash);
+                        }
                         Ok(None) => {
-                            // EBB skipped
-                            trace!("skipping EBB header");
+                            // EBB decode returned None (hash size mismatch, etc.)
+                            trace!("pipelined: EBB skipped (could not decode hash)");
                         }
                         Err(e) => {
                             return Err(ClientError::BlockDecode(format!(
@@ -243,6 +268,8 @@ impl PipelinedPeerClient {
                     // continue reading the remaining in-flight responses, which
                     // contain the post-rollback headers.
                     headers.clear();
+                    ebb_hashes.clear();
+                    pending_ebb_hash = None;
                     latest_tip = Some(torsten_tip.clone());
                     // If no more in-flight, return the rollback
                     if self.in_flight == 0 {
@@ -277,10 +304,27 @@ impl PipelinedPeerClient {
                     match wait_response {
                         Message::RollForward(header, tip) => {
                             latest_tip = Some(pallas_to_torsten_tip(&tip));
-                            if let Ok(Some(info)) =
-                                decode_header_info(&header, self.byron_epoch_length)
-                            {
-                                headers.push(info);
+                            match decode_header_info(&header, self.byron_epoch_length) {
+                                Ok(Some(DecodedHeader::Block(info))) => {
+                                    if let Some(ebb_hash) = pending_ebb_hash.take() {
+                                        ebb_hashes.push(EbbInfo {
+                                            ebb_hash,
+                                            next_block_hash: info.hash,
+                                        });
+                                    }
+                                    headers.push(info);
+                                }
+                                Ok(Some(DecodedHeader::Ebb(ebb_hash))) => {
+                                    // An EBB arrived at tip — record it but the
+                                    // next_block_hash is unknown until the next
+                                    // RollForward arrives in a subsequent call.
+                                    // We do not set pending_ebb_hash here because
+                                    // this function returns immediately after the
+                                    // AwaitReply handler; the EBB will be re-sent
+                                    // by the server on the next request.
+                                    let _ebb_at_tip = ebb_hash; // acknowledged but deferred
+                                }
+                                Ok(None) | Err(_) => {}
                             }
                             // Do NOT drain remaining in-flight. The server will
                             // respond to them one-by-one as new blocks arrive.
@@ -297,6 +341,7 @@ impl PipelinedPeerClient {
                                     tip: torsten_tip.clone(),
                                     rollback_point: pallas_to_torsten_point(&point),
                                     rollback_tip: torsten_tip,
+                                    ebb_hashes,
                                 });
                             }
                             return Ok(HeaderBatchResult::RollBackward(
@@ -317,7 +362,7 @@ impl PipelinedPeerClient {
                     let tip = latest_tip.ok_or_else(|| {
                         ClientError::ChainSync("got headers at tip but no tip".into())
                     })?;
-                    return Ok(HeaderBatchResult::HeadersAtTip(headers, tip));
+                    return Ok(HeaderBatchResult::HeadersAtTip(headers, tip, ebb_hashes));
                 }
                 _ => {
                     return Err(ClientError::ChainSync(format!(
@@ -328,7 +373,7 @@ impl PipelinedPeerClient {
         }
 
         match latest_tip {
-            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip)),
+            Some(tip) => Ok(HeaderBatchResult::Headers(headers, tip, ebb_hashes)),
             None if headers.is_empty() => Ok(HeaderBatchResult::Await),
             None => Err(ClientError::ChainSync("got headers but no tip".into())),
         }
@@ -374,9 +419,23 @@ impl PipelinedPeerClient {
     }
 }
 
+/// Result of decoding a single ChainSync header.
+enum DecodedHeader {
+    /// A regular block header with full metadata.
+    Block(HeaderInfo),
+    /// A Byron Epoch Boundary Block — no slot, no transactions, but its hash
+    /// is the `prev_hash` of the first real block of the next epoch.
+    Ebb([u8; 32]),
+}
+
 /// Decode header metadata from a ChainSync HeaderContent.
-/// Returns None for Epoch Boundary Blocks (EBBs), which contain no
-/// transactions and are not needed for ledger application.
+///
+/// Returns `DecodedHeader::Ebb` for Byron Epoch Boundary Blocks (variant 0,
+/// subtag 0): these carry no transactions and are never fetched via BlockFetch,
+/// but their hashes must be recorded so the ledger tip can be advanced through
+/// them before the next real block is applied.
+///
+/// Returns `DecodedHeader::Block` for all regular headers.
 ///
 /// `byron_epoch_length`: the number of absolute slots per Byron epoch
 /// (= 10 * k). Required for correct slot computation on non-mainnet
@@ -385,12 +444,31 @@ impl PipelinedPeerClient {
 fn decode_header_info(
     header: &HeaderContent,
     byron_epoch_length: u64,
-) -> Result<Option<HeaderInfo>, String> {
+) -> Result<Option<DecodedHeader>, String> {
     let subtag = header.byron_prefix.map(|(st, _)| st);
 
-    // Skip EBBs: variant 0 with subtag 0
+    // EBBs: Byron variant 0 with subtag 0.  They have no slot and carry no
+    // transactions, but their hash is the `prev_hash` of the next real block.
+    // Record the hash so the apply loop can advance the ledger tip through them.
     if header.variant == 0 && subtag == Some(0) {
-        return Ok(None);
+        match MultiEraHeader::decode(header.variant, subtag, &header.cbor) {
+            Ok(ebb_header) => {
+                let hash_vec = ebb_header.hash().to_vec();
+                if hash_vec.len() == 32 {
+                    let mut ebb_hash = [0u8; 32];
+                    ebb_hash.copy_from_slice(&hash_vec);
+                    return Ok(Some(DecodedHeader::Ebb(ebb_hash)));
+                }
+                // Hash size mismatch — treat as skipped EBB (non-fatal).
+                return Ok(None);
+            }
+            Err(_) => {
+                // Decode failure on an EBB header is non-fatal: we skip it.
+                // If the subsequent real block can't be decoded either, that
+                // error will surface normally.
+                return Ok(None);
+            }
+        }
     }
 
     let multi_era_header = MultiEraHeader::decode(header.variant, subtag, &header.cbor)
@@ -419,11 +497,11 @@ fn decode_header_info(
     let hash_vec = hash.to_vec();
     hash_bytes.copy_from_slice(&hash_vec);
 
-    Ok(Some(HeaderInfo {
+    Ok(Some(DecodedHeader::Block(HeaderInfo {
         slot,
         hash: hash_bytes,
         block_no,
-    }))
+    })))
 }
 
 // Point/Tip conversion utilities
