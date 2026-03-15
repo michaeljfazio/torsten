@@ -947,6 +947,7 @@ impl Node {
                 utxo_cfg.bloom_filter_bits_per_key,
             ) {
                 Ok(store) => {
+                    let store_count = store.len();
                     info!(
                         path = %utxo_path.display(),
                         memtable_mb = utxo_cfg.memtable_size_mb,
@@ -954,6 +955,19 @@ impl Node {
                         "UTxO store attached (LSM)"
                     );
                     ledger.attach_utxo_store(store);
+
+                    // If the ledger has a non-origin tip but the UTxO store is empty,
+                    // the store data was lost (crash, session lock issue, etc.).
+                    // Force a full re-replay by resetting the ledger tip to origin.
+                    let ledger_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    if ledger_slot > 0 && store_count == 0 {
+                        warn!(
+                            "UTxO store is empty but ledger is at slot {}. \
+                             Resetting ledger to force full re-replay.",
+                            ledger_slot
+                        );
+                        ledger.reset_to_origin();
+                    }
                 }
                 Err(e) => {
                     warn!(

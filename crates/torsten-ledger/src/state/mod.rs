@@ -297,6 +297,14 @@ pub struct PoolRegistration {
 }
 
 impl LedgerState {
+    /// Reset the ledger tip to origin, forcing a full re-replay from storage.
+    /// Used when the UTxO store is empty but the ledger snapshot has state
+    /// (indicating data loss from crash or session lock issues).
+    pub fn reset_to_origin(&mut self) {
+        self.tip = Tip::origin();
+        self.epoch = EpochNo(0);
+    }
+
     pub fn new(params: ProtocolParameters) -> Self {
         LedgerState {
             utxo_set: UtxoSet::new(),
