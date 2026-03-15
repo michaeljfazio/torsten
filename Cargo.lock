@@ -3493,6 +3493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "torsten-golden-tests"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "torsten-crypto",
+ "torsten-primitives",
+]
+
+[[package]]
 name = "torsten-integration-tests"
 version = "0.1.0"
 dependencies = [
