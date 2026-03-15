@@ -333,9 +333,9 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
-            labeled: std::collections::HashMap::new(),
+            _labeled: std::collections::HashMap::new(),
             connected: true,
-            error: None,
+            _error: None,
         }
     }
 
