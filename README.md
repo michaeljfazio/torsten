@@ -45,7 +45,7 @@ See the [full documentation](https://michaeljfazio.github.io/torsten/) for detai
 
 ## Architecture
 
-Torsten is organized as an 11-crate Cargo workspace:
+Torsten is organized as a 12-crate Cargo workspace:
 
 | Crate | Description |
 |-------|-------------|
@@ -60,6 +60,7 @@ Torsten is organized as an 11-crate Cargo workspace:
 | `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
 | `torsten-node` | Main binary: config, topology, pipelined sync, Mithril import, block forging, Prometheus metrics |
 | `torsten-cli` | cardano-cli compatible CLI (33+ subcommands) |
+| `torsten-tui` | Terminal monitoring dashboard (ratatui-based, real-time metrics) |
 
 ```mermaid
 graph TD
@@ -175,6 +176,7 @@ graph TD
 
 ### Observability
 - **28+ Prometheus metrics** on port 12798 (blocks, slots, epochs, UTxO count, delegations, treasury, mempool, peers, transactions, DReps, proposals, pools, disk, memory, uptime, tip age)
+- **torsten-tui**: Beautiful terminal monitoring dashboard with real-time sync progress, block rate sparkline, peer breakdown, governance summary, and color-coded health indicators. Run: `torsten-tui --metrics-url http://localhost:12798/metrics`
 - **Structured logging** with tracing-subscriber (env-filter, JSON output, journald)
 - **SIGHUP topology reload** for live configuration updates
 - **GSM state tracking**: PreSyncing/Syncing/CaughtUp with tip age monitoring
