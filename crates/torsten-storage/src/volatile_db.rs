@@ -201,8 +201,7 @@ fn detect_legacy_format(data: &[u8]) -> bool {
     }
 
     // Read cbor_len from the legacy header position (offset 52).
-    let cbor_len =
-        u32::from_be_bytes(data[52..56].try_into().unwrap()) as usize;
+    let cbor_len = u32::from_be_bytes(data[52..56].try_into().unwrap()) as usize;
 
     // Where would the next entry begin under the 56-byte assumption?
     let next_pos = WAL_HEADER_SIZE_LEGACY + cbor_len;
@@ -235,12 +234,10 @@ fn detect_legacy_format(data: &[u8]) -> bool {
     // The next position does not start with TWAL under the legacy assumption.
     // Check if it does under the new-format assumption.
     if data.len() >= WAL_HEADER_SIZE {
-        let new_cbor_len =
-            u32::from_be_bytes(data[84..88].try_into().unwrap()) as usize;
+        let new_cbor_len = u32::from_be_bytes(data[84..88].try_into().unwrap()) as usize;
         let new_next = WAL_HEADER_SIZE + new_cbor_len;
         if new_next <= data.len()
-            && (new_next == data.len()
-                || data[new_next..new_next + 4] == WAL_MAGIC)
+            && (new_next == data.len() || data[new_next..new_next + 4] == WAL_MAGIC)
         {
             return false; // New format aligns correctly.
         }
@@ -305,24 +302,19 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
         }
 
         let slot = u64::from_be_bytes(data[pos + 4..pos + 12].try_into().unwrap());
-        let block_no =
-            u64::from_be_bytes(data[pos + 12..pos + 20].try_into().unwrap());
+        let block_no = u64::from_be_bytes(data[pos + 12..pos + 20].try_into().unwrap());
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&data[pos + 20..pos + 52]);
 
         let (prev_hash, cbor_len) = if legacy {
             // Legacy layout: cbor_len at offset 52, no prev_hash field.
-            let cl = u32::from_be_bytes(
-                data[pos + 52..pos + 56].try_into().unwrap(),
-            ) as usize;
+            let cl = u32::from_be_bytes(data[pos + 52..pos + 56].try_into().unwrap()) as usize;
             (Hash32::ZERO, cl)
         } else {
             // New layout: prev_hash at offset 52, cbor_len at offset 84.
             let mut prev_bytes = [0u8; 32];
             prev_bytes.copy_from_slice(&data[pos + 52..pos + 84]);
-            let cl = u32::from_be_bytes(
-                data[pos + 84..pos + 88].try_into().unwrap(),
-            ) as usize;
+            let cl = u32::from_be_bytes(data[pos + 84..pos + 88].try_into().unwrap()) as usize;
             (Hash32::from_bytes(prev_bytes), cl)
         };
 
@@ -565,8 +557,7 @@ impl VolatileDB {
     /// The rewritten WAL uses the current 88-byte format, so this operation
     /// also upgrades any legacy 56-byte WAL to the new format.
     pub fn remove_blocks_up_to_slot(&mut self, slot: u64) -> Vec<Hash32> {
-        let slots_to_remove: Vec<u64> =
-            self.slot_index.range(..=slot).map(|(&s, _)| s).collect();
+        let slots_to_remove: Vec<u64> = self.slot_index.range(..=slot).map(|(&s, _)| s).collect();
 
         let mut removed = Vec::new();
         for s in slots_to_remove {
@@ -574,9 +565,7 @@ impl VolatileDB {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
                         self.block_no_index.remove(&block.block_no);
-                        if let Some(succs) =
-                            self.successors.get_mut(&block.prev_hash)
-                        {
+                        if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
                             succs.retain(|h| *h != hash);
                             if succs.is_empty() {
                                 self.successors.remove(&block.prev_hash);
@@ -637,9 +626,7 @@ impl VolatileDB {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
                         self.block_no_index.remove(&block.block_no);
-                        if let Some(succs) =
-                            self.successors.get_mut(&block.prev_hash)
-                        {
+                        if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
                             succs.retain(|h| *h != hash);
                         }
                     }

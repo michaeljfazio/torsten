@@ -234,7 +234,7 @@ impl LedgerState {
             // Check voting thresholds
             if let Some(state) = self.governance.proposals.get(action_id) {
                 // Compute vote counts for logging
-                let (drep_yes, drep_total, spo_yes, _spo_voted, cc_yes, cc_total) = self
+                let (_drep_yes, _drep_total, _spo_yes, _spo_voted, _cc_yes, _cc_total) = self
                     .count_votes_by_type(
                         action_id,
                         &state.procedure.gov_action,
