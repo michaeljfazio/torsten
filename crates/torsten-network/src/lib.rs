@@ -23,7 +23,7 @@ pub use miniprotocols::peersharing::{
     request_peers_from, PeerAddress, PeerSharingMessage, PeerSharingState,
 };
 pub use miniprotocols::txsubmission::{TxSubmissionClient, TxSubmissionError, TxSubmissionStats};
-pub use n2c::{encode_query_result, N2CServer, TxValidationError, TxValidator};
+pub use n2c::{N2CServer, TxValidationError, TxValidator};
 pub use n2c_client::N2CClient;
 // Re-export mempool trait and types from torsten-primitives for convenience
 pub use governor::{Governor, GovernorEvent, PeerTargets};
@@ -32,7 +32,8 @@ pub use n2n_server::{
 };
 pub use peer::PeerConnection;
 pub use peer_manager::{
-    CircuitState, DiffusionMode, PeerCategory, PeerManager, PeerManagerConfig, PeerPerformance,
+    CircuitState, ConnectionDirection, DiffusionMode, PeerCategory, PeerManager, PeerManagerConfig,
+    PeerPerformance,
 };
 pub use pipelined::PipelinedPeerClient;
 pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};

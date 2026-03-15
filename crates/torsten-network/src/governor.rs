@@ -436,7 +436,7 @@ pub enum ConnectionDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_manager::PeerManagerConfig;
+    use crate::peer_manager::{ConnectionDirection, PeerManagerConfig};
     use std::net::SocketAddr;
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -460,13 +460,13 @@ mod tests {
         for _ in 0..warm {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
-            pm.peer_connected(&addr, 14, true);
+            pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
             port += 1;
         }
         for _ in 0..hot {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
-            pm.peer_connected(&addr, 14, true);
+            pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
             pm.promote_to_hot(&addr);
             port += 1;
         }
@@ -557,9 +557,9 @@ mod tests {
         pm.add_config_peer(local2, true, false);
         pm.add_config_peer(regular, false, false);
 
-        pm.peer_connected(&local1, 14, true);
-        pm.peer_connected(&local2, 14, true);
-        pm.peer_connected(&regular, 14, true);
+        pm.peer_connected(&local1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&local2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&regular, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&local1);
         pm.promote_to_hot(&local2);
         pm.promote_to_hot(&regular);

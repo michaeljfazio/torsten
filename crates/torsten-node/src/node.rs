@@ -12,9 +12,10 @@ use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
-    BlockFetchPool, BlockProvider, ChainSyncEvent, DiffusionMode, EbbInfo, Governor, GovernorEvent,
-    HeaderBatchResult, N2CServer, NodeServer, NodeStateSnapshot, NodeToNodeClient, PeerManager,
-    PeerManagerConfig, PipelinedPeerClient, QueryHandler, TipInfo, TxValidationError, TxValidator,
+    BlockFetchPool, BlockProvider, ChainSyncEvent, ConnectionDirection, DiffusionMode, EbbInfo,
+    Governor, GovernorEvent, HeaderBatchResult, N2CServer, NodeServer, NodeStateSnapshot,
+    NodeToNodeClient, PeerManager, PeerManagerConfig, PipelinedPeerClient, QueryHandler, TipInfo,
+    TxValidationError, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -1722,7 +1723,7 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            pm.peer_connected(addr, 14, true);
+                            pm.peer_connected(addr, 14, ConnectionDirection::Outbound);
                             pm.record_handshake_rtt(addr, rtt_ms);
                             pm.promote_to_hot(addr);
                             drop(pm);
@@ -1854,7 +1855,7 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            pm.peer_connected(addr, 14, true);
+                            pm.peer_connected(addr, 14, ConnectionDirection::Outbound);
                             pm.record_handshake_rtt(addr, rtt_ms);
                             pm.promote_to_hot(addr);
                             drop(pm);

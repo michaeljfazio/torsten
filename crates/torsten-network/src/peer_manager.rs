@@ -32,6 +32,19 @@ pub enum PeerTemperature {
     Hot,
 }
 
+/// Direction of a peer connection from our perspective.
+///
+/// Only **outbound** (self-initiated) peers should be shared in the peer-sharing
+/// protocol. Advertising inbound peers would expose their IP to third parties
+/// without consent, and their address is often not publicly reachable anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionDirection {
+    /// We dialled this peer.
+    Outbound,
+    /// This peer connected to us.
+    Inbound,
+}
+
 /// Peer source — how we learned about this peer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerSource {
@@ -111,8 +124,9 @@ pub struct PeerInfo {
     pub version: Option<u32>,
     /// Remote tip slot (if known)
     pub remote_tip_slot: Option<u64>,
-    /// Connection direction
-    pub is_initiator: Option<bool>,
+    /// Whether this connection was outbound (we dialled) or inbound (they connected).
+    /// `None` while the peer is cold (not yet connected).
+    pub direction: Option<ConnectionDirection>,
     /// Performance metrics for adaptive peer selection
     pub performance: PeerPerformance,
     /// Circuit breaker state
@@ -245,7 +259,7 @@ impl PeerInfo {
             advertise: false,
             version: None,
             remote_tip_slot: None,
-            is_initiator: None,
+            direction: None,
             performance: PeerPerformance::default(),
             circuit_state: CircuitState::Closed,
             consecutive_failures: 0,
@@ -515,8 +529,15 @@ impl PeerManager {
 
     /// Mark a peer as successfully connected (warm).
     ///
-    /// Resets the circuit breaker to Closed and clears consecutive failures.
-    pub fn peer_connected(&mut self, addr: &SocketAddr, version: u32, is_initiator: bool) {
+    /// `direction` should be `Outbound` when we dialled the peer and `Inbound`
+    /// when the peer connected to us.  Resets the circuit breaker to Closed and
+    /// clears consecutive failures.
+    pub fn peer_connected(
+        &mut self,
+        addr: &SocketAddr,
+        version: u32,
+        direction: ConnectionDirection,
+    ) {
         if let Some(info) = self.peers.get_mut(addr) {
             info.temperature = PeerTemperature::Warm;
             info.last_connected = Some(Instant::now());
@@ -524,13 +545,13 @@ impl PeerManager {
             info.consecutive_failures = 0;
             info.circuit_state = CircuitState::Closed;
             info.version = Some(version);
-            info.is_initiator = Some(is_initiator);
+            info.direction = Some(direction);
             self.cold_peers.remove(addr);
             self.warm_peers.insert(*addr);
-            if !is_initiator {
+            if direction == ConnectionDirection::Inbound {
                 self.inbound_count += 1;
             }
-            debug!(%addr, version, is_initiator, "Peer connected (warm)");
+            debug!(%addr, version, ?direction, "Peer connected (warm)");
         }
     }
 
@@ -561,12 +582,12 @@ impl PeerManager {
     /// Mark a peer as disconnected
     pub fn peer_disconnected(&mut self, addr: &SocketAddr) {
         if let Some(info) = self.peers.get_mut(addr) {
-            if info.is_initiator == Some(false) {
+            if info.direction == Some(ConnectionDirection::Inbound) {
                 self.inbound_count = self.inbound_count.saturating_sub(1);
             }
             info.temperature = PeerTemperature::Cold;
             info.version = None;
-            info.is_initiator = None;
+            info.direction = None;
             self.hot_peers.remove(addr);
             self.warm_peers.remove(addr);
             self.cold_peers.insert(*addr);
@@ -585,7 +606,7 @@ impl PeerManager {
             info.consecutive_failures += 1;
             info.temperature = PeerTemperature::Cold;
             info.version = None;
-            info.is_initiator = None;
+            info.direction = None;
             self.hot_peers.remove(addr);
             self.warm_peers.remove(addr);
             self.cold_peers.insert(*addr);
@@ -868,7 +889,11 @@ impl PeerManager {
             .collect()
     }
 
-    /// Get peer addresses to share with a requesting peer
+    /// Get peer addresses to share with a requesting peer.
+    ///
+    /// Only **outbound** connections are eligible for sharing.  Advertising
+    /// inbound peers would expose their IP to third parties without consent,
+    /// and their listen address may not be publicly reachable.
     pub fn peers_for_sharing(&self, max_count: usize) -> Vec<SocketAddr> {
         if !self.config.peer_sharing_enabled {
             return vec![];
@@ -877,6 +902,7 @@ impl PeerManager {
             .iter()
             .filter(|(addr, info)| {
                 info.advertise
+                    && info.direction == Some(ConnectionDirection::Outbound)
                     && info.temperature != PeerTemperature::Cold
                     && Self::is_routable(&addr.ip())
             })
@@ -990,7 +1016,7 @@ mod tests {
         pm.add_config_peer(addr, false, false);
 
         // Connect
-        pm.peer_connected(&addr, 14, true);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         assert!(pm.warm_peers.contains(&addr));
         assert!(!pm.cold_peers.contains(&addr));
 
@@ -1041,9 +1067,9 @@ mod tests {
         pm.add_config_peer(a1, false, false);
         pm.add_config_peer(a2, false, false);
         pm.add_config_peer(a3, false, false);
-        pm.peer_connected(&a1, 14, true);
-        pm.peer_connected(&a2, 14, true);
-        pm.peer_connected(&a3, 14, true);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a3, 14, ConnectionDirection::Outbound);
 
         let to_promote = pm.peers_to_promote();
         assert_eq!(to_promote.len(), 2); // target_hot = 2
@@ -1062,9 +1088,9 @@ mod tests {
         let a2 = test_addr(3002);
         pm.add_config_peer(a1, false, false);
         pm.add_config_peer(a2, false, false);
-        pm.peer_connected(&a1, 14, false); // inbound
+        pm.peer_connected(&a1, 14, ConnectionDirection::Inbound); // inbound
         assert!(pm.should_accept_inbound());
-        pm.peer_connected(&a2, 14, false); // inbound
+        pm.peer_connected(&a2, 14, ConnectionDirection::Inbound); // inbound
         assert!(!pm.should_accept_inbound()); // at max
     }
 
@@ -1086,7 +1112,7 @@ mod tests {
         let a2 = routable_addr(1, 1, 1, 1, 3002);
         pm.add_config_peer(a1, false, true); // advertise=true
         pm.add_config_peer(a2, false, false); // advertise=false
-        pm.peer_connected(&a1, 14, true);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
 
         let shared = pm.peers_for_sharing(10);
         assert_eq!(shared.len(), 1);
@@ -1116,7 +1142,7 @@ mod tests {
         pm.add_config_peer(a1, false, false);
         pm.add_config_peer(a2, false, false);
         pm.add_config_peer(a3, false, false);
-        pm.peer_connected(&a1, 14, true);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&a1);
 
         let stats = pm.stats();
@@ -1278,8 +1304,8 @@ mod tests {
         let slow_peer = test_addr(3002);
         pm.add_config_peer(fast_peer, true, false);
         pm.add_config_peer(slow_peer, false, false);
-        pm.peer_connected(&fast_peer, 14, true);
-        pm.peer_connected(&slow_peer, 14, true);
+        pm.peer_connected(&fast_peer, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&slow_peer, 14, ConnectionDirection::Outbound);
 
         // Give fast peer better latency
         pm.record_handshake_rtt(&fast_peer, 20.0);
@@ -1298,8 +1324,8 @@ mod tests {
         let slow = test_addr(3002);
         pm.add_config_peer(fast, true, false);
         pm.add_config_peer(slow, false, false);
-        pm.peer_connected(&fast, 14, true);
-        pm.peer_connected(&slow, 14, true);
+        pm.peer_connected(&fast, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&slow, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&fast);
         pm.promote_to_hot(&slow);
 
@@ -1319,8 +1345,8 @@ mod tests {
         let bad = test_addr(3002);
         pm.add_config_peer(good, true, false);
         pm.add_config_peer(bad, false, false);
-        pm.peer_connected(&good, 14, true);
-        pm.peer_connected(&bad, 14, true);
+        pm.peer_connected(&good, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&bad, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&good);
         pm.promote_to_hot(&bad);
 
@@ -1337,7 +1363,7 @@ mod tests {
         let mut pm = PeerManager::new(PeerManagerConfig::default());
         let addr = test_addr(3001);
         pm.add_config_peer(addr, false, false);
-        pm.peer_connected(&addr, 14, true);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&addr);
         pm.record_block_fetch(&addr, 100.0, 10, 10000);
         pm.recompute_reputations();
@@ -1474,9 +1500,21 @@ mod tests {
         pm.add_config_peer(routable_addr(1, 2, 3, 1, 4001), false, false);
 
         // Connect 3 from the same subnet (exceeds MAX_PEERS_PER_SUBNET)
-        pm.peer_connected(&routable_addr(8, 8, 8, 1, 3001), 14, true);
-        pm.peer_connected(&routable_addr(8, 8, 8, 2, 3002), 14, true);
-        pm.peer_connected(&routable_addr(8, 8, 8, 3, 3003), 14, true);
+        pm.peer_connected(
+            &routable_addr(8, 8, 8, 1, 3001),
+            14,
+            ConnectionDirection::Outbound,
+        );
+        pm.peer_connected(
+            &routable_addr(8, 8, 8, 2, 3002),
+            14,
+            ConnectionDirection::Outbound,
+        );
+        pm.peer_connected(
+            &routable_addr(8, 8, 8, 3, 3003),
+            14,
+            ConnectionDirection::Outbound,
+        );
 
         // Now get peers to connect — the diverse peer should rank higher
         // than the 4th peer from the same subnet
@@ -1499,9 +1537,9 @@ mod tests {
         pm.add_config_peer(a1, false, false);
         pm.add_config_peer(a2, false, false);
         pm.add_config_peer(a3, false, false);
-        pm.peer_connected(&a1, 14, true);
-        pm.peer_connected(&a2, 14, true);
-        pm.peer_connected(&a3, 14, true);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a3, 14, ConnectionDirection::Outbound);
 
         let stats = pm.stats();
         assert_eq!(stats.unique_subnets, 2, "Should have 2 unique /24 subnets");
@@ -1526,9 +1564,11 @@ mod tests {
         pm.add_config_peer(private, false, true);
         pm.add_config_peer(link_local, false, true);
 
-        // Connect and promote to warm so they pass the temperature filter
+        // Connect and promote to warm so they pass the temperature filter.
+        // All are marked Outbound so the direction filter doesn't interfere
+        // with the routability assertion this test is exercising.
         for addr in &[routable, loopback, private, link_local] {
-            pm.peer_connected(addr, 14, true);
+            pm.peer_connected(addr, 14, ConnectionDirection::Outbound);
         }
 
         let shared = pm.peers_for_sharing(10);
@@ -1625,7 +1665,7 @@ mod tests {
         }
 
         // Successful connection should close the circuit
-        pm.peer_connected(&addr, 14, true);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         assert!(matches!(
             pm.peers[&addr].circuit_state,
             CircuitState::Closed
@@ -1655,6 +1695,33 @@ mod tests {
             }
             other => panic!("Expected Open, got {other:?}"),
         }
+    }
+
+    /// Inbound peers must NOT be shared, even when they satisfy all other
+    /// eligibility criteria (advertise=true, warm/hot, routable).  Sharing
+    /// inbound addresses would expose the remote peer's IP to third parties
+    /// without consent and their listen port may not be the port they connected
+    /// from.
+    #[test]
+    fn test_peers_for_sharing_outbound_only() {
+        let mut pm = PeerManager::new(PeerManagerConfig {
+            peer_sharing_enabled: true,
+            ..PeerManagerConfig::default()
+        });
+
+        let outbound_addr = routable_addr(8, 8, 8, 8, 3001);
+        let inbound_addr = routable_addr(1, 1, 1, 1, 3002);
+
+        pm.add_config_peer(outbound_addr, false, true); // advertise=true
+        pm.add_config_peer(inbound_addr, false, true); // advertise=true
+
+        // Connect both: one outbound, one inbound
+        pm.peer_connected(&outbound_addr, 15, ConnectionDirection::Outbound);
+        pm.peer_connected(&inbound_addr, 15, ConnectionDirection::Inbound);
+
+        let shared = pm.peers_for_sharing(10);
+        assert_eq!(shared.len(), 1, "Only the outbound peer should be shared");
+        assert_eq!(shared[0], outbound_addr, "Inbound peer must not be shared");
     }
 
     #[test]
