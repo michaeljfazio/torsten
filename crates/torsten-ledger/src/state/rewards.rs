@@ -1,4 +1,4 @@
-use super::{LedgerState, StakeSnapshot, MAX_LOVELACE_SUPPLY};
+use super::{LedgerState, PendingRewardUpdate, StakeSnapshot, MAX_LOVELACE_SUPPLY};
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 use std::collections::HashMap;
@@ -108,7 +108,42 @@ impl Rat {
 }
 
 impl LedgerState {
-    /// Calculate and distribute rewards according to the Cardano Shelley reward formula.
+    /// Apply a pending reward update to the ledger state.
+    ///
+    /// This is called at the BEGINNING of an epoch transition to apply rewards
+    /// computed during the previous epoch transition, matching Haskell's RUPD
+    /// deferred application pattern.
+    pub(crate) fn apply_pending_reward_update(&mut self) {
+        if let Some(rupd) = self.pending_reward_update.take() {
+            // Apply reserves decrease (monetary expansion)
+            self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
+
+            // Apply treasury increase (tau cut + undistributed)
+            self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+
+            // Apply per-account rewards
+            let mut total_applied = 0u64;
+            for (cred_hash, reward) in &rupd.rewards {
+                if reward.0 > 0 {
+                    *Arc::make_mut(&mut self.reward_accounts)
+                        .entry(*cred_hash)
+                        .or_insert(Lovelace(0)) += *reward;
+                    total_applied += reward.0;
+                }
+            }
+
+            debug!(
+                "Applied pending reward update: {} lovelace to {} accounts, \
+                 treasury +{}, reserves -{}",
+                total_applied,
+                rupd.rewards.len(),
+                rupd.delta_treasury,
+                rupd.delta_reserves,
+            );
+        }
+    }
+
+    /// Calculate rewards and return a PendingRewardUpdate for deferred application.
     ///
     /// Implements the formula from cardano-ledger-shelley:
     ///   - maxPool'(a0, nOpt, R, sigma, p) for pledge-influenced pool rewards
@@ -116,7 +151,10 @@ impl LedgerState {
     ///   - Pledge verification (pool gets zero if owner stake < declared pledge)
     ///   - Operator reward includes self-delegation share (margin + proportional)
     ///   - Operator reward goes to pool's registered reward account
-    pub(crate) fn calculate_and_distribute_rewards(&mut self, go_snapshot: StakeSnapshot) {
+    ///
+    /// Returns a `PendingRewardUpdate` that should be stored and applied at the
+    /// NEXT epoch boundary, matching Haskell's RUPD timing.
+    pub(crate) fn calculate_rewards(&self, go_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
         let rho_num = self.protocol_params.rho.numerator as i128;
         let rho_den = self.protocol_params.rho.denominator.max(1) as i128;
         let tau_num = self.protocol_params.tau.numerator as i128;
@@ -151,18 +189,14 @@ impl LedgerState {
         let total_rewards_available = expansion + self.epoch_fees.0;
 
         if total_rewards_available == 0 {
-            return;
+            return PendingRewardUpdate::default();
         }
-
-        // Move expansion from reserves
-        self.reserves.0 = self.reserves.0.saturating_sub(expansion);
 
         // Treasury cut: floor(tau * total_rewards)
         let tau = Rat::from_i128(tau_num, tau_den);
         let treasury_cut = tau
             .mul(&Rat::from_i128(total_rewards_available as i128, 1))
             .floor_u64();
-        self.treasury.0 = self.treasury.0.saturating_add(treasury_cut);
 
         let reward_pot = total_rewards_available - treasury_cut;
 
@@ -173,8 +207,11 @@ impl LedgerState {
         // apparent performance).
         let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
         if total_stake == 0 {
-            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
-            return;
+            return PendingRewardUpdate {
+                delta_reserves: expansion,
+                delta_treasury: treasury_cut + reward_pot,
+                rewards: HashMap::new(),
+            };
         }
 
         // Total active stake (for apparent performance denominator only)
@@ -183,8 +220,11 @@ impl LedgerState {
             .values()
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
         if total_active_stake == 0 {
-            self.treasury.0 = self.treasury.0.saturating_add(reward_pot);
-            return;
+            return PendingRewardUpdate {
+                delta_reserves: expansion,
+                delta_treasury: treasury_cut + reward_pot,
+                rewards: HashMap::new(),
+            };
         }
 
         // Total blocks produced this epoch
@@ -194,6 +234,7 @@ impl LedgerState {
         let n_opt = self.protocol_params.n_opt.max(1);
 
         let mut total_distributed: u64 = 0;
+        let mut reward_map: HashMap<Hash32, Lovelace> = HashMap::new();
 
         // Build delegators-by-pool index for O(n) reward distribution
         let mut delegators_by_pool: HashMap<Hash28, Vec<Hash32>> = HashMap::new();
@@ -342,9 +383,8 @@ impl LedgerState {
                     };
 
                     if member_share > 0 {
-                        *Arc::make_mut(&mut self.reward_accounts)
-                            .entry(*cred_hash)
-                            .or_insert(Lovelace(0)) += Lovelace(member_share);
+                        *reward_map.entry(*cred_hash).or_insert(Lovelace(0)) +=
+                            Lovelace(member_share);
                         total_distributed += member_share;
                     }
                 }
@@ -353,23 +393,48 @@ impl LedgerState {
             // Operator reward goes to pool's registered reward account
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                *Arc::make_mut(&mut self.reward_accounts)
-                    .entry(op_key)
-                    .or_insert(Lovelace(0)) += Lovelace(operator_reward);
+                *reward_map.entry(op_key).or_insert(Lovelace(0)) += Lovelace(operator_reward);
                 total_distributed += operator_reward;
             }
         }
 
         // Any undistributed rewards go to treasury
         let undistributed = reward_pot.saturating_sub(total_distributed);
-        if undistributed > 0 {
-            self.treasury.0 = self.treasury.0.saturating_add(undistributed);
-        }
 
         debug!(
-            "Rewards distributed: {} lovelace to accounts, {} to treasury (expansion: {}, fees: {})",
-            total_distributed, treasury_cut + undistributed, expansion, self.epoch_fees.0
+            "Rewards calculated: {} lovelace to {} accounts, {} to treasury (expansion: {}, fees: {})",
+            total_distributed,
+            reward_map.len(),
+            treasury_cut + undistributed,
+            expansion,
+            self.epoch_fees.0
         );
+
+        PendingRewardUpdate {
+            rewards: reward_map,
+            delta_treasury: treasury_cut + undistributed,
+            delta_reserves: expansion,
+        }
+    }
+
+    /// Legacy compatibility: calculate and immediately distribute rewards.
+    ///
+    /// Used by tests that expect immediate reward application. New code should
+    /// use `calculate_rewards()` + `apply_pending_reward_update()` for correct
+    /// Haskell-compatible RUPD timing.
+    #[cfg(test)]
+    pub(crate) fn calculate_and_distribute_rewards(&mut self, go_snapshot: StakeSnapshot) {
+        let rupd = self.calculate_rewards(&go_snapshot);
+        // Apply immediately (legacy behavior for test compatibility)
+        self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
+        self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+        for (cred_hash, reward) in &rupd.rewards {
+            if reward.0 > 0 {
+                *Arc::make_mut(&mut self.reward_accounts)
+                    .entry(*cred_hash)
+                    .or_insert(Lovelace(0)) += *reward;
+            }
+        }
     }
 }
 
@@ -592,8 +657,8 @@ mod tests {
         let f1 = Rat::from_i128(reward_pot, 1).div(&Rat::from_i128(1, 1).add(&a0));
         let max_pool = f1.mul(&f2).floor_u64();
 
-        // sigma ≈ 0.000129 < z0 = 0.002, so sigma is NOT capped
-        // maxPool should be approximately R/1.3 * sigma ≈ 1T/1.3 * 0.000129 ≈ 99M
+        // sigma ~ 0.000129 < z0 = 0.002, so sigma is NOT capped
+        // maxPool should be approximately R/1.3 * sigma ~ 1T/1.3 * 0.000129 ~ 99M
         assert!(
             max_pool > 90_000_000 && max_pool < 110_000_000,
             "maxPool at mainnet scale should be ~99M for R=1T, got {max_pool}"
@@ -784,7 +849,7 @@ mod tests {
         let total_active_stake: u64 = 1_177_946_537_741_239;
         let circulation: u64 = 36_709_439_229_911_673;
 
-        // sigma (for maxPool') = pool_stake / circulation ≈ 0.000129 < z0 = 0.002
+        // sigma (for maxPool') = pool_stake / circulation ~ 0.000129 < z0 = 0.002
         let sigma = Rat::from_i128(pool_stake as i128, circulation as i128);
         let sigma_f64 = {
             let n: i128 = (&sigma.n).try_into().unwrap();
@@ -796,7 +861,7 @@ mod tests {
             "sigma relative to circulation should be below z0"
         );
 
-        // sigmaA (for performance only) = pool_stake / total_active_stake ≈ 0.004
+        // sigmaA (for performance only) = pool_stake / total_active_stake ~ 0.004
         let sigma_a = Rat::from_i128(pool_stake as i128, total_active_stake as i128);
         let sigma_a_f64 = {
             let n: i128 = (&sigma_a.n).try_into().unwrap();

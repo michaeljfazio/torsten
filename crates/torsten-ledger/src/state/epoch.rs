@@ -8,12 +8,26 @@ use tracing::{debug, info, warn};
 
 impl LedgerState {
     /// Process an epoch transition
+    ///
+    /// Follows Haskell's NEWEPOCH STS rule ordering:
+    /// 1. Apply pending reward update from the PREVIOUS epoch transition (RUPD)
+    /// 2. Rotate snapshots: go = set, set = mark, mark = new
+    /// 3. Compute new reward update using go snapshot -> store as pending
+    /// 4. Process retirements, governance, nonce, etc.
     pub fn process_epoch_transition(&mut self, new_epoch: EpochNo) {
         debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
 
-        // Calculate and distribute rewards using the "go" snapshot (take ownership to avoid clone)
-        if let Some(go_snapshot) = self.snapshots.go.take() {
-            self.calculate_and_distribute_rewards(go_snapshot);
+        // Step 1: Apply the pending reward update from the PREVIOUS epoch boundary.
+        // This matches Haskell's RUPD deferred application: rewards computed at
+        // E-1 -> E are applied at E -> E+1.
+        self.apply_pending_reward_update();
+
+        // Step 3 (after snapshot rotation below): Compute new rewards using the
+        // go snapshot and store them for deferred application at the NEXT boundary.
+        // We capture the go snapshot before rotation consumes it.
+        if let Some(ref go_snapshot) = self.snapshots.go {
+            let rupd = self.calculate_rewards(go_snapshot);
+            self.pending_reward_update = Some(rupd);
         }
 
         // Rotate snapshots: go = set, set = mark, mark = new snapshot

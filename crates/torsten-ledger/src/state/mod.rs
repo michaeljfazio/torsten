@@ -154,6 +154,33 @@ pub struct LedgerState {
     /// During replay from genesis, incremental tracking is always correct.
     #[serde(skip)]
     pub needs_stake_rebuild: bool,
+    /// Pending reward update computed at one epoch boundary and applied at the
+    /// next, matching Haskell's RUPD (Reward UPDate) / pulsing reward scheme.
+    ///
+    /// At boundary E -> E+1:
+    ///   1. Apply `pending_reward_update` (computed at E-1 -> E boundary)
+    ///   2. Rotate snapshots, build new mark snapshot
+    ///   3. Compute new rewards using go snapshot -> store in `pending_reward_update`
+    ///
+    /// This defers reward application by one epoch, matching Haskell exactly.
+    #[serde(default)]
+    pub pending_reward_update: Option<PendingRewardUpdate>,
+}
+
+/// Pending reward update matching Haskell's RUPD structure.
+///
+/// Computed at one epoch boundary and applied at the next. Contains:
+/// - Per-account rewards to credit
+/// - Treasury increase (tau cut + undistributed)
+/// - Reserves decrease (monetary expansion)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PendingRewardUpdate {
+    /// Rewards to add to each registered stake credential's reward account.
+    pub rewards: HashMap<Hash32, Lovelace>,
+    /// Total treasury increase (tau cut + undistributed rewards).
+    pub delta_treasury: u64,
+    /// Total reserves decrease (monetary expansion).
+    pub delta_reserves: u64,
 }
 
 /// Conway-era governance state (CIP-1694)
@@ -343,6 +370,7 @@ impl LedgerState {
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: true,
+            pending_reward_update: None,
         }
     }
 
@@ -1811,10 +1839,15 @@ mod tests {
         Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
 
-        // Epoch 3→4: triggers reward calculation using "go" snapshot
+        // Epoch 3->4: triggers reward CALCULATION using "go" snapshot.
+        // With RUPD deferred timing, rewards are computed here but not yet applied.
         state.process_epoch_transition(EpochNo(4));
 
-        // Treasury should have increased
+        // Epoch 4->5: APPLIES the rewards computed at 3->4 boundary.
+        // This matches Haskell's deferred RUPD application.
+        state.process_epoch_transition(EpochNo(5));
+
+        // Treasury should have increased (rewards applied at 4->5)
         assert!(state.treasury.0 > 0);
 
         // Reserves should have decreased
@@ -1880,7 +1913,10 @@ mod tests {
                                                   // epoch_blocks_by_pool is empty — no pool produced blocks
         state.epoch_block_count = 0;
 
+        // Epoch 3->4: computes rewards (deferred via RUPD)
         state.process_epoch_transition(EpochNo(4));
+        // Epoch 4->5: applies the deferred rewards
+        state.process_epoch_transition(EpochNo(5));
 
         // Pool produced no blocks, so performance = 0, no pool rewards
         // eta = 0, so expansion = 0, but fees still contribute to reward pot
@@ -1946,8 +1982,10 @@ mod tests {
         let reserves_before = state.reserves.0;
         let treasury_before = state.treasury.0;
 
-        // This epoch transition would divide by zero without the fix
+        // Epoch 3->4: computes rewards (deferred via RUPD); would divide by zero without the fix
         state.process_epoch_transition(EpochNo(4));
+        // Epoch 4->5: applies the deferred rewards
+        state.process_epoch_transition(EpochNo(5));
 
         // Verify the system did not panic and rewards were distributed
         assert!(
@@ -2016,7 +2054,10 @@ mod tests {
         state.epoch_fees = Lovelace(500_000_000_000);
         Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
+        // Epoch 3->4: computes rewards (deferred via RUPD)
         state.process_epoch_transition(EpochNo(4));
+        // Epoch 4->5: applies the deferred rewards
+        state.process_epoch_transition(EpochNo(5));
 
         // No pool rewards when pledge not met — all goes to treasury as undistributed
         let member_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
@@ -2074,7 +2115,10 @@ mod tests {
         state.epoch_fees = Lovelace(500_000_000_000);
         Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
         state.epoch_block_count = 21600;
+        // Epoch 3->4: computes rewards (deferred via RUPD)
         state.process_epoch_transition(EpochNo(4));
+        // Epoch 4->5: applies the deferred rewards
+        state.process_epoch_transition(EpochNo(5));
 
         // Operator reward should go to owner_hash credential, not pool_id padded to 32
         let reward_key = credential_to_hash(&Credential::VerificationKey(owner_hash));
