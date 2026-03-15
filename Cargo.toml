@@ -12,6 +12,7 @@ members = [
     "crates/torsten-cli",
     "crates/torsten-lsm",
     "crates/torsten-integration-tests",
+    "crates/torsten-tui",
     "tests/conformance",
     "tests/golden",
 ]
@@ -37,6 +38,11 @@ torsten-storage = { path = "crates/torsten-storage" }
 torsten-node = { path = "crates/torsten-node" }
 torsten-cli = { path = "crates/torsten-cli" }
 torsten-lsm = { path = "crates/torsten-lsm" }
+torsten-tui = { path = "crates/torsten-tui" }
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
