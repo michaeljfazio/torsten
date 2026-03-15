@@ -33,11 +33,11 @@ type: project
 
 ## MEDIUM Priority Gaps
 
-### cardano-lsm Fork Dependency (PARTIAL)
-- Using `michaeljfazio/cardano-lsm-rust.git` branch `fix/index-based-get`
-- Fix submitted upstream as PR #2; not yet merged to crates.io
-- Risk: not a stable tagged release; no semver guarantees
-- Cargo.toml: `cardano-lsm = { git = "...", branch = "fix/index-based-get" }`
+### torsten-lsm Production Hardening (NEW - needs stress testing)
+- cardano-lsm replaced by in-house torsten-lsm (crates/torsten-lsm, ~4,500 lines)
+- 84 unit tests pass but no stress test with real UTxO-HD workload (20M+ entries)
+- Key unknowns: compaction under concurrent flush, snapshot atomicity, WAL replay on crash
+- No benchmark against prior cardano-lsm baseline (target: ~10,600 blocks/s ImmutableDB replay)
 
 ### Plutus Cost Models (PARTIAL)
 - V1/V2/V3 cost models stored and passed to uplc

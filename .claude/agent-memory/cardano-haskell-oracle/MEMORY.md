@@ -53,6 +53,9 @@
 ## Conway Governance Ratification
 - See [conway-ratification-details.md](conway-ratification-details.md) - Complete CIP-1694 ratification algorithm, threshold functions, enactment priority, committee expiry, DRep activity, parameter groups, treasury cap, delaying actions, prevActionId
 
+## lsm-tree (UTxO-HD Storage Backend)
+- See [lsm-tree-architecture.md](lsm-tree-architecture.md) — Complete architecture: lazy levelling merge, 4-file run format, page layout, bloom filters, fence pointers, incremental merge scheduler, NO WAL
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
