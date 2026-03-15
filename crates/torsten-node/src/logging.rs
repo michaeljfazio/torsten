@@ -315,13 +315,25 @@ mod tests {
         // Create a .log file and backdate its modification time
         let old_file = dir.join("torsten.2020-01-01.log");
         std::fs::write(&old_file, "old log data").unwrap();
-        // Set modification time to 30 days ago
+        // Set modification time to 30 days ago.
+        // We must drop the file handle before cleanup_old_logs reads metadata,
+        // otherwise some platforms may report a stale mtime for the open file.
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
-        let f = std::fs::File::options()
-            .write(true)
-            .open(&old_file)
-            .unwrap();
-        f.set_modified(old_time).unwrap_or_default();
+        {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(&old_file)
+                .unwrap();
+            f.set_modified(old_time).unwrap();
+            drop(f);
+        }
+        // Verify the mtime was actually persisted before proceeding.
+        let actual_mtime = std::fs::metadata(&old_file).unwrap().modified().unwrap();
+        assert!(
+            actual_mtime
+                < std::time::SystemTime::now() - std::time::Duration::from_secs(29 * 86400),
+            "Filesystem did not persist backdated mtime"
+        );
 
         // Create a recent .log file
         let new_file = dir.join("torsten.2026-03-14.log");
