@@ -2661,7 +2661,7 @@ impl Node {
             let remote_tip_slot = remote_tip.point.slot().map(|s| s.0).unwrap_or(0);
             let lag_slots = wall_clock.0.saturating_sub(remote_tip_slot);
             // Allow 120 slots (2 minutes) of lag for normal network propagation
-            if lag_slots > 120 {
+            if lag_slots > 600 {
                 warn!(
                     remote_tip_slot,
                     wall_clock_slot = wall_clock.0,
