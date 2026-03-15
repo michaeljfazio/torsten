@@ -9,47 +9,61 @@ pub struct TransactionCmd {
     command: TxSubcommand,
 }
 
+/// Arguments shared between `transaction build` and `transaction build-raw`.
+///
+/// Both subcommands accept the exact same flags and produce the same output.
+/// `build-raw` exists for cardano-cli naming compatibility — many downstream
+/// scripts and tools invoke `cardano-cli transaction build-raw` specifically.
+#[derive(Args, Debug)]
+struct BuildArgs {
+    /// Transaction inputs (format: tx_hash#index)
+    #[arg(long, num_args = 1..)]
+    tx_in: Vec<String>,
+    /// Transaction outputs (format: address+amount)
+    #[arg(long, num_args = 1..)]
+    tx_out: Vec<String>,
+    /// Change address
+    #[arg(long)]
+    change_address: String,
+    /// Fee amount in lovelace
+    #[arg(long, default_value = "200000")]
+    fee: u64,
+    /// Time-to-live (slot number)
+    #[arg(long)]
+    ttl: Option<u64>,
+    /// Certificate files to include
+    #[arg(long)]
+    certificate_file: Vec<PathBuf>,
+    /// Withdrawal (format: stake_address+amount)
+    #[arg(long)]
+    withdrawal: Vec<String>,
+    /// Metadata JSON file
+    #[arg(long)]
+    metadata_json_file: Option<PathBuf>,
+    /// Collateral inputs for Plutus scripts (format: tx_hash#index)
+    #[arg(long)]
+    tx_in_collateral: Vec<String>,
+    /// Required signers (key hash hex)
+    #[arg(long)]
+    required_signer_hash: Vec<String>,
+    /// Mint/burn tokens (format: policy_id.asset_name+quantity or policy_id.asset_name-quantity)
+    #[arg(long)]
+    mint: Vec<String>,
+    /// Output file for the transaction body
+    #[arg(long)]
+    out_file: PathBuf,
+}
+
 #[derive(Subcommand, Debug)]
 enum TxSubcommand {
-    /// Build a transaction
-    Build {
-        /// Transaction inputs (format: tx_hash#index)
-        #[arg(long, num_args = 1..)]
-        tx_in: Vec<String>,
-        /// Transaction outputs (format: address+amount)
-        #[arg(long, num_args = 1..)]
-        tx_out: Vec<String>,
-        /// Change address
-        #[arg(long)]
-        change_address: String,
-        /// Fee amount in lovelace
-        #[arg(long, default_value = "200000")]
-        fee: u64,
-        /// Time-to-live (slot number)
-        #[arg(long)]
-        ttl: Option<u64>,
-        /// Certificate files to include
-        #[arg(long)]
-        certificate_file: Vec<PathBuf>,
-        /// Withdrawal (format: stake_address+amount)
-        #[arg(long)]
-        withdrawal: Vec<String>,
-        /// Metadata JSON file
-        #[arg(long)]
-        metadata_json_file: Option<PathBuf>,
-        /// Collateral inputs for Plutus scripts (format: tx_hash#index)
-        #[arg(long)]
-        tx_in_collateral: Vec<String>,
-        /// Required signers (key hash hex)
-        #[arg(long)]
-        required_signer_hash: Vec<String>,
-        /// Mint/burn tokens (format: policy_id.asset_name+quantity or policy_id.asset_name-quantity)
-        #[arg(long)]
-        mint: Vec<String>,
-        /// Output file for the transaction body
-        #[arg(long)]
-        out_file: PathBuf,
-    },
+    /// Build a transaction body (alias: build-raw)
+    Build(BuildArgs),
+    /// Build a transaction body — cardano-cli compatible alias for `build`
+    ///
+    /// Accepts the same arguments as `transaction build` and produces identical
+    /// output. Provided for compatibility with scripts that call
+    /// `cardano-cli transaction build-raw`.
+    BuildRaw(BuildArgs),
     /// Sign a transaction
     Sign {
         /// Transaction file to sign
@@ -700,100 +714,106 @@ fn encode_metadata_value(
     Ok(())
 }
 
+/// Build a transaction body and write it as a text envelope to `args.out_file`.
+///
+/// Shared implementation for both `transaction build` and `transaction build-raw`.
+fn cmd_build(args: BuildArgs) -> Result<()> {
+    let BuildArgs {
+        tx_in,
+        tx_out,
+        change_address: _,
+        fee,
+        ttl,
+        certificate_file,
+        withdrawal,
+        metadata_json_file,
+        tx_in_collateral,
+        required_signer_hash,
+        mint,
+        out_file,
+    } = args;
+
+    if tx_in.is_empty() {
+        bail!("At least one --tx-in is required");
+    }
+    if tx_out.is_empty() {
+        bail!("At least one --tx-out is required");
+    }
+
+    let inputs: Vec<(Hash32, u32)> = tx_in
+        .iter()
+        .map(|s| parse_tx_input(s))
+        .collect::<Result<_>>()?;
+    let outputs: Vec<ParsedTxOutput> = tx_out
+        .iter()
+        .map(|s| parse_tx_output(s))
+        .collect::<Result<_>>()?;
+
+    let collateral_inputs: Vec<(Hash32, u32)> = tx_in_collateral
+        .iter()
+        .map(|s| parse_tx_input(s))
+        .collect::<Result<_>>()?;
+
+    let required_signers: Vec<Vec<u8>> = required_signer_hash
+        .iter()
+        .map(|s| hex::decode(s).map_err(|e| anyhow::anyhow!("Invalid signer hash: {e}")))
+        .collect::<Result<_>>()?;
+
+    let parsed_mint = parse_mint_args(&mint)?;
+
+    let certificates: Vec<Vec<u8>> = certificate_file
+        .iter()
+        .map(load_certificate_cbor)
+        .collect::<Result<_>>()?;
+
+    let withdrawals: Vec<(Vec<u8>, u64)> = withdrawal
+        .iter()
+        .map(|s| parse_withdrawal(s))
+        .collect::<Result<_>>()?;
+
+    let auxiliary_data = if let Some(ref meta_file) = metadata_json_file {
+        let meta_content = std::fs::read_to_string(meta_file)?;
+        let meta_json: serde_json::Value = serde_json::from_str(&meta_content)?;
+        Some(build_auxiliary_data(&meta_json)?)
+    } else {
+        None
+    };
+
+    let tx_body_cbor = build_tx_body_cbor(
+        &inputs,
+        &outputs,
+        fee,
+        ttl,
+        &certificates,
+        &withdrawals,
+        auxiliary_data.as_deref(),
+        &collateral_inputs,
+        &required_signers,
+        &parsed_mint,
+    )?;
+
+    // Write as text envelope (cardano-cli compatible format)
+    let mut envelope = serde_json::json!({
+        "type": "TxBodyConway",
+        "description": "Transaction Body",
+        "cborHex": hex::encode(&tx_body_cbor)
+    });
+
+    // Include auxiliary data if present (for sign/assemble to embed in tx)
+    if let Some(ref aux) = auxiliary_data {
+        envelope["auxiliaryDataCborHex"] = serde_json::Value::String(hex::encode(aux));
+    }
+
+    std::fs::write(&out_file, serde_json::to_string_pretty(&envelope)?)?;
+    println!("Transaction body written to: {}", out_file.display());
+    Ok(())
+}
+
 impl TransactionCmd {
     pub fn run(self) -> Result<()> {
         match self.command {
-            TxSubcommand::Build {
-                tx_in,
-                tx_out,
-                change_address: _,
-                fee,
-                ttl,
-                certificate_file,
-                withdrawal,
-                metadata_json_file,
-                tx_in_collateral,
-                required_signer_hash,
-                mint,
-                out_file,
-            } => {
-                if tx_in.is_empty() {
-                    bail!("At least one --tx-in is required");
-                }
-                if tx_out.is_empty() {
-                    bail!("At least one --tx-out is required");
-                }
-
-                let inputs: Vec<(Hash32, u32)> = tx_in
-                    .iter()
-                    .map(|s| parse_tx_input(s))
-                    .collect::<Result<_>>()?;
-                let outputs: Vec<ParsedTxOutput> = tx_out
-                    .iter()
-                    .map(|s| parse_tx_output(s))
-                    .collect::<Result<_>>()?;
-
-                let collateral_inputs: Vec<(Hash32, u32)> = tx_in_collateral
-                    .iter()
-                    .map(|s| parse_tx_input(s))
-                    .collect::<Result<_>>()?;
-
-                let required_signers: Vec<Vec<u8>> = required_signer_hash
-                    .iter()
-                    .map(|s| {
-                        hex::decode(s).map_err(|e| anyhow::anyhow!("Invalid signer hash: {e}"))
-                    })
-                    .collect::<Result<_>>()?;
-
-                let parsed_mint = parse_mint_args(&mint)?;
-
-                let certificates: Vec<Vec<u8>> = certificate_file
-                    .iter()
-                    .map(load_certificate_cbor)
-                    .collect::<Result<_>>()?;
-
-                let withdrawals: Vec<(Vec<u8>, u64)> = withdrawal
-                    .iter()
-                    .map(|s| parse_withdrawal(s))
-                    .collect::<Result<_>>()?;
-
-                let auxiliary_data = if let Some(ref meta_file) = metadata_json_file {
-                    let meta_content = std::fs::read_to_string(meta_file)?;
-                    let meta_json: serde_json::Value = serde_json::from_str(&meta_content)?;
-                    Some(build_auxiliary_data(&meta_json)?)
-                } else {
-                    None
-                };
-
-                let tx_body_cbor = build_tx_body_cbor(
-                    &inputs,
-                    &outputs,
-                    fee,
-                    ttl,
-                    &certificates,
-                    &withdrawals,
-                    auxiliary_data.as_deref(),
-                    &collateral_inputs,
-                    &required_signers,
-                    &parsed_mint,
-                )?;
-
-                // Write as text envelope (cardano-cli compatible format)
-                let mut envelope = serde_json::json!({
-                    "type": "TxBodyConway",
-                    "description": "Transaction Body",
-                    "cborHex": hex::encode(&tx_body_cbor)
-                });
-
-                // Include auxiliary data if present (for sign/assemble to embed in tx)
-                if let Some(ref aux) = auxiliary_data {
-                    envelope["auxiliaryDataCborHex"] = serde_json::Value::String(hex::encode(aux));
-                }
-
-                std::fs::write(&out_file, serde_json::to_string_pretty(&envelope)?)?;
-                println!("Transaction body written to: {}", out_file.display());
-                Ok(())
-            }
+            // `build` and `build-raw` are identical — both delegate to cmd_build().
+            TxSubcommand::Build(args) | TxSubcommand::BuildRaw(args) => cmd_build(args),
             TxSubcommand::Sign {
                 tx_body_file,
                 signing_key_file,

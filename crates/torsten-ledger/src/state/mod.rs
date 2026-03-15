@@ -165,6 +165,13 @@ pub struct LedgerState {
     /// This defers reward application by one epoch, matching Haskell exactly.
     #[serde(default)]
     pub pending_reward_update: Option<PendingRewardUpdate>,
+    /// Script-type stake credentials (credential_type = 1 for N2C queries).
+    /// Populated from StakeRegistration / ConwayStakeRegistration / RegStakeDeleg /
+    /// RegStakeVoteDeleg / VoteRegDeleg certificates when the credential is a
+    /// Credential::Script variant.  Used to correctly set credential_type in
+    /// GetStakeDelegDeposits and GetFilteredVoteDelegatees responses.
+    #[serde(default)]
+    pub script_stake_credentials: std::collections::HashSet<Hash32>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -196,6 +203,12 @@ pub struct GovernanceState {
     pub committee_expiration: HashMap<Hash32, EpochNo>,
     /// Resigned committee members
     pub committee_resigned: HashMap<Hash32, Option<Anchor>>,
+    /// Script-type cold committee credentials (credential_type = 1 for N2C queries).
+    /// Populated from CommitteeHotAuth and CommitteeColdResign certificates when the cold
+    /// credential is a Credential::Script variant.  Used to correctly set cold_credential_type
+    /// in GetCommitteeState responses without changing the Hash32-keyed committee maps.
+    #[serde(default)]
+    pub script_committee_credentials: std::collections::HashSet<Hash32>,
     /// Active governance proposals indexed by GovActionId
     pub proposals: BTreeMap<GovActionId, ProposalState>,
     /// Votes cast, indexed by action ID for efficient ratification lookup
@@ -371,6 +384,7 @@ impl LedgerState {
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: true,
             pending_reward_update: None,
+            script_stake_credentials: std::collections::HashSet::new(),
         }
     }
 
@@ -985,7 +999,7 @@ impl LedgerState {
     /// not critical data. The node can always reconstruct state from the chain.
     /// Increment when GovernanceState/LedgerState fields change.
     /// Bincode is positional — any field addition/reorder breaks old snapshots.
-    const SNAPSHOT_VERSION: u8 = 2;
+    const SNAPSHOT_VERSION: u8 = 3;
 
     /// Save ledger state snapshot to disk using bincode serialization.
     /// Format: [4-byte magic "TRSN"][1-byte version][32-byte blake2b checksum][bincode data]

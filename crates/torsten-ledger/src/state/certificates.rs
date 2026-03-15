@@ -1,5 +1,6 @@
 use super::{credential_to_hash, DRepRegistration, LedgerState, PoolRegistration};
 use std::sync::Arc;
+use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::transaction::{Certificate, MIRSource, MIRTarget};
 use torsten_primitives::value::Lovelace;
@@ -46,6 +47,10 @@ impl LedgerState {
                 Arc::make_mut(&mut self.reward_accounts)
                     .entry(key)
                     .or_insert(Lovelace(0));
+                // Track script credentials so N2C query responses can set credential_type correctly.
+                if matches!(credential, Credential::Script(_)) {
+                    self.script_stake_credentials.insert(key);
+                }
                 debug!("Stake key registered: {}", key.to_hex());
             }
             Certificate::StakeDeregistration(credential) => {
@@ -66,6 +71,7 @@ impl LedgerState {
                     self.stake_distribution.stake_map.remove(&key);
                     Arc::make_mut(&mut self.delegations).remove(&key);
                     Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                    self.script_stake_credentials.remove(&key);
                     debug!("Stake key deregistered: {}", key.to_hex());
                 }
             }
@@ -82,6 +88,9 @@ impl LedgerState {
                 Arc::make_mut(&mut self.reward_accounts)
                     .entry(key)
                     .or_insert(Lovelace(0));
+                if matches!(credential, Credential::Script(_)) {
+                    self.script_stake_credentials.insert(key);
+                }
                 debug!("Stake key registered (Conway): {}", key.to_hex());
             }
             Certificate::ConwayStakeDeregistration {
@@ -94,6 +103,7 @@ impl LedgerState {
                 self.stake_distribution.stake_map.remove(&key);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                self.script_stake_credentials.remove(&key);
                 debug!("Stake key deregistered (Conway): {}", key.to_hex());
             }
             Certificate::StakeDelegation {
@@ -172,6 +182,9 @@ impl LedgerState {
                     .entry(key)
                     .or_insert(Lovelace(0));
                 Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                if matches!(credential, Credential::Script(_)) {
+                    self.script_stake_credentials.insert(key);
+                }
             }
             Certificate::RegDRep {
                 credential,
@@ -240,13 +253,14 @@ impl LedgerState {
             } => {
                 let cold_key = credential_to_hash(cold_credential);
                 let hot_key = credential_to_hash(hot_credential);
-                Arc::make_mut(&mut self.governance)
-                    .committee_hot_keys
-                    .insert(cold_key, hot_key);
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_hot_keys.insert(cold_key, hot_key);
                 // Remove from resigned if re-authorizing
-                Arc::make_mut(&mut self.governance)
-                    .committee_resigned
-                    .remove(&cold_key);
+                gov.committee_resigned.remove(&cold_key);
+                // Track script cold credentials for correct credential_type in N2C responses.
+                if matches!(cold_credential, Credential::Script(_)) {
+                    gov.script_committee_credentials.insert(cold_key);
+                }
                 debug!(
                     "Committee hot key authorized: {} -> {}",
                     cold_key.to_hex(),
@@ -258,12 +272,13 @@ impl LedgerState {
                 anchor,
             } => {
                 let cold_key = credential_to_hash(cold_credential);
-                Arc::make_mut(&mut self.governance)
-                    .committee_resigned
-                    .insert(cold_key, anchor.clone());
-                Arc::make_mut(&mut self.governance)
-                    .committee_hot_keys
-                    .remove(&cold_key);
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_resigned.insert(cold_key, anchor.clone());
+                gov.committee_hot_keys.remove(&cold_key);
+                // Track script cold credentials for correct credential_type in N2C responses.
+                if matches!(cold_credential, Credential::Script(_)) {
+                    gov.script_committee_credentials.insert(cold_key);
+                }
                 debug!("Committee member resigned: {}", cold_key.to_hex());
             }
             Certificate::RegStakeVoteDeleg {
@@ -287,6 +302,9 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance)
                     .vote_delegations
                     .insert(key, drep.clone());
+                if matches!(credential, Credential::Script(_)) {
+                    self.script_stake_credentials.insert(key);
+                }
                 debug!(
                     "Reg+stake+vote delegated: pool={}, drep={:?}",
                     pool_hash.to_hex(),
@@ -309,6 +327,9 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance)
                     .vote_delegations
                     .insert(key, drep.clone());
+                if matches!(credential, Credential::Script(_)) {
+                    self.script_stake_credentials.insert(key);
+                }
                 debug!("Reg+vote delegated to {:?}", drep);
             }
             Certificate::GenesisKeyDelegation {

@@ -3834,7 +3834,9 @@ impl Node {
                     .collect();
                 DRepSnapshot {
                     credential_hash: hash.as_ref().to_vec(),
-                    credential_type: 0, // KeyHashObj (we don't track script DReps separately yet)
+                    // DRepRegistration stores the full Credential enum, so we can derive the type
+                    // directly: 0 = VerificationKey (KeyHashObj), 1 = Script (ScriptHashObj).
+                    credential_type: drep.credential.is_script() as u8,
                     deposit: drep.deposit.0,
                     anchor_url: drep.anchor.as_ref().map(|a| a.url.clone()),
                     anchor_hash: drep.anchor.as_ref().map(|a| a.data_hash.as_ref().to_vec()),
@@ -3932,7 +3934,12 @@ impl Node {
                     let is_resigned = resigned_set.contains(cold);
                     CommitteeMemberSnapshot {
                         cold_credential: cold.as_ref().to_vec(),
-                        cold_credential_type: 0, // KeyHashObj
+                        // Use the script_committee_credentials set to correctly distinguish
+                        // key credentials (0) from script credentials (1).
+                        cold_credential_type: ls
+                            .governance
+                            .script_committee_credentials
+                            .contains(cold) as u8,
                         hot_status: if is_resigned { 2 } else { 0 },
                         hot_credential: if is_resigned {
                             None
@@ -4155,7 +4162,8 @@ impl Node {
             .keys()
             .map(|cred_hash| StakeDelegDepositEntry {
                 credential_hash: cred_hash.as_ref()[..28].to_vec(),
-                credential_type: 0, // KeyHash (we don't distinguish script creds yet)
+                // Use the script_stake_credentials set to distinguish key (0) from script (1).
+                credential_type: ls.script_stake_credentials.contains(cred_hash) as u8,
                 deposit: key_deposit,
             })
             .collect();
@@ -4214,7 +4222,8 @@ impl Node {
                     };
                     VoteDelegateeEntry {
                         credential_hash: stake_cred.as_ref()[..28].to_vec(),
-                        credential_type: 0, // KeyHash
+                        // Use the script_stake_credentials set to distinguish key (0) from script (1).
+                        credential_type: ls.script_stake_credentials.contains(stake_cred) as u8,
                         drep_type,
                         drep_hash,
                     }
