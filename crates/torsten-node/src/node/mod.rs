@@ -1169,7 +1169,11 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            pm.peer_connected(addr, 14, torsten_network::ConnectionDirection::Outbound);
+                            pm.peer_connected(
+                                addr,
+                                14,
+                                torsten_network::ConnectionDirection::Outbound,
+                            );
                             pm.record_handshake_rtt(addr, rtt_ms);
                             pm.promote_to_hot(addr);
                             drop(pm);
@@ -1301,7 +1305,11 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            pm.peer_connected(addr, 14, torsten_network::ConnectionDirection::Outbound);
+                            pm.peer_connected(
+                                addr,
+                                14,
+                                torsten_network::ConnectionDirection::Outbound,
+                            );
                             pm.record_handshake_rtt(addr, rtt_ms);
                             pm.promote_to_hot(addr);
                             drop(pm);

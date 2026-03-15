@@ -77,7 +77,7 @@ pub async fn fetch_metrics(url: &str) -> MetricsSnapshot {
         },
         Err(e) => MetricsSnapshot {
             values: HashMap::new(),
-                labeled: HashMap::new(),
+            labeled: HashMap::new(),
             connected: false,
             error: Some(format!("Connection failed: {e}")),
         },
