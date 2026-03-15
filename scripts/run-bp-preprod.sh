@@ -27,7 +27,7 @@ if [[ ! -x "$BIN" ]]; then
     cargo build --release
 fi
 
-for f in kes.skey vrf.skey opcert.cert cold.skey; do
+for f in kes.skey vrf.skey opcert.cert; do
     if [[ ! -f "$KEY_DIR/$f" ]]; then
         echo "Missing key: $KEY_DIR/$f"
         exit 1
@@ -45,7 +45,6 @@ CMD=(
     --shelley-kes-key "$KEY_DIR/kes.skey"
     --shelley-vrf-key "$KEY_DIR/vrf.skey"
     --shelley-operational-certificate "$KEY_DIR/opcert.cert"
-    --shelley-cold-key "$KEY_DIR/cold.skey"
 )
 
 echo "Starting Torsten block producer (preprod testnet)..."
