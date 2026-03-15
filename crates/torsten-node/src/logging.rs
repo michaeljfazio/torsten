@@ -78,9 +78,7 @@ pub struct LoggingOpts {
     pub no_color: bool,
     /// Number of days to retain log files (default: 7). Files older than this are deleted.
     /// Used by [`start_log_cleanup_task`] when the caller passes this value.
-    // TODO: wire up start_log_cleanup_task() from node startup
-    #[allow(dead_code)]
-    pub log_retention_days: u64,
+    pub _log_retention_days: u64,
 }
 
 /// Guard that must be held for the lifetime of the program.
@@ -192,8 +190,7 @@ pub fn init(opts: &LoggingOpts) -> anyhow::Result<LogGuard> {
 ///
 /// Scans only immediate children of the directory (not recursive). Files that
 /// cannot be inspected (e.g. permission errors) are silently skipped.
-// TODO: call from start_log_cleanup_task() in production
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn cleanup_old_logs(log_dir: &std::path::Path, retention_days: u64) {
     let cutoff =
         std::time::SystemTime::now() - std::time::Duration::from_secs(retention_days * 86400);
@@ -220,29 +217,6 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, retention_days: u64) {
                 tracing::info!(path = %path.display(), "Removed old log file");
             }
         }
-    }
-}
-
-/// Spawn a background task that periodically cleans up old log files.
-/// Runs every hour alongside the disk monitor.
-// TODO: spawn this task from node startup when file logging is enabled
-#[allow(dead_code)]
-pub async fn start_log_cleanup_task(
-    log_dir: std::path::PathBuf,
-    retention_days: u64,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            _ = shutdown_rx.changed() => {
-                tracing::debug!("Log cleanup task shutting down");
-                return;
-            }
-        }
-        cleanup_old_logs(&log_dir, retention_days);
     }
 }
 

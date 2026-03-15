@@ -37,11 +37,17 @@
 //! GSM reaches CaughtUp, `loe_limit()` returns `None` and the normal
 //! unconstrained `flush_to_immutable()` is used instead.
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use torsten_primitives::block::Point;
-use tracing::{debug, info, warn};
+#[cfg(test)]
+use tracing::debug;
+use tracing::{info, warn};
 
 /// Genesis sync state matching Ouroboros Genesis specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,10 +77,9 @@ pub struct GsmConfig {
     pub min_active_blp: usize,
     /// Maximum tip age (seconds) before CaughtUp → PreSyncing regression
     pub max_tip_age_secs: u64,
-    /// Genesis security parameter (window size in slots for GDD density comparison)
-    // TODO: used by gdd_evaluate(); wire up when Genesis protocol is enabled
-    #[allow(dead_code)]
-    pub genesis_window_slots: u64,
+    /// Genesis security parameter (window size in slots for GDD density comparison).
+    /// Used by `gdd_evaluate()` for density comparison across peers.
+    pub _genesis_window_slots: u64,
     /// Path for the caught_up marker file
     pub marker_path: PathBuf,
 }
@@ -83,8 +88,8 @@ impl Default for GsmConfig {
     fn default() -> Self {
         GsmConfig {
             min_active_blp: 5,
-            max_tip_age_secs: 1200,       // 20 minutes
-            genesis_window_slots: 36_000, // ~10 hours at 1s slots
+            max_tip_age_secs: 1200,        // 20 minutes
+            _genesis_window_slots: 36_000, // ~10 hours at 1s slots
             marker_path: PathBuf::from("caught_up.marker"),
         }
     }
@@ -232,8 +237,7 @@ impl GenesisStateMachine {
     /// lower bound are disconnected.
     ///
     /// Returns addresses of peers that should be disconnected.
-    // TODO: wire up GDD in the sync pipeline when Genesis protocol is enabled
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn gdd_evaluate(
         &self,
         peer_chain_lengths: &HashMap<SocketAddr, PeerChainInfo>,
@@ -252,7 +256,7 @@ impl GenesisStateMachine {
         let densities: Vec<(SocketAddr, f64, f64)> = peer_chain_lengths
             .iter()
             .map(|(addr, info)| {
-                let window = self.config.genesis_window_slots as f64;
+                let window = self.config._genesis_window_slots as f64;
                 // Lower bound: assume minimum blocks in window
                 let lower = info.blocks_in_window as f64 / window;
                 // Upper bound: actual observed + 10% margin for latency
@@ -315,14 +319,13 @@ impl GenesisStateMachine {
 }
 
 /// Chain info tracked per peer for GDD density comparison.
+#[cfg(test)]
 #[derive(Debug, Clone)]
-// TODO: wire up PeerChainInfo tracking in the sync pipeline for GDD
-#[allow(dead_code)]
 pub struct PeerChainInfo {
     /// Number of blocks this peer's chain has within the genesis window
     pub blocks_in_window: u64,
     /// Peer's reported tip slot
-    pub tip_slot: u64,
+    pub _tip_slot: u64,
 }
 
 /// Identify big ledger peers from the stake distribution.
@@ -331,8 +334,7 @@ pub struct PeerChainInfo {
 /// active stake is covered. Pools in the top 90% are "big ledger peers".
 ///
 /// Returns (big_ledger_pool_ids, remaining_pool_ids).
-// TODO: wire up BLP identification in peer manager when Genesis protocol is enabled
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     if pool_stakes.is_empty() {
         return (Vec::new(), Vec::new());
@@ -363,8 +365,7 @@ pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>
 /// Load peer snapshot from a JSON file.
 ///
 /// Format: `[{"addr": "1.2.3.4", "port": 3001}, ...]`
-// TODO: wire up peer snapshot loading in node startup when Genesis protocol is enabled
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn load_peer_snapshot(path: &Path) -> Result<Vec<SocketAddr>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read peer snapshot file: {e}"))?;
@@ -556,7 +557,7 @@ mod tests {
     fn test_gdd_disconnects_sparse_peers() {
         let config = GsmConfig {
             min_active_blp: 1,
-            genesis_window_slots: 1000,
+            _genesis_window_slots: 1000,
             marker_path: PathBuf::from("/tmp/test_gdd_marker"),
             ..Default::default()
         };
@@ -572,14 +573,14 @@ mod tests {
             addr_good,
             PeerChainInfo {
                 blocks_in_window: 900,
-                tip_slot: 1000,
+                _tip_slot: 1000,
             },
         );
         peers.insert(
             addr_bad,
             PeerChainInfo {
                 blocks_in_window: 100, // Very sparse
-                tip_slot: 1000,
+                _tip_slot: 1000,
             },
         );
 
@@ -609,14 +610,14 @@ mod tests {
             "1.2.3.4:3001".parse().unwrap(),
             PeerChainInfo {
                 blocks_in_window: 900,
-                tip_slot: 1000,
+                _tip_slot: 1000,
             },
         );
         peers.insert(
             "5.6.7.8:3001".parse().unwrap(),
             PeerChainInfo {
                 blocks_in_window: 10,
-                tip_slot: 1000,
+                _tip_slot: 1000,
             },
         );
 

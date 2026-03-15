@@ -171,14 +171,10 @@ fn unwrap_cbor(data: &[u8]) -> &[u8] {
 pub struct BlockProducerConfig {
     /// Protocol version to stamp on forged blocks
     pub protocol_version: ProtocolVersion,
-    /// Maximum block body size
-    // TODO: enforce in forge_block() to reject oversized blocks
-    #[allow(dead_code)]
-    pub max_block_body_size: u64,
+    /// Maximum block body size in bytes
+    pub _max_block_body_size: u64,
     /// Maximum number of transactions per block
-    // TODO: enforce in forge_block() to cap transaction count
-    #[allow(dead_code)]
-    pub max_txs_per_block: usize,
+    pub _max_txs_per_block: usize,
     /// Current era for the forged block
     pub era: Era,
     /// Slots per KES period (from genesis config)
@@ -189,8 +185,8 @@ impl Default for BlockProducerConfig {
     fn default() -> Self {
         BlockProducerConfig {
             protocol_version: ProtocolVersion { major: 9, minor: 0 },
-            max_block_body_size: 90112,
-            max_txs_per_block: 500,
+            _max_block_body_size: 90112,
+            _max_txs_per_block: 500,
             era: Era::Conway,
             slots_per_kes_period: 129600,
         }

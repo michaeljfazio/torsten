@@ -122,35 +122,36 @@ fn default_valency() -> u16 {
 }
 
 impl LocalRootGroup {
+    /// Whether peers in this group are behind a firewall
+    pub fn is_behind_firewall(&self) -> bool {
+        self.behind_firewall.unwrap_or(false)
+    }
+
     /// Get effective hot valency (prefers hotValency over deprecated valency)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn effective_hot_valency(&self) -> u16 {
         self.hot_valency.unwrap_or(self.valency)
     }
 
     /// Get effective warm valency (defaults to hot_valency + 1 if not set)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn effective_warm_valency(&self) -> u16 {
         self.warm_valency
             .unwrap_or_else(|| self.effective_hot_valency() + 1)
-    }
-
-    /// Whether peers in this group are behind a firewall
-    pub fn is_behind_firewall(&self) -> bool {
-        self.behind_firewall.unwrap_or(false)
     }
 }
 
 /// Detailed peer info extracted from topology for the peer manager
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TopologyPeer {
     pub address: String,
     pub port: u16,
-    pub source: TopologyPeerSource,
+    /// Topology source category for this peer
+    pub _source: TopologyPeerSource,
     pub trustable: bool,
     pub advertise: bool,
-    pub behind_firewall: bool,
+    /// Whether this peer is behind a firewall (inbound-only)
+    pub _behind_firewall: bool,
 }
 
 /// Source category for a topology peer
@@ -218,10 +219,10 @@ impl Topology {
             peers.push(TopologyPeer {
                 address: p.addr.clone(),
                 port: p.port,
-                source: TopologyPeerSource::Producer,
+                _source: TopologyPeerSource::Producer,
                 trustable: false,
                 advertise: false,
-                behind_firewall: false,
+                _behind_firewall: false,
             });
         }
 
@@ -231,10 +232,10 @@ impl Topology {
                 peers.push(TopologyPeer {
                     address: bp.address.clone(),
                     port: bp.port,
-                    source: TopologyPeerSource::Bootstrap,
+                    _source: TopologyPeerSource::Bootstrap,
                     trustable: true,
                     advertise: false,
-                    behind_firewall: false,
+                    _behind_firewall: false,
                 });
             }
         }
@@ -245,10 +246,10 @@ impl Topology {
                 peers.push(TopologyPeer {
                     address: ap.address.clone(),
                     port: ap.port,
-                    source: TopologyPeerSource::LocalRoot,
+                    _source: TopologyPeerSource::LocalRoot,
                     trustable: group.trustable,
                     advertise: group.advertise,
-                    behind_firewall: group.is_behind_firewall(),
+                    _behind_firewall: group.is_behind_firewall(),
                 });
             }
         }
@@ -259,10 +260,10 @@ impl Topology {
                 peers.push(TopologyPeer {
                     address: ap.address.clone(),
                     port: ap.port,
-                    source: TopologyPeerSource::PublicRoot,
+                    _source: TopologyPeerSource::PublicRoot,
                     trustable: false,
                     advertise: root.advertise,
-                    behind_firewall: false,
+                    _behind_firewall: false,
                 });
             }
         }
@@ -286,7 +287,6 @@ impl Topology {
     }
 
     /// Whether any trustable peers are configured (bootstrap or trustable local roots)
-    #[allow(dead_code)]
     pub fn has_trustable_peers(&self) -> bool {
         if self.has_bootstrap_peers() {
             return true;
@@ -404,17 +404,17 @@ mod tests {
         assert_eq!(detailed.len(), 3);
 
         // Bootstrap peer is trusted
-        assert_eq!(detailed[0].source, TopologyPeerSource::Bootstrap);
+        assert_eq!(detailed[0]._source, TopologyPeerSource::Bootstrap);
         assert!(detailed[0].trustable);
 
         // Local root peer
-        assert_eq!(detailed[1].source, TopologyPeerSource::LocalRoot);
+        assert_eq!(detailed[1]._source, TopologyPeerSource::LocalRoot);
         assert!(detailed[1].trustable);
         assert!(detailed[1].advertise);
-        assert!(detailed[1].behind_firewall);
+        assert!(detailed[1]._behind_firewall);
 
         // Public root
-        assert_eq!(detailed[2].source, TopologyPeerSource::PublicRoot);
+        assert_eq!(detailed[2]._source, TopologyPeerSource::PublicRoot);
         assert!(!detailed[2].trustable);
     }
 

@@ -41,8 +41,7 @@ pub struct NodeArgs {
     /// Path to operational certificate (enables block production)
     pub shelley_operational_certificate: Option<PathBuf>,
     /// Path to cold signing key (accepted for cardano-node compatibility)
-    #[allow(dead_code)]
-    pub shelley_cold_key: Option<PathBuf>,
+    pub _shelley_cold_key: Option<PathBuf>,
     /// Prometheus metrics port (0 to disable)
     pub metrics_port: u16,
     /// Maximum number of transactions in the mempool
@@ -645,8 +644,7 @@ pub struct Node {
     consensus: OuroborosPraos,
     mempool: Arc<Mempool>,
     // Held to keep the N2N/N2C server tasks alive for the node's lifetime
-    #[allow(dead_code)]
-    server: NodeServer,
+    _server: NodeServer,
     query_handler: Arc<RwLock<QueryHandler>>,
     peer_manager: Arc<RwLock<PeerManager>>,
     socket_path: PathBuf,
@@ -1154,7 +1152,7 @@ impl Node {
             ledger_state,
             consensus,
             mempool,
-            server,
+            _server: server,
             query_handler,
             peer_manager: Arc::new(RwLock::new(PeerManager::new(PeerManagerConfig::default()))),
             socket_path,
@@ -1258,7 +1256,10 @@ impl Node {
         // Replay blocks from ChainDB if the ledger is behind storage.
         // This happens after a Mithril snapshot import — blocks are in storage
         // but the ledger hasn't processed them yet.
+        let replay_start = std::time::Instant::now();
         self.replay_ledger_from_storage(shutdown_rx.clone()).await;
+        self.metrics
+            .set_replay_duration_secs(replay_start.elapsed().as_secs());
         if *shutdown_rx.borrow() {
             info!("Shutdown requested during replay, exiting");
             return Ok(());
@@ -1330,6 +1331,12 @@ impl Node {
         if detailed_peers.is_empty() {
             warn!("No peers configured in topology");
             return Ok(());
+        }
+        if self.topology.has_bootstrap_peers() {
+            info!(
+                "Bootstrap peers configured (trustable: {})",
+                self.topology.has_trustable_peers()
+            );
         }
         {
             // Resolve all DNS addresses BEFORE acquiring the write lock to avoid
@@ -3671,6 +3678,7 @@ impl Node {
         self.snapshot_policy.record_blocks(batch_count);
         self.metrics.add_blocks_received(batch_count);
         self.metrics.record_block_received();
+        self.metrics.record_roll_forward();
         self.metrics.add_blocks_applied(batch_count);
         self.metrics
             .transactions_received
@@ -3875,6 +3883,18 @@ impl Node {
                     ls.pool_params.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
+                // Compute and record tip age (wall clock - slot time)
+                let sc = &ls.slot_config;
+                let slot_time_ms =
+                    sc.zero_time + slot.saturating_sub(sc.zero_slot) * sc.slot_length as u64;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let tip_age = now_ms.saturating_sub(slot_time_ms) / 1000;
+                self.metrics.set_tip_age_secs(tip_age);
+                // Update chainsync idle time
+                self.metrics.update_chainsync_idle();
                 // Only show sync progress when catching up, not when following the tip
                 if blocks_remaining > 0 {
                     info!(
@@ -5288,8 +5308,8 @@ impl Node {
                 major: protocol_version_major,
                 minor: protocol_version_minor,
             },
-            max_block_body_size,
-            max_txs_per_block: 500,
+            _max_block_body_size: max_block_body_size,
+            _max_txs_per_block: 500,
             era: current_era,
             slots_per_kes_period,
         };

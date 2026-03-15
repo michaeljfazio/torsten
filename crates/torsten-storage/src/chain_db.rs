@@ -50,8 +50,7 @@ pub const SECURITY_PARAM_K: usize = 2160;
 /// blocks from the tip, they are flushed to the ImmutableDB. The ImmutableDB
 /// is append-only chunk files that are inherently durable.
 pub struct ChainDB {
-    #[allow(dead_code)]
-    path: PathBuf,
+    _path: PathBuf,
     immutable: ImmutableDB,
     volatile: VolatileDB,
     immutable_tip: Option<(SlotNo, Hash32, BlockNo)>,
@@ -113,7 +112,7 @@ impl ChainDB {
             "ChainDB opened successfully"
         );
         Ok(ChainDB {
-            path: db_path.to_path_buf(),
+            _path: db_path.to_path_buf(),
             immutable,
             volatile,
             immutable_tip,

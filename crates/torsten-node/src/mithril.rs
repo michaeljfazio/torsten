@@ -38,13 +38,13 @@ const PREPROD_AGGREGATOR: &str =
 #[derive(Debug, serde::Deserialize)]
 struct SnapshotListItem {
     digest: String,
-    #[allow(dead_code)]
-    network: String,
+    #[serde(rename = "network")]
+    _network: String,
     size: u64,
     #[serde(rename = "beacon")]
     beacon: SnapshotBeacon,
-    #[allow(dead_code)]
-    compression_algorithm: Option<String>,
+    #[serde(rename = "compression_algorithm", default)]
+    _compression_algorithm: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -58,11 +58,11 @@ struct SnapshotBeacon {
 struct SnapshotDetail {
     digest: String,
     size: u64,
-    #[allow(dead_code)]
-    beacon: SnapshotBeacon,
+    #[serde(rename = "beacon")]
+    _beacon: SnapshotBeacon,
     locations: Vec<String>,
-    #[allow(dead_code)]
-    compression_algorithm: Option<String>,
+    #[serde(rename = "compression_algorithm", default)]
+    _compression_algorithm: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,13 +72,12 @@ struct SnapshotDetail {
 /// Entry from a cardano-node secondary index file.
 /// Each entry is 56 bytes in the secondary index.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SecondaryIndexEntry {
     block_offset: u64,
     _header_offset: u16,
     _header_size: u16,
-    checksum: u32,
-    header_hash: [u8; 32],
+    _checksum: u32,
+    _header_hash: [u8; 32],
     _block_or_ebb: u64,
 }
 
@@ -99,8 +98,8 @@ impl SecondaryIndexEntry {
             block_offset,
             _header_offset: header_offset,
             _header_size: header_size,
-            checksum,
-            header_hash,
+            _checksum: checksum,
+            _header_hash: header_hash,
             _block_or_ebb: block_or_ebb,
         })
     }
@@ -841,12 +840,12 @@ fn parse_chunk_with_index(
         let block_cbor = &chunk_data[block_start..block_end];
 
         // Verify CRC32 checksum from secondary index
-        if entry.checksum != 0 && !verify_block_checksum(block_cbor, entry.checksum) {
+        if entry._checksum != 0 && !verify_block_checksum(block_cbor, entry._checksum) {
             *checksum_failures += 1;
             warn!(
                 chunk = %chunk_path.display(),
                 offset = block_start,
-                expected_crc = entry.checksum,
+                expected_crc = entry._checksum,
                 actual_crc = crc32fast::hash(block_cbor),
                 "Block CRC32 checksum mismatch"
             );
@@ -859,7 +858,7 @@ fn parse_chunk_with_index(
             Ok(pallas_block) => {
                 let slot = SlotNo(pallas_block.slot());
                 let block_no = BlockNo(pallas_block.number());
-                let hash = Hash32::from_bytes(entry.header_hash);
+                let hash = Hash32::from_bytes(entry._header_hash);
 
                 blocks.push((slot, hash, block_no, block_cbor.to_vec()));
             }
@@ -1046,8 +1045,8 @@ mod tests {
         assert_eq!(entry.block_offset, 1024);
         assert_eq!(entry._header_offset, 2);
         assert_eq!(entry._header_size, 100);
-        assert_eq!(entry.checksum, 12345);
-        assert_eq!(entry.header_hash, [0xAB; 32]);
+        assert_eq!(entry._checksum, 12345);
+        assert_eq!(entry._header_hash, [0xAB; 32]);
         assert_eq!(entry._block_or_ebb, 5000);
     }
 

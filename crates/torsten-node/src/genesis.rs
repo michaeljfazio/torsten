@@ -16,7 +16,6 @@ use tracing::debug;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // Fields populated by serde deserialization from cardano-node genesis JSON
-#[allow(dead_code)]
 pub struct ByronGenesis {
     /// AVVM (Ada Voucher Vending Machine) distribution: base64 pubkey → lovelace
     #[serde(default)]
@@ -24,14 +23,15 @@ pub struct ByronGenesis {
     /// Non-AVVM initial balances: base58 Byron address → lovelace
     #[serde(default)]
     pub non_avvm_balances: HashMap<String, String>,
-    /// Bootstrap stakeholders: stakeholder ID → weight
-    #[serde(default)]
-    pub boot_stakeholders: HashMap<String, serde_json::Value>,
-    /// Heavy delegation certificates
-    #[serde(default)]
-    pub heavy_delegation: HashMap<String, serde_json::Value>,
+    /// Bootstrap stakeholders: stakeholder ID → weight (deserialized for completeness)
+    #[serde(default, rename = "bootStakeholders")]
+    _boot_stakeholders: HashMap<String, serde_json::Value>,
+    /// Heavy delegation certificates (deserialized for completeness)
+    #[serde(default, rename = "heavyDelegation")]
+    _heavy_delegation: HashMap<String, serde_json::Value>,
     /// System start time (POSIX timestamp)
-    pub start_time: u64,
+    #[serde(rename = "startTime")]
+    pub _start_time: u64,
     /// Block version data (fee policy, slot duration, etc.)
     #[serde(default)]
     pub block_version_data: ByronBlockVersionData,
@@ -43,28 +43,26 @@ pub struct ByronGenesis {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // Fields populated by serde deserialization from cardano-node genesis JSON
-#[allow(dead_code)]
 pub struct ByronBlockVersionData {
     #[serde(default)]
     pub slot_duration: String,
-    #[serde(default)]
-    pub max_block_size: String,
-    #[serde(default)]
-    pub max_tx_size: String,
-    #[serde(default)]
-    pub tx_fee_policy: ByronTxFeePolicy,
+    #[serde(default, rename = "maxBlockSize")]
+    pub _max_block_size: String,
+    #[serde(default, rename = "maxTxSize")]
+    _max_tx_size: String,
+    #[serde(default, rename = "txFeePolicy")]
+    _tx_fee_policy: ByronTxFeePolicy,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 // Fields populated by serde deserialization from cardano-node genesis JSON
-#[allow(dead_code)]
 pub struct ByronTxFeePolicy {
-    /// Fee = summand + multiplier * tx_size (both values are ×1e12)
-    #[serde(default)]
-    pub summand: String,
-    #[serde(default)]
-    pub multiplier: String,
+    /// Fee = summand + multiplier * tx_size (both values are x1e12)
+    #[serde(default, rename = "summand")]
+    _summand: String,
+    #[serde(default, rename = "multiplier")]
+    _multiplier: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -571,11 +569,9 @@ pub struct ConwayGenesis {
     #[serde(default)]
     pub plutus_v3_cost_model: Option<Vec<i64>>,
     // Deserialized from genesis JSON for completeness; not yet consumed in code
+    #[serde(default, rename = "constitution")]
+    _constitution: Option<serde_json::Value>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub constitution: Option<serde_json::Value>,
-    #[serde(default)]
-    #[allow(dead_code)]
     pub committee: Option<serde_json::Value>,
 }
 
@@ -965,11 +961,11 @@ mod tests {
         let genesis: ByronGenesis = serde_json::from_str(json).unwrap();
         assert_eq!(genesis.protocol_magic(), 764824073);
         assert_eq!(genesis.security_param(), 2160);
-        assert_eq!(genesis.start_time, 1654041600);
+        assert_eq!(genesis._start_time, 1654041600);
         assert_eq!(genesis.non_avvm_balances.len(), 2);
         assert_eq!(genesis.avvm_distr.len(), 1);
         assert_eq!(genesis.block_version_data.slot_duration, "20000");
-        assert_eq!(genesis.block_version_data.max_block_size, "2000000");
+        assert_eq!(genesis.block_version_data._max_block_size, "2000000");
 
         // Test initial_utxos extraction
         let utxos = genesis.initial_utxos();
