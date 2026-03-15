@@ -14,6 +14,12 @@ pub struct TransactionCmd {
 /// Both subcommands accept the exact same flags and produce the same output.
 /// `build-raw` exists for cardano-cli naming compatibility — many downstream
 /// scripts and tools invoke `cardano-cli transaction build-raw` specifically.
+///
+/// Auto-balance mode: when `--socket-path` is provided and `--fee` is NOT
+/// explicitly set, the command connects to the node, queries UTxO values for
+/// the given inputs and the current protocol parameters, computes the fee
+/// automatically, derives a change output, and writes a balanced transaction.
+/// If `--fee` IS set the old manual-balance behaviour is preserved.
 #[derive(Args, Debug)]
 struct BuildArgs {
     /// Transaction inputs (format: tx_hash#index)
@@ -22,12 +28,17 @@ struct BuildArgs {
     /// Transaction outputs (format: address+amount)
     #[arg(long, num_args = 1..)]
     tx_out: Vec<String>,
-    /// Change address
+    /// Change address (required for auto-balance mode)
     #[arg(long)]
-    change_address: String,
-    /// Fee amount in lovelace
-    #[arg(long, default_value = "200000")]
-    fee: u64,
+    change_address: Option<String>,
+    /// Fee amount in lovelace.
+    ///
+    /// When omitted and `--socket-path` is set the fee is computed
+    /// automatically from protocol parameters (auto-balance mode).
+    /// When omitted without `--socket-path` a default of 200 000 lovelace
+    /// is used (offline / build-raw compatible behaviour).
+    #[arg(long)]
+    fee: Option<u64>,
     /// Time-to-live (slot number)
     #[arg(long)]
     ttl: Option<u64>,
@@ -52,6 +63,19 @@ struct BuildArgs {
     /// Output file for the transaction body
     #[arg(long)]
     out_file: PathBuf,
+    // ── Node connection args (used for auto-balance) ──────────────────────────
+    /// Path to the node's Unix domain socket.
+    ///
+    /// When provided together with no explicit `--fee`, the command performs
+    /// automatic fee computation and change calculation (auto-balance mode).
+    #[arg(long)]
+    socket_path: Option<PathBuf>,
+    /// Use mainnet (network magic 764824073)
+    #[arg(long)]
+    mainnet: bool,
+    /// Testnet network magic (e.g. 2 for preview, 1 for preprod)
+    #[arg(long)]
+    testnet_magic: Option<u64>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -169,11 +193,12 @@ fn parse_tx_input(s: &str) -> Result<(Hash32, u32)> {
 }
 
 /// Parsed transaction output with optional multi-asset tokens
-struct ParsedTxOutput {
-    address: String,
-    lovelace: u64,
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedTxOutput {
+    pub(crate) address: String,
+    pub(crate) lovelace: u64,
     /// Native tokens: Vec<(policy_hex, asset_name_hex, quantity)>
-    tokens: Vec<(String, String, u64)>,
+    pub(crate) tokens: Vec<(String, String, u64)>,
 }
 
 /// Parse a tx output string into address, lovelace, and optional native tokens.
@@ -714,15 +739,216 @@ fn encode_metadata_value(
     Ok(())
 }
 
+// ─── Fee estimation ────────────────────────────────────────────────────────
+
+/// Estimate the fee for a transaction using the linear fee formula.
+///
+/// The Cardano fee formula is:
+/// ```text
+/// fee = min_fee_a * tx_size_bytes + min_fee_b
+/// ```
+/// where `tx_size_bytes` is the size of the *fully signed* transaction.
+///
+/// We estimate the signed tx size as:
+/// - The serialised tx body CBOR length
+/// - Plus per-witness overhead: each vkey witness is 2 + 32 (vkey) + 64 (sig)
+///   bytes, plus CBOR array framing (~10 bytes) = 108 bytes total per witness.
+/// - Plus the signed-tx envelope framing (array(4) header + bool + null ≈ 11 bytes)
+/// - Plus the witness set map header (~3 bytes)
+///
+/// This matches the estimate used by `calculate-min-fee`.
+pub(crate) fn estimate_fee(
+    tx_body_cbor: &[u8],
+    witness_count: u64,
+    min_fee_a: u64,
+    min_fee_b: u64,
+) -> u64 {
+    // Each vkey witness: array(2)[bytes(32), bytes(64)] ≈ 2+1+32+1+64 = 100 bytes + array2 header = 106
+    let witness_overhead = witness_count * 106;
+    // Signed tx envelope: array(4) = 1 byte; bool(true) = 1 byte; null = 1 byte; witness set map(1) = ~3 bytes
+    let envelope_overhead: u64 = 11;
+    let estimated_size = tx_body_cbor.len() as u64 + witness_overhead + envelope_overhead;
+    min_fee_a * estimated_size + min_fee_b
+}
+
+/// Compute a change output to balance the transaction.
+///
+/// Returns `Some(output)` when there is positive change (after fee) that
+/// exceeds the minimum UTxO value (1 ADA = 1 000 000 lovelace), or `None`
+/// when the change would be zero or below the minimum.
+///
+/// Returns an error when `total_inputs < total_outputs + fee` (insufficient
+/// funds), describing the shortfall in lovelace.
+pub(crate) fn calculate_change(
+    total_inputs: u64,
+    total_outputs: u64,
+    fee: u64,
+    change_address: &str,
+) -> Result<Option<ParsedTxOutput>> {
+    let total_spent = total_outputs
+        .checked_add(fee)
+        .ok_or_else(|| anyhow::anyhow!("Arithmetic overflow computing total spent"))?;
+
+    if total_inputs < total_spent {
+        let shortfall = total_spent - total_inputs;
+        bail!(
+            "Insufficient funds: inputs provide {total_inputs} lovelace but \
+             outputs + fee require {total_spent} lovelace (shortfall: {shortfall} lovelace)"
+        );
+    }
+
+    let change = total_inputs - total_spent;
+    // 1 ADA = 1_000_000 lovelace — below this a change output would itself
+    // become unspendable (violates min-UTxO).
+    const MIN_UTXO_LOVELACE: u64 = 1_000_000;
+    if change < MIN_UTXO_LOVELACE {
+        // Change is dust — leave it as an implicit fee contribution.
+        return Ok(None);
+    }
+
+    Ok(Some(ParsedTxOutput {
+        address: change_address.to_string(),
+        lovelace: change,
+        tokens: Vec::new(),
+    }))
+}
+
+/// Decode the raw UTxO MsgResult payload from a `GetUTxOByTxIn` response and
+/// return the total lovelace contained in the matched outputs.
+///
+/// The wire format is:
+/// ```text
+/// [4, [Map<[tx_hash, index], {0: addr, 1: value, ...}>]]
+/// ```
+/// where `value` is either a plain uint (ADA-only) or `[uint, multiasset_map]`.
+///
+/// Only the lovelace (coin) component is summed; multi-asset tokens are ignored
+/// for fee/change purposes.
+fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
+    let mut decoder = minicbor::Decoder::new(raw);
+
+    // Outer: MsgResult = [4, result]
+    let _ = decoder.array();
+    let tag = decoder
+        .u32()
+        .map_err(|e| anyhow::anyhow!("Expected MsgResult tag: {e}"))?;
+    if tag != 4 {
+        bail!("Expected MsgResult(4), got {tag}");
+    }
+
+    // Strip HFC success wrapper: array(1) around the actual map
+    let pos = decoder.position();
+    if let Ok(Some(1)) = decoder.array() {
+        // HFC wrapper consumed — nothing more to do here
+    } else {
+        decoder.set_position(pos);
+    }
+
+    // UTxO result: Map<[tx_hash, index], TransactionOutput>
+    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+    if map_len == 0 {
+        return Ok(0);
+    }
+
+    let mut total: u64 = 0;
+
+    for _ in 0..map_len {
+        // Key: [tx_hash_bytes, output_index]
+        let _ = decoder.array();
+        let _ = decoder.bytes(); // tx hash
+        let _ = decoder.u32(); // output index
+
+        // Value: PostAlonzo TransactionOutput — map {0: addr, 1: value, ...}
+        let output_map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+        for _ in 0..output_map_len {
+            let key = decoder.u32().unwrap_or(999);
+            match key {
+                0 => {
+                    // address — skip
+                    decoder
+                        .skip()
+                        .map_err(|e| anyhow::anyhow!("Cannot skip address: {e}"))?;
+                }
+                1 => {
+                    // value: uint (ADA-only) or [uint, multiasset_map]
+                    let val_pos = decoder.position();
+                    if let Ok(coin) = decoder.u64() {
+                        total = total.checked_add(coin).ok_or_else(|| {
+                            anyhow::anyhow!("Lovelace overflow summing UTxO values")
+                        })?;
+                    } else {
+                        // Multi-asset value: [coin, {policy: {asset: qty}}]
+                        decoder.set_position(val_pos);
+                        let _ = decoder.array();
+                        let coin = decoder
+                            .u64()
+                            .map_err(|e| anyhow::anyhow!("Cannot read multi-asset coin: {e}"))?;
+                        total = total.checked_add(coin).ok_or_else(|| {
+                            anyhow::anyhow!("Lovelace overflow summing UTxO values")
+                        })?;
+                        // Skip multiasset map
+                        decoder
+                            .skip()
+                            .map_err(|e| anyhow::anyhow!("Cannot skip multiasset: {e}"))?;
+                    }
+                }
+                _ => {
+                    // datum, script_ref, etc. — skip
+                    decoder
+                        .skip()
+                        .map_err(|e| anyhow::anyhow!("Cannot skip output field {key}: {e}"))?;
+                }
+            }
+        }
+    }
+
+    Ok(total)
+}
+
+/// Extract `minFeeA` (txFeePerByte) and `minFeeB` (txFeeFixed) from a
+/// protocol-parameters JSON string returned by `query_protocol_params`.
+///
+/// Supports both the current cardano-cli field names and legacy aliases.
+fn extract_fee_params(params_json: &str) -> Result<(u64, u64)> {
+    let pp: serde_json::Value = serde_json::from_str(params_json)
+        .map_err(|e| anyhow::anyhow!("Cannot parse protocol params JSON: {e}"))?;
+
+    let min_fee_a = pp["txFeePerByte"]
+        .as_u64()
+        .or_else(|| pp["minFeeA"].as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Protocol params missing txFeePerByte / minFeeA"))?;
+
+    let min_fee_b = pp["txFeeFixed"]
+        .as_u64()
+        .or_else(|| pp["minFeeB"].as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Protocol params missing txFeeFixed / minFeeB"))?;
+
+    Ok((min_fee_a, min_fee_b))
+}
+
+// ─── Build command implementation ──────────────────────────────────────────
+
 /// Build a transaction body and write it as a text envelope to `args.out_file`.
 ///
 /// Shared implementation for both `transaction build` and `transaction build-raw`.
-fn cmd_build(args: BuildArgs) -> Result<()> {
+///
+/// When `args.socket_path` is `Some` and `args.fee` is `None` the function
+/// operates in **auto-balance mode**:
+///   1. Connects to the node via N2C.
+///   2. Queries UTxO values for every `--tx-in` input.
+///   3. Queries the current protocol parameters.
+///   4. Builds a preliminary tx body (no change output) and estimates the fee.
+///   5. Computes a change output from `(total_inputs - total_outputs - fee)`.
+///   6. Re-estimates the fee with the change output included and iterates once
+///      for stability — one extra iteration is sufficient because the change
+///      output size is constant (a plain ADA output).
+///   7. Writes the final balanced body.
+async fn cmd_build(args: BuildArgs) -> Result<()> {
     let BuildArgs {
         tx_in,
         tx_out,
-        change_address: _,
-        fee,
+        change_address,
+        fee: explicit_fee,
         ttl,
         certificate_file,
         withdrawal,
@@ -731,12 +957,19 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         required_signer_hash,
         mint,
         out_file,
+        socket_path,
+        mainnet,
+        testnet_magic,
     } = args;
 
     if tx_in.is_empty() {
         bail!("At least one --tx-in is required");
     }
-    if tx_out.is_empty() {
+    // In auto-balance mode (no explicit fee, socket-path given) the user may
+    // omit --tx-out entirely when all funds are being swept to --change-address.
+    // In manual / offline mode at least one output is required.
+    let auto_balance_mode = explicit_fee.is_none() && socket_path.is_some();
+    if tx_out.is_empty() && !auto_balance_mode {
         bail!("At least one --tx-out is required");
     }
 
@@ -744,7 +977,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         .iter()
         .map(|s| parse_tx_input(s))
         .collect::<Result<_>>()?;
-    let outputs: Vec<ParsedTxOutput> = tx_out
+    let mut outputs: Vec<ParsedTxOutput> = tx_out
         .iter()
         .map(|s| parse_tx_output(s))
         .collect::<Result<_>>()?;
@@ -778,6 +1011,153 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     } else {
         None
     };
+
+    // ── Determine the effective fee ─────────────────────────────────────────
+
+    let fee = if let Some(f) = explicit_fee {
+        // Manual mode: use the caller-supplied fee verbatim.
+        f
+    } else if let Some(ref sock) = socket_path {
+        // Auto-balance mode: connect to the node and compute everything.
+
+        let change_addr = change_address.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--change-address is required for auto-balance mode (when --fee is not set)"
+            )
+        })?;
+
+        let magic = if mainnet {
+            764824073u64
+        } else {
+            testnet_magic.unwrap_or(764824073)
+        };
+
+        // Connect to the node.
+        let mut client = torsten_network::N2CClient::connect(sock)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Cannot connect to node socket '{}': {e}", sock.display())
+            })?;
+        client
+            .handshake(magic)
+            .await
+            .map_err(|e| anyhow::anyhow!("Handshake failed: {e}"))?;
+        client
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to acquire ledger state: {e}"))?;
+
+        // Query UTxO values for all inputs.
+        let utxo_inputs: Vec<(Vec<u8>, u32)> = inputs
+            .iter()
+            .map(|(h, idx)| (h.as_bytes().to_vec(), *idx))
+            .collect();
+        let utxo_raw = client
+            .query_utxo_by_txin(&utxo_inputs)
+            .await
+            .map_err(|e| anyhow::anyhow!("UTxO query failed: {e}"))?;
+        let total_inputs = sum_utxo_lovelace(&utxo_raw)
+            .map_err(|e| anyhow::anyhow!("Failed to decode UTxO response: {e}"))?;
+
+        if total_inputs == 0 {
+            bail!(
+                "No UTxOs found for the specified inputs. \
+                 Ensure the inputs exist on-chain and the node is fully synced."
+            );
+        }
+
+        // Query protocol parameters.
+        let params_json = client
+            .query_protocol_params()
+            .await
+            .map_err(|e| anyhow::anyhow!("Protocol params query failed: {e}"))?;
+
+        client.release().await.ok();
+        client.done().await.ok();
+
+        let (min_fee_a, min_fee_b) = extract_fee_params(&params_json)?;
+
+        // Sum the explicit outputs (not counting change yet).
+        let total_explicit_outputs: u64 = outputs.iter().map(|o| o.lovelace).sum();
+
+        // ── Iteration 1: estimate fee without change output ─────────────────
+        let body_no_change = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            0, // placeholder fee — size only matters, not the value
+            ttl,
+            &certificates,
+            &withdrawals,
+            auxiliary_data.as_deref(),
+            &collateral_inputs,
+            &required_signers,
+            &parsed_mint,
+        )?;
+        // Assume 1 witness (the payment key). SPO tools can override with --fee.
+        let fee_estimate_1 = estimate_fee(&body_no_change, 1, min_fee_a, min_fee_b);
+
+        // Compute tentative change.
+        let change_output_1 = calculate_change(
+            total_inputs,
+            total_explicit_outputs,
+            fee_estimate_1,
+            change_addr,
+        )?;
+
+        // ── Iteration 2: re-estimate with the change output included ────────
+        //
+        // Adding the change output changes the tx body size, which changes
+        // the fee, which changes the change amount. One more pass is
+        // sufficient for convergence because the change output size is fixed
+        // (plain ADA output with a constant-length address).
+        let mut outputs_with_change = outputs.clone();
+        if let Some(ref co) = change_output_1 {
+            outputs_with_change.push(ParsedTxOutput {
+                address: co.address.clone(),
+                lovelace: co.lovelace,
+                tokens: Vec::new(),
+            });
+        }
+
+        let body_with_change = build_tx_body_cbor(
+            &inputs,
+            &outputs_with_change,
+            0,
+            ttl,
+            &certificates,
+            &withdrawals,
+            auxiliary_data.as_deref(),
+            &collateral_inputs,
+            &required_signers,
+            &parsed_mint,
+        )?;
+        let fee_final = estimate_fee(&body_with_change, 1, min_fee_a, min_fee_b);
+
+        // Recompute change with the final fee.
+        let change_output_final =
+            calculate_change(total_inputs, total_explicit_outputs, fee_final, change_addr)?;
+
+        // Commit: replace `outputs` with the final set (explicit + change).
+        if let Some(co) = change_output_final {
+            outputs.push(co);
+        }
+
+        eprintln!(
+            "Auto-balance: total inputs = {total_inputs} lovelace, \
+             fee = {fee_final} lovelace, \
+             change = {} lovelace",
+            total_inputs
+                .saturating_sub(total_explicit_outputs)
+                .saturating_sub(fee_final)
+        );
+
+        fee_final
+    } else {
+        // Offline / build-raw fallback: use the cardano-cli default of 200 000.
+        200_000u64
+    };
+
+    // ── Build the final tx body ─────────────────────────────────────────────
 
     let tx_body_cbor = build_tx_body_cbor(
         &inputs,
@@ -813,7 +1193,12 @@ impl TransactionCmd {
     pub fn run(self) -> Result<()> {
         match self.command {
             // `build` and `build-raw` are identical — both delegate to cmd_build().
-            TxSubcommand::Build(args) | TxSubcommand::BuildRaw(args) => cmd_build(args),
+            // cmd_build is async (it may connect to the node for auto-balance),
+            // so we drive it with a single-threaded tokio runtime here.
+            TxSubcommand::Build(args) | TxSubcommand::BuildRaw(args) => {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(cmd_build(args))
+            }
             TxSubcommand::Sign {
                 tx_body_file,
                 signing_key_file,
@@ -1705,5 +2090,300 @@ mod tests {
             hash.to_hex(),
             "9574ec47eece19ba26900b524f9945d69a28df4fb386522365bf342d"
         );
+    }
+
+    // ── Auto-balance: estimate_fee tests ─────────────────────────────────────
+
+    #[test]
+    fn test_estimate_fee_basic() {
+        // A realistic Conway-era mainnet parameter set (preview/mainnet 2024):
+        //   minFeeA (txFeePerByte) = 44
+        //   minFeeB (txFeeFixed)   = 155381
+        let min_fee_a = 44u64;
+        let min_fee_b = 155_381u64;
+
+        // Build a minimal tx body: just inputs+outputs+fee fields so we get
+        // a deterministic size to reason about.
+        let body = build_tx_body_cbor(
+            &[(Hash32::from_bytes([0xab; 32]), 0)],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let fee = estimate_fee(&body, 1, min_fee_a, min_fee_b);
+
+        // fee = 44 * (body_len + 106 + 11) + 155381
+        let expected_size = body.len() as u64 + 106 + 11;
+        let expected_fee = 44 * expected_size + 155_381;
+        assert_eq!(fee, expected_fee);
+    }
+
+    #[test]
+    fn test_estimate_fee_multiple_witnesses() {
+        // With 2 witnesses (e.g. payment + stake key), the fee increases by
+        // exactly one witness worth of overhead.
+        let body = build_tx_body_cbor(
+            &[(Hash32::from_bytes([0xcd; 32]), 1)],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let fee_1 = estimate_fee(&body, 1, 44, 155_381);
+        let fee_2 = estimate_fee(&body, 2, 44, 155_381);
+        // Each extra witness adds 106 bytes → 44 * 106 = 4664 lovelace
+        assert_eq!(fee_2 - fee_1, 44 * 106);
+    }
+
+    #[test]
+    fn test_estimate_fee_grows_with_body_size() {
+        // A larger tx body (e.g. two inputs) should yield a higher fee.
+        let small_body = build_tx_body_cbor(
+            &[(Hash32::from_bytes([0x01; 32]), 0)],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let large_body = build_tx_body_cbor(
+            &[
+                (Hash32::from_bytes([0x01; 32]), 0),
+                (Hash32::from_bytes([0x02; 32]), 1),
+            ],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let fee_small = estimate_fee(&small_body, 1, 44, 155_381);
+        let fee_large = estimate_fee(&large_body, 1, 44, 155_381);
+        assert!(
+            fee_large > fee_small,
+            "larger tx body must produce higher fee"
+        );
+    }
+
+    // ── Auto-balance: calculate_change tests ─────────────────────────────────
+
+    #[test]
+    fn test_calculate_change_exact_fit() {
+        // When inputs exactly cover outputs + fee, change is zero → None.
+        let result = calculate_change(
+            10_000_000, // total inputs
+            9_800_000,  // total outputs
+            200_000,    // fee
+            "addr_test1abc",
+        )
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "zero change should produce None (not an empty output)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_change_dust() {
+        // Change below 1 ADA (min-UTxO) is considered dust → None.
+        let result = calculate_change(
+            10_000_000, // total inputs
+            9_700_000,  // total outputs
+            299_999,    // fee  → change = 1 lovelace (dust)
+            "addr_test1abc",
+        )
+        .unwrap();
+        assert!(result.is_none(), "dust change must be dropped");
+    }
+
+    #[test]
+    fn test_calculate_change_spendable() {
+        // Change of exactly 1 ADA should produce a change output.
+        let result = calculate_change(
+            11_000_000, // total inputs
+            9_800_000,  // total outputs
+            200_000,    // fee  → change = 1_000_000 = 1 ADA
+            "addr_test1abc",
+        )
+        .unwrap();
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert_eq!(output.lovelace, 1_000_000);
+        assert_eq!(output.address, "addr_test1abc");
+        assert!(output.tokens.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_change_large_change() {
+        // SPO scenario: large wallet, small payment, majority goes to change.
+        let result = calculate_change(
+            100_000_000_000, // 100k ADA input
+            1_000_000,       // 1 ADA payment
+            170_000,         // fee
+            "addr_test1change",
+        )
+        .unwrap();
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert_eq!(output.lovelace, 100_000_000_000 - 1_000_000 - 170_000);
+    }
+
+    #[test]
+    fn test_calculate_change_insufficient_funds() {
+        // Inputs do not cover outputs + fee → error with shortfall description.
+        let err = calculate_change(
+            5_000_000, // 5 ADA input
+            5_000_000, // 5 ADA output (no room for fee)
+            200_000,   // fee
+            "addr_test1abc",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Insufficient funds"),
+            "error message must mention 'Insufficient funds', got: {msg}"
+        );
+        assert!(
+            msg.contains("200000"),
+            "error message must include the shortfall amount"
+        );
+    }
+
+    #[test]
+    fn test_calculate_change_exactly_at_minimum() {
+        // Change of exactly MIN_UTXO_LOVELACE (1 ADA) should be included.
+        let result = calculate_change(
+            11_200_000, // 11.2 ADA
+            10_000_000, // 10 ADA output
+            200_000,    // fee
+            "addr_test1x",
+        )
+        .unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().lovelace, 1_000_000);
+    }
+
+    #[test]
+    fn test_calculate_change_just_below_minimum() {
+        // Change of MIN_UTXO_LOVELACE - 1 (999_999 lovelace) is dust → None.
+        let result = calculate_change(
+            11_199_999, // 11.199999 ADA
+            10_000_000, // 10 ADA output
+            200_000,    // fee → change = 999_999
+            "addr_test1x",
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── Auto-balance: extract_fee_params tests ───────────────────────────────
+
+    #[test]
+    fn test_extract_fee_params_current_names() {
+        // Current cardano-cli JSON field names (post-Alonzo).
+        let json = r#"{"txFeePerByte": 44, "txFeeFixed": 155381}"#;
+        let (a, b) = extract_fee_params(json).unwrap();
+        assert_eq!(a, 44);
+        assert_eq!(b, 155_381);
+    }
+
+    #[test]
+    fn test_extract_fee_params_legacy_names() {
+        // Legacy aliases used by older cardano-cli versions.
+        let json = r#"{"minFeeA": 44, "minFeeB": 155381}"#;
+        let (a, b) = extract_fee_params(json).unwrap();
+        assert_eq!(a, 44);
+        assert_eq!(b, 155_381);
+    }
+
+    #[test]
+    fn test_extract_fee_params_missing_field() {
+        let json = r#"{"txFeePerByte": 44}"#;
+        assert!(extract_fee_params(json).is_err());
+    }
+
+    // ── Auto-balance: sum_utxo_lovelace tests ────────────────────────────────
+
+    /// Build a synthetic UTxO MsgResult payload for testing.
+    ///
+    /// Format: [4, [Map<[tx_hash, index], {1: lovelace}>]]
+    fn build_utxo_msg_result(entries: &[([u8; 32], u32, u64)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+
+        // [4, [map]]
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap(); // MsgResult tag
+
+        // HFC success wrapper: array(1)
+        enc.array(1).unwrap();
+
+        // UTxO map
+        enc.map(entries.len() as u64).unwrap();
+        for (hash, index, lovelace) in entries {
+            // Key: [tx_hash, index]
+            enc.array(2).unwrap();
+            enc.bytes(hash).unwrap();
+            enc.u32(*index).unwrap();
+
+            // Value: {1: lovelace}  (simplified output — only the value field)
+            enc.map(1).unwrap();
+            enc.u32(1).unwrap();
+            enc.u64(*lovelace).unwrap();
+        }
+
+        buf
+    }
+
+    #[test]
+    fn test_sum_utxo_lovelace_single_entry() {
+        let raw = build_utxo_msg_result(&[([0xab; 32], 0, 5_000_000)]);
+        let total = sum_utxo_lovelace(&raw).unwrap();
+        assert_eq!(total, 5_000_000);
+    }
+
+    #[test]
+    fn test_sum_utxo_lovelace_multiple_entries() {
+        let raw = build_utxo_msg_result(&[
+            ([0x01; 32], 0, 10_000_000),
+            ([0x02; 32], 1, 20_000_000),
+            ([0x03; 32], 0, 5_000_000),
+        ]);
+        let total = sum_utxo_lovelace(&raw).unwrap();
+        assert_eq!(total, 35_000_000);
+    }
+
+    #[test]
+    fn test_sum_utxo_lovelace_empty_map() {
+        let raw = build_utxo_msg_result(&[]);
+        let total = sum_utxo_lovelace(&raw).unwrap();
+        assert_eq!(total, 0);
     }
 }
