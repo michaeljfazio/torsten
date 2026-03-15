@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use torsten_primitives::hash::{Hash28, Hash32};
+use torsten_primitives::transaction::{ExUnits, PlutusData, Redeemer, RedeemerTag};
 
 #[derive(Args, Debug)]
 pub struct TransactionCmd {
@@ -51,6 +52,29 @@ struct BuildArgs {
     /// Metadata JSON file
     #[arg(long)]
     metadata_json_file: Option<PathBuf>,
+    /// Plutus script file to attach to the most recently specified --tx-in.
+    ///
+    /// Must be a text-envelope file whose `type` begins with "PlutusScriptV1",
+    /// "PlutusScriptV2", or "PlutusScriptV3".  Each occurrence is matched to
+    /// the `--tx-in` that immediately precedes it on the command line by
+    /// position (both lists are iterated in declaration order by clap, so the
+    /// i-th `--tx-in-script-file` is paired with the i-th `--tx-in`).
+    #[arg(long)]
+    tx_in_script_file: Vec<PathBuf>,
+    /// Datum JSON file to attach to the script-bearing input at the same
+    /// position.  Uses the cardano-cli JSON PlutusData schema
+    /// (`{"int": N}` / `{"bytes": "hex"}` / `{"list": [...]}` /
+    ///  `{"map": [...]}` / `{"constructor": N, "fields": [...]}`).
+    #[arg(long)]
+    tx_in_datum_file: Vec<PathBuf>,
+    /// Redeemer JSON file for the script-bearing input at the same position.
+    /// Same JSON schema as `--tx-in-datum-file`.
+    #[arg(long)]
+    tx_in_redeemer_file: Vec<PathBuf>,
+    /// Execution units budget for the script-bearing input at the same
+    /// position.  Format: `mem,steps`  (e.g. `1000000,500000000`).
+    #[arg(long)]
+    tx_in_execution_units: Vec<String>,
     /// Collateral inputs for Plutus scripts (format: tx_hash#index)
     #[arg(long)]
     tx_in_collateral: Vec<String>,
@@ -270,13 +294,15 @@ fn build_tx_body_cbor(
     collateral_inputs: &[(Hash32, u32)],
     required_signers: &[Vec<u8>],
     mint: &[MintEntry],
+    script_data_hash: Option<&Hash32>,
 ) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
 
     // Transaction body map fields:
     // 0: inputs, 1: outputs, 2: fee, 3: ttl, 4: certificates, 5: withdrawals,
-    // 7: auxiliary_data_hash, 9: mint, 13: collateral, 14: required_signers
+    // 7: auxiliary_data_hash, 9: mint, 11: script_data_hash,
+    // 13: collateral, 14: required_signers
     let mut field_count = 3u64; // inputs + outputs + fee
     if ttl.is_some() {
         field_count += 1;
@@ -291,6 +317,9 @@ fn build_tx_body_cbor(
         field_count += 1;
     }
     if !mint.is_empty() {
+        field_count += 1;
+    }
+    if script_data_hash.is_some() {
         field_count += 1;
     }
     if !collateral_inputs.is_empty() {
@@ -417,6 +446,12 @@ fn build_tx_body_cbor(
                 }
             }
         }
+    }
+
+    // Field 11: script_data_hash (optional — present when Plutus scripts are used)
+    if let Some(hash) = script_data_hash {
+        enc.u32(11)?;
+        enc.bytes(hash.as_bytes())?;
     }
 
     // Field 13: collateral inputs (optional)
@@ -576,6 +611,626 @@ fn parse_json_script_list(
         .iter()
         .map(parse_json_native_script)
         .collect::<Result<Vec<_>>>()
+}
+
+// ─── Plutus script witness support ─────────────────────────────────────────
+
+/// Plutus language version extracted from a text-envelope `type` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlutusVersion {
+    V1,
+    V2,
+    V3,
+}
+
+/// All the information needed to build the Plutus witness for one script input.
+#[derive(Debug, Clone)]
+pub(crate) struct ScriptWitness {
+    /// Language version of the script.
+    pub(crate) version: PlutusVersion,
+    /// Raw flat-encoded script bytes (the `cborHex` payload from the text envelope
+    /// is itself CBOR-wrapped bytes; we store the inner bytes here).
+    pub(crate) script_bytes: Vec<u8>,
+    /// CBOR encoding of the datum `PlutusData` for this input.
+    pub(crate) datum_cbor: Vec<u8>,
+    /// CBOR encoding of the redeemer `PlutusData` for this input.
+    pub(crate) redeemer_data_cbor: Vec<u8>,
+    /// Execution units budget.
+    pub(crate) ex_units: ExUnits,
+}
+
+/// Load a Plutus script from a cardano-cli text-envelope file.
+///
+/// The envelope `type` field must start with "PlutusScriptV1", "PlutusScriptV2",
+/// or "PlutusScriptV3".  The `cborHex` field is the double-CBOR encoding used
+/// by cardano-cli: the outer CBOR wraps a byte-string whose content is the
+/// flat-encoded script bytes.  We strip the outer CBOR byte-string wrapper and
+/// return the inner bytes together with the version.
+pub(crate) fn load_plutus_script(path: &PathBuf) -> Result<(PlutusVersion, Vec<u8>)> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read script file '{}': {e}", path.display()))?;
+    let env: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid JSON in script file '{}': {e}", path.display()))?;
+
+    let type_str = env["type"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'type' field in '{}'", path.display()))?;
+
+    let version = if type_str.starts_with("PlutusScriptV1") {
+        PlutusVersion::V1
+    } else if type_str.starts_with("PlutusScriptV2") {
+        PlutusVersion::V2
+    } else if type_str.starts_with("PlutusScriptV3") {
+        PlutusVersion::V3
+    } else {
+        bail!(
+            "Unsupported script type '{}' in '{}'. \
+             Expected PlutusScriptV1, PlutusScriptV2, or PlutusScriptV3.",
+            type_str,
+            path.display()
+        );
+    };
+
+    let cbor_hex = env["cborHex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'cborHex' in '{}'", path.display()))?;
+    let outer_cbor = hex::decode(cbor_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid hex in 'cborHex' of '{}': {e}", path.display()))?;
+
+    // cardano-cli wraps the flat script in a CBOR byte-string (#6.XX(bytes(...))).
+    // We may have:
+    //   - Just bytes(N): the flat bytes directly
+    //   - tag(N) bytes(N): tagged flat bytes (some versions wrap with a short tag)
+    // Unwrap one level of CBOR to get the raw script bytes.
+    let script_bytes = cbor_unwrap_bytes(&outer_cbor).unwrap_or(outer_cbor);
+
+    Ok((version, script_bytes))
+}
+
+/// Strip a CBOR byte-string (or tag + byte-string) wrapper from `data` and
+/// return the contained bytes.  Returns `None` if the outermost item is not
+/// a byte-string or a single-tag wrapping a byte-string.
+fn cbor_unwrap_bytes(data: &[u8]) -> Option<Vec<u8>> {
+    let mut dec = minicbor::Decoder::new(data);
+    // Try to consume an optional CBOR tag (major type 6) without advancing the
+    // position if the next item is not a tag.  We save the position first so
+    // we can reset if `tag()` fails or if the item after the tag is not bytes.
+    let pos_before = dec.position();
+
+    let has_tag = matches!(dec.datatype(), Ok(minicbor::data::Type::Tag));
+    if has_tag {
+        // Consume the tag and fall through to the byte-string read below.
+        let _ = dec.tag();
+    } else {
+        // No tag — reset in case `datatype()` moved the cursor (it shouldn't,
+        // but be defensive).
+        dec.set_position(pos_before);
+    }
+
+    if let Ok(b) = dec.bytes() {
+        return Some(b.to_vec());
+    }
+    None
+}
+
+/// Parse a cardano-cli PlutusData JSON value into `PlutusData`.
+///
+/// Supported schemas (matching cardano-cli / cardano-api):
+/// - `{"int": <number>}`  →  `PlutusData::Integer`
+/// - `{"bytes": "<hex>"}` →  `PlutusData::Bytes`
+/// - `{"list": [...]}`    →  `PlutusData::List`
+/// - `{"map": [{"k": ..., "v": ...}, ...]}` → `PlutusData::Map`
+/// - `{"constructor": <N>, "fields": [...]}` → `PlutusData::Constr`
+pub(crate) fn parse_plutus_data_json(json: &serde_json::Value) -> Result<PlutusData> {
+    if let Some(n) = json.get("int") {
+        let i = n
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("PlutusData 'int' must be an integer, got: {n}"))?;
+        return Ok(PlutusData::Integer(i as i128));
+    }
+
+    if let Some(b) = json.get("bytes") {
+        let hex_str = b
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("PlutusData 'bytes' must be a hex string"))?;
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("Invalid hex in PlutusData 'bytes': {e}"))?;
+        return Ok(PlutusData::Bytes(bytes));
+    }
+
+    if let Some(list) = json.get("list") {
+        let arr = list
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("PlutusData 'list' must be an array"))?;
+        let items = arr
+            .iter()
+            .map(parse_plutus_data_json)
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(PlutusData::List(items));
+    }
+
+    if let Some(map) = json.get("map") {
+        let arr = map
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("PlutusData 'map' must be an array of {{k,v}} pairs"))?;
+        let mut entries = Vec::with_capacity(arr.len());
+        for entry in arr {
+            let k = entry
+                .get("k")
+                .ok_or_else(|| anyhow::anyhow!("PlutusData map entry missing 'k'"))?;
+            let v = entry
+                .get("v")
+                .ok_or_else(|| anyhow::anyhow!("PlutusData map entry missing 'v'"))?;
+            entries.push((parse_plutus_data_json(k)?, parse_plutus_data_json(v)?));
+        }
+        return Ok(PlutusData::Map(entries));
+    }
+
+    if let Some(ctor) = json.get("constructor") {
+        let tag = ctor.as_u64().ok_or_else(|| {
+            anyhow::anyhow!("PlutusData 'constructor' must be a non-negative integer")
+        })?;
+        let fields_json = json
+            .get("fields")
+            .and_then(|f| f.as_array())
+            .ok_or_else(|| anyhow::anyhow!("PlutusData constructor missing 'fields' array"))?;
+        let fields = fields_json
+            .iter()
+            .map(parse_plutus_data_json)
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(PlutusData::Constr(tag, fields));
+    }
+
+    bail!(
+        "Unrecognised PlutusData JSON schema. Expected one of: \
+         {{\"int\": N}}, {{\"bytes\": \"hex\"}}, {{\"list\": [...]}}, \
+         {{\"map\": [...]}}, {{\"constructor\": N, \"fields\": [...]}}.  \
+         Got: {json}"
+    )
+}
+
+/// Load and parse a PlutusData JSON file.
+pub(crate) fn load_plutus_data_file(path: &PathBuf) -> Result<PlutusData> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!("Cannot read datum/redeemer file '{}': {e}", path.display())
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid JSON in '{}': {e}", path.display()))?;
+    parse_plutus_data_json(&json).map_err(|e| anyhow::anyhow!("In '{}': {e}", path.display()))
+}
+
+/// Parse a `--tx-in-execution-units` string like `"1000000,500000000"`.
+pub(crate) fn parse_execution_units(s: &str) -> Result<ExUnits> {
+    let (mem_str, steps_str) = s
+        .split_once(',')
+        .ok_or_else(|| anyhow::anyhow!("Invalid execution units '{s}'. Expected mem,steps"))?;
+    let mem = mem_str
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| anyhow::anyhow!("Invalid mem in execution units '{s}': {e}"))?;
+    let steps = steps_str
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| anyhow::anyhow!("Invalid steps in execution units '{s}': {e}"))?;
+    Ok(ExUnits { mem, steps })
+}
+
+/// Encode a single `Redeemer` to CBOR `[tag, index, data, [mem, steps]]`.
+///
+/// Self-contained implementation that avoids depending on the `pub(crate)`
+/// helper in `torsten-serialization`, keeping the CLI crate independent.
+fn encode_redeemer_to_cbor(r: &Redeemer) -> Vec<u8> {
+    // Redeemer = [tag, index, data, ex_units]
+    // Tag: Spend=0, Mint=1, Cert=2, Reward=3, Vote=4, Propose=5
+    let tag_num: u64 = match r.tag {
+        RedeemerTag::Spend => 0,
+        RedeemerTag::Mint => 1,
+        RedeemerTag::Cert => 2,
+        RedeemerTag::Reward => 3,
+        RedeemerTag::Vote => 4,
+        RedeemerTag::Propose => 5,
+    };
+
+    // Build header (array(4), tag, index) in a block so the encoder borrow ends
+    // before we extend with the data and ex_units bytes.
+    let mut header = Vec::new();
+    {
+        let mut enc = minicbor::Encoder::new(&mut header);
+        enc.array(4).unwrap();
+        enc.u64(tag_num).unwrap();
+        enc.u64(r.index as u64).unwrap();
+    }
+
+    // ex_units: [mem, steps]
+    let mut ex_units = Vec::new();
+    {
+        let mut enc = minicbor::Encoder::new(&mut ex_units);
+        enc.array(2).unwrap();
+        enc.u64(r.ex_units.mem).unwrap();
+        enc.u64(r.ex_units.steps).unwrap();
+    }
+
+    // Concatenate: header || data_cbor || ex_units
+    let mut buf = header;
+    buf.extend_from_slice(&encode_plutus_data_to_cbor(&r.data));
+    buf.extend_from_slice(&ex_units);
+    buf
+}
+
+/// Encode a `PlutusData` value to CBOR using the Cardano wire encoding.
+///
+/// Self-contained implementation that mirrors `torsten_serialization::cbor::encode_plutus_data`
+/// without depending on it, keeping the CLI crate independent of internal
+/// serialization helpers.
+fn encode_plutus_data_to_cbor(data: &PlutusData) -> Vec<u8> {
+    match data {
+        PlutusData::Integer(n) => {
+            let n = *n;
+            if n >= 0 {
+                // Non-negative: CBOR major type 0 (unsigned)
+                if n <= u64::MAX as i128 {
+                    let mut buf = Vec::new();
+                    minicbor::Encoder::new(&mut buf).u64(n as u64).unwrap();
+                    buf
+                } else {
+                    // Positive bignum: tag(2) + bytes(big-endian)
+                    let bytes = (n as u128).to_be_bytes();
+                    let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
+                    let mut buf = Vec::new();
+                    {
+                        let mut enc = minicbor::Encoder::new(&mut buf);
+                        enc.tag(minicbor::data::Tag::new(2)).unwrap();
+                        enc.bytes(&bytes[start..]).unwrap();
+                    }
+                    buf
+                }
+            } else {
+                // Negative: CBOR major type 1
+                if n >= i64::MIN as i128 {
+                    let mut buf = Vec::new();
+                    minicbor::Encoder::new(&mut buf).i64(n as i64).unwrap();
+                    buf
+                } else {
+                    // Negative bignum: tag(3) + bytes(big-endian of -(1+n))
+                    let abs = (-(1 + n)) as u128;
+                    let bytes = abs.to_be_bytes();
+                    let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
+                    let mut buf = Vec::new();
+                    {
+                        let mut enc = minicbor::Encoder::new(&mut buf);
+                        enc.tag(minicbor::data::Tag::new(3)).unwrap();
+                        enc.bytes(&bytes[start..]).unwrap();
+                    }
+                    buf
+                }
+            }
+        }
+        PlutusData::Bytes(b) => {
+            let mut buf = Vec::new();
+            minicbor::Encoder::new(&mut buf).bytes(b).unwrap();
+            buf
+        }
+        PlutusData::List(items) => {
+            let mut header = Vec::new();
+            minicbor::Encoder::new(&mut header)
+                .array(items.len() as u64)
+                .unwrap();
+            let mut buf = header;
+            for item in items {
+                buf.extend_from_slice(&encode_plutus_data_to_cbor(item));
+            }
+            buf
+        }
+        PlutusData::Map(entries) => {
+            let mut header = Vec::new();
+            minicbor::Encoder::new(&mut header)
+                .map(entries.len() as u64)
+                .unwrap();
+            let mut buf = header;
+            for (k, v) in entries {
+                buf.extend_from_slice(&encode_plutus_data_to_cbor(k));
+                buf.extend_from_slice(&encode_plutus_data_to_cbor(v));
+            }
+            buf
+        }
+        PlutusData::Constr(tag, fields) => {
+            // Small constructors 0–6: CBOR tag 121+n
+            // Constructors 7–127: CBOR tag 1280+(n-7)
+            // Anything else: CBOR tag 102 with [constructor, fields]
+            let (cbor_tag, wrap_in_pair): (u64, bool) = if *tag < 7 {
+                (121 + tag, false)
+            } else if *tag < 128 {
+                (1280 + (tag - 7), false)
+            } else {
+                (102, true)
+            };
+
+            let mut header = Vec::new();
+            {
+                let mut enc = minicbor::Encoder::new(&mut header);
+                enc.tag(minicbor::data::Tag::new(cbor_tag)).unwrap();
+                if wrap_in_pair {
+                    // General form: tag(102) [constructor_index, [fields...]]
+                    enc.array(2).unwrap();
+                    enc.u64(*tag).unwrap();
+                }
+                enc.array(fields.len() as u64).unwrap();
+            }
+            let mut buf = header;
+            for f in fields {
+                buf.extend_from_slice(&encode_plutus_data_to_cbor(f));
+            }
+            buf
+        }
+    }
+}
+
+/// Compute the `script_data_hash` field (tx body key 11).
+///
+/// Per the Cardano spec (Alonzo+), this is:
+/// ```text
+/// script_data_hash = blake2b_256(
+///     redeemers_cbor         -- array of redeemer; empty array if no redeemers
+///     || datums_cbor          -- array of PlutusData; empty array if no datums
+///     || language_views_cbor  -- map of language → cost model; empty map offline
+/// )
+/// ```
+/// We use an empty language views map (`a0`) when building offline.  The node
+/// re-validates this hash during submission using the actual cost models.
+///
+/// Returns `None` when no Plutus scripts are attached to the transaction.
+pub(crate) fn compute_script_data_hash_offline(witnesses: &[ScriptWitness]) -> Option<Hash32> {
+    if witnesses.is_empty() {
+        return None;
+    }
+
+    // Redeemers: one per witness, indexed by witness position (= sorted tx-input position)
+    let redeemers: Vec<Redeemer> = witnesses
+        .iter()
+        .enumerate()
+        .map(|(idx, w)| {
+            let data =
+                decode_plutus_data_cbor(&w.redeemer_data_cbor).unwrap_or(PlutusData::Bytes(vec![]));
+            Redeemer {
+                tag: RedeemerTag::Spend,
+                index: idx as u32,
+                data,
+                ex_units: w.ex_units,
+            }
+        })
+        .collect();
+
+    // Encode redeemers as an array
+    let mut redeemer_bytes = Vec::new();
+    {
+        let mut enc = minicbor::Encoder::new(&mut redeemer_bytes);
+        enc.array(redeemers.len() as u64).unwrap();
+    }
+    for r in &redeemers {
+        redeemer_bytes.extend_from_slice(&encode_redeemer_to_cbor(r));
+    }
+
+    // Encode datums as an array
+    let mut datum_bytes = Vec::new();
+    {
+        let mut enc = minicbor::Encoder::new(&mut datum_bytes);
+        enc.array(witnesses.len() as u64).unwrap();
+    }
+    for w in witnesses {
+        datum_bytes.extend_from_slice(&w.datum_cbor);
+    }
+
+    // Empty language views map: `a0`
+    let language_views: Vec<u8> = vec![0xa0];
+
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(&redeemer_bytes);
+    preimage.extend_from_slice(&datum_bytes);
+    preimage.extend_from_slice(&language_views);
+
+    Some(torsten_primitives::hash::blake2b_256(&preimage))
+}
+
+/// Build the Plutus witness set CBOR for inclusion in the signed transaction.
+///
+/// Returns the raw CBOR bytes of a witness-set *map* containing only the
+/// Plutus-related keys (3/6/7 for scripts, 4 for datums, 5 for redeemers).
+/// The caller merges these with vkey witness key 0 when assembling the
+/// final signed transaction.
+pub(crate) fn build_plutus_witness_set_cbor(witnesses: &[ScriptWitness]) -> Vec<u8> {
+    if witnesses.is_empty() {
+        // Empty map — no Plutus witnesses.
+        return vec![0xa0];
+    }
+
+    // Collect scripts by version (maintaining declaration order for consistent hashing)
+    let v1_scripts: Vec<&[u8]> = witnesses
+        .iter()
+        .filter(|w| w.version == PlutusVersion::V1)
+        .map(|w| w.script_bytes.as_slice())
+        .collect();
+    let v2_scripts: Vec<&[u8]> = witnesses
+        .iter()
+        .filter(|w| w.version == PlutusVersion::V2)
+        .map(|w| w.script_bytes.as_slice())
+        .collect();
+    let v3_scripts: Vec<&[u8]> = witnesses
+        .iter()
+        .filter(|w| w.version == PlutusVersion::V3)
+        .map(|w| w.script_bytes.as_slice())
+        .collect();
+
+    let datum_count = witnesses.len();
+    let redeemer_count = witnesses.len();
+
+    // Count witness-set map keys (in wire-format order: 3, 4, 5, 6, 7)
+    let mut key_count = 0usize;
+    if !v1_scripts.is_empty() {
+        key_count += 1;
+    }
+    if datum_count > 0 {
+        key_count += 1;
+    }
+    if redeemer_count > 0 {
+        key_count += 1;
+    }
+    if !v2_scripts.is_empty() {
+        key_count += 1;
+    }
+    if !v3_scripts.is_empty() {
+        key_count += 1;
+    }
+
+    let mut buf = Vec::new();
+    {
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.map(key_count as u64).unwrap();
+    }
+
+    // Key 3: PlutusV1 scripts — each script is bytes(flat_encoded_script)
+    if !v1_scripts.is_empty() {
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.u32(3).unwrap();
+        enc.array(v1_scripts.len() as u64).unwrap();
+        for s in &v1_scripts {
+            enc.bytes(s).unwrap();
+        }
+    }
+
+    // Key 4: datums — array of PlutusData; each datum_cbor is a pre-encoded item
+    if datum_count > 0 {
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.u32(4).unwrap();
+            enc.array(datum_count as u64).unwrap();
+        }
+        for w in witnesses {
+            // datum_cbor is the encoding of one PlutusData item — inject raw bytes.
+            buf.extend_from_slice(&w.datum_cbor);
+        }
+    }
+
+    // Key 5: redeemers — array of [tag, index, data, ex_units]
+    if redeemer_count > 0 {
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.u32(5).unwrap();
+            enc.array(redeemer_count as u64).unwrap();
+        }
+        for (idx, w) in witnesses.iter().enumerate() {
+            let data =
+                decode_plutus_data_cbor(&w.redeemer_data_cbor).unwrap_or(PlutusData::Bytes(vec![]));
+            let r = Redeemer {
+                tag: RedeemerTag::Spend,
+                index: idx as u32,
+                data,
+                ex_units: w.ex_units,
+            };
+            buf.extend_from_slice(&encode_redeemer_to_cbor(&r));
+        }
+    }
+
+    // Key 6: PlutusV2 scripts
+    if !v2_scripts.is_empty() {
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.u32(6).unwrap();
+        enc.array(v2_scripts.len() as u64).unwrap();
+        for s in &v2_scripts {
+            enc.bytes(s).unwrap();
+        }
+    }
+
+    // Key 7: PlutusV3 scripts
+    if !v3_scripts.is_empty() {
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.u32(7).unwrap();
+        enc.array(v3_scripts.len() as u64).unwrap();
+        for s in &v3_scripts {
+            enc.bytes(s).unwrap();
+        }
+    }
+
+    buf
+}
+
+/// Decode a single CBOR-encoded PlutusData item back into the `PlutusData` type.
+///
+/// Used when round-tripping pre-encoded CBOR through the redeemer builder.
+/// On any decode failure returns `None`.
+fn decode_plutus_data_cbor(cbor: &[u8]) -> Option<PlutusData> {
+    // We use our own decode logic via minicbor to reconstruct PlutusData.
+    decode_plutus_cbor_inner(&mut minicbor::Decoder::new(cbor))
+}
+
+/// Recursive CBOR PlutusData decoder (mirrors `encode_plutus_data`).
+fn decode_plutus_cbor_inner(dec: &mut minicbor::Decoder<'_>) -> Option<PlutusData> {
+    use minicbor::data::Type;
+    match dec.datatype().ok()? {
+        Type::Tag => {
+            // Constr: tag 121+n (constructor 0–6) or 1280+n (7–127) or 102 general
+            let tag = dec.tag().ok()?.as_u64();
+            if tag == 102 {
+                // General constructor: [index, fields]
+                let _ = dec.array().ok()?;
+                let index = dec.u64().ok()?;
+                let arr_len = dec.array().ok()??;
+                let mut fields = Vec::new();
+                for _ in 0..arr_len {
+                    fields.push(decode_plutus_cbor_inner(dec)?);
+                }
+                Some(PlutusData::Constr(index, fields))
+            } else if (121..=127).contains(&tag) {
+                let constructor = tag - 121;
+                let arr_len = dec.array().ok()??;
+                let mut fields = Vec::new();
+                for _ in 0..arr_len {
+                    fields.push(decode_plutus_cbor_inner(dec)?);
+                }
+                Some(PlutusData::Constr(constructor, fields))
+            } else if tag >= 1280 {
+                let constructor = tag - 1280 + 7;
+                let arr_len = dec.array().ok()??;
+                let mut fields = Vec::new();
+                for _ in 0..arr_len {
+                    fields.push(decode_plutus_cbor_inner(dec)?);
+                }
+                Some(PlutusData::Constr(constructor, fields))
+            } else {
+                None
+            }
+        }
+        Type::Map => {
+            let len = dec.map().ok()?? as usize;
+            let mut entries = Vec::new();
+            for _ in 0..len {
+                let k = decode_plutus_cbor_inner(dec)?;
+                let v = decode_plutus_cbor_inner(dec)?;
+                entries.push((k, v));
+            }
+            Some(PlutusData::Map(entries))
+        }
+        Type::Array => {
+            let len = dec.array().ok()?? as usize;
+            let mut items = Vec::new();
+            for _ in 0..len {
+                items.push(decode_plutus_cbor_inner(dec)?);
+            }
+            Some(PlutusData::List(items))
+        }
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
+            let n = dec.u64().ok()?;
+            Some(PlutusData::Integer(n as i128))
+        }
+        Type::I8 | Type::I16 | Type::I32 | Type::I64 => {
+            let n = dec.i64().ok()?;
+            Some(PlutusData::Integer(n as i128))
+        }
+        Type::Bytes => {
+            let b = dec.bytes().ok()?.to_vec();
+            Some(PlutusData::Bytes(b))
+        }
+        _ => None,
+    }
 }
 
 /// Decode and print a summary of a transaction output from CBOR.
@@ -953,6 +1608,10 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         certificate_file,
         withdrawal,
         metadata_json_file,
+        tx_in_script_file,
+        tx_in_datum_file,
+        tx_in_redeemer_file,
+        tx_in_execution_units,
         tx_in_collateral,
         required_signer_hash,
         mint,
@@ -993,6 +1652,89 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         .collect::<Result<_>>()?;
 
     let parsed_mint = parse_mint_args(&mint)?;
+
+    // ── Parse Plutus script witnesses ───────────────────────────────────────
+    //
+    // The four `--tx-in-script-file`, `--tx-in-datum-file`,
+    // `--tx-in-redeemer-file`, and `--tx-in-execution-units` arguments are
+    // matched by position: the i-th occurrence of each corresponds to the i-th
+    // script-bearing `--tx-in`.  cardano-cli uses the same positional pairing
+    // convention.
+    //
+    // Validation: if any script file is given, a matching datum, redeemer, and
+    // execution units argument must also be present at the same index.
+    let script_witness_count = tx_in_script_file.len();
+    if !tx_in_datum_file.is_empty() && tx_in_datum_file.len() != script_witness_count {
+        bail!(
+            "--tx-in-datum-file count ({}) must match --tx-in-script-file count ({})",
+            tx_in_datum_file.len(),
+            script_witness_count
+        );
+    }
+    if !tx_in_redeemer_file.is_empty() && tx_in_redeemer_file.len() != script_witness_count {
+        bail!(
+            "--tx-in-redeemer-file count ({}) must match --tx-in-script-file count ({})",
+            tx_in_redeemer_file.len(),
+            script_witness_count
+        );
+    }
+    if !tx_in_execution_units.is_empty() && tx_in_execution_units.len() != script_witness_count {
+        bail!(
+            "--tx-in-execution-units count ({}) must match --tx-in-script-file count ({})",
+            tx_in_execution_units.len(),
+            script_witness_count
+        );
+    }
+
+    let mut script_witnesses: Vec<ScriptWitness> = Vec::with_capacity(script_witness_count);
+    for i in 0..script_witness_count {
+        let (version, script_bytes) = load_plutus_script(&tx_in_script_file[i])?;
+
+        let datum_data = if i < tx_in_datum_file.len() {
+            load_plutus_data_file(&tx_in_datum_file[i])?
+        } else {
+            bail!(
+                "--tx-in-datum-file not provided for script witness at position {i}. \
+                 Each --tx-in-script-file requires a matching --tx-in-datum-file."
+            );
+        };
+
+        let redeemer_data = if i < tx_in_redeemer_file.len() {
+            load_plutus_data_file(&tx_in_redeemer_file[i])?
+        } else {
+            bail!(
+                "--tx-in-redeemer-file not provided for script witness at position {i}. \
+                 Each --tx-in-script-file requires a matching --tx-in-redeemer-file."
+            );
+        };
+
+        let ex_units = if i < tx_in_execution_units.len() {
+            parse_execution_units(&tx_in_execution_units[i])?
+        } else {
+            bail!(
+                "--tx-in-execution-units not provided for script witness at position {i}. \
+                 Each --tx-in-script-file requires a matching --tx-in-execution-units."
+            );
+        };
+
+        // Pre-encode datum and redeemer to CBOR — this avoids round-trip
+        // encoding loss when injecting into the witness set and computing the
+        // script_data_hash.
+        let datum_cbor = encode_plutus_data_to_cbor(&datum_data);
+        let redeemer_data_cbor = encode_plutus_data_to_cbor(&redeemer_data);
+
+        script_witnesses.push(ScriptWitness {
+            version,
+            script_bytes,
+            datum_cbor,
+            redeemer_data_cbor,
+            ex_units,
+        });
+    }
+
+    // Compute the script_data_hash (tx body field 11) for all Plutus witnesses.
+    // This is None when no script witnesses are present.
+    let script_data_hash = compute_script_data_hash_offline(&script_witnesses);
 
     let certificates: Vec<Vec<u8>> = certificate_file
         .iter()
@@ -1092,6 +1834,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             &collateral_inputs,
             &required_signers,
             &parsed_mint,
+            script_data_hash.as_ref(),
         )?;
         // Assume 1 witness (the payment key). SPO tools can override with --fee.
         let fee_estimate_1 = estimate_fee(&body_no_change, 1, min_fee_a, min_fee_b);
@@ -1130,6 +1873,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             &collateral_inputs,
             &required_signers,
             &parsed_mint,
+            script_data_hash.as_ref(),
         )?;
         let fee_final = estimate_fee(&body_with_change, 1, min_fee_a, min_fee_b);
 
@@ -1170,6 +1914,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         &collateral_inputs,
         &required_signers,
         &parsed_mint,
+        script_data_hash.as_ref(),
     )?;
 
     // Write as text envelope (cardano-cli compatible format)
@@ -1182,6 +1927,16 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     // Include auxiliary data if present (for sign/assemble to embed in tx)
     if let Some(ref aux) = auxiliary_data {
         envelope["auxiliaryDataCborHex"] = serde_json::Value::String(hex::encode(aux));
+    }
+
+    // Include Plutus witness set CBOR when script witnesses are present.
+    // This non-standard field lets `transaction sign` and `transaction assemble`
+    // embed the Plutus witnesses alongside the vkey witnesses in the signed tx,
+    // without requiring the user to re-supply the script files at sign time.
+    if !script_witnesses.is_empty() {
+        let plutus_ws_cbor = build_plutus_witness_set_cbor(&script_witnesses);
+        envelope["plutusWitnessesCborHex"] =
+            serde_json::Value::String(hex::encode(&plutus_ws_cbor));
     }
 
     std::fs::write(&out_file, serde_json::to_string_pretty(&envelope)?)?;
@@ -1238,27 +1993,45 @@ impl TransactionCmd {
                     witnesses.push((vk.to_bytes().to_vec(), signature));
                 }
 
-                // Build signed transaction CBOR: [tx_body, witnesses, true, null]
-                let mut signed_buf = Vec::new();
-                let mut enc = minicbor::Encoder::new(&mut signed_buf);
-                enc.array(4)?;
+                // Build the witness set map.
+                //
+                // The witness set is a CBOR map with these optional keys:
+                //   0 → vkey witnesses    (always present after signing)
+                //   3 → PlutusV1 scripts  \
+                //   4 → datums             > from plutusWitnessesCborHex in the
+                //   5 → redeemers          > tx body envelope (if any)
+                //   6 → PlutusV2 scripts  /
+                //   7 → PlutusV3 scripts  /
+                //
+                // When the tx body envelope contains a `plutusWitnessesCborHex`
+                // field we decode the embedded map and merge its keys into the
+                // witness set produced here.
+                let plutus_ws_hex = envelope
+                    .get("plutusWitnessesCborHex")
+                    .and_then(|v| v.as_str());
 
-                // Raw tx body CBOR (embed as-is using tag-less bytes)
-                // We need to include the raw CBOR, so write it directly
-                signed_buf.extend_from_slice(&tx_body_cbor);
+                // Collect Plutus witness-set keys from the pre-built map (if any)
+                // so we can count how many witness-set keys we need in total.
+                let plutus_entries = collect_plutus_witness_entries(plutus_ws_hex)?;
 
-                // Re-create encoder after extending
+                // Witness set map: key 0 = vkey witnesses + any Plutus keys
+                let ws_key_count = 1 + plutus_entries.len();
                 let mut witness_buf = Vec::new();
-                let mut wenc = minicbor::Encoder::new(&mut witness_buf);
-
-                // Witness set: map { 0: [[vkey, sig], ...] }
-                wenc.map(1)?;
-                wenc.u32(0)?;
-                wenc.array(witnesses.len() as u64)?;
-                for (vkey, sig) in &witnesses {
-                    wenc.array(2)?;
-                    wenc.bytes(vkey)?;
-                    wenc.bytes(sig)?;
+                {
+                    let mut wenc = minicbor::Encoder::new(&mut witness_buf);
+                    wenc.map(ws_key_count as u64)?;
+                    // Key 0: vkey witnesses
+                    wenc.u32(0)?;
+                    wenc.array(witnesses.len() as u64)?;
+                    for (vkey, sig) in &witnesses {
+                        wenc.array(2)?;
+                        wenc.bytes(vkey)?;
+                        wenc.bytes(sig)?;
+                    }
+                }
+                // Append raw Plutus witness entries (each is pre-encoded key+value CBOR)
+                for (_, entry_cbor) in &plutus_entries {
+                    witness_buf.extend_from_slice(entry_cbor);
                 }
 
                 // Build complete signed tx: [body, witness_set, true, null]
@@ -1669,22 +2442,35 @@ impl TransactionCmd {
                     vkey_witnesses.push((vkey, sig));
                 }
 
+                // Collect Plutus witness entries stored in the body envelope
+                let plutus_ws_hex = body_env
+                    .get("plutusWitnessesCborHex")
+                    .and_then(|v| v.as_str());
+                let plutus_entries = collect_plutus_witness_entries(plutus_ws_hex)?;
+
                 // Build signed tx: [body, witness_set, true, null]
                 let mut tx_cbor = Vec::new();
                 let mut enc = minicbor::Encoder::new(&mut tx_cbor);
                 enc.array(4)?;
                 // Write body as raw CBOR
                 tx_cbor.extend_from_slice(&body_cbor);
-                // Witness set: {0: [[vkey, sig], ...]}
+                // Witness set: {0: [[vkey, sig], ...], <plutus keys...>}
+                let ws_key_count = 1 + plutus_entries.len();
                 let mut ws_buf = Vec::new();
-                let mut ws_enc = minicbor::Encoder::new(&mut ws_buf);
-                ws_enc.map(1)?;
-                ws_enc.u32(0)?; // vkey witnesses
-                ws_enc.array(vkey_witnesses.len() as u64)?;
-                for (vkey, sig) in &vkey_witnesses {
-                    ws_enc.array(2)?;
-                    ws_enc.bytes(vkey)?;
-                    ws_enc.bytes(sig)?;
+                {
+                    let mut ws_enc = minicbor::Encoder::new(&mut ws_buf);
+                    ws_enc.map(ws_key_count as u64)?;
+                    ws_enc.u32(0)?; // vkey witnesses
+                    ws_enc.array(vkey_witnesses.len() as u64)?;
+                    for (vkey, sig) in &vkey_witnesses {
+                        ws_enc.array(2)?;
+                        ws_enc.bytes(vkey)?;
+                        ws_enc.bytes(sig)?;
+                    }
+                }
+                // Append raw Plutus witness entries
+                for (_, entry_cbor) in &plutus_entries {
+                    ws_buf.extend_from_slice(entry_cbor);
                 }
                 tx_cbor.extend_from_slice(&ws_buf);
                 // is_valid: true
@@ -1734,6 +2520,49 @@ impl TransactionCmd {
             }
         }
     }
+}
+
+/// Decode a Plutus witness-set map from a hex-encoded CBOR string and return
+/// the individual map entries as `(key, raw_cbor_key_and_value)` pairs.
+///
+/// This is used by `transaction sign` and `transaction assemble` to merge
+/// Plutus witness-set keys (3–7) from the `plutusWitnessesCborHex` field in
+/// the tx body envelope into the final signed transaction's witness set.
+///
+/// Returning raw CBOR bytes for each entry (key + value as a contiguous slice)
+/// lets us inject them verbatim into the new map without re-encoding, which
+/// preserves the byte-exact encoding needed for the script data hash to match.
+fn collect_plutus_witness_entries(plutus_ws_hex: Option<&str>) -> Result<Vec<(u32, Vec<u8>)>> {
+    let hex = match plutus_ws_hex {
+        None => return Ok(Vec::new()),
+        Some("") => return Ok(Vec::new()),
+        Some(h) => h,
+    };
+
+    let cbor = hex::decode(hex)
+        .map_err(|e| anyhow::anyhow!("Invalid hex in plutusWitnessesCborHex: {e}"))?;
+
+    let mut dec = minicbor::Decoder::new(&cbor);
+    let map_len = dec
+        .map()
+        .map_err(|e| anyhow::anyhow!("Plutus witness set is not a CBOR map: {e}"))?
+        .unwrap_or(0) as usize;
+
+    let mut entries = Vec::with_capacity(map_len);
+    for _ in 0..map_len {
+        // Record the byte range that covers the key+value pair so we can
+        // inject both as a single raw slice into the merged witness set.
+        let entry_start = dec.position();
+        let key = dec
+            .u32()
+            .map_err(|e| anyhow::anyhow!("Plutus witness map key is not a uint: {e}"))?;
+        dec.skip()
+            .map_err(|e| anyhow::anyhow!("Cannot skip Plutus witness map value: {e}"))?;
+        let entry_end = dec.position();
+        entries.push((key, cbor[entry_start..entry_end].to_vec()));
+    }
+
+    Ok(entries)
 }
 
 /// Extract the transaction body CBOR from a signed transaction
@@ -1813,6 +2642,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         );
         assert!(result.is_ok());
     }
@@ -1841,6 +2671,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         );
         assert!(result.is_ok());
     }
@@ -1863,6 +2694,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         );
         assert!(result.is_ok());
         let cbor = result.unwrap();
@@ -2115,6 +2947,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -2141,6 +2974,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -2164,6 +2998,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -2181,6 +3016,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -2385,5 +3221,366 @@ mod tests {
         let raw = build_utxo_msg_result(&[]);
         let total = sum_utxo_lovelace(&raw).unwrap();
         assert_eq!(total, 0);
+    }
+
+    // ── Plutus data JSON parsing tests ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_plutus_data_int() {
+        let json = serde_json::json!({"int": 42});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Integer(42));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_negative_int() {
+        let json = serde_json::json!({"int": -100});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Integer(-100));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_bytes() {
+        let json = serde_json::json!({"bytes": "deadbeef"});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Bytes(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_empty_bytes() {
+        let json = serde_json::json!({"bytes": ""});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Bytes(vec![]));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_list() {
+        let json = serde_json::json!({"list": [{"int": 1}, {"int": 2}]});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(
+            data,
+            PlutusData::List(vec![PlutusData::Integer(1), PlutusData::Integer(2)])
+        );
+    }
+
+    #[test]
+    fn test_parse_plutus_data_empty_list() {
+        let json = serde_json::json!({"list": []});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::List(vec![]));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_map() {
+        let json = serde_json::json!({
+            "map": [
+                {"k": {"int": 1}, "v": {"bytes": "aabb"}}
+            ]
+        });
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(
+            data,
+            PlutusData::Map(vec![(
+                PlutusData::Integer(1),
+                PlutusData::Bytes(vec![0xaa, 0xbb])
+            )])
+        );
+    }
+
+    #[test]
+    fn test_parse_plutus_data_constructor_small() {
+        // Constructor 0 with one field
+        let json = serde_json::json!({"constructor": 0, "fields": [{"int": 42}]});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Constr(0, vec![PlutusData::Integer(42)]));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_constructor_empty_fields() {
+        let json = serde_json::json!({"constructor": 1, "fields": []});
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(data, PlutusData::Constr(1, vec![]));
+    }
+
+    #[test]
+    fn test_parse_plutus_data_nested() {
+        // Nested constructor with list inside
+        let json = serde_json::json!({
+            "constructor": 0,
+            "fields": [
+                {"list": [{"int": 10}, {"bytes": "ff"}]}
+            ]
+        });
+        let data = parse_plutus_data_json(&json).unwrap();
+        assert_eq!(
+            data,
+            PlutusData::Constr(
+                0,
+                vec![PlutusData::List(vec![
+                    PlutusData::Integer(10),
+                    PlutusData::Bytes(vec![0xff])
+                ])]
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_plutus_data_invalid_schema() {
+        let json = serde_json::json!({"unknown": "value"});
+        assert!(parse_plutus_data_json(&json).is_err());
+    }
+
+    #[test]
+    fn test_parse_plutus_data_invalid_bytes_hex() {
+        let json = serde_json::json!({"bytes": "zzzz"});
+        assert!(parse_plutus_data_json(&json).is_err());
+    }
+
+    // ── Plutus data CBOR encoding tests ─────────────────────────────────────
+
+    #[test]
+    fn test_encode_plutus_integer_zero() {
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::Integer(0));
+        // CBOR uint(0) = 0x00
+        assert_eq!(cbor, vec![0x00]);
+    }
+
+    #[test]
+    fn test_encode_plutus_integer_positive() {
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::Integer(42));
+        // CBOR uint(42) = 0x18 0x2a
+        let mut dec = minicbor::Decoder::new(&cbor);
+        assert_eq!(dec.u64().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_encode_plutus_integer_negative() {
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::Integer(-1));
+        // CBOR negative int -1 = 0x20
+        assert_eq!(cbor, vec![0x20]);
+    }
+
+    #[test]
+    fn test_encode_plutus_bytes() {
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::Bytes(vec![0xde, 0xad]));
+        let mut dec = minicbor::Decoder::new(&cbor);
+        assert_eq!(dec.bytes().unwrap(), &[0xde, 0xad]);
+    }
+
+    #[test]
+    fn test_encode_plutus_list() {
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::List(vec![
+            PlutusData::Integer(1),
+            PlutusData::Integer(2),
+        ]));
+        let mut dec = minicbor::Decoder::new(&cbor);
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u64().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_encode_plutus_constr_small() {
+        // Constructor 0 → CBOR tag 121
+        let cbor =
+            encode_plutus_data_to_cbor(&PlutusData::Constr(0, vec![PlutusData::Integer(42)]));
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let tag = dec.tag().unwrap();
+        assert_eq!(tag.as_u64(), 121); // 121 + 0
+        assert_eq!(dec.array().unwrap(), Some(1));
+        assert_eq!(dec.u64().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_encode_plutus_constr_large() {
+        // Constructor 7 → CBOR tag 1280
+        let cbor = encode_plutus_data_to_cbor(&PlutusData::Constr(7, vec![]));
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let tag = dec.tag().unwrap();
+        assert_eq!(tag.as_u64(), 1280); // 1280 + (7-7)
+        assert_eq!(dec.array().unwrap(), Some(0));
+    }
+
+    // ── Execution unit parsing tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_execution_units_valid() {
+        let ex = parse_execution_units("1000000,500000000").unwrap();
+        assert_eq!(ex.mem, 1_000_000);
+        assert_eq!(ex.steps, 500_000_000);
+    }
+
+    #[test]
+    fn test_parse_execution_units_with_spaces() {
+        let ex = parse_execution_units("  200000 , 100000000 ").unwrap();
+        assert_eq!(ex.mem, 200_000);
+        assert_eq!(ex.steps, 100_000_000);
+    }
+
+    #[test]
+    fn test_parse_execution_units_missing_comma() {
+        assert!(parse_execution_units("1000000").is_err());
+    }
+
+    #[test]
+    fn test_parse_execution_units_non_numeric() {
+        assert!(parse_execution_units("abc,def").is_err());
+    }
+
+    // ── CBOR byte unwrapping tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_cbor_unwrap_bytes_plain() {
+        // Encode bytes(b"hello") and check we get "hello" back
+        let mut buf = Vec::new();
+        minicbor::Encoder::new(&mut buf).bytes(b"hello").unwrap();
+        let result = cbor_unwrap_bytes(&buf).unwrap();
+        assert_eq!(result, b"hello");
+    }
+
+    #[test]
+    fn test_cbor_unwrap_bytes_not_bytes() {
+        // A CBOR uint is not a byte string
+        let mut buf = Vec::new();
+        minicbor::Encoder::new(&mut buf).u32(42).unwrap();
+        // Should fall through to None because it's not bytes
+        assert!(cbor_unwrap_bytes(&buf).is_none());
+    }
+
+    // ── Script data hash computation tests ──────────────────────────────────
+
+    #[test]
+    fn test_script_data_hash_none_for_empty_witnesses() {
+        let hash = compute_script_data_hash_offline(&[]);
+        assert!(hash.is_none(), "No witnesses → no script data hash");
+    }
+
+    #[test]
+    fn test_script_data_hash_present_for_witness() {
+        // A witness with an integer datum/redeemer must produce a hash
+        let datum = PlutusData::Integer(42);
+        let redeemer = PlutusData::Integer(0);
+        let w = ScriptWitness {
+            version: PlutusVersion::V2,
+            script_bytes: vec![0x01, 0x02, 0x03],
+            datum_cbor: encode_plutus_data_to_cbor(&datum),
+            redeemer_data_cbor: encode_plutus_data_to_cbor(&redeemer),
+            ex_units: ExUnits {
+                mem: 1_000_000,
+                steps: 500_000_000,
+            },
+        };
+        let hash = compute_script_data_hash_offline(&[w]);
+        assert!(
+            hash.is_some(),
+            "One witness → script data hash must be Some"
+        );
+        // The hash must be exactly 32 bytes
+        assert_eq!(hash.unwrap().as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn test_script_data_hash_is_deterministic() {
+        let datum = PlutusData::Bytes(vec![0xca, 0xfe]);
+        let redeemer = PlutusData::Constr(0, vec![]);
+        let w = ScriptWitness {
+            version: PlutusVersion::V1,
+            script_bytes: vec![0xde, 0xad],
+            datum_cbor: encode_plutus_data_to_cbor(&datum),
+            redeemer_data_cbor: encode_plutus_data_to_cbor(&redeemer),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 200,
+            },
+        };
+        let h1 = compute_script_data_hash_offline(std::slice::from_ref(&w));
+        let h2 = compute_script_data_hash_offline(std::slice::from_ref(&w));
+        assert_eq!(h1, h2, "Hash must be deterministic");
+    }
+
+    // ── Plutus witness set CBOR tests ────────────────────────────────────────
+
+    #[test]
+    fn test_build_plutus_witness_set_empty() {
+        let cbor = build_plutus_witness_set_cbor(&[]);
+        // Must be empty CBOR map: 0xa0
+        assert_eq!(cbor, vec![0xa0]);
+    }
+
+    #[test]
+    fn test_build_plutus_witness_set_v2_single() {
+        let datum = PlutusData::Integer(1);
+        let redeemer = PlutusData::Integer(0);
+        let w = ScriptWitness {
+            version: PlutusVersion::V2,
+            script_bytes: vec![0x01],
+            datum_cbor: encode_plutus_data_to_cbor(&datum),
+            redeemer_data_cbor: encode_plutus_data_to_cbor(&redeemer),
+            ex_units: ExUnits {
+                mem: 1000,
+                steps: 2000,
+            },
+        };
+        let cbor = build_plutus_witness_set_cbor(&[w]);
+
+        // Must be a valid CBOR map with at least key 4 (datums), 5 (redeemers), 6 (v2 scripts)
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        assert!(
+            map_len >= 3,
+            "Witness set must have at least 3 keys (datums, redeemers, v2 scripts)"
+        );
+    }
+
+    #[test]
+    fn test_collect_plutus_witness_entries_none() {
+        let entries = collect_plutus_witness_entries(None).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_collect_plutus_witness_entries_empty_string() {
+        let entries = collect_plutus_witness_entries(Some("")).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_tx_body_has_script_data_hash_field_when_script_present() {
+        // Build a tx body with a script_data_hash and verify field 11 is present
+        let hash = torsten_primitives::hash::Hash32::from_bytes([0xab; 32]);
+        let inputs = vec![(Hash32::from_bytes([0x01; 32]), 0)];
+        let outputs = vec![];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200_000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&hash),
+        )
+        .unwrap();
+
+        // Decode the map and look for key 11
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        let mut found_key_11 = false;
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            if key == 11 {
+                found_key_11 = true;
+                // Value must be bytes(32)
+                let hash_bytes = dec.bytes().unwrap();
+                assert_eq!(hash_bytes.len(), 32);
+                assert_eq!(hash_bytes, &[0xab; 32]);
+            } else {
+                dec.skip().unwrap();
+            }
+        }
+        assert!(found_key_11, "Field 11 (script_data_hash) must be present");
     }
 }

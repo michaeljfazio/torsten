@@ -1,0 +1,286 @@
+//! Transaction validation — Phase-1 and Phase-2.
+//!
+//! This module is the public surface of the validation subsystem. It:
+//! - Defines [`ValidationError`], the unified error type for all validation rules.
+//! - Provides [`validate_transaction`] and [`validate_transaction_with_pools`] as
+//!   the sole public entry points.
+//! - Re-exports [`evaluate_native_script`] for callers that need to evaluate
+//!   native scripts outside of full transaction validation (e.g. mempool admission).
+//!
+//! Internal rule logic is split across focused sub-modules:
+//! - [`phase1`]    — Rules 1–10, 13–14 (structural/witness rules)
+//! - [`collateral`] — Rules 11, 11b, 11c (collateral for Plutus transactions)
+//! - [`scripts`]   — Rule 12 + script hash utilities + native script evaluation
+//! - [`conway`]    — Era-gating checks + deposit/refund accounting
+
+mod collateral;
+mod conway;
+mod phase1;
+mod scripts;
+
+#[cfg(test)]
+mod tests;
+
+pub use scripts::evaluate_native_script;
+
+use std::collections::HashSet;
+
+use torsten_primitives::hash::Hash28;
+use torsten_primitives::protocol_params::ProtocolParameters;
+use torsten_primitives::transaction::Transaction;
+use tracing::{debug, trace, warn};
+
+use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
+use crate::utxo::UtxoSet;
+
+// ---------------------------------------------------------------------------
+// Public error type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    #[error("No inputs in transaction")]
+    NoInputs,
+    #[error("Input not found in UTxO set: {0}")]
+    InputNotFound(String),
+    #[error("Value not conserved: inputs={inputs}, outputs={outputs}, fee={fee}")]
+    ValueNotConserved { inputs: u64, outputs: u64, fee: u64 },
+    #[error("Fee too small: minimum={minimum}, actual={actual}")]
+    FeeTooSmall { minimum: u64, actual: u64 },
+    #[error("Output too small: minimum={minimum}, actual={actual}")]
+    OutputTooSmall { minimum: u64, actual: u64 },
+    #[error("Transaction too large: maximum={maximum}, actual={actual}")]
+    TxTooLarge { maximum: u64, actual: u64 },
+    #[error("Missing required signer: {0}")]
+    MissingRequiredSigner(String),
+    #[error("Missing witness for input: {0}")]
+    MissingWitness(String),
+    #[error("TTL expired: current_slot={current_slot}, ttl={ttl}")]
+    TtlExpired { current_slot: u64, ttl: u64 },
+    #[error("Transaction not yet valid: current_slot={current_slot}, valid_from={valid_from}")]
+    NotYetValid { current_slot: u64, valid_from: u64 },
+    #[error("Script validation failed: {0}")]
+    ScriptFailed(String),
+    #[error("Insufficient collateral")]
+    InsufficientCollateral,
+    #[error("Too many collateral inputs: max={max}, actual={actual}")]
+    TooManyCollateralInputs { max: u64, actual: u64 },
+    #[error("Collateral input not found in UTxO set: {0}")]
+    CollateralNotFound(String),
+    #[error("Collateral input contains tokens (must be pure ADA): {0}")]
+    CollateralHasTokens(String),
+    #[error("Collateral mismatch: total_collateral={declared}, effective={computed}")]
+    CollateralMismatch { declared: u64, computed: u64 },
+    #[error("Reference input not found in UTxO set: {0}")]
+    ReferenceInputNotFound(String),
+    #[error("Reference input overlaps with regular input: {0}")]
+    ReferenceInputOverlapsInput(String),
+    #[error("Multi-asset not conserved for policy {policy}: inputs+mint={input_side}, outputs={output_side}")]
+    MultiAssetNotConserved {
+        policy: String,
+        input_side: i128,
+        output_side: i128,
+    },
+    #[error("Negative minting without policy script")]
+    InvalidMint,
+    #[error("Max execution units exceeded")]
+    ExUnitsExceeded,
+    #[error("Script data hash mismatch: expected {expected}, got {actual}")]
+    ScriptDataHashMismatch { expected: String, actual: String },
+    #[error("Script data hash present but no scripts or redeemers")]
+    UnexpectedScriptDataHash,
+    #[error("Missing script data hash (required when scripts/redeemers present)")]
+    MissingScriptDataHash,
+    #[error("Duplicate input in transaction: {0}")]
+    DuplicateInput(String),
+    #[error("Native script validation failed")]
+    NativeScriptFailed,
+    #[error("Witness signature verification failed for vkey: {0}")]
+    InvalidWitnessSignature(String),
+    #[error("Output address network mismatch: expected {expected:?}, got {actual:?}")]
+    NetworkMismatch {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
+    #[error("Auxiliary data hash declared but no auxiliary data present")]
+    AuxiliaryDataHashWithoutData,
+    #[error("Auxiliary data present but no auxiliary data hash in tx body")]
+    AuxiliaryDataWithoutHash,
+    #[error("Block execution units exceeded: {resource} limit={limit}, total={total}")]
+    BlockExUnitsExceeded {
+        resource: String,
+        limit: u64,
+        total: u64,
+    },
+    #[error("Output value too large: maximum={maximum}, actual={actual}")]
+    OutputValueTooLarge { maximum: u64, actual: u64 },
+    #[error("Plutus transaction missing raw CBOR for script evaluation")]
+    MissingRawCbor,
+    #[error("Plutus transaction missing slot configuration for script evaluation")]
+    MissingSlotConfig,
+    #[error("Script-locked input at index {index} has no matching Spend redeemer")]
+    MissingSpendRedeemer { index: u32 },
+    #[error("Redeemer index out of range: tag={tag}, index={index}, max={max}")]
+    RedeemerIndexOutOfRange { tag: String, index: u32, max: usize },
+    #[error("Missing VKey witness for input credential: {0}")]
+    MissingInputWitness(String),
+    #[error("Missing script witness for script-locked input: {0}")]
+    MissingScriptWitness(String),
+    #[error("Missing VKey witness for withdrawal credential: {0}")]
+    MissingWithdrawalWitness(String),
+    #[error("Missing script witness for script-locked withdrawal: {0}")]
+    MissingWithdrawalScriptWitness(String),
+    #[error("Value overflow in transaction accounting")]
+    ValueOverflow,
+    #[error("Era gating violation: {certificate_type} requires {required_era}, current era is {current_era}")]
+    EraGatingViolation {
+        certificate_type: String,
+        required_era: String,
+        current_era: String,
+    },
+    #[error("Governance feature requires Conway era (protocol >= 9), current protocol version is {current_version}")]
+    GovernancePreConway { current_version: u64 },
+}
+
+// ---------------------------------------------------------------------------
+// Public validation entry points
+// ---------------------------------------------------------------------------
+
+/// Validate a transaction against the current UTxO set and protocol parameters.
+///
+/// This is a convenience wrapper around [`validate_transaction_with_pools`] that
+/// treats all pool registrations as new (no re-registration discount).
+pub fn validate_transaction(
+    tx: &Transaction,
+    utxo_set: &UtxoSet,
+    params: &ProtocolParameters,
+    current_slot: u64,
+    tx_size: u64,
+    slot_config: Option<&SlotConfig>,
+) -> Result<(), Vec<ValidationError>> {
+    validate_transaction_with_pools(
+        tx,
+        utxo_set,
+        params,
+        current_slot,
+        tx_size,
+        slot_config,
+        None,
+    )
+}
+
+/// Validate a transaction with an optional set of registered pools.
+///
+/// When `registered_pools` is `Some`, pool re-registrations (updating an existing
+/// pool's parameters) do not charge an additional deposit — only new pool
+/// registrations do. When `None`, all pool registrations are treated as new
+/// (deposit always charged).
+///
+/// The validation pipeline is:
+/// 1. Phase-1 structural rules (Rules 1–10, 13–14) via [`phase1::run_phase1_rules`].
+/// 2. For Plutus transactions: collateral rules (Rules 11, 11b, 11c) and
+///    script data hash (Rule 12).
+/// 3. Phase-2 Plutus script execution when all Phase-1 checks pass and redeemers
+///    are present.
+pub fn validate_transaction_with_pools(
+    tx: &Transaction,
+    utxo_set: &UtxoSet,
+    params: &ProtocolParameters,
+    current_slot: u64,
+    tx_size: u64,
+    slot_config: Option<&SlotConfig>,
+    registered_pools: Option<&HashSet<Hash28>>,
+) -> Result<(), Vec<ValidationError>> {
+    trace!(
+        tx_hash = %tx.hash.to_hex(),
+        inputs = tx.body.inputs.len(),
+        outputs = tx.body.outputs.len(),
+        fee = tx.body.fee.0,
+        tx_size,
+        current_slot,
+        "Validation: validating transaction"
+    );
+
+    let mut errors = Vec::new();
+
+    // ------------------------------------------------------------------
+    // Phase-1 structural rules (Rules 1–10, 13–14)
+    // ------------------------------------------------------------------
+    phase1::run_phase1_rules(
+        tx,
+        utxo_set,
+        params,
+        current_slot,
+        tx_size,
+        registered_pools,
+        &mut errors,
+    );
+
+    // ------------------------------------------------------------------
+    // Rules 11, 11b, 11c, 12 — Plutus-transaction-specific checks
+    //
+    // These are only enforced when the transaction includes Plutus scripts
+    // or redeemers. They are split into their own modules to keep the rule
+    // logic focused and independently testable.
+    // ------------------------------------------------------------------
+    if scripts::has_plutus_scripts(tx) {
+        // Rule 11: collateral inputs, percentage, net-ADA check, total_collateral
+        // Rule 11b: redeemer index bounds
+        collateral::check_collateral(tx, utxo_set, params, &mut errors);
+
+        // Rule 11c: every script-locked spending input must have a Spend redeemer
+        collateral::check_spend_redeemers(tx, utxo_set, &mut errors);
+
+        // Rule 12: script data hash (mkScriptIntegrity) — covers redeemers,
+        // datums, cost models, and language versions.
+        scripts::check_script_data_hash(tx, utxo_set, params, &mut errors);
+
+        // ------------------------------------------------------------------
+        // Phase-2: Execute Plutus scripts when redeemers are present.
+        //
+        // Both `raw_cbor` and `slot_config` are required for Plutus evaluation.
+        // A missing `raw_cbor` means the transaction was constructed locally
+        // without being round-tripped through CBOR — that is a programming
+        // error and must be surfaced. Silent bypass is not allowed.
+        // ------------------------------------------------------------------
+        let has_redeemers = !tx.witness_set.redeemers.is_empty();
+        if errors.is_empty() && has_redeemers {
+            if tx.raw_cbor.is_none() {
+                debug!(
+                    tx_hash = %tx.hash.to_hex(),
+                    "Plutus transaction missing raw CBOR for script evaluation"
+                );
+                errors.push(ValidationError::MissingRawCbor);
+            }
+            if slot_config.is_none() {
+                debug!(
+                    tx_hash = %tx.hash.to_hex(),
+                    "Plutus transaction missing slot configuration for script evaluation"
+                );
+                errors.push(ValidationError::MissingSlotConfig);
+            }
+            if let (Some(ref _raw), Some(sc)) = (&tx.raw_cbor, slot_config) {
+                let cost_models_cbor = params.cost_models.to_cbor();
+                let max_ex = (params.max_tx_ex_units.mem, params.max_tx_ex_units.steps);
+                if let Err(e) =
+                    evaluate_plutus_scripts(tx, utxo_set, cost_models_cbor.as_deref(), max_ex, sc)
+                {
+                    errors.push(ValidationError::ScriptFailed(e.to_string()));
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        debug!(tx_hash = %tx.hash.to_hex(), "Validation: transaction valid");
+        Ok(())
+    } else {
+        warn!(
+            tx_hash = %tx.hash.to_hex(),
+            error_count = errors.len(),
+            errors = ?errors,
+            "Validation: transaction rejected"
+        );
+        Err(errors)
+    }
+}

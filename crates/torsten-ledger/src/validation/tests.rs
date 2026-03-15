@@ -1,0 +1,2688 @@
+//! Tests for Phase-1 transaction validation.
+//!
+//! All tests live here so production modules stay focused on logic only.
+
+#[cfg(test)]
+#[allow(clippy::module_inception)]
+mod tests {
+    use std::collections::{BTreeMap, HashSet};
+
+    use torsten_primitives::address::{Address, ByronAddress};
+    use torsten_primitives::hash::Hash32;
+    use torsten_primitives::protocol_params::ProtocolParameters;
+    use torsten_primitives::transaction::*;
+    use torsten_primitives::value::Value;
+
+    use crate::utxo::UtxoSet;
+
+    // Public entry points
+    use super::super::{validate_transaction, validate_transaction_with_pools, ValidationError};
+
+    // Internal helpers exposed for testing
+    use super::super::conway::{calculate_deposits_and_refunds, conway_only_certificate_name};
+    use super::super::phase1::extract_reward_credential;
+    use super::super::scripts::{
+        calculate_ref_script_tiered_fee, cbor_uint_size, compute_script_ref_hash,
+        estimate_value_cbor_size, evaluate_native_script, script_ref_byte_size,
+    };
+
+    use torsten_primitives::hash::Hash28;
+    use torsten_primitives::time::SlotNo;
+    use torsten_primitives::value::{AssetName, Lovelace};
+
+    fn make_simple_utxo_set() -> (UtxoSet, TransactionInput) {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let output = TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        utxo_set.insert(input.clone(), output);
+        (utxo_set, input)
+    }
+
+    fn make_simple_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction {
+        Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(output_value),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(fee),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        }
+    }
+
+    #[test]
+    fn test_valid_transaction() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_no_inputs() {
+        let (utxo_set, _) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(
+            TransactionInput {
+                transaction_id: Hash32::ZERO,
+                index: 0,
+            },
+            0,
+            0,
+        );
+        tx.body.inputs.clear();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NoInputs)));
+    }
+
+    #[test]
+    fn test_input_not_found() {
+        let (utxo_set, _) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let missing_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            index: 0,
+        };
+        let tx = make_simple_tx(missing_input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_value_not_conserved() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 10_000_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fee_too_small() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_999_900, 100);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_output_too_small() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 1000, 9_999_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ttl_expired() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.ttl = Some(SlotNo(50));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_not_yet_valid() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.validity_interval_start = Some(SlotNo(200));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tx_too_large() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 20000, None);
+        assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Native script evaluation
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_native_script_pubkey_match() {
+        let key = Hash32::from_bytes([1u8; 32]);
+        let script = NativeScript::ScriptPubkey(key);
+        let signers: HashSet<Hash32> = [key].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_pubkey_no_match() {
+        let key = Hash32::from_bytes([1u8; 32]);
+        let other_key = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptPubkey(key);
+        let signers: HashSet<Hash32> = [other_key].into();
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_all() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptAll(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::ScriptPubkey(k2),
+        ]);
+        let signers: HashSet<Hash32> = [k1, k2].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        let partial: HashSet<Hash32> = [k1].into();
+        assert!(!evaluate_native_script(&script, &partial, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_any() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let script = NativeScript::ScriptAny(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::ScriptPubkey(k2),
+        ]);
+        let signers: HashSet<Hash32> = [k2].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        let empty: HashSet<Hash32> = HashSet::new();
+        assert!(!evaluate_native_script(&script, &empty, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_n_of_k() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let k2 = Hash32::from_bytes([2u8; 32]);
+        let k3 = Hash32::from_bytes([3u8; 32]);
+        let script = NativeScript::ScriptNOfK(
+            2,
+            vec![
+                NativeScript::ScriptPubkey(k1),
+                NativeScript::ScriptPubkey(k2),
+                NativeScript::ScriptPubkey(k3),
+            ],
+        );
+        let signers: HashSet<Hash32> = [k1, k3].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        let one: HashSet<Hash32> = [k1].into();
+        assert!(!evaluate_native_script(&script, &one, SlotNo(100)));
+    }
+
+    #[test]
+    fn test_native_script_invalid_before() {
+        let script = NativeScript::InvalidBefore(SlotNo(50));
+        let signers: HashSet<Hash32> = HashSet::new();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(50)));
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(49)));
+    }
+
+    #[test]
+    fn test_native_script_invalid_hereafter() {
+        let script = NativeScript::InvalidHereafter(SlotNo(100));
+        let signers: HashSet<Hash32> = HashSet::new();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(99)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(101)));
+    }
+
+    #[test]
+    fn test_native_script_nested_timelock_multisig() {
+        let k1 = Hash32::from_bytes([1u8; 32]);
+        let script = NativeScript::ScriptAll(vec![
+            NativeScript::ScriptPubkey(k1),
+            NativeScript::InvalidBefore(SlotNo(50)),
+            NativeScript::InvalidHereafter(SlotNo(200)),
+        ]);
+        let signers: HashSet<Hash32> = [k1].into();
+        assert!(evaluate_native_script(&script, &signers, SlotNo(100)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(49)));
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(200)));
+        let empty: HashSet<Hash32> = HashSet::new();
+        assert!(!evaluate_native_script(&script, &empty, SlotNo(100)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Certificates: deposits and refunds
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_stake_registration_deposit() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+        let mut tx = make_simple_tx(input, 10_000_000 - 200_000 - key_deposit, 200_000);
+        tx.body.certificates.push(Certificate::StakeRegistration(
+            torsten_primitives::credentials::Credential::VerificationKey(
+                torsten_primitives::hash::Hash28::from_bytes([5u8; 28]),
+            ),
+        ));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_stake_deregistration_refund() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+        let mut tx = make_simple_tx(input, 10_000_000 - 200_000 + key_deposit, 200_000);
+        tx.body.certificates.push(Certificate::StakeDeregistration(
+            torsten_primitives::credentials::Credential::VerificationKey(
+                torsten_primitives::hash::Hash28::from_bytes([5u8; 28]),
+            ),
+        ));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_deposit_not_accounted_fails() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::StakeRegistration(
+            torsten_primitives::credentials::Credential::VerificationKey(
+                torsten_primitives::hash::Hash28::from_bytes([5u8; 28]),
+            ),
+        ));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deposits_and_refunds_calculation() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            torsten_primitives::hash::Hash28::from_bytes([5u8; 28]),
+        );
+        let certs = vec![
+            Certificate::StakeRegistration(cred.clone()),
+            Certificate::StakeRegistration(cred.clone()),
+            Certificate::StakeDeregistration(cred),
+        ];
+        let (deposits, refunds) = calculate_deposits_and_refunds(&certs, &params, None);
+        assert_eq!(deposits, params.key_deposit.0 * 2);
+        assert_eq!(refunds, params.key_deposit.0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Multi-asset
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_asset_conservation_valid() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let mut input_value = Value::lovelace(10_000_000);
+        input_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 100);
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: input_value,
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 100);
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: output_value,
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_multi_asset_not_conserved() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let mut input_value = Value::lovelace(10_000_000);
+        input_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 100);
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: input_value,
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 200);
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: output_value,
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MultiAssetNotConserved { .. })));
+    }
+
+    #[test]
+    fn test_multi_asset_with_minting() {
+        let script = NativeScript::ScriptAll(vec![]);
+        let script_cbor = torsten_serialization::encode_native_script(&script);
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&script_cbor);
+        let policy = torsten_primitives::hash::blake2b_224(&tagged);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 50);
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy).or_default().insert(asset, 50);
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.outputs[0].value = output_value;
+        tx.body.mint = mint;
+        tx.witness_set.native_scripts.push(script);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_multi_asset_burning() {
+        let script = NativeScript::ScriptAll(vec![]);
+        let script_cbor = torsten_serialization::encode_native_script(&script);
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&script_cbor);
+        let policy = torsten_primitives::hash::blake2b_224(&tagged);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let mut input_value = Value::lovelace(10_000_000);
+        input_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 100);
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: input_value,
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 70);
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy).or_default().insert(asset, -30);
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.outputs[0].value = output_value;
+        tx.body.mint = mint;
+        tx.witness_set.native_scripts.push(script);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_minting_without_script_rejected() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 50);
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy).or_default().insert(asset, 50);
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.outputs[0].value = output_value;
+        tx.body.mint = mint;
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidMint)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Collateral helpers
+    // ---------------------------------------------------------------------------
+
+    fn make_plutus_tx_with_collateral(
+        input: TransactionInput,
+        output_value: u64,
+        fee: u64,
+        collateral: Vec<TransactionInput>,
+    ) -> Transaction {
+        let mut tx = make_simple_tx(input, output_value, fee);
+        tx.body.collateral = collateral;
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        });
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01]);
+        let params = ProtocolParameters::mainnet_defaults();
+        let computed_hash = torsten_serialization::compute_script_data_hash(
+            &tx.witness_set.redeemers,
+            &tx.witness_set.plutus_data,
+            &params.cost_models,
+            !tx.witness_set.plutus_v1_scripts.is_empty(),
+            !tx.witness_set.plutus_v2_scripts.is_empty(),
+            !tx.witness_set.plutus_v3_scripts.is_empty(),
+            None,
+            None,
+        );
+        tx.body.script_data_hash = Some(computed_hash);
+        tx
+    }
+
+    #[test]
+    fn test_plutus_collateral_valid() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        if let Err(errors) = &result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::InsufficientCollateral
+                        | ValidationError::TooManyCollateralInputs { .. }
+                        | ValidationError::CollateralNotFound(_)
+                        | ValidationError::CollateralHasTokens(_)
+                        | ValidationError::CollateralMismatch { .. }
+                )),
+                "No collateral errors expected, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_plutus_collateral_not_found() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let missing_col = TransactionInput {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            index: 0,
+        };
+        let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![missing_col]);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::CollateralNotFound(_))));
+    }
+
+    #[test]
+    fn test_plutus_collateral_has_tokens() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        let mut col_value = Value::lovelace(5_000_000);
+        col_value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 100);
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: col_value,
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::CollateralHasTokens(_))));
+    }
+
+    #[test]
+    fn test_plutus_too_many_collateral_inputs() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut collateral = Vec::new();
+        for i in 2..=5u8 {
+            let col = TransactionInput {
+                transaction_id: Hash32::from_bytes([i; 32]),
+                index: 0,
+            };
+            utxo_set.insert(
+                col.clone(),
+                TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(1_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                },
+            );
+            collateral.push(col);
+        }
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, collateral);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::TooManyCollateralInputs { .. })));
+    }
+
+    #[test]
+    fn test_plutus_ex_units_exceeded() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        tx.witness_set.redeemers[0].ex_units = ExUnits {
+            mem: u64::MAX,
+            steps: u64::MAX,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ExUnitsExceeded)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Reference inputs
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_reference_input_valid() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.reference_inputs = vec![ref_input];
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reference_input_not_found() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let missing_ref = TransactionInput {
+            transaction_id: Hash32::from_bytes([99u8; 32]),
+            index: 0,
+        };
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.reference_inputs = vec![missing_ref];
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ReferenceInputNotFound(_))));
+    }
+
+    #[test]
+    fn test_reference_input_overlaps_input() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input.clone(), 9_800_000, 200_000);
+        tx.body.reference_inputs = vec![input];
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ReferenceInputOverlapsInput(_))));
+    }
+
+    #[test]
+    fn test_required_signer_missing() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.required_signers = vec![Hash32::from_bytes([0xAA; 32])];
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingRequiredSigner(_))));
+    }
+
+    #[test]
+    fn test_duplicate_input() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input.clone(), 9_800_000, 200_000);
+        tx.body.inputs.push(input);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::DuplicateInput(_))));
+    }
+
+    #[test]
+    fn test_native_script_validation_in_tx() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        let required_key = Hash32::from_bytes([0xBB; 32]);
+        tx.witness_set
+            .native_scripts
+            .push(NativeScript::ScriptPubkey(required_key));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NativeScriptFailed)));
+    }
+
+    #[test]
+    fn test_native_script_timelock_in_tx() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.witness_set
+            .native_scripts
+            .push(NativeScript::InvalidBefore(SlotNo(200)));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let result = validate_transaction(&tx, &utxo_set, &params, 200, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_witness_signature_verification() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.witness_set.vkey_witnesses.push(VKeyWitness {
+            vkey: vec![1u8; 32],
+            signature: vec![0u8; 64],
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidWitnessSignature(_))));
+    }
+
+    #[test]
+    fn test_collateral_return_reduces_effective_collateral() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        tx.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(4_700_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        });
+        tx.body.total_collateral = Some(Lovelace(300_000));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        if let Err(errors) = &result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::InsufficientCollateral
+                        | ValidationError::TooManyCollateralInputs { .. }
+                        | ValidationError::CollateralNotFound(_)
+                        | ValidationError::CollateralHasTokens(_)
+                        | ValidationError::CollateralMismatch { .. }
+                )),
+                "No collateral errors expected, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_collateral_return_mismatch_total() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_plutus_tx_with_collateral(input, 9_800_000, 200_000, vec![col_input]);
+        tx.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(4_700_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        });
+        tx.body.total_collateral = Some(Lovelace(500_000)); // wrong
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::CollateralMismatch { .. })));
+    }
+
+    #[test]
+    fn test_reference_script_minting_validation() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let pubkey_hash = Hash32::from_bytes([42u8; 32]);
+        let native_script = NativeScript::ScriptPubkey(pubkey_hash);
+        let script_hash = compute_script_ref_hash(&ScriptRef::NativeScript(native_script.clone()));
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::NativeScript(native_script)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let asset = AssetName(b"Token".to_vec());
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(script_hash)
+            .or_default()
+            .insert(asset.clone(), 10);
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.mint = mint;
+        tx.body.reference_inputs.push(ref_input);
+        tx.body.outputs[0]
+            .value
+            .multi_asset
+            .entry(script_hash)
+            .or_default()
+            .insert(asset, 10);
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compute_script_ref_hash_plutus_v2() {
+        let script_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let hash = compute_script_ref_hash(&ScriptRef::PlutusV2(script_bytes.clone()));
+        let mut tagged = vec![0x02];
+        tagged.extend_from_slice(&script_bytes);
+        let expected = torsten_primitives::hash::blake2b_224(&tagged);
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_ref_script_tiered_fee_calculation() {
+        assert_eq!(calculate_ref_script_tiered_fee(15, 1000), 15_000);
+        assert_eq!(calculate_ref_script_tiered_fee(15, 25_600), 384_000);
+        let fee = calculate_ref_script_tiered_fee(15, 26_600);
+        assert_eq!(fee, 384_000 + 18_000);
+        assert_eq!(calculate_ref_script_tiered_fee(15, 0), 0);
+        assert_eq!(
+            calculate_ref_script_tiered_fee(15, 25_600 * 3),
+            1_397_760,
+            "3 tiers must use exact rational arithmetic (21.6 not 21)"
+        );
+    }
+
+    #[test]
+    fn test_script_ref_byte_size() {
+        let v2_script = ScriptRef::PlutusV2(vec![0u8; 500]);
+        assert_eq!(script_ref_byte_size(&v2_script), 500);
+        let v3_script = ScriptRef::PlutusV3(vec![0u8; 1024]);
+        assert_eq!(script_ref_byte_size(&v3_script), 1024);
+    }
+
+    #[test]
+    fn test_auxiliary_data_hash_without_data() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::AuxiliaryDataHashWithoutData)));
+    }
+
+    #[test]
+    fn test_auxiliary_data_without_hash() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::AuxiliaryDataWithoutHash)));
+    }
+
+    #[test]
+    fn test_auxiliary_data_with_hash_valid() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cbor_uint_size() {
+        assert_eq!(cbor_uint_size(0), 1);
+        assert_eq!(cbor_uint_size(23), 1);
+        assert_eq!(cbor_uint_size(24), 2);
+        assert_eq!(cbor_uint_size(255), 2);
+        assert_eq!(cbor_uint_size(256), 3);
+        assert_eq!(cbor_uint_size(65535), 3);
+        assert_eq!(cbor_uint_size(65536), 5);
+        assert_eq!(cbor_uint_size(0xFFFF_FFFF), 5);
+        assert_eq!(cbor_uint_size(0x1_0000_0000), 9);
+    }
+
+    #[test]
+    fn test_estimate_value_cbor_size_ada_only() {
+        let value = Value::lovelace(1_000_000);
+        let size = estimate_value_cbor_size(&value);
+        assert_eq!(size, cbor_uint_size(1_000_000));
+    }
+
+    #[test]
+    fn test_estimate_value_cbor_size_multi_asset() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let asset = AssetName::new(b"Token".to_vec()).unwrap();
+        let mut value = Value::lovelace(2_000_000);
+        value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 100);
+        let size = estimate_value_cbor_size(&value);
+        assert_eq!(size, 45);
+    }
+
+    #[test]
+    fn test_output_value_too_large() {
+        let policy = torsten_primitives::hash::Hash28::from_bytes([10u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(100_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut output_value = Value::lovelace(99_800_000);
+        for i in 0..100u8 {
+            let asset = AssetName::new(vec![i; 32]).unwrap();
+            output_value
+                .multi_asset
+                .entry(policy)
+                .or_default()
+                .insert(asset, 1_000_000);
+        }
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.max_val_size = 50;
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: output_value,
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::OutputValueTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_ada_only_output_skips_max_val_size_check() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.max_val_size = 1;
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_redeemer_index_out_of_range() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input.clone(), 9_000_000, 1_000_000);
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 5,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        });
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01, 0x02]);
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        let mut utxo = utxo_set;
+        utxo.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        tx.body.collateral = vec![col_input];
+        let result = validate_transaction(&tx, &utxo, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::RedeemerIndexOutOfRange { .. })));
+    }
+
+    #[test]
+    fn test_script_locked_input_missing_redeemer() {
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        let script_hash = Hash28::from_bytes([0xaa; 28]);
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([4u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(1_000_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0x01]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingSpendRedeemer { .. })));
+    }
+
+    #[test]
+    fn test_script_locked_input_with_redeemer_ok() {
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        let script_hash = Hash28::from_bytes([0xbb; 28]);
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([5u8; 32]),
+            index: 0,
+        };
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([6u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(1_000_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: Some(Hash32::ZERO),
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0x01]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Spend,
+                    index: 0,
+                    data: PlutusData::Integer(42),
+                    ex_units: ExUnits {
+                        mem: 1000,
+                        steps: 1000,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(!errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MissingSpendRedeemer { .. })));
+            }
+        }
+    }
+
+    #[test]
+    fn test_treasury_donation_value_conservation() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 8_800_000, 200_000);
+        tx.body.donation = Some(Lovelace(1_000_000));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_treasury_donation_value_not_conserved() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.donation = Some(Lovelace(1_000_000));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bug fix tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_script_data_hash_mismatch_rejects() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.collateral = vec![col_input];
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01]);
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(42),
+            ex_units: ExUnits {
+                mem: 1000,
+                steps: 1000,
+            },
+        });
+        tx.body.script_data_hash = Some(Hash32::from_bytes([0xDE; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ScriptDataHashMismatch { .. })),
+            "Expected ScriptDataHashMismatch error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_min_fee_includes_execution_unit_costs() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(100_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(50_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx_size: u64 = 300;
+        let base_fee = params.min_fee(tx_size).0;
+        let mem_units: u64 = 14_000_000;
+        let step_units: u64 = 10_000_000_000;
+        let fee_without_ex = base_fee;
+        let output_value = 100_000_000 - fee_without_ex;
+        let mut tx = make_simple_tx(input, output_value, fee_without_ex);
+        tx.body.collateral = vec![col_input];
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01]);
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(42),
+            ex_units: ExUnits {
+                mem: mem_units,
+                steps: step_units,
+            },
+        });
+        tx.body.script_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, tx_size, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::FeeTooSmall { .. })),
+            "Expected FeeTooSmall error when ex unit costs not covered, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_min_fee_no_redeemers_no_ex_unit_cost() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx_size: u64 = 300;
+        let base_fee = params.min_fee(tx_size).0;
+        let output_value = 10_000_000 - base_fee;
+        let tx = make_simple_tx(input, output_value, base_fee);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, tx_size, None);
+        assert!(
+            result.is_ok(),
+            "Simple tx with exact base fee should pass: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Pool re-registration
+    // ---------------------------------------------------------------------------
+
+    fn make_pool_params(pool_id: Hash28) -> PoolParams {
+        PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([0u8; 32]),
+            pledge: Lovelace(100_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account: vec![0xe0; 29],
+            pool_owners: vec![pool_id],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_pool_reregistration_no_duplicate_deposit() {
+        let pool_id = torsten_primitives::hash::Hash28::from_bytes([42u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params(pool_id)));
+        let mut registered = HashSet::new();
+        registered.insert(pool_id);
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered),
+        );
+        assert!(
+            result.is_ok(),
+            "Pool re-registration should not charge deposit: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_new_pool_registration_charges_deposit() {
+        let pool_id = torsten_primitives::hash::Hash28::from_bytes([42u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params(pool_id)));
+        let registered: HashSet<Hash28> = HashSet::new();
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered),
+        );
+        assert!(
+            result.is_ok(),
+            "New pool registration should charge deposit: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_new_pool_registration_without_deposit_fails() {
+        let pool_id = torsten_primitives::hash::Hash28::from_bytes([42u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params(pool_id)));
+        let registered: HashSet<Hash28> = HashSet::new();
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered),
+        );
+        assert!(result.is_err(), "New pool reg without deposit should fail");
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })));
+    }
+
+    #[test]
+    fn test_calculate_deposits_pool_rereg_no_deposit() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let pool_id = torsten_primitives::hash::Hash28::from_bytes([42u8; 28]);
+        let certs = vec![Certificate::PoolRegistration(make_pool_params(pool_id))];
+        let (deposits_new, _) = calculate_deposits_and_refunds(&certs, &params, None);
+        assert_eq!(deposits_new, params.pool_deposit.0);
+        let mut registered = HashSet::new();
+        registered.insert(pool_id);
+        let (deposits_rereg, _) =
+            calculate_deposits_and_refunds(&certs, &params, Some(&registered));
+        assert_eq!(deposits_rereg, 0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Plutus Phase-2 prerequisites
+    // ---------------------------------------------------------------------------
+
+    fn make_plutus_utxo_and_tx(raw_cbor: Option<Vec<u8>>) -> (UtxoSet, Transaction) {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let redeemers = vec![Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        }];
+        let plutus_v1_scripts = vec![vec![0x01, 0x02, 0x03]];
+        let params = ProtocolParameters::mainnet_defaults();
+        let script_data_hash = torsten_serialization::compute_script_data_hash(
+            &redeemers,
+            &[],
+            &params.cost_models,
+            true,
+            false,
+            false,
+            None,
+            None,
+        );
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: Some(script_data_hash),
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts,
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers,
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor,
+        };
+        (utxo_set, tx)
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_raw_cbor_returns_error() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(None);
+        let params = ProtocolParameters::mainnet_defaults();
+        let slot_config = crate::plutus::SlotConfig::default();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, Some(&slot_config));
+        assert!(
+            result.is_err(),
+            "Should reject Plutus tx with missing raw_cbor"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+            "Should contain MissingRawCbor error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_slot_config_returns_error() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(Some(vec![0x84, 0x00]));
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_err(),
+            "Should reject Plutus tx with missing slot_config"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+            "Should contain MissingSlotConfig error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_missing_both_raw_cbor_and_slot_config() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(None);
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+            "Should contain MissingRawCbor, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+            "Should contain MissingSlotConfig, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_plutus_tx_missing_raw_cbor_passes() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_ok(),
+            "Non-Plutus tx should pass without raw_cbor/slot_config"
+        );
+    }
+
+    #[test]
+    fn test_plutus_tx_with_raw_cbor_and_slot_config_reaches_evaluation() {
+        let (utxo_set, tx) = make_plutus_utxo_and_tx(Some(vec![0x84, 0x00]));
+        let params = ProtocolParameters::mainnet_defaults();
+        let slot_config = crate::plutus::SlotConfig::default();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, Some(&slot_config));
+        if let Err(errors) = &result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MissingRawCbor)),
+                "Should NOT contain MissingRawCbor when raw_cbor is present"
+            );
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MissingSlotConfig)),
+                "Should NOT contain MissingSlotConfig when slot_config is present"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Witness completeness
+    // ---------------------------------------------------------------------------
+
+    fn make_vkey_witness_from_bytes(vkey: [u8; 32]) -> VKeyWitness {
+        VKeyWitness {
+            vkey: vkey.to_vec(),
+            signature: vec![0u8; 64],
+        }
+    }
+
+    fn make_reward_account_vkey(keyhash: Hash28) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(29);
+        bytes.push(0xe0);
+        bytes.extend_from_slice(keyhash.as_bytes());
+        bytes
+    }
+
+    fn make_reward_account_script(script_hash: Hash28) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(29);
+        bytes.push(0xf0);
+        bytes.extend_from_slice(script_hash.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn test_witness_completeness_vkey_input_with_matching_witness() {
+        let vkey_bytes = [0xAA; 32];
+        let keyhash = torsten_primitives::hash::blake2b_224(&vkey_bytes);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(torsten_primitives::address::EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: torsten_primitives::credentials::Credential::VerificationKey(keyhash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.witness_set
+            .vkey_witnesses
+            .push(make_vkey_witness_from_bytes(vkey_bytes));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingInputWitness(_))),
+                    "Should not have MissingInputWitness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_witness_completeness_vkey_input_missing_witness() {
+        let keyhash = Hash28::from_bytes([0x11; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(torsten_primitives::address::EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: torsten_primitives::credentials::Credential::VerificationKey(keyhash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 9_800_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingInputWitness(_))),
+            "Expected MissingInputWitness, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_witness_completeness_withdrawal_vkey_missing_witness() {
+        let keyhash = Hash28::from_bytes([0xCC; 28]);
+        let reward_account = make_reward_account_vkey(keyhash);
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 10_100_000, 400_000);
+        tx.body
+            .withdrawals
+            .insert(reward_account, Lovelace(500_000));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingWithdrawalWitness(_))),
+            "Expected MissingWithdrawalWitness, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_witness_completeness_withdrawal_script_missing_witness() {
+        let script_hash = Hash28::from_bytes([0xDD; 28]);
+        let reward_account = make_reward_account_script(script_hash);
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 10_100_000, 400_000);
+        tx.body
+            .withdrawals
+            .insert(reward_account, Lovelace(500_000));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingWithdrawalScriptWitness(_))),
+            "Expected MissingWithdrawalScriptWitness, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_reward_credential_vkey() {
+        let keyhash = Hash28::from_bytes([0x42; 28]);
+        let reward_account = make_reward_account_vkey(keyhash);
+        let cred = extract_reward_credential(&reward_account);
+        assert_eq!(
+            cred,
+            Some(torsten_primitives::credentials::Credential::VerificationKey(keyhash))
+        );
+    }
+
+    #[test]
+    fn test_extract_reward_credential_script() {
+        let script_hash = Hash28::from_bytes([0x43; 28]);
+        let reward_account = make_reward_account_script(script_hash);
+        let cred = extract_reward_credential(&reward_account);
+        assert_eq!(
+            cred,
+            Some(torsten_primitives::credentials::Credential::Script(
+                script_hash
+            ))
+        );
+    }
+
+    #[test]
+    fn test_extract_reward_credential_too_short() {
+        let cred = extract_reward_credential(&[0xe0, 0x01, 0x02]);
+        assert_eq!(cred, None);
+    }
+
+    #[test]
+    fn test_extract_reward_credential_invalid_type() {
+        let mut bytes = vec![0x00];
+        bytes.extend_from_slice(&[0x00; 28]);
+        let cred = extract_reward_credential(&bytes);
+        assert_eq!(cred, None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Era gating
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_era_gating_conway_cert_in_pre_conway_tx_rejected() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8;
+        params.key_deposit = Lovelace(0);
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xAAu8; 28]),
+            ),
+            deposit: Lovelace(0),
+            anchor: None,
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err(), "Should reject Conway cert in Babbage era");
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::EraGatingViolation { .. })),
+            "Should contain EraGatingViolation error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_era_gating_conway_cert_in_conway_tx_accepted() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        params.key_deposit = Lovelace(0);
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xAAu8; 28]),
+            ),
+            deposit: Lovelace(0),
+            anchor: None,
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        if let Err(errors) = &result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::EraGatingViolation { .. })),
+                "Should NOT have EraGatingViolation in Conway era, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_conway_only_certificate_name_classification() {
+        let conway_certs = vec![
+            Certificate::RegDRep {
+                credential: torsten_primitives::credentials::Credential::VerificationKey(
+                    Hash28::from_bytes([0u8; 28]),
+                ),
+                deposit: Lovelace(0),
+                anchor: None,
+            },
+            Certificate::UnregDRep {
+                credential: torsten_primitives::credentials::Credential::VerificationKey(
+                    Hash28::from_bytes([0u8; 28]),
+                ),
+                refund: Lovelace(0),
+            },
+            Certificate::CommitteeHotAuth {
+                cold_credential: torsten_primitives::credentials::Credential::VerificationKey(
+                    Hash28::from_bytes([0u8; 28]),
+                ),
+                hot_credential: torsten_primitives::credentials::Credential::VerificationKey(
+                    Hash28::from_bytes([1u8; 28]),
+                ),
+            },
+        ];
+        for cert in &conway_certs {
+            assert!(
+                conway_only_certificate_name(cert).is_some(),
+                "Should be classified as Conway-only: {cert:?}"
+            );
+        }
+        let pre_conway_certs = vec![
+            Certificate::StakeRegistration(
+                torsten_primitives::credentials::Credential::VerificationKey(Hash28::from_bytes(
+                    [0u8; 28],
+                )),
+            ),
+            Certificate::PoolRetirement {
+                pool_hash: Hash28::from_bytes([0u8; 28]),
+                epoch: 100,
+            },
+        ];
+        for cert in &pre_conway_certs {
+            assert!(
+                conway_only_certificate_name(cert).is_none(),
+                "Should NOT be classified as Conway-only: {cert:?}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Additional error-path tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_fee_too_small_with_zero_fee() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 10_000_000, 0);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::FeeTooSmall { .. })));
+    }
+
+    #[test]
+    fn test_ttl_expired_with_ttl_less_than_current_slot() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.ttl = Some(SlotNo(10));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::TtlExpired { .. })));
+    }
+
+    #[test]
+    fn test_value_not_conserved_outputs_exceed_inputs() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let tx = make_simple_tx(input, 11_000_000, 200_000);
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })));
+    }
+
+    #[test]
+    fn test_missing_required_signer() {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body
+            .required_signers
+            .push(Hash32::from_bytes([0xEE; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::MissingRequiredSigner(_))));
+    }
+
+    #[test]
+    fn test_script_data_hash_allowed_with_reference_scripts() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(vec![0x01, 0x02, 0x03])),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.reference_inputs = vec![ref_input];
+        tx.body.script_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors.iter().any(|e| matches!(e, ValidationError::UnexpectedScriptDataHash)),
+                    "UnexpectedScriptDataHash should not fire when reference scripts exist: {errors:?}"
+                );
+            }
+        }
+    }
+}
