@@ -9,6 +9,10 @@ default = []
 io-uring = ["torsten-storage/io-uring"]
 journald = ["dep:tracing-journald"]
 
+[lib]
+name = "torsten_node"
+path = "src/lib.rs"
+
 [[bin]]
 name = "torsten-node"
 path = "src/main.rs"

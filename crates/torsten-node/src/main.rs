@@ -1,6 +1,7 @@
 mod config;
 mod disk_monitor;
-mod forge;
+// forge is declared in lib.rs and re-used here via the crate root
+use torsten_node::forge;
 mod genesis;
 mod gsm;
 mod logging;
