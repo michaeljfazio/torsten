@@ -2386,7 +2386,14 @@ impl Node {
                     );
                 }
                 Err(e) => {
-                    error!("Chunk-file replay failed: {e}");
+                    // "shutdown requested" is not an error — it's a normal
+                    // interruption when Ctrl+C is pressed during replay.
+                    let msg = e.to_string();
+                    if msg.contains("shutdown") {
+                        warn!("Chunk-file replay interrupted: {e}");
+                    } else {
+                        error!("Chunk-file replay failed: {e}");
+                    }
                 }
             }
 

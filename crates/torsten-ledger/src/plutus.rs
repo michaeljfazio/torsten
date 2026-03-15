@@ -1,6 +1,6 @@
 use crate::utxo::UtxoSet;
 use torsten_primitives::transaction::Transaction;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlutusError {
@@ -93,11 +93,10 @@ pub fn evaluate_plutus_scripts(
             let output_cbor = match &output.raw_cbor {
                 Some(cbor) => cbor.clone(),
                 None => {
-                    warn!(
-                        input = %input,
-                        "Missing raw CBOR for UTxO output"
-                    );
-                    return Err(PlutusError::MissingOutputCbor(input.to_string()));
+                    // raw_cbor is None when the UTxO was round-tripped through
+                    // the LSM store (serde(skip) on raw_cbor). Re-encode the
+                    // output from its parsed fields.
+                    torsten_serialization::encode_transaction_output(&output)
                 }
             };
             let input_cbor = encode_input_cbor(input);
@@ -108,10 +107,12 @@ pub fn evaluate_plutus_scripts(
     // Also resolve collateral inputs
     for col_input in &tx.body.collateral {
         if let Some(output) = utxo_set.lookup(col_input) {
-            if let Some(cbor) = &output.raw_cbor {
-                let input_cbor = encode_input_cbor(col_input);
-                utxo_pairs.push((input_cbor, cbor.clone()));
-            }
+            let output_cbor = match &output.raw_cbor {
+                Some(cbor) => cbor.clone(),
+                None => torsten_serialization::encode_transaction_output(&output),
+            };
+            let input_cbor = encode_input_cbor(col_input);
+            utxo_pairs.push((input_cbor, output_cbor));
         }
     }
 
