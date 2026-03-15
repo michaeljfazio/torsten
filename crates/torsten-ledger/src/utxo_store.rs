@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 use torsten_lsm::{Key, LsmConfig, LsmTree, Value};
 use torsten_primitives::address::Address;
@@ -35,6 +36,10 @@ pub struct UtxoStore {
     address_index: HashMap<Address, HashSet<TransactionInput>>,
     /// When false, address index operations are skipped (for fast replay).
     indexing_enabled: bool,
+    /// Owned temporary directory for test-only stores created via `new_temp()`.
+    /// Holding this here ensures the directory is cleaned up when the store is
+    /// dropped, rather than being leaked via `std::mem::forget`.
+    _temp_dir: Option<TempDir>,
 }
 
 // Key encoding: 32-byte tx_hash + 4-byte index (big-endian)
@@ -93,6 +98,7 @@ impl UtxoStore {
             count: 0,
             address_index: HashMap::new(),
             indexing_enabled: true,
+            _temp_dir: None,
         })
     }
 
@@ -121,6 +127,7 @@ impl UtxoStore {
             count: 0,
             address_index: HashMap::new(),
             indexing_enabled: true,
+            _temp_dir: None,
         })
     }
 
@@ -137,23 +144,28 @@ impl UtxoStore {
             count: 0, // Will be set by count_entries() or caller
             address_index: HashMap::new(),
             indexing_enabled: true,
+            _temp_dir: None,
         })
     }
 
     /// Create an in-memory UTxO store backed by a temporary directory.
     /// Useful for tests.
+    ///
+    /// The `TempDir` is stored in the returned `UtxoStore` and is cleaned up
+    /// automatically when the store is dropped. Previously this used
+    /// `std::mem::forget`, which leaked the directory and its contents on the
+    /// host filesystem for the lifetime of the process.
     pub fn new_temp() -> Result<Self, UtxoStoreError> {
         let dir = tempfile::tempdir().map_err(UtxoStoreError::Io)?;
         let path = dir.path().to_path_buf();
         let tree = LsmTree::open(&path, LsmConfig::default())?;
-        // Leak the tempdir so the directory persists for the lifetime of the store
-        std::mem::forget(dir);
         Ok(UtxoStore {
             tree,
             path,
             count: 0,
             address_index: HashMap::new(),
             indexing_enabled: true,
+            _temp_dir: Some(dir),
         })
     }
 

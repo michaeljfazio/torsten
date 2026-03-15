@@ -41,11 +41,19 @@ impl WalWriter {
 
     /// Append a WAL entry and sync to disk.
     fn append(&mut self, slot: u64, block_no: u64, hash: &Hash32, cbor: &[u8]) -> io::Result<()> {
+        // Cardano blocks are well under 4 GiB, but guard against accidental
+        // silent truncation if the invariant is ever violated.
+        let cbor_len = u32::try_from(cbor.len()).map_err(|_| {
+            io::Error::other(format!(
+                "WAL entry too large: {} bytes exceeds u32::MAX",
+                cbor.len()
+            ))
+        })?;
         self.file.write_all(&WAL_MAGIC)?;
         self.file.write_all(&slot.to_be_bytes())?;
         self.file.write_all(&block_no.to_be_bytes())?;
         self.file.write_all(hash.as_bytes())?;
-        self.file.write_all(&(cbor.len() as u32).to_be_bytes())?;
+        self.file.write_all(&cbor_len.to_be_bytes())?;
         self.file.write_all(cbor)?;
         self.file.flush()?;
         self.file.get_ref().sync_data()?;
@@ -81,11 +89,19 @@ impl WalWriter {
             let file = File::create(&tmp_path)?;
             let mut writer = BufWriter::new(file);
             for (slot, block_no, hash, cbor) in entries {
+                // Guard against silent truncation of a block that somehow
+                // exceeds 4 GiB (should be impossible, but treat as fatal).
+                let cbor_len = u32::try_from(cbor.len()).map_err(|_| {
+                    io::Error::other(format!(
+                        "WAL rewrite: entry too large: {} bytes exceeds u32::MAX",
+                        cbor.len()
+                    ))
+                })?;
                 writer.write_all(&WAL_MAGIC)?;
                 writer.write_all(&slot.to_be_bytes())?;
                 writer.write_all(&block_no.to_be_bytes())?;
                 writer.write_all(hash.as_bytes())?;
-                writer.write_all(&(cbor.len() as u32).to_be_bytes())?;
+                writer.write_all(&cbor_len.to_be_bytes())?;
                 writer.write_all(cbor)?;
             }
             writer.flush()?;
