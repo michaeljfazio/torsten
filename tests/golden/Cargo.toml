@@ -1,0 +1,14 @@
+[package]
+name = "torsten-golden-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "golden_tests"
+path = "tests/golden_tests.rs"
+
+[dependencies]
+torsten-crypto = { path = "../../crates/torsten-crypto" }
+torsten-primitives = { path = "../../crates/torsten-primitives" }
+hex = "0.4"

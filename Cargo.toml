@@ -12,6 +12,7 @@ members = [
     "crates/torsten-cli",
     "crates/torsten-integration-tests",
     "tests/conformance",
+    "tests/golden",
 ]
 resolver = "2"
 
