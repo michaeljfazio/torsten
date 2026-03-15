@@ -15,6 +15,29 @@ use torsten_primitives::time::{BlockNo, SlotNo};
 use torsten_primitives::transaction::*;
 use torsten_primitives::value::{AssetName, Lovelace, Value};
 
+/// Return true when a Babbage-era output uses the legacy Shelley array format.
+///
+/// The pallas type alias `MintedTransactionOutput` is deprecated in favour of
+/// `PseudoTransactionOutput<MintedPostAlonzoTransactionOutput<'_>>`, but the
+/// variant names (`Legacy` / `PostAlonzo`) are the same on both.  We isolate
+/// the `#[allow(deprecated)]` here so the rest of the codebase stays clean.
+#[allow(deprecated)]
+fn is_babbage_legacy(output: &pallas_primitives::babbage::MintedTransactionOutput<'_>) -> bool {
+    matches!(
+        output,
+        pallas_primitives::babbage::MintedTransactionOutput::Legacy(_)
+    )
+}
+
+/// Return true when a Conway-era output uses the legacy Shelley array format.
+#[allow(deprecated)]
+fn is_conway_legacy(output: &pallas_primitives::conway::MintedTransactionOutput<'_>) -> bool {
+    matches!(
+        output,
+        pallas_primitives::conway::MintedTransactionOutput::Legacy(_)
+    )
+}
+
 /// Decode a transaction from raw CBOR bytes.
 ///
 /// The `era_id` corresponds to the Cardano era encoding:
@@ -402,18 +425,42 @@ fn convert_output_inner(
             OutputDatum::DatumHash(pallas_hash_to_torsten32(&h))
         }
         Some(pallas_primitives::conway::DatumOption::Data(d)) => {
-            OutputDatum::InlineDatum(convert_plutus_data(&d.0))
+            // `d` is a CborWrap<KeepRaw<PlutusData>>; `d.0` is the KeepRaw.
+            // Preserve the raw bytes so encode_transaction_output() can reproduce
+            // the exact on-wire encoding (including indefinite-length arrays that
+            // some script builders emit inside Constr/List fields). Without this,
+            // re-encoding after an LSM round-trip would differ byte-for-byte.
+            let raw_datum_cbor = d.0.raw_cbor().to_vec();
+            OutputDatum::InlineDatum {
+                data: convert_plutus_data(&d.0),
+                raw_cbor: Some(raw_datum_cbor),
+            }
         }
         None => OutputDatum::None,
     };
 
     let script_ref = output.script_ref().map(|sr| convert_script_ref(&sr));
 
+    // Detect whether this output was encoded in the legacy Shelley-era array format
+    // ([address, value] or [address, value, datum_hash]) rather than the Babbage/Conway
+    // post-Alonzo map format ({0: address, 1: value, ...}).  Conway-era transactions
+    // may still contain legacy-format outputs for simple change outputs.  pallas exposes
+    // this via the `MultiEraOutput` variant: AlonzoCompatible outputs are always legacy;
+    // Babbage/Conway can be either Legacy or PostAlonzo.
+    let is_legacy = match output {
+        PallasOutput::AlonzoCompatible(..) => true,
+        PallasOutput::Babbage(x) => is_babbage_legacy(x.as_ref().as_ref()),
+        PallasOutput::Conway(x) => is_conway_legacy(x.as_ref().as_ref()),
+        PallasOutput::Byron(_) => false, // Byron has its own format; handled separately
+        _ => false,                      // future variants: default to post-Alonzo map format
+    };
+
     Ok(TransactionOutput {
         address,
         value,
         datum,
         script_ref,
+        is_legacy,
         raw_cbor,
     })
 }

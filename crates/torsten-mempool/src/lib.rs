@@ -839,6 +839,7 @@ mod tests {
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),

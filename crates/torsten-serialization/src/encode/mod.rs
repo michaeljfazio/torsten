@@ -83,6 +83,7 @@ mod tests {
             value: Value::lovelace(1_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         let encoded = encode_transaction_output(&output);
@@ -99,6 +100,7 @@ mod tests {
             value: Value::lovelace(1_000_000),
             datum: OutputDatum::DatumHash(Hash32::ZERO),
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         let encoded = encode_transaction_output(&output);
@@ -205,6 +207,7 @@ mod tests {
                 value: Value::lovelace(1_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             }],
             fee: Lovelace(200_000),
@@ -247,6 +250,7 @@ mod tests {
                 value: Value::lovelace(1_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             }],
             fee: Lovelace(200_000),
@@ -294,6 +298,7 @@ mod tests {
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),

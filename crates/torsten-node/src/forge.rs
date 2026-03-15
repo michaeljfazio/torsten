@@ -425,6 +425,7 @@ mod tests {
                     value: torsten_primitives::value::Value::lovelace(1_000_000),
                     datum: torsten_primitives::transaction::OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: torsten_primitives::value::Lovelace(200_000),

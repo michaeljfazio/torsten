@@ -10,10 +10,46 @@ use super::script::{
 };
 use super::value::{encode_mint, encode_value};
 
-/// Encode a transaction output (Babbage/Conway post-Alonzo map format).
+/// Encode a transaction output.
+///
+/// Two wire-format variants exist:
+///
+/// **Legacy (Shelley/Allegra/Mary/Alonzo era) — `output.is_legacy = true`**
+/// Encoded as a CBOR array: `[address, value]` or `[address, value, datum_hash]`.
+/// Conway-era transactions may embed legacy-format outputs for simple change
+/// outputs to preserve encoding compatibility with existing tooling.
+///
+/// **Post-Alonzo (Babbage/Conway era) — `output.is_legacy = false`**
+/// Encoded as a CBOR map with optional keys: `{0: address, 1: value, ?2: datum_option, ?3: script_ref}`.
+///
+/// The `is_legacy` flag is stored in bincode so it survives LSM round-trips.
+pub fn encode_transaction_output(output: &TransactionOutput) -> Vec<u8> {
+    if output.is_legacy {
+        return encode_legacy_transaction_output(output);
+    }
+    encode_post_alonzo_transaction_output(output)
+}
+
+/// Encode a legacy (Shelley-era array format) transaction output.
+///
+/// Wire format: `[address_bytes, value]` or `[address_bytes, value, datum_hash]`
+fn encode_legacy_transaction_output(output: &TransactionOutput) -> Vec<u8> {
+    let has_datum_hash = matches!(&output.datum, OutputDatum::DatumHash(_));
+    let len = if has_datum_hash { 3 } else { 2 };
+
+    let mut buf = encode_array_header(len);
+    buf.extend(encode_bytes(&output.address.to_bytes()));
+    buf.extend(encode_value(&output.value));
+    if let OutputDatum::DatumHash(h) = &output.datum {
+        buf.extend(encode_hash32(h));
+    }
+    buf
+}
+
+/// Encode a post-Alonzo (Babbage/Conway map format) transaction output.
 ///
 /// Map with keys: 0=address, 1=value, 2=datum_option, 3=script_ref
-pub fn encode_transaction_output(output: &TransactionOutput) -> Vec<u8> {
+fn encode_post_alonzo_transaction_output(output: &TransactionOutput) -> Vec<u8> {
     let mut count = 2; // address + value are always present
     if output.datum != OutputDatum::None {
         count += 1;
@@ -42,14 +78,22 @@ pub fn encode_transaction_output(output: &TransactionOutput) -> Vec<u8> {
             buf.extend(encode_uint(0));
             buf.extend(encode_hash32(h));
         }
-        OutputDatum::InlineDatum(data) => {
+        OutputDatum::InlineDatum { data, raw_cbor } => {
             buf.extend(encode_uint(2));
             // [1, #6.24(cbor_encoded_data)]
             buf.extend(encode_array_header(2));
             buf.extend(encode_uint(1));
-            // Tag 24 (CBOR-encoded data item)
+            // Tag 24 (CBOR-encoded data item). Use the preserved raw bytes when
+            // available so that encoding details (indefinite-length arrays inside
+            // Constr/List, etc.) are reproduced exactly. Falling back to a fresh
+            // encode_plutus_data() call would produce definite-length arrays which
+            // differ from what many Plutus script builders emit, causing datum hash
+            // mismatches in script context construction.
             buf.extend(encode_tag(24));
-            let encoded_data = encode_plutus_data(data);
+            let encoded_data = raw_cbor
+                .as_deref()
+                .map(|r| r.to_vec())
+                .unwrap_or_else(|| encode_plutus_data(data));
             buf.extend(encode_bytes(&encoded_data));
         }
     }

@@ -69,6 +69,7 @@ fn make_output(lovelace: u64) -> TransactionOutput {
         datum: OutputDatum::None,
         script_ref: None,
         raw_cbor: None,
+        is_legacy: false,
     }
 }
 
@@ -103,6 +104,7 @@ fn make_multi_asset_output(lovelace: u64, seed: u64) -> TransactionOutput {
         datum: OutputDatum::None,
         script_ref: None,
         raw_cbor: None,
+        is_legacy: false,
     }
 }
 

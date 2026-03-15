@@ -430,6 +430,7 @@ mod tests {
             value: TxValue::lovelace(lovelace),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         }
     }
@@ -440,6 +441,7 @@ mod tests {
             value: TxValue::lovelace(lovelace),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         }
     }

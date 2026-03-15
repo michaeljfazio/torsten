@@ -686,6 +686,14 @@ pub struct Node {
     validate_all_blocks: bool,
     /// Watch receiver for current disk space level, updated by disk monitor
     disk_space_rx: watch::Receiver<crate::disk_monitor::DiskSpaceLevel>,
+    /// Genesis State Machine — drives LoE enforcement and GDD.
+    ///
+    /// When genesis mode is disabled the GSM immediately enters CaughtUp
+    /// and `loe_limit()` always returns `None`, so there is no overhead on
+    /// the normal (Praos) sync path.  Stored as an `Arc<RwLock<…>>` so that
+    /// the background GSM evaluation task can write state transitions while
+    /// the sync pipeline holds a read lock to query `loe_limit()`.
+    gsm: Arc<RwLock<crate::gsm::GenesisStateMachine>>,
 }
 
 impl Node {
@@ -1121,6 +1129,20 @@ impl Node {
             debug!("Expected Shelley genesis hash: {}", h.to_hex());
         }
 
+        // Build the GSM here so it is owned by the Node struct. This lets
+        // `process_forward_blocks` query `loe_limit()` without needing to
+        // pass the Arc through every call site.  When genesis mode is off the
+        // GSM starts in CaughtUp and `loe_limit()` always returns None.
+        let genesis_enabled = args.consensus_mode == "genesis";
+        let gsm_config = crate::gsm::GsmConfig {
+            marker_path: args.database_path.join("caught_up.marker"),
+            ..Default::default()
+        };
+        let gsm = Arc::new(RwLock::new(crate::gsm::GenesisStateMachine::new(
+            gsm_config,
+            genesis_enabled,
+        )));
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -1160,6 +1182,7 @@ impl Node {
             consensus_mode: args.consensus_mode,
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
+            gsm,
         })
     }
 
@@ -1548,18 +1571,13 @@ impl Node {
 
         let network_magic = self.network_magic;
 
-        // Initialize Genesis State Machine (GSM)
+        // The GSM is initialized in Node::new() and stored as self.gsm.
+        // Clone the Arc here so the background evaluation task can hold a
+        // reference independently of the borrow on `self`.
         let genesis_enabled = self.consensus_mode == "genesis";
-        let gsm_config = crate::gsm::GsmConfig {
-            marker_path: self.database_path.join("caught_up.marker"),
-            ..Default::default()
-        };
-        let gsm = std::sync::Arc::new(tokio::sync::RwLock::new(
-            crate::gsm::GenesisStateMachine::new(gsm_config, genesis_enabled),
-        ));
         if genesis_enabled {
             info!(
-                state = %gsm.blocking_read().state(),
+                state = %self.gsm.blocking_read().state(),
                 "Genesis mode enabled — note: lightweight checkpointing and Genesis-specific \
                  peer selection are not yet implemented. The GSM provides basic state tracking \
                  (PreSyncing/Syncing/CaughtUp) and density-based peer disconnection."
@@ -1568,7 +1586,7 @@ impl Node {
 
         // Spawn GSM evaluation task
         if genesis_enabled {
-            let gsm_ref = gsm.clone();
+            let gsm_ref = self.gsm.clone();
             let gsm_pm = peer_manager.clone();
             let gsm_metrics = self.metrics.clone();
             let gsm_shutdown = shutdown_rx.clone();
@@ -3546,10 +3564,43 @@ impl Node {
         }
 
         // Flush finalized blocks from VolatileDB to ImmutableDB.
-        // Blocks deeper than k are appended to chunk files.
+        //
+        // When the Genesis State Machine is active (--consensus-mode genesis)
+        // and the node is still in PreSyncing or Syncing state, the Limit on
+        // Eagerness (LoE) applies: the immutable tip must not advance past the
+        // common prefix of all candidate chains (approximated here by the tip
+        // slot reported by the current upstream peer).  We query `loe_limit`
+        // with the peer tip as the sole candidate; once the GSM transitions to
+        // CaughtUp, `loe_limit` returns `None` and we revert to the normal
+        // unconstrained flush.
+        //
+        // In Praos mode (genesis disabled) `loe_limit` always returns `None`
+        // because the GSM starts in CaughtUp, so there is no overhead on the
+        // hot path.
         {
+            // Read the GSM state without blocking the write lock.
+            let loe = {
+                let gsm = self.gsm.read().await;
+                gsm.loe_limit(std::slice::from_ref(&tip.point))
+            };
             let mut db = self.chain_db.write().await;
-            if let Err(e) = db.flush_to_immutable() {
+            let flush_result = match loe {
+                None => {
+                    // No LoE constraint — flush normally (Praos mode or CaughtUp).
+                    db.flush_to_immutable()
+                }
+                Some(loe_slot) => {
+                    // LoE active: cap the immutable tip at the peer common prefix.
+                    // Blocks beyond loe_slot remain in VolatileDB until the GSM
+                    // transitions to CaughtUp and the constraint is lifted.
+                    debug!(
+                        loe_slot,
+                        "LoE active: capping immutable flush at peer tip slot"
+                    );
+                    db.flush_to_immutable_loe(loe_slot)
+                }
+            };
+            if let Err(e) = flush_result {
                 warn!(error = %e, "Failed to flush blocks to immutable storage");
             }
         }
@@ -3654,6 +3705,51 @@ impl Node {
                     .copied()
                     .collect();
                 self.consensus.prune_opcert_counters(&active_pools);
+
+                // Revalidate all mempool transactions against the new epoch's protocol
+                // parameters.  Protocol parameters can change at epoch boundaries (fee
+                // structure, max tx size, execution unit prices, etc.), so transactions
+                // that were valid in the previous epoch may now violate the new rules.
+                // This mirrors Haskell cardano-node's epoch-boundary revalidation and is
+                // critical for block producers: forging a block with transactions that
+                // violate the new parameters would produce an invalid block.
+                if !self.mempool.is_empty() {
+                    let ledger = self.ledger_state.read().await;
+                    // Snapshot the scalar fields we need for the closure — these are
+                    // cheap copies (params and slot_config are both small structs).
+                    // We borrow utxo_set directly from the read-guard so we avoid
+                    // cloning the potentially large UTxO map.
+                    let new_params = ledger.protocol_params.clone();
+                    let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    let slot_config = ledger.slot_config;
+                    let utxo_ref = &ledger.utxo_set;
+                    let evicted = self.mempool.revalidate_all(|tx| {
+                        let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+                        torsten_ledger::validation::validate_transaction(
+                            tx,
+                            utxo_ref,
+                            &new_params,
+                            current_slot,
+                            tx_size,
+                            Some(&slot_config),
+                        )
+                        .is_ok()
+                    });
+                    drop(ledger);
+                    if !evicted.is_empty() {
+                        info!(
+                            epoch = current_epoch,
+                            evicted = evicted.len(),
+                            remaining = self.mempool.len(),
+                            "Epoch boundary: evicted mempool transactions that violate new protocol parameters",
+                        );
+                    } else {
+                        debug!(
+                            epoch = current_epoch,
+                            "Epoch boundary: all mempool transactions valid under new protocol parameters",
+                        );
+                    }
+                }
             }
         }
 
@@ -4934,20 +5030,81 @@ impl Node {
         self.notify_rollback(rollback_point).await;
     }
 
-    /// Compute the current slot number from wall-clock time using Shelley genesis parameters.
+    /// Compute the current absolute slot number from wall-clock time.
+    ///
+    /// This correctly accounts for the Byron era on chains like mainnet and
+    /// preprod, where the first N epochs use 20-second Byron slots before the
+    /// Shelley hard fork switches to 1-second slots.
+    ///
+    /// The calculation:
+    ///   1. Compute the total number of Byron slots that preceded Shelley:
+    ///      `shelley_transition_epoch × byron_epoch_length`
+    ///   2. Compute the wall-clock time at which Shelley began:
+    ///      `chain_start + (shelley_transition_epoch × byron_epoch_length × byron_slot_ms)`
+    ///   3. Compute elapsed Shelley slots from that point forward:
+    ///      `(now - shelley_start) / shelley_slot_ms`
+    ///   4. Total wall-clock slot = Byron slots + Shelley slots.
+    ///
+    /// For preview/sanchonet (no Byron era), `byron_epoch_length` is 0 and the
+    /// result degenerates to the simple case used previously.
     fn current_wall_clock_slot(&self) -> Option<torsten_primitives::time::SlotNo> {
         let genesis = self.shelley_genesis.as_ref()?;
-        let system_start = torsten_primitives::time::SystemStart {
-            utc_time: chrono::DateTime::parse_from_rfc3339(&genesis.system_start)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .ok()?,
-        };
-        let slot_length = torsten_primitives::time::SlotLength(genesis.slot_length as f64);
-        torsten_primitives::time::SlotNo::from_wall_clock(
-            chrono::Utc::now(),
-            &system_start,
-            slot_length,
-        )
+        let chain_start = chrono::DateTime::parse_from_rfc3339(&genesis.system_start)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok()?;
+        let shelley_slot_ms = (genesis.slot_length * 1000) as i64;
+        if shelley_slot_ms == 0 {
+            return None;
+        }
+
+        let now = chrono::Utc::now();
+
+        // Determine how many Shelley-era slots follow the Byron era.
+        // For networks without a Byron era (preview, sanchonet), byron_epoch_length
+        // is 0 and the transition_epoch is also 0, so this whole block is a no-op.
+        let byron_epoch_len = self.byron_epoch_length;
+        let shelley_transition_epoch = shelley_transition_epoch_for_magic(self.network_magic);
+
+        let (byron_total_slots, shelley_start_ms_offset): (u64, i64) =
+            if byron_epoch_len > 0 && shelley_transition_epoch > 0 {
+                // Total Byron slots = number of Byron epochs × slots per Byron epoch.
+                let total_byron_slots = shelley_transition_epoch * byron_epoch_len;
+                // Duration of the Byron era in milliseconds.
+                let byron_duration_ms =
+                    (total_byron_slots as i64).saturating_mul(self.byron_slot_duration_ms as i64);
+                (total_byron_slots, byron_duration_ms)
+            } else {
+                (0, 0)
+            };
+
+        // Wall-clock time at which Shelley era began (= chain start + Byron era duration).
+        let shelley_start = chain_start + chrono::Duration::milliseconds(shelley_start_ms_offset);
+
+        // Elapsed milliseconds since Shelley start.
+        let shelley_elapsed_ms = now.signed_duration_since(shelley_start).num_milliseconds();
+        if shelley_elapsed_ms < 0 {
+            // Wall clock is before Shelley era started — still in Byron era.
+            // Fall back to computing Byron slot from chain start.
+            let elapsed_ms = now.signed_duration_since(chain_start).num_milliseconds();
+            if elapsed_ms < 0 {
+                return None;
+            }
+            let byron_slot_ms = self.byron_slot_duration_ms as i64;
+            if byron_slot_ms == 0 {
+                return None;
+            }
+            return Some(torsten_primitives::time::SlotNo(
+                (elapsed_ms / byron_slot_ms) as u64,
+            ));
+        }
+
+        // Shelley-era slot count = elapsed ms / shelley slot duration.
+        let shelley_slots = (shelley_elapsed_ms / shelley_slot_ms) as u64;
+
+        // Absolute slot = Byron slots that preceded Shelley + Shelley slots elapsed.
+        Some(torsten_primitives::time::SlotNo(
+            byron_total_slots + shelley_slots,
+        ))
     }
 
     /// Attempt to forge a block if we are in block producer mode and are the slot leader.

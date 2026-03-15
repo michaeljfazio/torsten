@@ -1611,6 +1611,7 @@ mod tests {
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         utxo_set.insert(input.clone(), output);
@@ -1629,6 +1630,7 @@ mod tests {
                     value: Value::lovelace(output_value),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(fee),
@@ -1995,6 +1997,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2018,6 +2021,7 @@ mod tests {
                     value: output_value,
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -2088,6 +2092,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2111,6 +2116,7 @@ mod tests {
                     value: output_value,
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -2225,6 +2231,7 @@ mod tests {
                 value: input_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2333,6 +2340,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2349,6 +2357,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2410,6 +2419,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2434,6 +2444,7 @@ mod tests {
                 value: col_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2464,6 +2475,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2484,6 +2496,7 @@ mod tests {
                     value: Value::lovelace(1_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 },
             );
@@ -2516,6 +2529,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2532,6 +2546,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2568,6 +2583,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2584,6 +2600,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2743,6 +2760,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2761,6 +2779,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2775,6 +2794,7 @@ mod tests {
             value: Value::lovelace(4_700_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         });
         tx.body.total_collateral = Some(Lovelace(300_000));
@@ -2813,6 +2833,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2830,6 +2851,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2843,6 +2865,7 @@ mod tests {
             value: Value::lovelace(4_700_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         });
         // Declare wrong total_collateral (should be 300_000)
@@ -2872,6 +2895,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -2895,6 +2919,7 @@ mod tests {
                 value: Value::lovelace(2_000_000),
                 datum: OutputDatum::None,
                 script_ref: Some(ScriptRef::NativeScript(native_script)),
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3092,6 +3117,7 @@ mod tests {
                 value: Value::lovelace(100_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3121,6 +3147,7 @@ mod tests {
                     value: output_value,
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -3215,6 +3242,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3249,6 +3277,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3267,6 +3296,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3283,6 +3313,7 @@ mod tests {
                     value: Value::lovelace(9_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(1_000_000),
@@ -3352,6 +3383,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3369,6 +3401,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3385,6 +3418,7 @@ mod tests {
                     value: Value::lovelace(9_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(1_000_000),
@@ -3500,6 +3534,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3516,6 +3551,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3568,6 +3604,7 @@ mod tests {
                 value: Value::lovelace(100_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3584,6 +3621,7 @@ mod tests {
                 value: Value::lovelace(50_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3664,6 +3702,7 @@ mod tests {
                 value: Value::lovelace(100_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3680,6 +3719,7 @@ mod tests {
                 value: Value::lovelace(50_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3793,6 +3833,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3859,6 +3900,7 @@ mod tests {
                 value: Value::lovelace(1_000_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3926,6 +3968,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -3992,6 +4035,7 @@ mod tests {
                 value: Value::lovelace(1_000_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4050,6 +4094,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4068,6 +4113,7 @@ mod tests {
                 value: Value::lovelace(2_000_000),
                 datum: OutputDatum::None,
                 script_ref: Some(ScriptRef::PlutusV2(vec![0x01, 0x02, 0x03])),
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4151,6 +4197,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4167,6 +4214,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4258,6 +4306,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4271,6 +4320,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4310,6 +4360,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -4523,6 +4574,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4569,6 +4621,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4608,6 +4661,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4658,6 +4712,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4703,6 +4758,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4748,6 +4804,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4766,6 +4823,7 @@ mod tests {
                 value: Value::lovelace(2_000_000),
                 datum: OutputDatum::None,
                 script_ref: Some(ScriptRef::PlutusV2(plutus_bytes)),
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4953,6 +5011,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4966,6 +5025,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -4982,6 +5042,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -5065,6 +5126,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5078,6 +5140,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5094,6 +5157,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -5171,6 +5235,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5235,6 +5300,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5279,6 +5345,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5379,6 +5446,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5392,6 +5460,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5408,6 +5477,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -5486,6 +5556,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5499,6 +5570,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5515,6 +5587,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -5911,6 +5984,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -5935,6 +6009,7 @@ mod tests {
                 value: col_value,
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );

@@ -191,6 +191,7 @@ pub fn to_tx_output(out: &TxOutput) -> Result<TransactionOutput, AdapterError> {
         value,
         datum: transaction::OutputDatum::None,
         script_ref: None,
+        is_legacy: false,
         raw_cbor: None,
     })
 }

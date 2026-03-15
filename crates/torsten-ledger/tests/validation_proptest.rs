@@ -35,6 +35,7 @@ fn make_utxo_set(input_value: u64) -> (UtxoSet, TransactionInput) {
         value: Value::lovelace(input_value),
         datum: OutputDatum::None,
         script_ref: None,
+        is_legacy: false,
         raw_cbor: None,
     };
     utxo_set.insert(input.clone(), output);
@@ -51,6 +52,7 @@ fn make_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction 
                 value: Value::lovelace(output_value),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             }],
             fee: Lovelace(fee),
@@ -431,6 +433,7 @@ proptest! {
             value: Value::lovelace(collateral_value),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         });
 
@@ -476,6 +479,7 @@ proptest! {
             value: Value::lovelace(collateral_value),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         });
 

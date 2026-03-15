@@ -14,6 +14,7 @@ pub(crate) use governance::{
 #[doc(hidden)]
 pub use rewards::Rat;
 
+use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoSet;
 use crate::validation::{validate_transaction, ValidationError};
@@ -533,6 +534,7 @@ impl LedgerState {
                 },
                 datum: torsten_primitives::transaction::OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             };
 
@@ -614,6 +616,86 @@ impl LedgerState {
                 slot = block.slot().0,
                 "Block body exceeds max_block_body_size (expected during replay before PP updates)"
             );
+        }
+
+        // Byron era — apply dedicated Byron UTxO rules and return early.
+        //
+        // Byron has no scripts, no certificates, no withdrawals, no governance,
+        // and no multi-asset. Its fee rule is:
+        //   fee >= min_fee_a * tx_size_bytes + min_fee_b
+        //
+        // We skip the entire Shelley+ transaction pipeline (execution units,
+        // Plutus evaluation, certificate processing, etc.) for Byron blocks.
+        if block.era == Era::Byron {
+            let fee_policy = ByronFeePolicy {
+                min_fee_a: self.protocol_params.min_fee_a,
+                min_fee_b: self.protocol_params.min_fee_b,
+            };
+            let byron_mode = match mode {
+                BlockValidationMode::ValidateAll => ByronApplyMode::ValidateAll,
+                BlockValidationMode::ApplyOnly => ByronApplyMode::ApplyOnly,
+            };
+
+            // apply_byron_block uses a two-pass model: it collects UTxO changes
+            // into a ByronBlockEffect using only the lookup closure (shared borrow),
+            // then we apply them below with mutable borrows. This avoids overlapping
+            // borrows on self.utxo_set.
+            let effect = apply_byron_block(
+                &block.transactions,
+                fee_policy,
+                block.slot().0,
+                byron_mode,
+                |input| self.utxo_set.lookup(input),
+            )
+            .map_err(|e| LedgerError::BlockTxValidationFailed {
+                slot: e.slot,
+                tx_hash: e.tx_hash,
+                errors: e.reason.to_string(),
+            })?;
+
+            // Apply the collected effects to the UTxO set
+            for input in &effect.spent {
+                self.utxo_set.remove(input);
+            }
+            for (input, output) in effect.created {
+                self.utxo_set.insert(input, output);
+            }
+            self.epoch_fees += effect.fees;
+
+            // Track block production and nonce state (same as Shelley+)
+            if !block.header.issuer_vkey.is_empty() {
+                let pool_id = torsten_primitives::hash::blake2b_224(&block.header.issuer_vkey);
+                *Arc::make_mut(&mut self.epoch_blocks_by_pool)
+                    .entry(pool_id)
+                    .or_insert(0) += 1;
+            }
+            self.epoch_block_count += 1;
+
+            // Byron uses OBFT so there is no VRF output, but update the nonces
+            // defensively in case a future encoding change adds one.
+            if !block.header.vrf_result.output.is_empty() {
+                self.update_evolving_nonce(&block.header.vrf_result.output);
+                let first_slot_of_next_epoch =
+                    self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
+                if block.slot().0
+                    < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
+                {
+                    self.candidate_nonce = self.evolving_nonce;
+                }
+            }
+            self.lab_nonce = block.header.prev_hash;
+
+            self.tip = block.tip();
+            self.era = block.era;
+
+            trace!(
+                slot = block.slot().0,
+                block_no = block.block_number().0,
+                utxo_count = self.utxo_set.len(),
+                epoch = self.epoch.0,
+                "Ledger: Byron block applied successfully"
+            );
+            return Ok(());
         }
 
         // Block-level execution unit budget check
@@ -1248,6 +1330,7 @@ mod tests {
             },
             datum: torsten_primitives::transaction::OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state.utxo_set.insert(input, output);
@@ -1383,6 +1466,7 @@ mod tests {
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state.utxo_set.insert(genesis_input.clone(), genesis_output);
@@ -1399,6 +1483,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -1472,6 +1557,7 @@ mod tests {
                 value: Value::lovelace(5_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -1757,6 +1843,7 @@ mod tests {
                 value: Value::lovelace(10_000_000),
                 datum: OutputDatum::None,
                 script_ref: None,
+                is_legacy: false,
                 raw_cbor: None,
             },
         );
@@ -1772,6 +1859,7 @@ mod tests {
                     value: Value::lovelace(9_800_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(200_000),
@@ -3854,6 +3942,7 @@ mod tests {
             value: Value::lovelace(1_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state.utxo_set.insert(input, output);
@@ -4607,6 +4696,7 @@ mod tests {
             value: Value::lovelace(10_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state.utxo_set.insert(genesis_input.clone(), genesis_output);
@@ -4621,6 +4711,7 @@ mod tests {
                     value: Value::lovelace(7_000_000),
                     datum: OutputDatum::None,
                     script_ref: None,
+                    is_legacy: false,
                     raw_cbor: None,
                 }],
                 fee: Lovelace(3_000_000),
@@ -5204,6 +5295,7 @@ mod tests {
             value: Value::lovelace(5_000_000), // 5 ADA collateral
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state
@@ -5281,6 +5373,7 @@ mod tests {
             value: Value::lovelace(10_000_000), // 10 ADA collateral input
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state
@@ -5295,6 +5388,7 @@ mod tests {
             value: Value::lovelace(7_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
 
@@ -5368,6 +5462,7 @@ mod tests {
             value: Value::lovelace(8_000_000),
             datum: OutputDatum::None,
             script_ref: None,
+            is_legacy: false,
             raw_cbor: None,
         };
         state

@@ -3558,6 +3558,7 @@ dependencies = [
 name = "torsten-serialization"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bytes",
  "criterion",
  "hex",

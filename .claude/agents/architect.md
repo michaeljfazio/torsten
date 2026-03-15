@@ -68,10 +68,15 @@ Periodically assess:
 ### 6. Decision Framework
 When evaluating architectural decisions, prioritize:
 1. **Correctness** — Must match Haskell cardano-node behavior exactly
-2. **Simplicity** — The simplest correct solution is the best
-3. **Performance** — Must keep up with Cardano chain growth rates
-4. **Maintainability** — Code should be readable and testable
-5. **Compatibility** — API compatibility with cardano-cli and existing tools
+2. **Security** — No unsafe patterns, proper input validation at boundaries, no secret leakage
+3. **Robustness** — Graceful error handling, crash recovery, no silent data corruption
+4. **Reliability** — Deterministic behavior, no race conditions, proper resource cleanup
+5. **Testability** — Every component must be independently testable with clean interfaces
+6. **Simplicity** — The simplest correct solution is the best
+7. **Performance** — Must keep up with Cardano chain growth rates
+8. **Composability** — Components should compose cleanly via traits, not concrete types
+9. **Maintainability** — Code should be readable, documented, and easy to change
+10. **Compatibility** — API compatibility with cardano-cli and existing tools
 
 ## Review Process
 When called for a review:

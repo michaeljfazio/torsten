@@ -52,6 +52,7 @@ fn make_tx_output_ada(seed: u8, lovelace: u64) -> TransactionOutput {
         datum: OutputDatum::None,
         script_ref: None,
         raw_cbor: None,
+        is_legacy: false,
     }
 }
 

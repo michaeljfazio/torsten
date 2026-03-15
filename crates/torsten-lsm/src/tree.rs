@@ -1480,7 +1480,9 @@ mod mainnet_scale_tests {
         // Fill credential fields with a deterministic mix of the seed
         let cred = seed.wrapping_mul(0xdead_beef_cafe_babe);
         for (i, chunk) in buf[8..200].chunks_mut(8).enumerate() {
-            let word = cred.wrapping_add(i as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            let word = cred
+                .wrapping_add(i as u64)
+                .wrapping_mul(0x517c_c1b7_2722_0a95);
             let len = chunk.len().min(8);
             chunk[..len].copy_from_slice(&word.to_be_bytes()[..len]);
         }
@@ -1597,7 +1599,9 @@ mod mainnet_scale_tests {
         eprintln!("[test_mainnet_scale_delete_amplification] delete flush complete");
 
         // Phase 3: Verify surviving 100K entries (seeds DELETED..TOTAL) are readable.
-        eprintln!("[test_mainnet_scale_delete_amplification] verifying surviving {REMAINING} entries...");
+        eprintln!(
+            "[test_mainnet_scale_delete_amplification] verifying surviving {REMAINING} entries..."
+        );
         let mut missing = 0usize;
         let mut wrong = 0usize;
         for seed in DELETED..TOTAL {
@@ -1613,19 +1617,19 @@ mod mainnet_scale_tests {
             }
         }
         assert_eq!(
-            missing,
-            0,
+            missing, 0,
             "{missing} surviving UTxOs missing from tree (out of {REMAINING})"
         );
         assert_eq!(
-            wrong,
-            0,
+            wrong, 0,
             "{wrong} surviving UTxOs have wrong values (out of {REMAINING})"
         );
 
         // Phase 4: Verify deleted entries return None (no resurrection).
         // Sample 10K deleted keys rather than all 400K to keep runtime bounded.
-        eprintln!("[test_mainnet_scale_delete_amplification] verifying 10K deleted keys return None...");
+        eprintln!(
+            "[test_mainnet_scale_delete_amplification] verifying 10K deleted keys return None..."
+        );
         let mut rng_state: u64 = 0xfeedface_deadc0de;
         for _ in 0..10_000 {
             let seed = next_rand(&mut rng_state) % DELETED;
@@ -1682,7 +1686,9 @@ mod mainnet_scale_tests {
             };
             let mut tree = LsmTree::open(&db_path, config).unwrap();
 
-            eprintln!("[test_mainnet_scale_wal_crash_recovery] writing {TOTAL} entries (WAL only)...");
+            eprintln!(
+                "[test_mainnet_scale_wal_crash_recovery] writing {TOTAL} entries (WAL only)..."
+            );
             for seed in 0..TOTAL {
                 let k = utxo_key(seed);
                 let v = utxo_value(seed);
@@ -1691,7 +1697,9 @@ mod mainnet_scale_tests {
 
             // Drop WITHOUT calling flush() — this is the crash.
             // All data is in the WAL on disk and the in-memory memtable only.
-            eprintln!("[test_mainnet_scale_wal_crash_recovery] simulating crash (drop without flush)...");
+            eprintln!(
+                "[test_mainnet_scale_wal_crash_recovery] simulating crash (drop without flush)..."
+            );
         }
 
         // Phase 2: reopen and verify WAL replay recovers all entries.
@@ -1702,7 +1710,9 @@ mod mainnet_scale_tests {
                 ..mainnet_config()
             };
             let tree = LsmTree::open(&db_path, config).unwrap();
-            eprintln!("[test_mainnet_scale_wal_crash_recovery] reopened, verifying {TOTAL} entries...");
+            eprintln!(
+                "[test_mainnet_scale_wal_crash_recovery] reopened, verifying {TOTAL} entries..."
+            );
 
             // Verify all TOTAL entries are present and have the correct value.
             let mut missing = 0usize;
@@ -1720,17 +1730,17 @@ mod mainnet_scale_tests {
                 }
             }
             assert_eq!(
-                missing,
-                0,
+                missing, 0,
                 "{missing} entries lost during WAL crash recovery (out of {TOTAL})"
             );
             assert_eq!(
-                wrong,
-                0,
+                wrong, 0,
                 "{wrong} entries have wrong values after WAL crash recovery (out of {TOTAL})"
             );
 
-            eprintln!("[test_mainnet_scale_wal_crash_recovery] all {TOTAL} entries recovered — PASS");
+            eprintln!(
+                "[test_mainnet_scale_wal_crash_recovery] all {TOTAL} entries recovered — PASS"
+            );
         }
     }
 }

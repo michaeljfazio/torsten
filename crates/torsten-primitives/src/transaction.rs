@@ -28,17 +28,50 @@ pub struct TransactionOutput {
     pub value: Value,
     pub datum: OutputDatum,
     pub script_ref: Option<ScriptRef>,
+    /// True when the output was encoded in the legacy Shelley-era array format:
+    /// `[address, value]` or `[address, value, datum_hash]`.
+    ///
+    /// Conway-era transactions may still contain legacy-format outputs for simple
+    /// change outputs. When `is_legacy` is true, `encode_transaction_output()`
+    /// produces the array encoding rather than the Babbage/Conway map format.
+    /// This flag is stored in bincode (no `#[serde(skip)]`) so it survives LSM
+    /// round-trips.
+    #[serde(default)]
+    pub is_legacy: bool,
     /// Raw CBOR encoding of this output (for Plutus script evaluation)
     #[serde(skip)]
     pub raw_cbor: Option<Vec<u8>>,
 }
 
 /// How datum is attached to a UTxO
+///
+/// The `raw_cbor` field on `InlineDatum` stores the exact CBOR bytes of the
+/// PlutusData as they appeared on-chain (inside the tag(24) wrapper). This
+/// preserves encoding details that cannot round-trip through `PlutusData` alone,
+/// such as indefinite-length array notation (0x9f..0xff) for Constr fields and
+/// List items. Without it, re-encoding for Plutus script context construction or
+/// N2C UTxO responses would produce a different byte string, invalidating any
+/// script that hashes the datum.
+///
+/// `raw_cbor` is serialized to bincode (no `#[serde(skip)]`) so it survives
+/// LSM store round-trips. It is `None` only for outputs constructed locally
+/// (not received from the wire), in which case `encode_transaction_output()`
+/// falls back to a fresh encoding of the parsed `PlutusData`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputDatum {
     None,
     DatumHash(DatumHash),
-    InlineDatum(PlutusData),
+    /// An inline datum embedded in the output.
+    ///
+    /// `data` — the parsed Plutus data (used by ledger and Plutus evaluation).
+    /// `raw_cbor` — the verbatim CBOR bytes of `data` as received on the wire,
+    ///              preserved through LSM storage for byte-exact re-encoding.
+    InlineDatum {
+        data: PlutusData,
+        /// Raw CBOR encoding of `data` as it appeared in the original transaction.
+        /// Stored in bincode (not skipped) so LSM round-trips preserve it.
+        raw_cbor: Option<Vec<u8>>,
+    },
 }
 
 /// Reference to a script embedded in a UTxO

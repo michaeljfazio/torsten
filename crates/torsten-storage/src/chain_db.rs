@@ -442,6 +442,73 @@ impl ChainDB {
         Ok(count)
     }
 
+    /// Flush finalized blocks up to a maximum slot (LoE-gated flush).
+    ///
+    /// Like `flush_to_immutable`, but also enforces a slot ceiling so that
+    /// the immutable tip never advances past `loe_slot`. This is the
+    /// Ouroboros Genesis Limit on Eagerness (LoE): during PreSyncing and
+    /// Syncing states, the immutable tip must not advance past the common
+    /// prefix of all candidate chains (the minimum peer tip slot).
+    ///
+    /// Blocks that are deep enough to be finalized (> k from volatile tip)
+    /// but have a slot > `loe_slot` are left in the VolatileDB until the
+    /// LoE constraint is lifted (when GSM transitions to CaughtUp).
+    pub fn flush_to_immutable_loe(&mut self, loe_slot: u64) -> Result<u64, ChainDBError> {
+        let vol_tip = match self.volatile.get_tip() {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        let tip_block_no = vol_tip.2;
+        if tip_block_no <= SECURITY_PARAM_K as u64 {
+            return Ok(0);
+        }
+
+        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+
+        // Collect finalizable blocks that are also within the LoE slot ceiling.
+        let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
+        for block_no in 1..=finalize_up_to_block_no {
+            if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
+                // LoE: skip blocks whose slot exceeds the limit
+                if slot > loe_slot {
+                    continue;
+                }
+                if self.immutable.has_block(&hash) {
+                    continue;
+                }
+                to_finalize.push((slot, hash, block_no, cbor.to_vec()));
+            }
+        }
+
+        if to_finalize.is_empty() {
+            return Ok(0);
+        }
+
+        let count = to_finalize.len() as u64;
+
+        for (slot, hash, block_no, cbor) in &to_finalize {
+            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+        }
+
+        if let Some((slot, hash, block_no, _)) = to_finalize.last() {
+            self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+        }
+
+        let max_slot = to_finalize.last().map(|(s, _, _, _)| *s).unwrap_or(0);
+        self.volatile.remove_blocks_up_to_slot(max_slot);
+
+        debug!(
+            flushed = count,
+            loe_slot,
+            immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
+            volatile_remaining = self.volatile.len(),
+            "ChainDB: flushed blocks to immutable (LoE-gated)"
+        );
+
+        Ok(count)
+    }
+
     /// Flush ALL volatile blocks to ImmutableDB, bypassing the k-depth check.
     ///
     /// Only safe to call during graceful shutdown — after this, the VolatileDB
