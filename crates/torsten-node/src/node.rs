@@ -956,17 +956,28 @@ impl Node {
                     );
                     ledger.attach_utxo_store(store);
 
-                    // If the ledger has a non-origin tip but the UTxO store is empty,
-                    // the store data was lost (crash, session lock issue, etc.).
+                    // If the ledger has a non-origin tip but the UTxO store has
+                    // significantly fewer entries than expected, the store data
+                    // was lost or incomplete (crash, session lock, etc.).
                     // Force a full re-replay by resetting the ledger tip to origin.
                     let ledger_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
-                    if ledger_slot > 0 && store_count == 0 {
-                        warn!(
-                            "UTxO store is empty but ledger is at slot {}. \
-                             Resetting ledger to force full re-replay.",
-                            ledger_slot
-                        );
-                        ledger.reset_to_origin();
+                    if ledger_slot > 0 {
+                        // A synced preview testnet has ~3M UTxOs, mainnet ~15M.
+                        // If the store has less than 100K entries for a non-trivial
+                        // ledger tip, the data is almost certainly incomplete.
+                        let min_expected = if ledger_slot > 10_000_000 { 100_000 } else { 0 };
+                        if store_count < min_expected {
+                            warn!(
+                                utxo_count = store_count,
+                                ledger_slot,
+                                min_expected,
+                                "UTxO store appears incomplete ({} entries for slot {}). \
+                                 Resetting ledger to force full re-replay.",
+                                store_count,
+                                ledger_slot
+                            );
+                            ledger.reset_to_origin();
+                        }
                     }
                 }
                 Err(e) => {
