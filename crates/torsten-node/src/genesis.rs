@@ -15,6 +15,7 @@ use tracing::debug;
 /// Byron genesis configuration (compatible with cardano-node byron-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Fields populated by serde deserialization from cardano-node genesis JSON
 #[allow(dead_code)]
 pub struct ByronGenesis {
     /// AVVM (Ada Voucher Vending Machine) distribution: base64 pubkey → lovelace
@@ -41,6 +42,7 @@ pub struct ByronGenesis {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Fields populated by serde deserialization from cardano-node genesis JSON
 #[allow(dead_code)]
 pub struct ByronBlockVersionData {
     #[serde(default)]
@@ -55,6 +57,7 @@ pub struct ByronBlockVersionData {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Fields populated by serde deserialization from cardano-node genesis JSON
 #[allow(dead_code)]
 pub struct ByronTxFeePolicy {
     /// Fee = summand + multiplier * tx_size (both values are ×1e12)
@@ -66,7 +69,6 @@ pub struct ByronTxFeePolicy {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ByronProtocolConsts {
     pub k: u64,
     pub protocol_magic: u64,
@@ -74,21 +76,12 @@ pub struct ByronProtocolConsts {
 
 /// A genesis UTxO entry (address bytes + lovelace amount)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GenesisUtxoEntry {
     pub address: Vec<u8>,
     pub lovelace: u64,
 }
 
 impl ByronGenesis {
-    #[allow(dead_code)]
-    pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read Byron genesis: {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse Byron genesis: {}", path.display()))
-    }
-
     /// Load the Byron genesis and compute its Blake2b-256 hash.
     ///
     /// The hash is computed over the raw file content (canonical JSON), matching
@@ -266,7 +259,6 @@ impl ByronGenesis {
 /// Shelley genesis configuration (compatible with cardano-node shelley-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ShelleyGenesis {
     pub network_magic: u64,
     pub network_id: String,
@@ -285,7 +277,6 @@ pub struct ShelleyGenesis {
 /// Protocol parameters as specified in Shelley genesis
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ShelleyGenesisProtocolParams {
     pub min_fee_a: u64,
     pub min_fee_b: u64,
@@ -378,7 +369,6 @@ impl ShelleyGenesis {
 /// Alonzo genesis configuration (compatible with cardano-node alonzo-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct AlonzoGenesis {
     pub lovelace_per_u_tx_o_word: Option<u64>,
     pub execution_prices: AlonzoExPrices,
@@ -564,7 +554,6 @@ fn parse_cost_model(value: &serde_json::Value) -> Option<Vec<i64>> {
 /// Conway genesis configuration (compatible with cardano-node conway-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ConwayGenesis {
     pub pool_voting_thresholds: PoolVotingThresholds,
     #[serde(alias = "dRepVotingThresholds")]
@@ -581,15 +570,17 @@ pub struct ConwayGenesis {
     pub min_fee_ref_script_cost_per_byte: Option<u64>,
     #[serde(default)]
     pub plutus_v3_cost_model: Option<Vec<i64>>,
+    // Deserialized from genesis JSON for completeness; not yet consumed in code
     #[serde(default)]
+    #[allow(dead_code)]
     pub constitution: Option<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub committee: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct PoolVotingThresholds {
     pub committee_normal: f64,
     pub committee_no_confidence: f64,
@@ -601,7 +592,6 @@ pub struct PoolVotingThresholds {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct DRepVotingThresholds {
     pub motion_no_confidence: f64,
     pub committee_normal: f64,

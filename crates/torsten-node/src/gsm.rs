@@ -66,13 +66,14 @@ impl std::fmt::Display for GenesisSyncState {
 
 /// Configuration for the Genesis State Machine.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GsmConfig {
     /// Minimum active big ledger peers to transition PreSyncing → Syncing
     pub min_active_blp: usize,
     /// Maximum tip age (seconds) before CaughtUp → PreSyncing regression
     pub max_tip_age_secs: u64,
     /// Genesis security parameter (window size in slots for GDD density comparison)
+    // TODO: used by gdd_evaluate(); wire up when Genesis protocol is enabled
+    #[allow(dead_code)]
     pub genesis_window_slots: u64,
     /// Path for the caught_up marker file
     pub marker_path: PathBuf,
@@ -95,7 +96,6 @@ impl Default for GsmConfig {
 /// and tip freshness. The GSM also manages:
 /// - **LoE (Limit on Eagerness)**: constrains block application during sync
 /// - **GDD (Genesis Density Disconnector)**: disconnects sparse-chain peers
-#[allow(dead_code)]
 pub struct GenesisStateMachine {
     config: GsmConfig,
     state: GenesisSyncState,
@@ -129,12 +129,6 @@ impl GenesisStateMachine {
     /// Current sync state
     pub fn state(&self) -> GenesisSyncState {
         self.state
-    }
-
-    /// Whether genesis mode is enabled
-    #[allow(dead_code)]
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
     }
 
     /// Evaluate state transitions based on current conditions.
@@ -238,6 +232,7 @@ impl GenesisStateMachine {
     /// lower bound are disconnected.
     ///
     /// Returns addresses of peers that should be disconnected.
+    // TODO: wire up GDD in the sync pipeline when Genesis protocol is enabled
     #[allow(dead_code)]
     pub fn gdd_evaluate(
         &self,
@@ -321,6 +316,7 @@ impl GenesisStateMachine {
 
 /// Chain info tracked per peer for GDD density comparison.
 #[derive(Debug, Clone)]
+// TODO: wire up PeerChainInfo tracking in the sync pipeline for GDD
 #[allow(dead_code)]
 pub struct PeerChainInfo {
     /// Number of blocks this peer's chain has within the genesis window
@@ -335,6 +331,7 @@ pub struct PeerChainInfo {
 /// active stake is covered. Pools in the top 90% are "big ledger peers".
 ///
 /// Returns (big_ledger_pool_ids, remaining_pool_ids).
+// TODO: wire up BLP identification in peer manager when Genesis protocol is enabled
 #[allow(dead_code)]
 pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     if pool_stakes.is_empty() {
@@ -366,6 +363,7 @@ pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>
 /// Load peer snapshot from a JSON file.
 ///
 /// Format: `[{"addr": "1.2.3.4", "port": 3001}, ...]`
+// TODO: wire up peer snapshot loading in node startup when Genesis protocol is enabled
 #[allow(dead_code)]
 pub fn load_peer_snapshot(path: &Path) -> Result<Vec<SocketAddr>, String> {
     let content = std::fs::read_to_string(path)

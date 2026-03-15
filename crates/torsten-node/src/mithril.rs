@@ -14,9 +14,13 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use torsten_primitives::hash::Hash32;
+#[cfg(test)]
 use torsten_primitives::time::{BlockNo, SlotNo};
-use tracing::{debug, info, warn};
+#[cfg(test)]
+use tracing::debug;
+use tracing::{info, warn};
 
 /// Mithril aggregator endpoints per network
 const MAINNET_AGGREGATOR: &str =
@@ -32,13 +36,14 @@ const PREPROD_AGGREGATOR: &str =
 
 /// Snapshot metadata from the Mithril aggregator API (legacy endpoint)
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
 struct SnapshotListItem {
     digest: String,
+    #[allow(dead_code)]
     network: String,
     size: u64,
     #[serde(rename = "beacon")]
     beacon: SnapshotBeacon,
+    #[allow(dead_code)]
     compression_algorithm: Option<String>,
 }
 
@@ -50,12 +55,13 @@ struct SnapshotBeacon {
 
 /// Full snapshot detail (includes download locations)
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
 struct SnapshotDetail {
     digest: String,
     size: u64,
+    #[allow(dead_code)]
     beacon: SnapshotBeacon,
     locations: Vec<String>,
+    #[allow(dead_code)]
     compression_algorithm: Option<String>,
 }
 
@@ -101,7 +107,7 @@ impl SecondaryIndexEntry {
 }
 
 /// Verify a block's CRC32 checksum against the secondary index entry.
-#[allow(dead_code)]
+#[cfg(test)]
 fn verify_block_checksum(block_data: &[u8], expected: u32) -> bool {
     crc32fast::hash(block_data) == expected
 }
@@ -502,7 +508,7 @@ fn find_immutable_dir(extract_dir: &Path) -> Option<PathBuf> {
 
 /// Import cardano-node immutable chunk files into Torsten's ImmutableDB.
 /// Retained for fallback/testing; Mithril import now skips this step.
-#[allow(dead_code)]
+#[cfg(test)]
 fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
     let immutable_dir = find_immutable_dir(extract_dir)
         .context("Could not find immutable/ directory in extracted snapshot")?;
@@ -776,14 +782,14 @@ where
 }
 
 /// A parsed block: (slot, hash, block_number, raw_cbor)
-#[allow(dead_code)]
+#[cfg(test)]
 type ParsedBlock = (SlotNo, Hash32, BlockNo, Vec<u8>);
 
 /// Parse a chunk file using the secondary index for block boundaries.
 ///
 /// Uses memory-mapped I/O for the chunk file to avoid loading the entire file
 /// into memory. The secondary index is small enough to read directly.
-#[allow(dead_code)]
+#[cfg(test)]
 fn parse_chunk_with_index(
     chunk_path: &Path,
     secondary_path: &Path,
@@ -876,7 +882,7 @@ fn parse_chunk_with_index(
 ///
 /// Uses memory-mapped I/O and proper CBOR size probing to avoid O(n^2)
 /// byte-by-byte scanning on decode failures.
-#[allow(dead_code)]
+#[cfg(test)]
 fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
     let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
     let chunk_len = chunk_file.metadata()?.len() as usize;

@@ -183,7 +183,8 @@ impl NodeConfig {
         }
     }
 
-    #[allow(dead_code)]
+    /// Get effective network magic (from explicit field or network default)
+    #[cfg(test)]
     pub fn network_magic(&self) -> u64 {
         self.network_magic.unwrap_or_else(|| self.network.magic())
     }

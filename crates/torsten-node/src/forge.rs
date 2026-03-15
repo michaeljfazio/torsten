@@ -8,7 +8,6 @@ use torsten_primitives::transaction::Transaction;
 use tracing::debug;
 
 /// Block producer credentials loaded from disk
-#[allow(dead_code)]
 pub struct BlockProducerCredentials {
     /// VRF secret key (32 bytes)
     pub vrf_skey: [u8; 32],
@@ -169,13 +168,16 @@ fn unwrap_cbor(data: &[u8]) -> &[u8] {
 }
 
 /// Configuration for the block producer
-#[allow(dead_code)]
 pub struct BlockProducerConfig {
     /// Protocol version to stamp on forged blocks
     pub protocol_version: ProtocolVersion,
     /// Maximum block body size
+    // TODO: enforce in forge_block() to reject oversized blocks
+    #[allow(dead_code)]
     pub max_block_body_size: u64,
     /// Maximum number of transactions per block
+    // TODO: enforce in forge_block() to cap transaction count
+    #[allow(dead_code)]
     pub max_txs_per_block: usize,
     /// Current era for the forged block
     pub era: Era,

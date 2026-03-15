@@ -40,7 +40,8 @@ pub struct NodeArgs {
     pub shelley_vrf_key: Option<PathBuf>,
     /// Path to operational certificate (enables block production)
     pub shelley_operational_certificate: Option<PathBuf>,
-    /// Path to cold signing key (for pool ID derivation; accepted for cardano-node compatibility)
+    /// Path to cold signing key (accepted for cardano-node compatibility)
+    #[allow(dead_code)]
     pub shelley_cold_key: Option<PathBuf>,
     /// Prometheus metrics port (0 to disable)
     pub metrics_port: u16,
@@ -643,6 +644,7 @@ pub struct Node {
     ledger_state: Arc<RwLock<LedgerState>>,
     consensus: OuroborosPraos,
     mempool: Arc<Mempool>,
+    // Held to keep the N2N/N2C server tasks alive for the node's lifetime
     #[allow(dead_code)]
     server: NodeServer,
     query_handler: Arc<RwLock<QueryHandler>>,

@@ -41,7 +41,6 @@ impl Histogram {
 
     /// Record an observation (value in milliseconds).
     /// Increments the first bucket whose upper bound >= value_ms.
-    #[allow(dead_code)]
     pub fn observe(&self, value_ms: f64) {
         for (i, &bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
             if value_ms <= bound {
@@ -173,6 +172,7 @@ pub struct NodeMetrics {
     /// Epoch milliseconds when the last block was received (0 = never)
     pub last_block_received_at: AtomicU64,
     /// Epoch millis of last RollForward event (for chainsync_idle calculation)
+    // TODO: wire up record_roll_forward() calls in the sync pipeline
     #[allow(dead_code)]
     pub last_roll_forward_at: AtomicU64,
     /// Duration of last ledger replay in seconds (stored as f64 bits)
@@ -355,6 +355,7 @@ impl NodeMetrics {
     }
 
     /// Record a RollForward event timestamp for chainsync_idle tracking.
+    // TODO: call from the ChainSync RollForward handler in node.rs
     #[allow(dead_code)]
     pub fn record_roll_forward(&self) {
         let now_millis = std::time::SystemTime::now()
@@ -366,18 +367,21 @@ impl NodeMetrics {
     }
 
     /// Set the tip age in seconds.
+    // TODO: call from the metrics update loop in node.rs
     #[allow(dead_code)]
     pub fn set_tip_age_secs(&self, secs: u64) {
         self.tip_age_secs.store(secs, Ordering::Relaxed);
     }
 
     /// Set the replay duration in seconds.
+    // TODO: call after ledger replay completes in node.rs
     #[allow(dead_code)]
     pub fn set_replay_duration_secs(&self, secs: u64) {
         self.replay_duration_secs.store(secs, Ordering::Relaxed);
     }
 
     /// Compute and store the chainsync idle time.
+    // TODO: call periodically from the metrics update loop in node.rs
     #[allow(dead_code)]
     pub fn update_chainsync_idle(&self) {
         let last_rf = self.last_roll_forward_at.load(Ordering::Relaxed);
