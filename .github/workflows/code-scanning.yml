@@ -1,0 +1,67 @@
+name: Code Scanning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly on Sundays at 03:00 UTC
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  clippy-analysis:
+    name: Clippy Security Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-scan-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-scan-
+
+      - name: Install SARIF tools
+        run: cargo install clippy-sarif sarif-fmt || true
+
+      - name: Run Clippy with SARIF output
+        run: |
+          cargo clippy --all-targets --message-format=json 2>&1 |
+            clippy-sarif 2>/dev/null > clippy-results.sarif || true
+
+      - name: Upload Clippy results to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: clippy-results.sarif
+          category: clippy
+        if: always()
+
+  cargo-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit || true
+
+      - name: Run cargo audit
+        run: cargo audit --json > audit-results.json 2>&1 || true
+
+      - name: Display audit results
+        run: cargo audit 2>&1 || true
