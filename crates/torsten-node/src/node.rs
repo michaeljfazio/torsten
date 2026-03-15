@@ -40,6 +40,8 @@ pub struct NodeArgs {
     pub shelley_vrf_key: Option<PathBuf>,
     /// Path to operational certificate (enables block production)
     pub shelley_operational_certificate: Option<PathBuf>,
+    /// Path to cold signing key (for pool ID derivation; accepted for cardano-node compatibility)
+    pub shelley_cold_key: Option<PathBuf>,
     /// Prometheus metrics port (0 to disable)
     pub metrics_port: u16,
     /// Maximum number of transactions in the mempool

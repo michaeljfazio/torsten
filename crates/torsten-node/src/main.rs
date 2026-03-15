@@ -183,6 +183,10 @@ struct RunArgs {
     #[arg(long)]
     shelley_operational_certificate: Option<PathBuf>,
 
+    /// Path to the cold signing key file (for pool ID derivation)
+    #[arg(long)]
+    shelley_cold_key: Option<PathBuf>,
+
     #[command(flatten)]
     log: LogArgs,
 }
@@ -456,6 +460,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_kes_key: args.shelley_kes_key,
         shelley_vrf_key: args.shelley_vrf_key,
         shelley_operational_certificate: args.shelley_operational_certificate,
+        shelley_cold_key: args.shelley_cold_key,
         metrics_port: args.metrics_port,
         mempool_max_tx: args.mempool_max_tx,
         mempool_max_bytes: args.mempool_max_bytes,
