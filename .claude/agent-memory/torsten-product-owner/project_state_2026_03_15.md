@@ -147,3 +147,36 @@ All Tranche 1 items resolved or confirmed done:
 - WAL prev_hash placeholder: fork detection impaired during post-crash recovery window
 - NonMyopicMemberRewards: formula implemented, no E2E validation against live chain data
 - Mainnet not yet booted: config files exist but node never connected to mainnet peers
+
+---
+
+## Tranche 4 — Queued Work (2026-03-15)
+
+**CRITICAL BLOCKER — EBB (Byron Epoch Boundary Block) handling is broken.**
+Node stalls on mainnet at slot 21600 (epoch 0→1). EBBs skipped in both
+serial client (client.rs:374) and pipelined client (pipelined.rs:391-393).
+First real Byron block at epoch 1 has prev_hash = EBB hash, chain breaks.
+
+**Root cause:** EBBs have variant==0, subtag==Some(0). decode_header_info
+returns Ok(None) → excluded from BlockFetch list → never stored → chain
+continuity check in apply_block fails with BlockDoesNotConnect.
+
+**Fix approach confirmed:** Track EBB hashes in ChainSync (they are in the
+header CBOR even though we skip the slot/block_no). Store EBB hash as a
+"stub" entry in ChainDB. In LedgerState.apply_block, treat EBB-connecting
+blocks specially: advance tip hash through the EBB without applying state.
+
+**Architectural debt queued:**
+- H1: state/mod.rs=8918L, validation.rs=6052L, node.rs=5590L — split needed
+- H3: 13 unwrap() on mmap byte slices in block_index.rs (use checked indexing)
+- M2: std::mem::forget in UtxoStore::new_temp() — leaks temp dir, needs doc
+- M3: cbor.len() as u32 in volatile WAL — silent truncation for >4GB blocks
+- M4: 5 unwrap() in CLI query.rs (address parsing)
+- M1: 45 #[allow(dead_code)] annotations across crates
+
+**T3 carry-overs (not started):**
+- Transaction build auto-balancing (HIGH/L)
+- Plutus script witness CLI support (HIGH/L)
+- CDDL conformance test suite (HIGH/L)
+- N2N V16 Genesis protocol (LOW/L)
+- Peer sharing privacy model (LOW/M)
