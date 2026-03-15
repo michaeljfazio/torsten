@@ -1,182 +1,163 @@
 ---
 name: project_state_2026_03_15
-description: State assessment as of end-of-day 2026-03-15, post session-7 milestones and tranche planning — updated with Tranche 1 completion status and Tranche 2 execution plan
+description: State assessment as of 2026-03-15 — Tranche 5 (SPO Mainnet Readiness) planning, post-session-8 milestone summary
 type: project
 ---
 
-# Torsten State Assessment — 2026-03-15 (Updated: Tranche 2 Planning)
+# Torsten State Assessment — 2026-03-15 (Updated: Tranche 5 Planning)
 
 **Why:** Tracks completed milestones and open gaps for the tranche planning cycle.
 
 **How to apply:** Use when asked about current state, gap analysis, or what to work on next.
 
-## Tranche 1 — COMPLETE (Preview Testnet Compliance)
+---
 
-All Tranche 1 items resolved or confirmed done:
-- Testnet re-run #10: PASS (0 errors, 2.9M UTxOs, RUPD correct)
-- Plutus cost model: PASS (encoding correct, values match Koios)
-- NonMyopicMemberRewards formula: IMPLEMENTED in protocol.rs (maxPool' with pledge/margin/cost)
-- Tx output re-encoding verification: DONE (raw_cbor path in state/mod.rs)
-- CLI improvements: build-raw, query utxo --tx-in, stake-address-info server filtering
-- Credential type discrimination: DONE
-- GSM, committee fields, ValidationTagMismatch tolerance: DONE
-- vrf_dalek: pinned to specific commit (e1dcc02)
+## Session-8 Accomplishments (38 commits)
 
-## Tranche 2 — Mainnet Readiness (CURRENT)
+- torsten-lsm custom LSM engine (replacing cardano-lsm)
+- RUPD timing fix, Byron EBB chain continuity fix
+- state/mod.rs split (was 8918L)
+- Mainnet validated: 115K blocks, 5 Byron epoch boundaries, 0 errors
+- Preview validated: 4.1M blocks, 0 errors
+- torsten-tui dashboard (ratatui, 12 tests)
+- Transaction build auto-balance
+- CLI hardening
+- Storage hardening (mmap unwraps, WAL guard, mem::forget)
+- Dead code cleanup (45→33 annotations remain)
+- Security/community standards, nightly benchmarks, code scanning
+- Wiki with 8 ADRs, 6 pages, CI badges
+- Architectural review items addressed (phantom deps, file splits)
+- Conformance test suite: 58 vectors (30 utxo, 14 cert, 8 gov, 6 epoch)
+- N2C golden tests: 4 tests (GetCurrentPParams, GetEpochNo, result encoding)
 
-### T2-1: torsten-lsm Mainnet-Scale Stress Test (HIGH / M)
-- Existing stress tests go to 50K entries only
-- Need 20M+ UTxO test with compaction under concurrent flush, WAL crash recovery
-- File: `crates/torsten-lsm/src/tree.rs` (stress_tests module)
-- Owner: Storage Lead
-- Can run in parallel with T2-2 and T2-3
+## Tranche 5 — SPO Mainnet Readiness (CURRENT)
 
-### T2-2: Mainnet Configuration Validation (HIGH / M)
-- Config files exist: `config/mainnet-*.json`
-- Need to boot node on mainnet, connect to peers, sync Byron epoch 0→1
-- Acceptance: no panic on startup, handshake succeeds, first Shelley block applied
-- Owner: Ops Lead
-- Depends on: T2-3 (Byron ledger) for correct UTxO state after Byron
+**Mission:** Get Torsten to a state where a technically capable SPO can run it on mainnet
+as a passive observer (non-block-producing), connect to mainnet peers, sync from
+Mithril snapshot, and serve cardano-cli queries. Not a full production node yet —
+but the bar for "worth trying" in an SPO's test environment.
 
-### T2-3: Byron Ledger Validation (HIGH / L)
-- `crates/torsten-ledger/src/eras/byron.rs` is a 12-line stub
-- Byron blocks pass through apply_block without UTxO enforcement
-- For Mithril users: unaffected (skip Byron). For genesis-from-Byron: UTxO state wrong.
-- Owner: Ledger Lead
-- Note: Pallas parses Byron txs; need to implement UTxO spend rules + fee check
-
-### T2-4: Replay Throughput Benchmark (MEDIUM / S)
-- Target: ~10,600 blocks/s ImmutableDB replay
-- No bench harness exists yet (`benches/` dir doesn't exist)
-- Need criterion bench for: block replay, LSM insert/flush, chain sync pipeline
-- Owner: Perf Lead
-- Can run in parallel with all other items
-
-### T2-5: VolatileDB WAL prev_hash (MEDIUM / S)
-- WAL replay uses Hash32::ZERO as prev_hash placeholder (comment: line 239 volatile_db.rs)
-- Header size (56 bytes) has no slot for prev_hash — would need format bump
-- Impact: successor tracking broken after crash recovery until new blocks restore it
-- Fork detection during recovery window is impaired
-- Owner: Storage Lead
-- Can run in parallel
-
-## NEW Tranche 2 Items (identified during Tranche 1 execution)
-
-### T2-6: NonMyopicMemberRewards Integration Test (HIGH / S)
-- Formula is implemented but has ZERO end-to-end test coverage
-- Koios MCP available: koios_pool_history can provide ground truth amounts
-- Risk level: same class as the VRF nonce_vrf bug — formula looks right, no E2E validation
-- File: `crates/torsten-network/src/query_handler/protocol.rs`
-- Owner: Ledger/Test Lead
-- Can run in parallel with T2-2
-
-### T2-7: N2C Golden Test Coverage Expansion (MEDIUM / M)
-- Golden test infrastructure exists (`tests/golden/`) with n2c fixtures for GetCurrentPParams and GetEpochNo
-- Missing: GetNonMyopicMemberRewards, GetRewardInfoPools, GetPoolState, GetDRepState, GetConstitution
-- These are exercised in run #10 but not in CI-runnable golden tests
-- Owner: Test Lead
-- Can run in parallel with all other items
-
-### T2-8: WAL prev_hash Format Upgrade (MEDIUM / S)
-- Expand WAL entry from 56 bytes to 88 bytes (add 32-byte prev_hash field)
-- Requires: WAL_HEADER_SIZE bump, rewrite logic update, replay logic update
-- Add migration: detect old 56-byte format, re-derive prev_hash from block CBOR
-- Owner: Storage Lead
-- Blocked by: T2-5 design decision
-
-## Tranche 3 — Features & Protocol Extensions (DETAILED PLAN 2026-03-15)
-
-### T3-1: `transaction build` auto-balancing (HIGH/L)
-- Phase A: Add --socket-path to BuildArgs, add query_utxo_by_inputs() to N2CClient
-- Phase B: Live fee estimation from GetCurrentPParams, change output calculation
-- Phase C: Largest-first coin selection when --tx-in omitted
-- Files: transaction.rs, n2c_client.rs, new coin_selection.rs
-- Owner: CLI Lead + Network Lead
-- Critical: multi-asset change uses coinsPerUTxOByte * output_size, not flat min
-
-### T3-2: Plutus script witness in CLI (HIGH/L)
-- Add --tx-in-script-file, --redeemer-file, --datum-file, --tx-in-execution-units
-- New plutus_witness.rs with ScriptWitness enum
-- Hash script subcommand (torsten hash script --script-file)
-- Dependency: T3-1 Phase B (fee affects witness set via tx size)
-- Risk: positional arg parsing (--tx-in binds following witness args); fallback: txhash#idx:script.plutus syntax
-
-### T3-3: CDDL conformance Plutus vectors + roundtrip tests (HIGH/M)
-- 5 new Plutus execution vectors (always-succeeds/always-fails, reference scripts)
-- 10 real tx CBOR roundtrip tests via Koios MCP (each era, each tx type)
-- Fully parallel — no dependencies on T3-1 or T3-2
-
-### T3-4: LoE enforcement wired into block pipeline (MEDIUM/S)
-- loe_limit() exists and is tested; NOT called from node.rs apply_block path
-- Add peer_tips snapshot to PeerManager (hot_peer_tips() -> Vec<Point>)
-- Add pending_blocks VecDeque in sync loop; gate on loe_limit before apply_block
-- Use tokio::watch channel for LoE limit updates to wake pending buffer drain
-- Risk: pending buffer must be capped (max 500 blocks) to prevent unbounded growth
-
-### T3-5: Peer sharing privacy hardening (MEDIUM/S)
-- Add ConnectionDirection::Outbound/Inbound to PeerInfo
-- Only share Outbound peers in peers_for_sharing()
-- Sort shared peers by reputation score (highest first) — currently random HashMap order
-- Fully parallel
-
-### T3-6: N2N V16 outbound proposal (LOW/S)
-- Add V16=16 to NodeToNodeVersion; add to propose_versions()
-- Dependency: T3-5 (peer_sharing state must be coherent) + T2-2 complete
-- Risk: CBOR encoding of V16 version data field order — validate against real cardano-node 10.x
-
-### T3-NEW-1: Multi-era output format (LOW/S)
-- Add --era flag to transaction build (babbage|conway)
-- 30-line change, unblocks Guild Operators script compatibility
-- Dependency: T3-1 Phase A
-
-### T3-NEW-2: Mempool revalidation on epoch boundary (MEDIUM/S)
-- cardano-node drains+revalidates mempool every epoch boundary
-- Torsten only clears on rollback — correctness gap for block producers
-- Add mempool.revalidate() call in epoch transition handler in node.rs
-- Fully parallel, no dependencies
-
-### Items deferred to Tranche 4:
-- Genesis bootstrap from scratch (requires T2-3 Byron + T3-4 LoE first)
-- Full Ouroboros Genesis protocol (BLP peer selection, full GDD) — not just V16 version bump
-
-### Critical path: T3-1A → T3-1B → T3-2 (everything else parallel)
-
-## Key Risk Flags (current)
-
-- Byron ledger stub: genesis-from-Byron users accumulate incorrect UTxO state
-- WAL prev_hash placeholder: fork detection impaired during post-crash recovery window
-- NonMyopicMemberRewards: formula implemented, no E2E validation against live chain data
-- Mainnet not yet booted: config files exist but node never connected to mainnet peers
+**The gap list for this bar:**
+1. Mainnet full sync validation (Byron→Shelley→current) — never been run end-to-end
+2. node.rs and validation.rs are unmaintainable at 5649L / 6052L — bugs hide there
+3. NonMyopicMemberRewards has zero E2E test coverage (same risk class as the nonce_vrf bug)
+4. cncli compatibility: SPOs depend on it for leader log; Torsten has no cncli compatibility layer
+5. WAL prev_hash placeholder is a correctness gap for crash-restart scenarios
+6. Dead code (33 annotations) signals incomplete implementations that confuse SPOs reading the code
 
 ---
 
-## Tranche 4 — Queued Work (2026-03-15)
+### T5-1: Full Mainnet Sync Validation — Byron→Shelley→Conway (CRITICAL / L)
+- Never been run past 115K blocks (Mithril import skips Byron entirely for most users)
+- Acceptance: sync from Mithril mainnet snapshot, reach tip, 0 errors over 48hr window
+- Files: mainnet config, network bootstrap
+- Owner: Ops Lead + Node Lead
+- Blocker for: cncli compatibility testing, block producer validation
+- Parallelizable: NO — gates T5-4 and T5-6
 
-**CRITICAL BLOCKER — EBB (Byron Epoch Boundary Block) handling is broken.**
-Node stalls on mainnet at slot 21600 (epoch 0→1). EBBs skipped in both
-serial client (client.rs:374) and pipelined client (pipelined.rs:391-393).
-First real Byron block at epoch 1 has prev_hash = EBB hash, chain breaks.
+### T5-2: node.rs Split (5649 lines → ≤5 files of ≤800L each) (HIGH / M)
+- node.rs handles: sync loop, block apply, peer management dispatch, epoch transitions,
+  snapshot triggers, mempool, block announce, LoE dispatch — too many concerns
+- Proposed split:
+  - sync_loop.rs — pipelined ChainSync receive + apply loop
+  - peer_dispatch.rs — hot/warm/cold peer lifecycle, BlockFetch task launch
+  - snapshot_manager.rs — snapshot trigger policy, save/load coordination
+  - epoch_handler.rs — epoch boundary logic, RUPD, transition
+  - node.rs — thin coordinator (<300L)
+- Owner: Node Lead
+- Can run in parallel with T5-3 and T5-4
 
-**Root cause:** EBBs have variant==0, subtag==Some(0). decode_header_info
-returns Ok(None) → excluded from BlockFetch list → never stored → chain
-continuity check in apply_block fails with BlockDoesNotConnect.
+### T5-3: validation.rs Split (6052 lines → ≤6 files of ≤800L each) (HIGH / M)
+- validation.rs handles: Phase-1 rules for all eras, fee checks, size checks,
+  script witness checks, governance rules, multiasset checks — unbounded growth vector
+- Proposed split (by era group + concern):
+  - phase1/shelley_alonzo.rs
+  - phase1/babbage_conway.rs
+  - phase1/common.rs (shared predicates)
+  - phase1/scripts.rs (witness/script integrity)
+  - phase1/governance.rs (CIP-1694 tx-level rules)
+  - validation.rs — dispatcher only (<200L)
+- Owner: Ledger Lead
+- Can run in parallel with T5-2 and T5-4
 
-**Fix approach confirmed:** Track EBB hashes in ChainSync (they are in the
-header CBOR even though we skip the slot/block_no). Store EBB hash as a
-"stub" entry in ChainDB. In LedgerState.apply_block, treat EBB-connecting
-blocks specially: advance tip hash through the EBB without applying state.
+### T5-4: NonMyopicMemberRewards E2E Test (HIGH / S)
+- Formula implemented in protocol.rs but zero end-to-end test coverage
+- Risk: same class as the Alonzo VRF nonce_vrf bug — formula looks right until it doesn't
+- Use Koios MCP: koios_pool_history for per-pool reward amounts per epoch
+- Use koios_epoch_params for a0, nOpt, rho, tau to recompute expected NMRW
+- Acceptance: within 1 lovelace of Koios ground truth for 3 mainnet pools across 5 epochs
+- Owner: Ledger Lead + Test Lead
+- Can run in parallel with T5-1
 
-**Architectural debt queued:**
-- H1: state/mod.rs=8918L, validation.rs=6052L, node.rs=5590L — split needed
-- H3: 13 unwrap() on mmap byte slices in block_index.rs (use checked indexing)
-- M2: std::mem::forget in UtxoStore::new_temp() — leaks temp dir, needs doc
-- M3: cbor.len() as u32 in volatile WAL — silent truncation for >4GB blocks
-- M4: 5 unwrap() in CLI query.rs (address parsing)
-- M1: 45 #[allow(dead_code)] annotations across crates
+### T5-5: WAL prev_hash Format Upgrade (MEDIUM / S)
+- Expand WAL entry: 56 bytes → 88 bytes (add 32-byte prev_hash field)
+- Add migration: detect old 56-byte format on open, re-derive prev_hash from block CBOR
+- Acceptance: crash-restart test shows correct fork detection after recovery
+- Owner: Storage Lead
+- Can run in parallel with all other items
 
-**T3 carry-overs (not started):**
-- Transaction build auto-balancing (HIGH/L)
-- Plutus script witness CLI support (HIGH/L)
-- CDDL conformance test suite (HIGH/L)
-- N2N V16 Genesis protocol (LOW/L)
-- Peer sharing privacy model (LOW/M)
+### T5-6: cncli Compatibility Layer (MEDIUM / L)
+- SPOs universally use cncli for leader schedule computation and block logging
+- cncli queries the node via N2C LocalStateQuery; Torsten already implements all required tags
+- Need: validate that cncli 6.x can connect to a running Torsten node and:
+  - `cncli ping` returns success
+  - `cncli sync` syncs blocks from Torsten's N2C socket
+  - `cncli leaderlog` computes leader schedule using Torsten's VRF/epoch data
+- This is primarily a validation exercise, not a new implementation
+- Likely issues: N2C handshake version negotiation, GetStakeDistribution2 response format
+- Owner: Ops Lead + Network Lead
+- Depends on: T5-1 (mainnet sync running)
+
+### T5-7: N2C Golden Tests Expansion (MEDIUM / M)
+- Current: 4 tests (GetCurrentPParams, GetEpochNo, two result encodings)
+- Need: GetNonMyopicMemberRewards, GetRewardInfoPools, GetPoolState, GetDRepState,
+        GetConstitution, GetStakeDistribution2, GetAccountState, GetCBOR wrapping
+- Each test: capture real CBOR from Haskell cardano-node, assert Torsten encodes identically
+- 8 new golden fixture files + 8 new test cases
+- Owner: Test Lead + Network Lead
+- Can run in parallel with all items
+
+### T5-8: Dead Code Cleanup Round 2 (LOW / S)
+- 33 #[allow(dead_code)] annotations remain across 10 files
+- Each one represents either: (a) a function that should be deleted, or (b) a function
+  that IS used and the annotation is suppressing a false positive that should be fixed properly
+- Audit each one: delete truly unused code, expose properly via pub(crate) where needed
+- Owner: Any Lead (small, parallel)
+- Fully parallel
+
+---
+
+## Tranche 6 — Queued (Post-SPO-Readiness)
+
+### Block Producer Full Validation (HIGH/L)
+- Run Torsten as active block producer on preview testnet for 2 full epochs
+- Validate: VRF leader check correct, KES rotation working, blocks accepted by network
+- Depends on: T5-1 full sync, T5-6 cncli compat
+
+### Plutus Script Witness CLI (HIGH/L)
+- --tx-in-script-file, --redeemer-file, --datum-file, --tx-in-execution-units
+- Depends on: T5-2 (node.rs split to reduce diff surface), T5-3 (validation.rs split)
+
+### CDDL Conformance Vectors — Plutus (HIGH/M)
+- Current: 58 vectors (utxo/cert/gov/epoch), no Plutus execution vectors
+- Add 5 Plutus vectors: always-succeeds, always-fails, reference scripts, V3
+- Real tx CBOR roundtrip tests via Koios MCP (one per era)
+
+### N2N V16 Genesis Protocol (LOW/L)
+- Full Ouroboros Genesis: BLP peer selection, GDD state, HAA
+- Prerequisite: T5-6 (confirm standard V14/V15 is solid first)
+
+### Mempool Revalidation on Epoch Boundary (MEDIUM/S)
+- cardano-node drains+revalidates mempool at epoch boundary
+- Torsten only clears on rollback — correctness gap for block producers
+- ~30-line change in epoch_handler.rs (post-T5-2 split)
+
+---
+
+## Key Risk Flags (current)
+
+- NonMyopicMemberRewards: formula implemented, ZERO E2E validation — HIGH risk
+- Mainnet never fully synced: confidence in Byron→Shelley transition is limited to 115K blocks
+- node.rs / validation.rs size: bugs hide in 5600+ line files; split is prerequisite for safe feature work
+- WAL prev_hash: post-crash fork detection impaired until new blocks arrive
+- cncli compat unknown: SPOs can't use Torsten without it regardless of other correctness

@@ -79,48 +79,42 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - `http://localhost:12798/ready` — returns `{"ready":true}`
 - Metrics server starts BEFORE ledger replay — confirmed working
 
-## Known Issues (Current — 2026-03-15, run #11 — mainnet smoke test)
+## Known Issues (Current — 2026-03-15, run #12 — Byron EBB fix validation on mainnet)
 1. **ScriptDataHash ignores reference scripts** — CRITICAL (run #7, status unknown after recent changes)
    - File: `crates/torsten-ledger/src/validation.rs:785-795`
 2. **CollateralHasTokens incorrect for txs with collateral_return** — CRITICAL (run #7, status unknown)
    - File: `crates/torsten-ledger/src/validation.rs:650-687`
 3. **Plutus ExBudget mismatch: uplc evaluates scripts over declared budget** — CRITICAL (run #10, OPEN)
    - Tx hash: `3c6d9cb477106657cf4d47dfd74f2aa2e0f5f7f73c23b2f4fa00a792f747a8be` (block 4109328)
-   - Tx hash: `62d9a808624be61852fbf38848cca103fc242f8c5d2f401c487e7416798eff10` (block 4109329)
-   - Error: `ScriptFailed("Plutus evaluation failed: eval_phase_two_raw error: failed script execution\n  Spend[0] execution went over budget Mem 9999938488 CPU -28413")`
-   - Both txs are confirmed is_valid=true on-chain (num_confirmations>0, Koios-verified)
-   - Both txs are PlutusV2 scripts from Liqwid Oracle / Agora-pro contracts
-   - Declared per-redeemer budget (tx1): mem=257,258, steps=78,454,388
-   - Torsten uplc evaluator exceeds CPU budget by 28,413 steps; Haskell evaluates within budget
-   - SlotConfig is CORRECT (zero_time=1666656000000 matches preview genesis 2022-10-25T00:00:00Z)
-   - Possible causes: (a) uplc v1.1.21 cost model application differs from Haskell for PlutusV2,
-     (b) reference script UTxO CBOR re-encoding introduces slight differences in script context,
-     (c) uplc CEK machine subtle semantics difference from Haskell evaluator
+   - Error: `ScriptFailed("Plutus evaluation failed: ... Spend[0] execution went over budget CPU -28413")`
    - File: `crates/torsten-ledger/src/plutus.rs` — eval_phase_two_raw call at line 132
-   - Note: ValidationTagMismatch fires but node continues applying subsequent blocks (NOT a stall)
-   - Transactions_rejected counter increments (2 rejections observed in metrics)
-4. **FIXED: Stale peer detection incorrect wall-clock slot for mainnet** (run #11, FIXED in same session)
-   - Root cause: `current_wall_clock_slot()` in `node.rs:4938-4951` used Shelley genesis system_start
-     with Shelley slot length (1s), giving ~267M slots. Mainnet is actually at ~182M slots because
-     Byron had 208 epochs × 21,600 slots × 20s = 89.85 million seconds before Shelley started.
-   - Effect: ALL mainnet peers rejected as "stale" (lag_slots=85363203), node never synced.
-   - Fix: Updated `current_wall_clock_slot()` to account for Byron era duration before computing
-     Shelley slots. Formula: total_slot = byron_transition_epoch × byron_epoch_length + shelley_slots
+4. **FIXED: Stale peer detection incorrect wall-clock slot for mainnet** (run #11, FIXED)
+   - Fix: Updated `current_wall_clock_slot()` to account for Byron era before computing Shelley slots
    - File: `crates/torsten-node/src/node.rs` function `current_wall_clock_slot()`
-5. **CRITICAL: Byron Epoch Boundary Block (EBB) causes chain sync stall on mainnet** (run #11, OPEN)
-   - Error: `Block does not connect to tip: expected 3bd04916..., got 1941d944... slot=21600 block_no=21587`
-   - Occurs at FIRST Byron epoch boundary (epoch 0 → epoch 1, absolute slot 21600 on mainnet)
-   - The EBB's prev_hash does not match the ledger tip — indicating either the EBB has an unexpected
-     prev_hash chain, or a preceding EBB was not properly applied to update the ledger tip
-   - Symptom: persistent reconnect loop — node stalls permanently, never advances past slot ~21600
-   - Context: "Block count mismatch: expected=35 got=36" warning precedes failure — extra block is the EBB
-   - Fix needed: verify EBB prev_hash handling in `decode_block_header` for mainnet Byron EBBs;
-     ensure the EBB slot computed by pallas matches what's stored as ledger tip; investigate why
-     prev_hash chain has a gap (possibly a second EBB in the epoch 0→1 transition)
-   - Files: `crates/torsten-serialization/src/multi_era.rs:decode_block_header`,
-     `crates/torsten-ledger/src/state/mod.rs:apply_block`
-   - Note: Preview testnet has NO Byron era (starts directly in Shelley at epoch 0), so this bug
-     only manifests on mainnet and preprod
+5. **FIXED: Byron Epoch Boundary Block (EBB) causes chain sync stall on mainnet** (run #11→12, FIXED in commit 56f063b)
+   - Validation: run #12 (2026-03-15) confirmed fix works — 5 Byron epoch boundaries crossed cleanly
+   - Epochs 0→1 (slot 21600), 1→2 (slot 43200), 2→3 (slot 64800), 3→4 (slot 86400), 4→5 (slot 108000)
+   - Zero "Block does not connect" errors, zero panics
+   - "Block count mismatch: expected=35 got=36" warning is EXPECTED/BENIGN — EBB counted in range,
+     node falls back to individual block fetches correctly
+   - Files fixed: `crates/torsten-serialization/src/multi_era.rs`, `crates/torsten-ledger/src/state/mod.rs`
+
+## Mainnet Sync Baselines (run #12 — 2026-03-15, Byron EBB fix validation)
+- Start: fresh DB, from genesis
+- Duration: ~22 minutes monitored (15:03 - 15:25)
+- Blocks applied: 115,493 (slot 115,524, epoch 5) in ~20 minutes of actual sync
+- Throughput: ~95-115 blk/s sustained (mainnet Byron era, small blocks)
+- Peers: 5 hot (backbone peers, all high-latency: 500ms - 40s handshake RTT)
+- Peer handshake delays: IOG backbone 36s, CF backbone 40s, others 500ms-30s
+- Memory: 127 MB RSS at epoch 5 (very low — Byron has no Plutus scripts, tiny UTxO growth)
+- UTxO count: 27,330 at epoch 5 (growing from 14,505 genesis)
+- Treasury at epoch 5: 41,656,759,300,310 lovelace (reward accumulation working)
+- Zero rollbacks, zero transaction rejections, zero errors
+- First peer connected: 51.161.86.220:3001 (WARN: 29s for raw TCP connect)
+  - This is NOT a "Peer connected" in the proper sense; handshake didn't complete until later
+  - Actual first hot peer: 135.148.7.9:3001 at 15:03:51 (36s into run)
+  - Sync only started after 4 fetchers connected (15:05:03, ~2 min after startup)
+- NOTE: mainnet bootstrap peers have HIGH latency, expect 2+ minutes before sync starts
 
 ## Mainnet Config Facts (run #11 — 2026-03-15)
 - Config files: `config/mainnet-config.json`, `config/mainnet-topology.json`, `config/mainnet-*-genesis.json`
