@@ -1570,6 +1570,7 @@ impl Node {
         if genesis_enabled {
             let gsm_ref = gsm.clone();
             let gsm_pm = peer_manager.clone();
+            let gsm_metrics = self.metrics.clone();
             let gsm_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -1587,9 +1588,19 @@ impl Node {
                     };
 
                     let mut gsm_w = gsm_ref.write().await;
-                    // TODO: compute tip_age and chainsync_idle from actual state
-                    let tip_age_secs = 0u64;
-                    let all_idle = false;
+                    // Read actual tip age and ChainSync idle state from metrics.
+                    // tip_age_secs: seconds since the last received block's slot time.
+                    // all_idle: true when ChainSync has been idle long enough to indicate
+                    // we're at the chain tip (no new blocks arriving).
+                    let tip_age_secs = gsm_metrics
+                        .tip_age_secs
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let chainsync_idle = gsm_metrics
+                        .chainsync_idle_secs
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    // Consider "all idle" when ChainSync has been idle for >30 seconds
+                    // (indicating no new blocks arriving — we're likely at tip)
+                    let all_idle = chainsync_idle > 30;
                     gsm_w.evaluate(active_blp, all_idle, tip_age_secs);
                 }
             });
@@ -3929,11 +3940,16 @@ impl Node {
                             Some(hot.as_ref().to_vec())
                         },
                         member_status: 0, // Active (simplified)
-                        expiry_epoch: None,
+                        expiry_epoch: ls.governance.committee_expiration.get(cold).map(|e| e.0),
                     }
                 })
                 .collect(),
-            threshold: Some((2, 3)), // Default quorum 2/3
+            threshold: ls
+                .governance
+                .committee_threshold
+                .as_ref()
+                .map(|r| (r.numerator, r.denominator))
+                .or(Some((2, 3))), // Fallback to 2/3 if not set
             current_epoch: ls.epoch.0,
         };
 
