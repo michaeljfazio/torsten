@@ -34,6 +34,12 @@ for f in kes.skey vrf.skey opcert.cert; do
     fi
 done
 
+# Import Mithril snapshot if database is empty
+if [[ ! -d "./db-mainnet/immutable" ]]; then
+    echo "Database empty. Importing Mithril snapshot (~35 GB, may take 30+ minutes)..."
+    "$BIN" mithril-import --network-magic 764824073 --database-path ./db-mainnet
+fi
+
 CMD=(
     "$BIN" run
     --config config/mainnet-config.json

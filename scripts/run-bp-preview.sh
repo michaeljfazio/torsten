@@ -34,6 +34,12 @@ for f in kes.skey vrf.skey opcert.cert; do
     fi
 done
 
+# Import Mithril snapshot if database is empty
+if [[ ! -d "./db-preview/immutable" ]]; then
+    echo "Database empty. Importing Mithril snapshot..."
+    "$BIN" mithril-import --network-magic 2 --database-path ./db-preview
+fi
+
 CMD=(
     "$BIN" run
     --config config/preview-config.json

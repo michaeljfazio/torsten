@@ -197,8 +197,8 @@ pub const THEME_CATPPUCCIN_MOCHA: Theme = Theme {
 
 /// All built-in themes, indexed for cycling.
 pub const THEMES: [Theme; 7] = [
-    THEME_DEFAULT,
     THEME_MONOKAI,
+    THEME_DEFAULT,
     THEME_SOLARIZED_DARK,
     THEME_SOLARIZED_LIGHT,
     THEME_NORD,
