@@ -36,6 +36,7 @@ pub use peer_manager::{
     PeerPerformance,
 };
 pub use pipelined::PipelinedPeerClient;
+pub use n2c::encode_query_result;
 pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};
 pub use server::NodeServer;
 pub use tcp::{configure_tcp_keepalive, TimeoutConfig};
