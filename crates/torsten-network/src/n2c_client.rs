@@ -407,10 +407,114 @@ impl N2CClient {
         Ok(result)
     }
 
-    /// Query stake address info (GetFilteredDelegationsAndRewardAccounts - Shelley query tag 10)
-    pub async fn query_stake_address_info(&mut self) -> Result<Vec<u8>, N2CClientError> {
-        let result = self.send_query(10).await?;
-        Ok(result)
+    /// Query stake address info for a specific credential (GetFilteredDelegationsAndRewardAccounts - Shelley query tag 10).
+    ///
+    /// The `credential_hash` is the 28-byte staking credential extracted from a stake address.
+    /// Sends tag(258) Set<Credential> as the query argument, matching the Haskell wire format.
+    /// If `credential_hash` is empty, sends an empty set (returns all stake addresses from the node).
+    pub async fn query_stake_address_info(
+        &mut self,
+        credential_hash: &[u8],
+    ) -> Result<Vec<u8>, N2CClientError> {
+        // Build MsgQuery: [3, [era, [10, tag(258) [credential]]]]
+        // Credential = [0, hash(28)]  (0 = KeyHash credential type)
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgQuery
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(0)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // era tag (Shelley+)
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(10)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetFilteredDelegationsAndRewardAccounts
+
+        if credential_hash.is_empty() {
+            // Empty set: tag(258) array(0) — returns all stake address info
+            enc.tag(minicbor::data::Tag::new(258))
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.array(0)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        } else {
+            // Single-element set: tag(258) array(1) [credential]
+            // Credential = [0, hash(28)]
+            enc.tag(minicbor::data::Tag::new(258))
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.array(1)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.array(2)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.u32(0)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // KeyHash credential
+            enc.bytes(credential_hash)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        }
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_STATE_QUERY,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        Ok(resp.payload)
+    }
+
+    /// Query UTxOs by specific transaction inputs (GetUTxOByTxIn - Shelley query tag 15).
+    ///
+    /// Each input is a `(tx_hash_bytes, output_index)` pair. The query sends a
+    /// tag(258) canonical CBOR set of `[tx_hash, index]` pairs and returns the
+    /// matching UTxO outputs in the same wire format as `GetUTxOByAddress`.
+    pub async fn query_utxo_by_txin(
+        &mut self,
+        inputs: &[(Vec<u8>, u32)],
+    ) -> Result<Vec<u8>, N2CClientError> {
+        // Build MsgQuery: [3, [era, [15, tag(258) [[tx_hash, idx], ...]]]]
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgQuery
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(0)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // era tag (Shelley+)
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(15)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetUTxOByTxIn
+
+        // Encode as tag(258) Set<TxIn> where TxIn = [tx_hash, output_index]
+        enc.tag(minicbor::data::Tag::new(258))
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.array(inputs.len() as u64)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        for (tx_hash, index) in inputs {
+            enc.array(2)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.bytes(tx_hash)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+            enc.u32(*index)
+                .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        }
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_STATE_QUERY,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        Ok(resp.payload)
     }
 
     /// Query stake snapshots (GetStakeSnapshots - Shelley query tag 20)

@@ -17,10 +17,18 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
-    /// Query UTxOs at an address
+    /// Query UTxOs at an address or by specific transaction input(s).
+    ///
+    /// Use --address to query all UTxOs at a bech32 address, or --tx-in to query
+    /// one or more specific UTxOs by transaction input reference (tx_hash#index).
+    /// Both flags may be repeated. If neither flag is provided, --address is required.
     Utxo {
+        /// Bech32 address to query UTxOs for
         #[arg(long)]
-        address: String,
+        address: Option<String>,
+        /// Specific UTxO input reference to query (format: tx_hash#index). May be repeated.
+        #[arg(long = "tx-in", value_name = "TX_HASH#INDEX")]
+        tx_in: Vec<String>,
         #[arg(long, default_value = "node.sock")]
         socket_path: PathBuf,
         #[arg(long)]
@@ -261,6 +269,90 @@ async fn release_and_done(client: &mut torsten_network::N2CClient) {
     client.done().await.ok();
 }
 
+/// Parse and print a UTxO query response in the standard tabular format.
+///
+/// The `raw` bytes are a full LocalStateQuery MsgResult payload:
+///   `[4, [Map<[tx_hash, index], TransactionOutput>]]`
+/// where the inner array(1) is the HFC success wrapper.
+///
+/// Matches cardano-cli output: columns TxHash#Ix, Datum, Lovelace.
+fn print_utxo_result(raw: &[u8]) -> Result<()> {
+    // Parse MsgResult [4, array[map{...}]]
+    let mut decoder = minicbor::Decoder::new(raw);
+    let _ = decoder.array();
+    let tag = decoder.u32().unwrap_or(999);
+    if tag != 4 {
+        anyhow::bail!("Expected MsgResult(4), got {tag}");
+    }
+
+    // Strip HFC success wrapper: array(1) around the actual map
+    let pos = decoder.position();
+    if let Ok(Some(1)) = decoder.array() {
+        // HFC wrapper consumed
+    } else {
+        decoder.set_position(pos);
+    }
+
+    // UTxO result: CBOR Map<[tx_hash, index], TransactionOutput>
+    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+
+    println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
+    println!("{}", "-".repeat(96));
+
+    for _ in 0..map_len {
+        // Key: [tx_hash_bytes, output_index]
+        let _ = decoder.array(); // consume array(2)
+        let tx_hash = hex::encode(decoder.bytes().unwrap_or(&[]));
+        let output_index = decoder.u32().unwrap_or(0);
+
+        // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, 2: datum, 3: script_ref}
+        let mut lovelace = 0u64;
+        let mut has_datum = false;
+        let output_map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+        for _ in 0..output_map_len {
+            let key = decoder.u32().unwrap_or(999);
+            match key {
+                0 => {
+                    // address bytes — skip
+                    decoder.skip().ok();
+                }
+                1 => {
+                    // value: either integer (ADA-only) or [coin, multiasset_map]
+                    let val_pos = decoder.position();
+                    if let Ok(coin) = decoder.u64() {
+                        lovelace = coin;
+                    } else {
+                        decoder.set_position(val_pos);
+                        if let Ok(Some(_)) = decoder.array() {
+                            lovelace = decoder.u64().unwrap_or(0);
+                            decoder.skip().ok(); // skip multiasset map
+                        }
+                    }
+                }
+                2 => {
+                    // datum option
+                    has_datum = true;
+                    decoder.skip().ok();
+                }
+                3 => {
+                    // script_ref
+                    decoder.skip().ok();
+                }
+                _ => {
+                    decoder.skip().ok();
+                }
+            }
+        }
+
+        let utxo_ref = format!("{tx_hash}#{output_index}");
+        let datum_str = if has_datum { "yes" } else { "no" };
+        println!("{utxo_ref:<68} {datum_str:>6} {lovelace:>20}");
+    }
+
+    println!("\nTotal UTxOs: {map_len}");
+    Ok(())
+}
+
 impl QueryCmd {
     pub fn run(self) -> Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
@@ -325,99 +417,65 @@ impl QueryCmd {
             }
             QuerySubcommand::Utxo {
                 address,
+                tx_in,
                 socket_path,
                 testnet_magic,
             } => {
-                // Decode bech32 address to raw bytes
-                let (_, addr_bytes) = bech32::decode(&address)
-                    .map_err(|e| anyhow::anyhow!("Invalid bech32 address: {e}"))?;
+                // Validate: must have at least --address or --tx-in
+                if address.is_none() && tx_in.is_empty() {
+                    anyhow::bail!(
+                        "At least one of --address or --tx-in must be provided.\n\
+                         Examples:\n  \
+                         --address addr1...\n  \
+                         --tx-in <txhash>#<index>"
+                    );
+                }
 
                 let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
 
-                let raw = client
-                    .query_utxo_by_address(&addr_bytes)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to query UTxOs: {e}"))?;
+                // Collect all UTxO responses into a single raw CBOR payload.
+                // For --tx-in queries we issue a single GetUTxOByTxIn (tag 15) with all inputs;
+                // for --address we issue GetUTxOByAddress (tag 6).
+                let raw: Vec<u8> = if !tx_in.is_empty() {
+                    // Parse each "tx_hash#index" argument
+                    let mut inputs: Vec<(Vec<u8>, u32)> = Vec::new();
+                    for arg in &tx_in {
+                        let (hash_str, idx_str) = arg.split_once('#').ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Invalid --tx-in format '{arg}': expected tx_hash#index"
+                            )
+                        })?;
+                        let hash_bytes = hex::decode(hash_str)
+                            .map_err(|e| anyhow::anyhow!("Invalid tx hash in '{arg}': {e}"))?;
+                        if hash_bytes.len() != 32 {
+                            anyhow::bail!(
+                                "Tx hash must be 32 bytes (64 hex chars), got {} bytes in '{arg}'",
+                                hash_bytes.len()
+                            );
+                        }
+                        let index: u32 = idx_str
+                            .parse()
+                            .map_err(|e| anyhow::anyhow!("Invalid output index in '{arg}': {e}"))?;
+                        inputs.push((hash_bytes, index));
+                    }
+                    client
+                        .query_utxo_by_txin(&inputs)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to query UTxOs by tx-in: {e}"))?
+                } else {
+                    // --address mode
+                    let addr = address.as_deref().unwrap();
+                    let (_, addr_bytes) = bech32::decode(addr)
+                        .map_err(|e| anyhow::anyhow!("Invalid bech32 address: {e}"))?;
+                    client
+                        .query_utxo_by_address(&addr_bytes)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to query UTxOs: {e}"))?
+                };
 
                 release_and_done(&mut client).await;
 
-                // Parse MsgResult [4, array[map{...}]]
-                let mut decoder = minicbor::Decoder::new(&raw);
-                let _ = decoder.array();
-                let tag = decoder.u32().unwrap_or(999);
-                if tag != 4 {
-                    anyhow::bail!("Expected MsgResult(4), got {tag}");
-                }
-
-                // Strip HFC wrapper
-                let pos = decoder.position();
-                if let Ok(Some(1)) = decoder.array() {
-                    // consumed wrapper
-                } else {
-                    decoder.set_position(pos);
-                }
-
-                // UTxO result is a CBOR Map<[tx_hash, index], TransactionOutput>
-                let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-
-                println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
-                println!("{}", "-".repeat(96));
-
-                if map_len == 0 {
-                    return Ok(());
-                }
-
-                for _ in 0..map_len {
-                    // Key: [tx_hash_bytes, output_index]
-                    let _ = decoder.array(); // consume array(2)
-                    let tx_hash = hex::encode(decoder.bytes().unwrap_or(&[]));
-                    let output_index = decoder.u32().unwrap_or(0);
-
-                    // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, ...}
-                    let mut lovelace = 0u64;
-                    let mut has_datum = false;
-                    let output_map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                    for _ in 0..output_map_len {
-                        let key = decoder.u32().unwrap_or(999);
-                        match key {
-                            0 => {
-                                // address bytes — skip
-                                decoder.skip().ok();
-                            }
-                            1 => {
-                                // value: either integer (ADA-only) or [coin, multiasset_map]
-                                let val_pos = decoder.position();
-                                if let Ok(coin) = decoder.u64() {
-                                    lovelace = coin;
-                                } else {
-                                    decoder.set_position(val_pos);
-                                    if let Ok(Some(_)) = decoder.array() {
-                                        lovelace = decoder.u64().unwrap_or(0);
-                                        decoder.skip().ok(); // skip multiasset map
-                                    }
-                                }
-                            }
-                            2 => {
-                                // datum
-                                has_datum = true;
-                                decoder.skip().ok();
-                            }
-                            3 => {
-                                // script_ref
-                                decoder.skip().ok();
-                            }
-                            _ => {
-                                decoder.skip().ok();
-                            }
-                        }
-                    }
-
-                    let utxo_ref = format!("{tx_hash}#{output_index}");
-                    let datum_str = if has_datum { "yes" } else { "no" };
-                    println!("{utxo_ref:<68} {datum_str:>6} {lovelace:>20}");
-                }
-
-                println!("\nTotal UTxOs: {map_len}");
+                print_utxo_result(&raw)?;
                 Ok(())
             }
             QuerySubcommand::ProtocolParameters {
@@ -503,21 +561,25 @@ impl QueryCmd {
                 socket_path,
                 testnet_magic,
             } => {
-                // Decode bech32 address to get credential hash
+                // Decode bech32 stake address to extract the 28-byte staking credential hash.
+                // A Shelley reward address has the format: [header(1)] [stake_cred(28)]
+                // The header byte encodes network and credential type; the credential starts at byte 1.
                 let (_, addr_bytes) = bech32::decode(&address)
                     .map_err(|e| anyhow::anyhow!("Invalid bech32 address: {e}"))?;
 
-                // For a reward/stake address, the credential hash is bytes 1..29
-                let credential_hex = if addr_bytes.len() >= 29 {
-                    hex::encode(&addr_bytes[1..29])
+                // Extract 28-byte credential hash (bytes 1..29 of the decoded address)
+                let credential_bytes: &[u8] = if addr_bytes.len() >= 29 {
+                    &addr_bytes[1..29]
                 } else {
-                    hex::encode(&addr_bytes)
+                    &addr_bytes
                 };
 
                 let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
 
+                // Pass the credential to the node so it filters server-side.
+                // This avoids fetching the entire stake address table over the socket.
                 let raw = client
-                    .query_stake_address_info()
+                    .query_stake_address_info(credential_bytes)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to query stake address info: {e}"))?;
 
@@ -530,15 +592,17 @@ impl QueryCmd {
                 if tag != 4 {
                     anyhow::bail!("Expected MsgResult(4), got {tag}");
                 }
-                // Strip HFC wrapper
+                // Strip HFC success wrapper: array(1)
                 let pos = decoder.position();
                 if let Ok(Some(1)) = decoder.array() {
-                    // consumed wrapper
+                    // HFC wrapper consumed
                 } else {
                     decoder.set_position(pos);
                 }
 
                 // Result: array(2) [delegations_map, rewards_map]
+                // delegations_map: Map<Credential, KeyHash StakePool>
+                // rewards_map:     Map<Credential, Coin>
                 let _ = decoder.array(); // array(2)
 
                 // Parse delegations map: Map<Credential, pool_hash>
@@ -548,43 +612,54 @@ impl QueryCmd {
                 for _ in 0..deleg_len {
                     // Credential: [0|1, hash(28)]
                     let _ = decoder.array();
-                    let _ = decoder.u32(); // credential type
+                    let _ = decoder.u32(); // credential type (0=key, 1=script)
                     let cred = hex::encode(decoder.bytes().unwrap_or(&[]));
                     let pool = hex::encode(decoder.bytes().unwrap_or(&[]));
                     delegations.insert(cred, pool);
                 }
 
                 // Parse rewards map: Map<Credential, Coin>
+                // Since we filtered server-side the result should contain only the queried address,
+                // but we iterate all entries for robustness.
                 let rewards_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                let mut found = false;
 
-                println!("[");
-                for i in 0..rewards_len {
+                // Collect entries so we can emit well-formed JSON (correct trailing comma)
+                let mut entries: Vec<(String, u64)> = Vec::new();
+                for _ in 0..rewards_len {
                     let _ = decoder.array();
                     let _ = decoder.u32(); // credential type
                     let cred = hex::encode(decoder.bytes().unwrap_or(&[]));
-                    let rewards = decoder.u64().unwrap_or(0);
-                    let pool = delegations.get(&cred).cloned().unwrap_or_default();
+                    let reward_balance = decoder.u64().unwrap_or(0);
+                    entries.push((cred, reward_balance));
+                }
 
-                    if cred.contains(&credential_hex) || credential_hex.is_empty() {
-                        found = true;
-                        let comma = if i + 1 < rewards_len { "," } else { "" };
-                        println!("  {{");
-                        println!("    \"address\": \"{address}\",");
-                        if pool.is_empty() {
-                            println!("    \"delegation\": null,");
-                        } else {
-                            println!("    \"delegation\": \"{pool}\",");
-                        }
-                        println!("    \"rewardAccountBalance\": {rewards}");
-                        println!("  }}{comma}");
+                // Output JSON array matching cardano-cli format:
+                // [{"address": "stake1...", "delegation": "pool1...", "rewardAccountBalance": N}]
+                println!("[");
+                let last = entries.len().saturating_sub(1);
+                for (i, (cred, reward_balance)) in entries.iter().enumerate() {
+                    let pool = delegations.get(cred).cloned().unwrap_or_default();
+                    let comma = if i < last { "," } else { "" };
+                    println!("  {{");
+                    println!("    \"address\": \"{address}\",");
+                    if pool.is_empty() {
+                        println!("    \"delegation\": null,");
+                    } else {
+                        println!("    \"delegation\": \"{pool}\",");
                     }
+                    println!("    \"rewardAccountBalance\": {reward_balance}");
+                    println!("  }}{comma}");
+                }
+                if entries.is_empty() {
+                    // Address not registered — cardano-cli returns empty array
+                    // with a single entry showing zero balance and no delegation.
+                    println!("  {{");
+                    println!("    \"address\": \"{address}\",");
+                    println!("    \"delegation\": null,");
+                    println!("    \"rewardAccountBalance\": 0");
+                    println!("  }}");
                 }
                 println!("]");
-
-                if !found {
-                    println!("No stake address info found for {address}");
-                }
 
                 Ok(())
             }
