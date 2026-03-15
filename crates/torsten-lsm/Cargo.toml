@@ -1,0 +1,21 @@
+[package]
+name = "torsten-lsm"
+version.workspace = true
+edition.workspace = true
+description = "Pure Rust LSM-tree engine for Torsten on-disk storage"
+
+[dependencies]
+thiserror = { workspace = true }
+crc32fast = { workspace = true }
+parking_lot = { workspace = true }
+byteorder = { workspace = true }
+fs2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# [[bench]]
+# name = "lsm_bench"
+# harness = false

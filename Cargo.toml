@@ -10,6 +10,7 @@ members = [
     "crates/torsten-storage",
     "crates/torsten-node",
     "crates/torsten-cli",
+    "crates/torsten-lsm",
     "crates/torsten-integration-tests",
     "tests/conformance",
     "tests/golden",
@@ -35,6 +36,7 @@ torsten-mempool = { path = "crates/torsten-mempool" }
 torsten-storage = { path = "crates/torsten-storage" }
 torsten-node = { path = "crates/torsten-node" }
 torsten-cli = { path = "crates/torsten-cli" }
+torsten-lsm = { path = "crates/torsten-lsm" }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
@@ -69,7 +71,6 @@ vrf_dalek = { git = "https://github.com/input-output-hk/vrf", branch = "main" }
 curve25519-dalek-fork = { package = "curve25519-dalek", git = "https://github.com/iquerejeta/curve25519-dalek", branch = "ietf03_vrf_compat_ell2" }
 
 # Storage
-cardano-lsm = { git = "https://github.com/michaeljfazio/cardano-lsm-rust.git", branch = "fix/index-based-get" }
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 

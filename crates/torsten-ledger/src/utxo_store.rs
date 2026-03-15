@@ -1,4 +1,4 @@
-//! LSM-tree backed UTxO set using `cardano-lsm`.
+//! LSM-tree backed UTxO set using `torsten-lsm`.
 //!
 //! Replaces the in-memory `HashMap<TransactionInput, TransactionOutput>` with an
 //! on-disk LSM tree, dramatically reducing memory usage for large UTxO sets
@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cardano_lsm::{Key, LsmConfig, LsmTree, Value};
+use torsten_lsm::{Key, LsmConfig, LsmTree, Value};
 use torsten_primitives::address::Address;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::transaction::{TransactionInput, TransactionOutput};
@@ -21,7 +21,7 @@ use crate::utxo::UtxoError;
 
 /// LSM-tree backed UTxO set.
 ///
-/// Stores UTxO entries on disk via `cardano-lsm`, with an in-memory address
+/// Stores UTxO entries on disk via `torsten-lsm`, with an in-memory address
 /// index for efficient address-based queries (N2C LocalStateQuery).
 pub struct UtxoStore {
     tree: LsmTree,
@@ -400,7 +400,7 @@ pub enum UtxoStoreError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("LSM error: {0}")]
-    Lsm(#[from] cardano_lsm::Error),
+    Lsm(#[from] torsten_lsm::Error),
 }
 
 #[cfg(test)]

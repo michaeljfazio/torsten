@@ -17,7 +17,7 @@ fn default_indexing_enabled() -> bool {
 ///
 /// Supports two backends:
 /// - **In-memory** (`HashMap`): used for tests and legacy mode
-/// - **On-disk** (`UtxoStore` backed by `cardano-lsm`): used in production,
+/// - **On-disk** (`UtxoStore` backed by `torsten-lsm`): used in production,
 ///   dramatically reduces memory usage for large UTxO sets (mainnet ~20M entries)
 ///
 /// When an `UtxoStore` is attached, all operations delegate to it and the
