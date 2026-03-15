@@ -231,7 +231,7 @@ fn build_logging_opts(log: &LogArgs) -> Result<logging::LoggingOpts> {
         log_dir: log.log_dir.to_string_lossy().into_owned(),
         rotation,
         no_color: log.log_no_color,
-        log_retention_days: log.log_retention_days,
+        _log_retention_days: log.log_retention_days,
     })
 }
 
@@ -460,7 +460,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_kes_key: args.shelley_kes_key,
         shelley_vrf_key: args.shelley_vrf_key,
         shelley_operational_certificate: args.shelley_operational_certificate,
-        shelley_cold_key: args.shelley_cold_key,
+        _shelley_cold_key: args.shelley_cold_key,
         metrics_port: args.metrics_port,
         mempool_max_tx: args.mempool_max_tx,
         mempool_max_bytes: args.mempool_max_bytes,

@@ -19,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-alpha"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/example/torsten"
@@ -110,7 +110,7 @@ bech32 = "0.11"
 base16ct = { version = "0.2", features = ["alloc"] }
 bs58 = "0.5"
 bincode = "1"
-uplc = "1.1"
+uplc = { git = "https://github.com/aiken-lang/aiken.git", branch = "main" }
 crc32fast = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json"], default-features = false }
 hickory-resolver = "0.25"
