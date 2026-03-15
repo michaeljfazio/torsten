@@ -1,5 +1,5 @@
 mod governance;
-mod protocol;
+pub mod protocol;
 mod stake;
 mod types;
 mod utxo;

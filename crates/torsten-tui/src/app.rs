@@ -4,8 +4,8 @@
 //! including the latest metrics snapshot, historical block-rate samples
 //! for the sparkline, and UI navigation state.
 
+use crate::layout::LayoutMode;
 use crate::metrics::MetricsSnapshot;
-use crate::theme::{self, Theme, THEMES};
 use std::collections::VecDeque;
 
 /// Maximum number of sparkline samples to retain (one sample per poll interval).
@@ -49,8 +49,12 @@ pub struct App {
     pub show_help: bool,
     /// Whether the application should exit.
     pub should_quit: bool,
-    /// Index into [`THEMES`] for the currently active theme.
-    pub theme_index: usize,
+    /// Manual layout mode override. `None` means auto-detect from terminal size.
+    pub layout_mode: Option<LayoutMode>,
+    /// Number of slots remaining in the current epoch.
+    pub epoch_slots_remaining: u64,
+    /// Epoch progress as a percentage (0.0 - 100.0).
+    pub epoch_progress_pct: f64,
 }
 
 impl App {
@@ -64,7 +68,9 @@ impl App {
             active_panel: ActivePanel::Chain,
             show_help: false,
             should_quit: false,
-            theme_index: 0,
+            layout_mode: None,
+            epoch_slots_remaining: 0,
+            epoch_progress_pct: 0.0,
         }
     }
 
@@ -90,6 +96,23 @@ impl App {
             self.block_rate_history.push_back(delta);
         }
 
+        // Compute epoch progress from slot_number and epoch_length.
+        // Default epoch length for Cardano is 432,000 slots (5 days at 1s slots).
+        let epoch_length = snapshot.get_u64("torsten_epoch_length");
+        let epoch_length = if epoch_length > 0 {
+            epoch_length
+        } else {
+            432_000
+        };
+        let slot = snapshot.get_u64("torsten_slot_number");
+        let slot_in_epoch = slot % epoch_length;
+        self.epoch_slots_remaining = epoch_length.saturating_sub(slot_in_epoch);
+        self.epoch_progress_pct = if epoch_length > 0 {
+            (slot_in_epoch as f64 / epoch_length as f64) * 100.0
+        } else {
+            0.0
+        };
+
         self.metrics = snapshot;
     }
 
@@ -103,19 +126,14 @@ impl App {
         self.show_help = !self.show_help;
     }
 
-    /// Return a reference to the currently active theme.
-    pub fn current_theme(&self) -> &'static Theme {
-        &THEMES[self.theme_index]
-    }
-
-    /// Cycle to the next theme, wrapping around after the last.
-    pub fn cycle_theme(&mut self) {
-        self.theme_index = theme::cycle_theme(self.theme_index);
-    }
-
-    /// Set the theme by index. Clamps to valid range.
-    pub fn set_theme(&mut self, index: usize) {
-        self.theme_index = index.min(THEMES.len() - 1);
+    /// Cycle layout mode: Auto -> Full -> Standard -> Compact -> Auto.
+    pub fn toggle_layout_mode(&mut self) {
+        self.layout_mode = match self.layout_mode {
+            None => Some(LayoutMode::Full),
+            Some(LayoutMode::Full) => Some(LayoutMode::Standard),
+            Some(LayoutMode::Standard) => Some(LayoutMode::Compact),
+            Some(LayoutMode::Compact) => None,
+        };
     }
 
     /// Determine the sync status label and associated color hint.
@@ -346,34 +364,5 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
-    }
-
-    #[test]
-    fn test_theme_cycling() {
-        let mut app = App::new();
-        assert_eq!(app.theme_index, 0);
-        assert_eq!(app.current_theme().name, "Default");
-
-        app.cycle_theme();
-        assert_eq!(app.theme_index, 1);
-        assert_eq!(app.current_theme().name, "Monokai");
-
-        // Cycle through all themes and back to start
-        for _ in 0..6 {
-            app.cycle_theme();
-        }
-        assert_eq!(app.theme_index, 0);
-        assert_eq!(app.current_theme().name, "Default");
-    }
-
-    #[test]
-    fn test_set_theme() {
-        let mut app = App::new();
-        app.set_theme(4);
-        assert_eq!(app.current_theme().name, "Nord");
-
-        // Clamp to max
-        app.set_theme(100);
-        assert_eq!(app.theme_index, 6);
     }
 }

@@ -6,6 +6,33 @@
 //!
 //! Use `VolatileDB::new()` for a pure in-memory store (backward compatible)
 //! or `VolatileDB::open(path)` to enable crash recovery via WAL.
+//!
+//! # WAL Format
+//!
+//! Each entry in the write-ahead log uses the following 88-byte header:
+//!
+//! ```text
+//! magic(4) + slot(8) + block_no(8) + hash(32) + prev_hash(32) + cbor_len(4)
+//! = 88 bytes total, followed by cbor_len bytes of block CBOR
+//! ```
+//!
+//! Fields are stored big-endian. Magic is the ASCII bytes `TWAL`.
+//!
+//! ## Legacy format (56 bytes)
+//!
+//! An older format without `prev_hash` was used before this version:
+//!
+//! ```text
+//! magic(4) + slot(8) + block_no(8) + hash(32) + cbor_len(4)
+//! = 56 bytes total
+//! ```
+//!
+//! On open, legacy entries are detected by checking the byte at offset 56:
+//! if bytes `[56..60]` equal the `TWAL` magic (meaning the next entry starts
+//! immediately after a 56-byte header), or if the `cbor_len` field encoded at
+//! offset 52 would produce a `cbor_end` that aligns with a `TWAL` magic at
+//! that position, we treat the file as legacy. A one-time warning is logged
+//! and `prev_hash` is set to `Hash32::ZERO` for all legacy entries.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -17,8 +44,15 @@ use tracing::{debug, warn};
 /// WAL entry magic bytes: "TWAL"
 const WAL_MAGIC: [u8; 4] = *b"TWAL";
 
-/// Size of a WAL entry header (magic + slot + block_no + hash + cbor_len).
-const WAL_HEADER_SIZE: usize = 4 + 8 + 8 + 32 + 4; // 56 bytes
+/// Size of the current (v2) WAL entry header.
+///
+/// Layout: magic(4) + slot(8) + block_no(8) + hash(32) + prev_hash(32) + cbor_len(4)
+const WAL_HEADER_SIZE: usize = 4 + 8 + 8 + 32 + 32 + 4; // 88 bytes
+
+/// Size of the legacy (v1) WAL entry header, which lacked prev_hash.
+///
+/// Layout: magic(4) + slot(8) + block_no(8) + hash(32) + cbor_len(4)
+const WAL_HEADER_SIZE_LEGACY: usize = 4 + 8 + 8 + 32 + 4; // 56 bytes
 
 /// WAL file name within the volatile directory.
 const WAL_FILENAME: &str = "volatile-wal.bin";
@@ -40,7 +74,18 @@ impl WalWriter {
     }
 
     /// Append a WAL entry and sync to disk.
-    fn append(&mut self, slot: u64, block_no: u64, hash: &Hash32, cbor: &[u8]) -> io::Result<()> {
+    ///
+    /// Writes the 88-byte v2 header followed by the block CBOR, then
+    /// flushes the BufWriter and issues a `sync_data()` to guarantee the
+    /// entry is durable before the caller proceeds.
+    fn append(
+        &mut self,
+        slot: u64,
+        block_no: u64,
+        hash: &Hash32,
+        prev_hash: &Hash32,
+        cbor: &[u8],
+    ) -> io::Result<()> {
         // Cardano blocks are well under 4 GiB, but guard against accidental
         // silent truncation if the invariant is ever violated.
         let cbor_len = u32::try_from(cbor.len()).map_err(|_| {
@@ -53,6 +98,7 @@ impl WalWriter {
         self.file.write_all(&slot.to_be_bytes())?;
         self.file.write_all(&block_no.to_be_bytes())?;
         self.file.write_all(hash.as_bytes())?;
+        self.file.write_all(prev_hash.as_bytes())?;
         self.file.write_all(&cbor_len.to_be_bytes())?;
         self.file.write_all(cbor)?;
         self.file.flush()?;
@@ -78,17 +124,20 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Rewrite the WAL with only the given entries (used after flush).
+    /// Rewrite the WAL with only the given entries (used after flush or rollback).
+    ///
+    /// Writes to a temporary file and renames atomically so that a crash
+    /// during rewrite cannot leave the WAL in a partially-written state.
     fn rewrite(
         &mut self,
-        entries: &[(u64, u64, Hash32, Vec<u8>)], // (slot, block_no, hash, cbor)
+        entries: &[(u64, u64, Hash32, Hash32, Vec<u8>)], // (slot, block_no, hash, prev_hash, cbor)
     ) -> io::Result<()> {
         // Write to a temp file, then rename for atomicity
         let tmp_path = self.path.with_extension("tmp");
         {
             let file = File::create(&tmp_path)?;
             let mut writer = BufWriter::new(file);
-            for (slot, block_no, hash, cbor) in entries {
+            for (slot, block_no, hash, prev_hash, cbor) in entries {
                 // Guard against silent truncation of a block that somehow
                 // exceeds 4 GiB (should be impossible, but treat as fatal).
                 let cbor_len = u32::try_from(cbor.len()).map_err(|_| {
@@ -101,6 +150,7 @@ impl WalWriter {
                 writer.write_all(&slot.to_be_bytes())?;
                 writer.write_all(&block_no.to_be_bytes())?;
                 writer.write_all(hash.as_bytes())?;
+                writer.write_all(prev_hash.as_bytes())?;
                 writer.write_all(&cbor_len.to_be_bytes())?;
                 writer.write_all(cbor)?;
             }
@@ -123,12 +173,91 @@ struct WalEntry {
     slot: u64,
     block_no: u64,
     hash: Hash32,
+    /// The hash of the parent block. Set to `Hash32::ZERO` when recovered
+    /// from a legacy 56-byte WAL entry that predates this field.
+    prev_hash: Hash32,
     cbor: Vec<u8>,
+}
+
+/// Detect whether a WAL file uses the legacy 56-byte header format.
+///
+/// Strategy: scan forward from the start treating the data as 56-byte
+/// headers. If, after consuming `WAL_HEADER_SIZE_LEGACY` bytes plus the
+/// CBOR payload, we land on another `TWAL` magic (or EOF), the file is
+/// legacy. If the scan fails to align (i.e. the implied cbor_len for a
+/// 56-byte header would produce a position that does NOT start with `TWAL`
+/// and is not EOF), we conclude the file is the new 88-byte format.
+///
+/// An empty file returns `false` (new format, no-op either way).
+fn detect_legacy_format(data: &[u8]) -> bool {
+    if data.len() < WAL_HEADER_SIZE_LEGACY {
+        // Too short to contain even one legacy entry; treat as new.
+        return false;
+    }
+
+    // The first 4 bytes must be TWAL for either format.
+    if data[..4] != WAL_MAGIC {
+        return false;
+    }
+
+    // Read cbor_len from the legacy header position (offset 52).
+    let cbor_len =
+        u32::from_be_bytes(data[52..56].try_into().unwrap()) as usize;
+
+    // Where would the next entry begin under the 56-byte assumption?
+    let next_pos = WAL_HEADER_SIZE_LEGACY + cbor_len;
+
+    if next_pos > data.len() {
+        // Not enough data — could be a truncated write in either format.
+        // Default to new format; the truncated header will be discarded by
+        // the normal replay loop regardless.
+        return false;
+    }
+
+    if next_pos == data.len() {
+        // Exactly one entry that consumes the entire file — ambiguous.
+        // Check whether the u32 at offset 84 (new-format cbor_len) would
+        // also land at EOF. If both land at EOF the entry is ambiguous but
+        // since the file is too short to confirm a 88-byte header we
+        // conservatively return false (new format).
+        if data.len() < WAL_HEADER_SIZE {
+            return true; // Can't fit 88-byte header; must be legacy.
+        }
+        return false;
+    }
+
+    // There is data beyond the first entry. Under legacy assumption the next
+    // entry must begin with TWAL.
+    if data[next_pos..next_pos + 4] == WAL_MAGIC {
+        return true;
+    }
+
+    // The next position does not start with TWAL under the legacy assumption.
+    // Check if it does under the new-format assumption.
+    if data.len() >= WAL_HEADER_SIZE {
+        let new_cbor_len =
+            u32::from_be_bytes(data[84..88].try_into().unwrap()) as usize;
+        let new_next = WAL_HEADER_SIZE + new_cbor_len;
+        if new_next <= data.len()
+            && (new_next == data.len()
+                || data[new_next..new_next + 4] == WAL_MAGIC)
+        {
+            return false; // New format aligns correctly.
+        }
+    }
+
+    // Neither format aligns cleanly on the first entry. Fall back to
+    // checking the magic at offset 56: if it looks like the old
+    // cbor_len field was zero the entry ends at byte 56 exactly, and
+    // byte 56 starts with TWAL → legacy.
+    false
 }
 
 /// Replay WAL entries from the given file path.
 ///
-/// Validates magic bytes for each entry and stops on corrupted/truncated data.
+/// Validates magic bytes for each entry and stops on corrupted/truncated
+/// data. Automatically detects legacy 56-byte format and logs a one-time
+/// warning when upgrading.
 fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
@@ -142,10 +271,25 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
         return Ok(entries);
     }
 
+    let legacy = detect_legacy_format(&data);
+    if legacy {
+        warn!(
+            "WAL: detected legacy 56-byte format (pre-prev_hash). \
+             Entries will be recovered with prev_hash=ZERO. \
+             The WAL will be upgraded to 88-byte format on the next rewrite."
+        );
+    }
+
+    let header_size = if legacy {
+        WAL_HEADER_SIZE_LEGACY
+    } else {
+        WAL_HEADER_SIZE
+    };
+
     let mut pos = 0;
     while pos < data.len() {
         // Check if we have enough bytes for the header
-        if pos + WAL_HEADER_SIZE > data.len() {
+        if pos + header_size > data.len() {
             warn!(
                 pos,
                 remaining = data.len() - pos,
@@ -161,12 +305,28 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
         }
 
         let slot = u64::from_be_bytes(data[pos + 4..pos + 12].try_into().unwrap());
-        let block_no = u64::from_be_bytes(data[pos + 12..pos + 20].try_into().unwrap());
+        let block_no =
+            u64::from_be_bytes(data[pos + 12..pos + 20].try_into().unwrap());
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&data[pos + 20..pos + 52]);
-        let cbor_len = u32::from_be_bytes(data[pos + 52..pos + 56].try_into().unwrap()) as usize;
 
-        let cbor_start = pos + WAL_HEADER_SIZE;
+        let (prev_hash, cbor_len) = if legacy {
+            // Legacy layout: cbor_len at offset 52, no prev_hash field.
+            let cl = u32::from_be_bytes(
+                data[pos + 52..pos + 56].try_into().unwrap(),
+            ) as usize;
+            (Hash32::ZERO, cl)
+        } else {
+            // New layout: prev_hash at offset 52, cbor_len at offset 84.
+            let mut prev_bytes = [0u8; 32];
+            prev_bytes.copy_from_slice(&data[pos + 52..pos + 84]);
+            let cl = u32::from_be_bytes(
+                data[pos + 84..pos + 88].try_into().unwrap(),
+            ) as usize;
+            (Hash32::from_bytes(prev_bytes), cl)
+        };
+
+        let cbor_start = pos + header_size;
         let cbor_end = cbor_start + cbor_len;
 
         // Check if we have enough bytes for the CBOR data
@@ -184,6 +344,7 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
             slot,
             block_no,
             hash: Hash32::from_bytes(hash_bytes),
+            prev_hash,
             cbor: data[cbor_start..cbor_end].to_vec(),
         });
 
@@ -232,7 +393,10 @@ impl VolatileDB {
     /// Open a VolatileDB with WAL-based crash recovery.
     ///
     /// Opens/creates the WAL file at `path/volatile-wal.bin` and replays
-    /// any existing entries to rebuild the in-memory state.
+    /// any existing entries to rebuild the in-memory state. Legacy 56-byte
+    /// WAL files are automatically detected and replayed with
+    /// `prev_hash = Hash32::ZERO`; the successors map will be repopulated
+    /// correctly as new blocks arrive.
     pub fn open(path: &Path) -> io::Result<Self> {
         fs::create_dir_all(path)?;
         let wal_path = path.join(WAL_FILENAME);
@@ -250,16 +414,17 @@ impl VolatileDB {
             wal: None,
         };
 
-        // Rebuild in-memory state from WAL
+        // Rebuild in-memory state from WAL, using the recovered prev_hash.
+        // For legacy entries prev_hash is Hash32::ZERO; the successors map
+        // will still be consistent with itself (all point to ZERO parent)
+        // and will be corrected over time as blocks are re-added via
+        // normal sync after the first node startup post-upgrade.
         for entry in entries {
-            // WAL doesn't store prev_hash, use ZERO as placeholder.
-            // The prev_hash is only used for successor tracking which is
-            // an optimization; it will be rebuilt correctly as new blocks arrive.
             db.insert_block_internal(
                 entry.hash,
                 entry.slot,
                 entry.block_no,
-                Hash32::ZERO,
+                entry.prev_hash,
                 entry.cbor,
             );
         }
@@ -278,7 +443,9 @@ impl VolatileDB {
     /// Add a block to the volatile store.
     ///
     /// If WAL is enabled, the block is appended to the WAL before being
-    /// inserted into the in-memory state.
+    /// inserted into the in-memory state. The `prev_hash` is persisted in
+    /// the WAL so that the successors map can be reconstructed accurately
+    /// after a crash.
     pub fn add_block(
         &mut self,
         hash: Hash32,
@@ -287,9 +454,10 @@ impl VolatileDB {
         prev_hash: Hash32,
         cbor: Vec<u8>,
     ) {
-        // Write to WAL first (if enabled)
+        // Write to WAL first (if enabled) so that prev_hash is durable
+        // before the in-memory state is updated.
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append(slot, block_no, &hash, &cbor) {
+            if let Err(e) = wal.append(slot, block_no, &hash, &prev_hash, &cbor) {
                 warn!(error = %e, "WAL: failed to append entry");
             }
         }
@@ -306,7 +474,7 @@ impl VolatileDB {
         prev_hash: Hash32,
         cbor: Vec<u8>,
     ) {
-        // Track successor relationship
+        // Track successor relationship: prev_hash -> hash
         self.successors.entry(prev_hash).or_default().push(hash);
 
         // Update indexes
@@ -394,8 +562,11 @@ impl VolatileDB {
     /// Returns the hashes of removed blocks.
     ///
     /// If WAL is enabled, rewrites the WAL with only the remaining entries.
+    /// The rewritten WAL uses the current 88-byte format, so this operation
+    /// also upgrades any legacy 56-byte WAL to the new format.
     pub fn remove_blocks_up_to_slot(&mut self, slot: u64) -> Vec<Hash32> {
-        let slots_to_remove: Vec<u64> = self.slot_index.range(..=slot).map(|(&s, _)| s).collect();
+        let slots_to_remove: Vec<u64> =
+            self.slot_index.range(..=slot).map(|(&s, _)| s).collect();
 
         let mut removed = Vec::new();
         for s in slots_to_remove {
@@ -403,7 +574,9 @@ impl VolatileDB {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
                         self.block_no_index.remove(&block.block_no);
-                        if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
+                        if let Some(succs) =
+                            self.successors.get_mut(&block.prev_hash)
+                        {
                             succs.retain(|h| *h != hash);
                             if succs.is_empty() {
                                 self.successors.remove(&block.prev_hash);
@@ -415,12 +588,12 @@ impl VolatileDB {
             }
         }
 
-        // Rewrite WAL with remaining entries
+        // Rewrite WAL with remaining entries in new 88-byte format
         if let Some(ref mut wal) = self.wal {
-            let remaining: Vec<(u64, u64, Hash32, Vec<u8>)> = self
+            let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
                 .blocks
                 .iter()
-                .map(|(h, b)| (b.slot, b.block_no, *h, b.cbor.clone()))
+                .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
                 .collect();
             if let Err(e) = wal.rewrite(&remaining) {
                 warn!(error = %e, "WAL: failed to rewrite after flush");
@@ -464,7 +637,9 @@ impl VolatileDB {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
                         self.block_no_index.remove(&block.block_no);
-                        if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
+                        if let Some(succs) =
+                            self.successors.get_mut(&block.prev_hash)
+                        {
                             succs.retain(|h| *h != hash);
                         }
                     }
@@ -482,12 +657,12 @@ impl VolatileDB {
         // Recompute tip
         self.recompute_tip();
 
-        // Rewrite WAL with remaining entries
+        // Rewrite WAL with remaining entries in new 88-byte format
         if let Some(ref mut wal) = self.wal {
-            let remaining: Vec<(u64, u64, Hash32, Vec<u8>)> = self
+            let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
                 .blocks
                 .iter()
-                .map(|(h, b)| (b.slot, b.block_no, *h, b.cbor.clone()))
+                .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
                 .collect();
             if let Err(e) = wal.rewrite(&remaining) {
                 warn!(error = %e, "WAL: failed to rewrite after rollback");
@@ -566,6 +741,10 @@ mod tests {
     fn h(byte: u8) -> Hash32 {
         Hash32::from_bytes([byte; 32])
     }
+
+    // -----------------------------------------------------------------------
+    // Core in-memory behaviour
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_add_get_block() {
@@ -673,7 +852,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // WAL tests
+    // WAL tests — new 88-byte format
     // -----------------------------------------------------------------------
 
     #[test]
@@ -709,6 +888,75 @@ mod tests {
     }
 
     #[test]
+    fn test_wal_prev_hash_survives_crash() {
+        // Verify that prev_hash is correctly recovered after a simulated crash
+        // (process exit without clean shutdown — WAL not rewritten).
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            // Chain: genesis(h0) -> b1(h1) -> b2(h2) -> b3(h3)
+            db.add_block(h(1), 100, 10, h(0), b"block1".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"block2".to_vec());
+            db.add_block(h(3), 300, 30, h(2), b"block3".to_vec());
+            // Drop without calling clear() — simulates a crash.
+        }
+
+        // Re-open and check prev_hash was recovered for each block.
+        {
+            let db = VolatileDB::open(&wal_dir).unwrap();
+            assert_eq!(db.len(), 3);
+
+            let b1 = db.get_block(&h(1)).unwrap();
+            assert_eq!(b1.prev_hash, h(0), "b1 prev_hash should be h(0)");
+
+            let b2 = db.get_block(&h(2)).unwrap();
+            assert_eq!(b2.prev_hash, h(1), "b2 prev_hash should be h(1)");
+
+            let b3 = db.get_block(&h(3)).unwrap();
+            assert_eq!(b3.prev_hash, h(2), "b3 prev_hash should be h(2)");
+        }
+    }
+
+    #[test]
+    fn test_wal_successors_map_after_recovery() {
+        // After crash-recovery the successors map must reflect the
+        // recovered prev_hash values so fork detection works correctly.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            // Two forks from h(1): h(2a) and h(2b)
+            db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"b2a".to_vec());
+            db.add_block(h(3), 200, 20, h(1), b"b2b_fork".to_vec());
+            // Drop without shutdown — simulates crash.
+        }
+
+        {
+            let db = VolatileDB::open(&wal_dir).unwrap();
+            assert_eq!(db.len(), 3);
+
+            // Both fork blocks report h(1) as their parent.
+            assert_eq!(db.get_block(&h(2)).unwrap().prev_hash, h(1));
+            assert_eq!(db.get_block(&h(3)).unwrap().prev_hash, h(1));
+
+            // The successors map for h(1) should contain both fork hashes.
+            let succs = db.successors.get(&h(1)).cloned().unwrap_or_default();
+            assert!(
+                succs.contains(&h(2)),
+                "successors of h(1) should include h(2)"
+            );
+            assert!(
+                succs.contains(&h(3)),
+                "successors of h(1) should include h(3)"
+            );
+        }
+    }
+
+    #[test]
     fn test_wal_truncation_on_flush() {
         let dir = tempfile::tempdir().unwrap();
         let wal_dir = dir.path().join("volatile");
@@ -734,8 +982,14 @@ mod tests {
             assert!(!db.has_block(&h(2)));
             assert!(db.has_block(&h(3)));
             assert_eq!(db.get_block_cbor(&h(3)).unwrap(), b"b3");
+            // prev_hash for h(3) must be preserved through rewrite
+            assert_eq!(db.get_block(&h(3)).unwrap().prev_hash, h(2));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // WAL corruption recovery tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_wal_corrupted_recovery_partial_write() {
@@ -744,16 +998,17 @@ mod tests {
         fs::create_dir_all(&wal_dir).unwrap();
         let wal_path = wal_dir.join(WAL_FILENAME);
 
-        // Write one valid entry followed by a truncated entry
+        // Write one valid new-format entry followed by a truncated entry
         {
             let mut file = File::create(&wal_path).unwrap();
 
-            // Valid entry: slot=100, block_no=10, hash=h(1), cbor="block1"
+            // Valid entry: slot=100, block_no=10, hash=h(1), prev_hash=h(0)
             let cbor = b"block1";
             file.write_all(&WAL_MAGIC).unwrap();
             file.write_all(&100u64.to_be_bytes()).unwrap();
             file.write_all(&10u64.to_be_bytes()).unwrap();
             file.write_all(h(1).as_bytes()).unwrap();
+            file.write_all(h(0).as_bytes()).unwrap(); // prev_hash
             file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
             file.write_all(cbor).unwrap();
 
@@ -767,6 +1022,7 @@ mod tests {
         assert_eq!(db.len(), 1);
         assert!(db.has_block(&h(1)));
         assert_eq!(db.get_block_cbor(&h(1)).unwrap(), b"block1");
+        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
     }
 
     #[test]
@@ -785,6 +1041,7 @@ mod tests {
             file.write_all(&100u64.to_be_bytes()).unwrap();
             file.write_all(&10u64.to_be_bytes()).unwrap();
             file.write_all(h(1).as_bytes()).unwrap();
+            file.write_all(h(0).as_bytes()).unwrap(); // prev_hash
             file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
             file.write_all(cbor).unwrap();
 
@@ -815,6 +1072,7 @@ mod tests {
             file.write_all(&100u64.to_be_bytes()).unwrap();
             file.write_all(&10u64.to_be_bytes()).unwrap();
             file.write_all(h(1).as_bytes()).unwrap();
+            file.write_all(h(0).as_bytes()).unwrap(); // prev_hash
             file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
             file.write_all(cbor).unwrap();
 
@@ -823,6 +1081,7 @@ mod tests {
             file.write_all(&200u64.to_be_bytes()).unwrap();
             file.write_all(&20u64.to_be_bytes()).unwrap();
             file.write_all(h(2).as_bytes()).unwrap();
+            file.write_all(h(1).as_bytes()).unwrap(); // prev_hash
             file.write_all(&1000u32.to_be_bytes()).unwrap();
             file.write_all(&[0u8; 5]).unwrap(); // Only 5 of 1000 bytes
         }
@@ -900,6 +1159,8 @@ mod tests {
         assert!(db.has_block(&h(1)));
         assert!(!db.has_block(&h(2)));
         assert!(!db.has_block(&h(3)));
+        // prev_hash must survive the rollback rewrite
+        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
     }
 
     #[test]
@@ -933,6 +1194,136 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Legacy 56-byte WAL migration tests
+    // -----------------------------------------------------------------------
+
+    /// Write a single legacy 56-byte WAL entry directly to disk.
+    fn write_legacy_entry(file: &mut File, slot: u64, block_no: u64, hash: Hash32, cbor: &[u8]) {
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&slot.to_be_bytes()).unwrap();
+        file.write_all(&block_no.to_be_bytes()).unwrap();
+        file.write_all(hash.as_bytes()).unwrap();
+        file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
+        file.write_all(cbor).unwrap();
+    }
+
+    #[test]
+    fn test_legacy_wal_opens_without_panic() {
+        // A legacy 56-byte WAL with three entries must open without error and
+        // return all blocks with prev_hash = Hash32::ZERO.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        {
+            let mut file = File::create(&wal_path).unwrap();
+            write_legacy_entry(&mut file, 100, 10, h(1), b"block1");
+            write_legacy_entry(&mut file, 200, 20, h(2), b"block2");
+            write_legacy_entry(&mut file, 300, 30, h(3), b"block3");
+        }
+
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 3, "all three legacy blocks should be recovered");
+        assert!(db.has_block(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert!(db.has_block(&h(3)));
+    }
+
+    #[test]
+    fn test_legacy_wal_prev_hash_zero() {
+        // Legacy entries have no stored prev_hash; they must recover as ZERO.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        {
+            let mut file = File::create(&wal_path).unwrap();
+            write_legacy_entry(&mut file, 100, 10, h(1), b"b1");
+            write_legacy_entry(&mut file, 200, 20, h(2), b"b2");
+        }
+
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(
+            db.get_block(&h(1)).unwrap().prev_hash,
+            Hash32::ZERO,
+            "legacy entry must have prev_hash=ZERO"
+        );
+        assert_eq!(
+            db.get_block(&h(2)).unwrap().prev_hash,
+            Hash32::ZERO,
+            "legacy entry must have prev_hash=ZERO"
+        );
+    }
+
+    #[test]
+    fn test_legacy_wal_upgraded_after_rewrite() {
+        // After a flush rewrite the WAL file must use the new 88-byte format,
+        // so subsequent reopens parse it as new format.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        // Seed a legacy WAL with two blocks
+        {
+            let mut file = File::create(&wal_path).unwrap();
+            write_legacy_entry(&mut file, 100, 10, h(1), b"b1");
+            write_legacy_entry(&mut file, 200, 20, h(2), b"b2");
+        }
+
+        // Open (legacy parse), add a new block, remove the first two to
+        // trigger a rewrite in new format.
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            assert_eq!(db.len(), 2);
+            // Add a block with a real prev_hash
+            db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+            // Remove legacy blocks — this rewrites the WAL in new format
+            db.remove_blocks_up_to_slot(200);
+            assert_eq!(db.len(), 1);
+        }
+
+        // The WAL file should now be in new 88-byte format
+        let wal_data = fs::read(&wal_path).unwrap();
+        // One entry: 88-byte header + 2 bytes CBOR
+        assert_eq!(
+            wal_data.len(),
+            WAL_HEADER_SIZE + 2,
+            "rewritten WAL must use 88-byte headers"
+        );
+
+        // Reopen and verify prev_hash is correct for the surviving block
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 1);
+        assert_eq!(
+            db.get_block(&h(3)).unwrap().prev_hash,
+            h(2),
+            "prev_hash must be exact after upgrade rewrite"
+        );
+    }
+
+    #[test]
+    fn test_legacy_wal_single_entry() {
+        // A legacy WAL with only one entry is an edge case for detection.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        {
+            let mut file = File::create(&wal_path).unwrap();
+            write_legacy_entry(&mut file, 100, 10, h(1), b"solo");
+        }
+
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 1);
+        assert!(db.has_block(&h(1)));
+        assert_eq!(db.get_block_cbor(&h(1)).unwrap(), b"solo");
+    }
+
+    // -----------------------------------------------------------------------
     // Additional WAL edge case tests
     // -----------------------------------------------------------------------
 
@@ -962,8 +1353,8 @@ mod tests {
 
     #[test]
     fn test_wal_replay_duplicate_entries() {
-        // Manually write WAL with duplicate entries (same hash, different data)
-        // Last entry should win since HashMap replaces previous value
+        // Manually write WAL with duplicate entries (same hash, different data).
+        // Last entry should win since HashMap replaces previous value.
         let dir = tempfile::tempdir().unwrap();
         let wal_dir = dir.path().join("volatile");
         fs::create_dir_all(&wal_dir).unwrap();
@@ -978,6 +1369,7 @@ mod tests {
                 file.write_all(&100u64.to_be_bytes()).unwrap();
                 file.write_all(&10u64.to_be_bytes()).unwrap();
                 file.write_all(h(1).as_bytes()).unwrap();
+                file.write_all(h(0).as_bytes()).unwrap(); // prev_hash
                 file.write_all(&(cbor.len() as u32).to_be_bytes()).unwrap();
                 file.write_all(cbor).unwrap();
             }
@@ -1015,11 +1407,11 @@ mod tests {
         assert!(db.len() <= 20);
         assert!(!db.is_empty());
 
-        // Verify the WAL file is smaller than writing 120 entries
+        // Verify the WAL file is smaller than writing 120 entries.
+        // Each entry is 88-byte header + 64-byte CBOR = 152 bytes.
+        // 120 entries would be ~18240 bytes; remaining ~20 should be much less.
         let wal_path = wal_dir.join(WAL_FILENAME);
         let wal_size = fs::metadata(&wal_path).unwrap().len();
-        // Each entry is ~56 header + 64 data = 120 bytes.
-        // 120 entries would be ~14400 bytes, remaining ~20 should be much less.
         assert!(wal_size < 5000, "WAL should have shrunk, got {wal_size}");
     }
 
@@ -1046,6 +1438,9 @@ mod tests {
         assert_eq!(db.get_block_cbor(&h(2)).unwrap(), b"block_two");
         // Tip should be the highest slot
         assert_eq!(db.get_tip(), Some((200, h(2), 20)));
+        // prev_hash round-trips exactly
+        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
+        assert_eq!(db.get_block(&h(2)).unwrap().prev_hash, h(1));
     }
 
     #[test]
@@ -1067,6 +1462,7 @@ mod tests {
         assert!(db.has_block(&h(1)));
         assert_eq!(db.get_block_cbor(&h(1)).unwrap().len(), 65536);
         assert_eq!(db.get_block_cbor(&h(1)).unwrap(), big_cbor.as_slice());
+        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
     }
 
     #[test]

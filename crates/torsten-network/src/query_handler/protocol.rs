@@ -169,7 +169,7 @@ fn max_pool_prime(a0_num: u64, a0_den: u64, n_opt: u64, r: u64, sigma: &Rat, p_r
 ///
 /// The result is a map from pool_id to expected lovelace reward for each
 /// requested stake amount, suitable for the cardano-wallet delegation advisor.
-pub(crate) fn handle_non_myopic_rewards(
+pub fn handle_non_myopic_rewards(
     state: &NodeStateSnapshot,
     decoder: &mut minicbor::Decoder<'_>,
 ) -> QueryResult {
