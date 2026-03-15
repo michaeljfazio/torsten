@@ -5,7 +5,14 @@ A Cardano node implementation written in Rust, aiming for 100% compatibility wit
 Built by [Sandstone Pool](https://www.sandstone.io/)
 
 [![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
+[![Code Scanning](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml)
+[![Nightly Benchmarks](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml)
 [![Docs](https://github.com/michaeljfazio/torsten/actions/workflows/docs.yml/badge.svg)](https://michaeljfazio.github.io/torsten/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![Cardano](https://img.shields.io/badge/cardano-conway-blueviolet.svg)](https://cardano.org/)
+[![GitHub Discussions](https://img.shields.io/github/discussions/michaeljfazio/torsten)](https://github.com/michaeljfazio/torsten/discussions)
+[![GitHub Stars](https://img.shields.io/github/stars/michaeljfazio/torsten)](https://github.com/michaeljfazio/torsten/stargazers)
 
 > [!CAUTION]
 > **Torsten is in early development and is NOT recommended for production use.**
