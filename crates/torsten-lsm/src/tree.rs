@@ -1113,3 +1113,299 @@ mod proptests {
         }
     }
 }
+
+/// High-volume stress tests simulating Cardano UTxO workloads.
+///
+/// These tests use 36-byte keys (matching Cardano TransactionInput encoding:
+/// 32-byte tx hash + 4-byte index BE) and ~200-byte values (matching bincode-
+/// serialized TransactionOutput). They exercise compaction, merge, WAL recovery,
+/// and range scans at a scale closer to production (tens of thousands of entries).
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+    use std::collections::HashMap as StdHashMap;
+
+    /// Generate a Cardano-like UTxO key: 32 bytes of tx hash + 4 bytes of index.
+    fn utxo_key(tx_hash_seed: u32, index: u32) -> Key {
+        let mut buf = [0u8; 36];
+        // Simulate a tx hash by repeating the seed
+        let seed_bytes = tx_hash_seed.to_be_bytes();
+        for i in 0..8 {
+            buf[i * 4..(i + 1) * 4].copy_from_slice(&seed_bytes);
+        }
+        buf[32..36].copy_from_slice(&index.to_be_bytes());
+        Key::from(buf)
+    }
+
+    /// Generate a Cardano-like UTxO value (~200 bytes).
+    fn utxo_value(seed: u32) -> Value {
+        let mut buf = vec![0u8; 200];
+        let seed_bytes = seed.to_be_bytes();
+        for chunk in buf.chunks_mut(4) {
+            let len = chunk.len().min(4);
+            chunk[..len].copy_from_slice(&seed_bytes[..len]);
+        }
+        Value::from(buf)
+    }
+
+    /// Simulate a Cardano block application: consume N inputs, produce M outputs.
+    /// Returns the new UTxO entries created.
+    fn apply_block(
+        tree: &mut LsmTree,
+        block_num: u32,
+        inputs_to_consume: &[(Key, Value)],
+        num_outputs: u32,
+    ) -> Vec<(Key, Value)> {
+        // Delete consumed inputs
+        for (key, _) in inputs_to_consume {
+            tree.delete(key).unwrap();
+        }
+
+        // Create new outputs
+        let mut new_entries = Vec::new();
+        for idx in 0..num_outputs {
+            let key = utxo_key(block_num, idx);
+            let value = utxo_value(block_num * 1000 + idx);
+            tree.insert(&key, &value).unwrap();
+            new_entries.push((key, value));
+        }
+
+        new_entries
+    }
+
+    /// 50K-entry UTxO stress test with interleaved inserts, deletes, and compactions.
+    ///
+    /// Simulates 5,000 blocks each consuming 2 UTxOs and producing 3 UTxOs,
+    /// resulting in a net growth of ~5,000 live UTxO entries with ~10,000 tombstones
+    /// that must be correctly handled during compaction.
+    #[test]
+    fn test_utxo_workload_50k_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LsmConfig {
+            memtable_size: 256 * 1024, // 256 KB — forces frequent flushes
+            block_cache_size: 4 * 1024 * 1024,
+            bloom_filter_bits_per_key: 10,
+            size_ratio: 4,
+            wal_enabled: false, // WAL tested separately
+            page_size: 4096,
+            ..LsmConfig::default()
+        };
+        let mut tree = LsmTree::open(dir.path(), config).unwrap();
+
+        // Track the live UTxO set as ground truth
+        let mut live_utxos: StdHashMap<Vec<u8>, Vec<u8>> = StdHashMap::new();
+
+        // Genesis: create 100 initial UTxOs
+        for i in 0u32..100 {
+            let key = utxo_key(0, i);
+            let value = utxo_value(i);
+            tree.insert(&key, &value).unwrap();
+            live_utxos.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
+        }
+
+        // Simulate 5,000 blocks
+        for block in 1u32..=5000 {
+            // Pick 2 random UTxOs to consume (use deterministic selection)
+            let live_keys: Vec<Vec<u8>> = live_utxos.keys().cloned().collect();
+            let mut to_consume = Vec::new();
+
+            if live_keys.len() >= 2 {
+                let idx1 = (block as usize * 7) % live_keys.len();
+                let idx2 = (block as usize * 13 + 3) % live_keys.len();
+                // Avoid consuming same UTxO twice
+                let idx2 = if idx2 == idx1 {
+                    (idx2 + 1) % live_keys.len()
+                } else {
+                    idx2
+                };
+
+                for &idx in &[idx1, idx2] {
+                    let key_bytes = &live_keys[idx];
+                    let val_bytes = live_utxos.get(key_bytes).unwrap().clone();
+                    to_consume.push((Key::new(key_bytes.clone()), Value::new(val_bytes)));
+                }
+            }
+
+            // Apply block: consume inputs, produce 3 outputs
+            let new_entries = apply_block(&mut tree, block, &to_consume, 3);
+
+            // Update ground truth
+            for (key, _) in &to_consume {
+                live_utxos.remove(key.as_bytes());
+            }
+            for (key, value) in &new_entries {
+                live_utxos.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
+            }
+        }
+
+        // Verify: every live UTxO should be readable
+        let mut missing = 0;
+        let mut wrong = 0;
+        for (key_bytes, expected_val) in &live_utxos {
+            match tree.get(&Key::new(key_bytes.clone())).unwrap() {
+                Some(val) => {
+                    if val.as_bytes() != expected_val.as_slice() {
+                        wrong += 1;
+                    }
+                }
+                None => missing += 1,
+            }
+        }
+        assert_eq!(
+            missing,
+            0,
+            "{missing} live UTxOs missing from LSM tree (out of {})",
+            live_utxos.len()
+        );
+        assert_eq!(
+            wrong,
+            0,
+            "{wrong} live UTxOs have wrong values (out of {})",
+            live_utxos.len()
+        );
+
+        // Verify: range scan returns correct count
+        let start = Key::from([0u8; 0]);
+        let end = Key::from([0xFFu8; 36]);
+        let range_count = tree.range(&start, &end).count();
+        assert_eq!(
+            range_count,
+            live_utxos.len(),
+            "range scan returned {range_count} entries but expected {}",
+            live_utxos.len()
+        );
+
+        // Final count check
+        eprintln!(
+            "Stress test passed: {} live UTxOs verified, range scan count matches",
+            live_utxos.len()
+        );
+    }
+
+    /// WAL crash recovery stress test: write data, simulate crash, verify recovery.
+    #[test]
+    fn test_wal_crash_recovery_stress() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().to_path_buf();
+        let mut expected: StdHashMap<Vec<u8>, Vec<u8>> = StdHashMap::new();
+
+        // Phase 1: write 1000 entries with WAL, don't flush (simulates crash)
+        {
+            let config = LsmConfig {
+                memtable_size: 100 * 1024 * 1024, // Large — no auto-flush
+                wal_enabled: true,
+                ..LsmConfig::default()
+            };
+            let mut tree = LsmTree::open(&db_path, config).unwrap();
+
+            for i in 0u32..1000 {
+                let key = utxo_key(i, 0);
+                let value = utxo_value(i);
+                tree.insert(&key, &value).unwrap();
+                expected.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
+            }
+            // Drop without flush — simulates crash
+        }
+
+        // Phase 2: reopen and verify all data recovered
+        {
+            let config = LsmConfig {
+                memtable_size: 100 * 1024 * 1024,
+                wal_enabled: true,
+                ..LsmConfig::default()
+            };
+            let tree = LsmTree::open(&db_path, config).unwrap();
+
+            for (key_bytes, expected_val) in &expected {
+                let result = tree.get(&Key::new(key_bytes.clone())).unwrap();
+                assert!(
+                    result.is_some(),
+                    "WAL recovery lost key (first 4 bytes: {:?})",
+                    &key_bytes[..4]
+                );
+                assert_eq!(result.unwrap().as_bytes(), expected_val.as_slice());
+            }
+        }
+    }
+
+    /// Snapshot consistency test: save snapshot mid-workload, verify it's frozen.
+    #[test]
+    fn test_snapshot_consistency_under_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LsmConfig {
+            memtable_size: 4096,
+            wal_enabled: false,
+            ..LsmConfig::default()
+        };
+        let mut tree = LsmTree::open(dir.path(), config).unwrap();
+
+        // Insert initial data
+        for i in 0u32..500 {
+            let key = utxo_key(i, 0);
+            let value = utxo_value(i);
+            tree.insert(&key, &value).unwrap();
+        }
+
+        // Save snapshot
+        tree.save_snapshot("epoch-100", "epoch100").unwrap();
+
+        // Continue modifying (these changes should NOT affect the snapshot)
+        for i in 500u32..1000 {
+            let key = utxo_key(i, 0);
+            let value = utxo_value(i);
+            tree.insert(&key, &value).unwrap();
+        }
+        // Delete some of the original entries
+        for i in 0u32..100 {
+            tree.delete(&utxo_key(i, 0)).unwrap();
+        }
+
+        // Open snapshot in a separate directory and verify it has exactly
+        // the 500 entries from before the snapshot, not the modified state
+        let dir2 = tempfile::tempdir().unwrap();
+        let snap_src = dir.path().join("snapshots");
+        let snap_dst = dir2.path().join("snapshots");
+        copy_dir_recursive(&snap_src, &snap_dst).unwrap();
+
+        let snap_tree = LsmTree::open_snapshot(dir2.path(), "epoch-100").unwrap();
+
+        // Snapshot should have all 500 original entries
+        for i in 0u32..500 {
+            let key = utxo_key(i, 0);
+            let result = snap_tree.get(&key).unwrap();
+            assert!(
+                result.is_some(),
+                "snapshot missing key for tx_hash_seed={i}"
+            );
+        }
+
+        // Snapshot should NOT have the 500 entries added after snapshot
+        for i in 500u32..1000 {
+            let key = utxo_key(i, 0);
+            let result = snap_tree.get(&key).unwrap();
+            assert!(
+                result.is_none(),
+                "snapshot should not contain post-snapshot key for tx_hash_seed={i}"
+            );
+        }
+    }
+
+    /// Recursive directory copy helper.
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        if !src.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path)?;
+            } else {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+}
