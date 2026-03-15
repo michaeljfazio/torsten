@@ -1409,3 +1409,328 @@ mod stress_tests {
         Ok(())
     }
 }
+
+/// Mainnet-scale stress tests gated behind the `large-tests` feature flag.
+///
+/// These tests operate on 100K-1M entry datasets matching Cardano mainnet UTxO
+/// dimensions (36-byte keys, 200-byte values) and verify correctness across
+/// compaction, tombstone cleanup, range scans, and WAL crash recovery at scale.
+///
+/// Run with: `cargo test -p torsten-lsm --features large-tests -- mainnet_scale`
+#[cfg(all(test, feature = "large-tests"))]
+mod mainnet_scale_tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // Shared helpers
+    // ---------------------------------------------------------------------------
+
+    /// LsmConfig tuned for mainnet-scale tests.
+    ///
+    /// 16 MB memtable keeps individual flush batches small enough to trigger
+    /// multiple compaction rounds within the test, exercising the full L0→Ln
+    /// promotion pipeline. Size ratio of 4 matches cardano-node's lsm-tree
+    /// default.
+    fn mainnet_config() -> LsmConfig {
+        LsmConfig {
+            memtable_size: 16 * 1024 * 1024, // 16 MB — triggers frequent flushes
+            block_cache_size: 64 * 1024 * 1024, // 64 MB cache
+            bloom_filter_bits_per_key: 10,
+            size_ratio: 4,
+            wal_enabled: true,
+            wal_segment_size: 64 * 1024 * 1024,
+            page_size: 65536,
+        }
+    }
+
+    /// Derive a deterministic 36-byte Cardano UTxO key from a u64 seed.
+    ///
+    /// Layout: 32-byte tx hash (derived from seed via a simple LCG mix) followed
+    /// by a 4-byte output index in big-endian, matching the natural binary
+    /// encoding of `TransactionInput { tx_hash: Hash32, index: u32 }`.
+    fn utxo_key(seed: u64) -> Key {
+        let mut buf = [0u8; 36];
+        // Mix seed into a 32-byte pseudo-hash using a well-known LCG multiplier
+        // (Knuth multiplicative hash). Each 8-byte word is independent so the
+        // resulting bytes have good bit-dispersion across the key space.
+        let h0 = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let h1 = seed.wrapping_mul(0x6c62_272e_07bb_0142);
+        let h2 = seed.wrapping_mul(0xb881_4c4b_3757_c2b7);
+        let h3 = seed.wrapping_mul(0x517c_c1b7_2722_0a95);
+        buf[0..8].copy_from_slice(&h0.to_be_bytes());
+        buf[8..16].copy_from_slice(&h1.to_be_bytes());
+        buf[16..24].copy_from_slice(&h2.to_be_bytes());
+        buf[24..32].copy_from_slice(&h3.to_be_bytes());
+        // Output index: the lower 32 bits of the seed (deterministic but varied)
+        buf[32..36].copy_from_slice(&(seed as u32).to_be_bytes());
+        Key::from(buf)
+    }
+
+    /// Build a 200-byte Cardano-like UTxO value from a u64 seed.
+    ///
+    /// The value simulates the bincode encoding of a `TransactionOutput`:
+    /// - bytes 0–7:  lovelace amount (seed-derived)
+    /// - bytes 8–39: payment credential hash (seed-mixed)
+    /// - bytes 40–71: staking credential hash (seed-mixed)
+    /// - bytes 72–199: datum / script ref placeholder (seed-filled)
+    fn utxo_value(seed: u64) -> Value {
+        let mut buf = vec![0u8; 200];
+        let lovelace = seed.wrapping_mul(1_000_000).wrapping_add(1_500_000);
+        buf[0..8].copy_from_slice(&lovelace.to_be_bytes());
+        // Fill credential fields with a deterministic mix of the seed
+        let cred = seed.wrapping_mul(0xdead_beef_cafe_babe);
+        for (i, chunk) in buf[8..200].chunks_mut(8).enumerate() {
+            let word = cred.wrapping_add(i as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            let len = chunk.len().min(8);
+            chunk[..len].copy_from_slice(&word.to_be_bytes()[..len]);
+        }
+        Value::from(buf)
+    }
+
+    /// Minimal xorshift64 PRNG for reproducible random sampling without pulling
+    /// in a crate. Initial state must be non-zero.
+    fn next_rand(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 1: 1M insert + point-read sample
+    // ---------------------------------------------------------------------------
+
+    /// Insert 1M synthetic UTxO entries, flush, compact, then verify a random
+    /// sample of 1000 keys are all readable with correct values.
+    ///
+    /// Correctness invariants exercised:
+    /// - All keys survive multiple memtable flushes.
+    /// - Bloom filters do not produce false negatives.
+    /// - Compaction merges runs without data loss.
+    /// - Point reads return byte-exact values after compaction.
+    #[test]
+    fn test_mainnet_scale_insert_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), mainnet_config()).unwrap();
+
+        const TOTAL: u64 = 1_000_000;
+
+        // Insert all entries. The 16 MB memtable holds roughly 3,000–4,000
+        // 236-byte entries (key+value+overhead) before flushing, so we expect
+        // ~250 flushes and multiple compaction rounds over 1M inserts.
+        eprintln!("[test_mainnet_scale_insert_read] inserting {TOTAL} entries...");
+        for seed in 0..TOTAL {
+            let k = utxo_key(seed);
+            let v = utxo_value(seed);
+            tree.insert(&k, &v).unwrap();
+        }
+
+        // Explicit flush to push any residual memtable data to disk.
+        tree.flush().unwrap();
+        eprintln!("[test_mainnet_scale_insert_read] flush complete, sampling 1000 keys...");
+
+        // Sample 1000 pseudo-random keys and verify each one is readable
+        // with the exact value we inserted. Seed chosen for reproducibility.
+        let mut rng_state: u64 = 0xdeadbeef_cafebabe;
+        let mut verified = 0usize;
+        for _ in 0..1000 {
+            let seed = next_rand(&mut rng_state) % TOTAL;
+            let k = utxo_key(seed);
+            let expected_v = utxo_value(seed);
+            let result = tree.get(&k).unwrap();
+            assert!(
+                result.is_some(),
+                "key missing after 1M inserts: seed={seed}"
+            );
+            assert_eq!(
+                result.unwrap().as_bytes(),
+                expected_v.as_bytes(),
+                "wrong value for seed={seed}"
+            );
+            verified += 1;
+        }
+
+        eprintln!("[test_mainnet_scale_insert_read] verified {verified}/1000 sampled keys — PASS");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 2: delete amplification + tombstone cleanup
+    // ---------------------------------------------------------------------------
+
+    /// Insert 500K entries, delete 400K (simulating a heavy epoch-turnover
+    /// churn), then verify:
+    ///   1. All 100K surviving entries are readable.
+    ///   2. A full range scan returns exactly 100K entries (tombstones cleaned).
+    ///   3. All deleted keys return None (no resurrection from stale runs).
+    ///
+    /// This tests that compaction correctly merges tombstones with the entries
+    /// they shadow, eliminating ghost reads and inflated range-scan counts.
+    /// 80% delete ratio is representative of high-churn epochs on mainnet
+    /// where many UTxOs are consumed within the same epoch they are created.
+    #[test]
+    fn test_mainnet_scale_delete_amplification() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), mainnet_config()).unwrap();
+
+        const TOTAL: u64 = 500_000;
+        const DELETED: u64 = 400_000; // 80% churn
+        const REMAINING: u64 = TOTAL - DELETED;
+
+        // Phase 1: Insert all 500K entries.
+        eprintln!("[test_mainnet_scale_delete_amplification] inserting {TOTAL} entries...");
+        for seed in 0..TOTAL {
+            let k = utxo_key(seed);
+            let v = utxo_value(seed);
+            tree.insert(&k, &v).unwrap();
+        }
+        tree.flush().unwrap();
+        eprintln!("[test_mainnet_scale_delete_amplification] insert flush complete");
+
+        // Phase 2: Delete the first DELETED entries (seeds 0..DELETED).
+        // This simulates consuming UTxOs as transaction inputs during an epoch.
+        eprintln!("[test_mainnet_scale_delete_amplification] deleting {DELETED} entries...");
+        for seed in 0..DELETED {
+            let k = utxo_key(seed);
+            tree.delete(&k).unwrap();
+        }
+        tree.flush().unwrap();
+        eprintln!("[test_mainnet_scale_delete_amplification] delete flush complete");
+
+        // Phase 3: Verify surviving 100K entries (seeds DELETED..TOTAL) are readable.
+        eprintln!("[test_mainnet_scale_delete_amplification] verifying surviving {REMAINING} entries...");
+        let mut missing = 0usize;
+        let mut wrong = 0usize;
+        for seed in DELETED..TOTAL {
+            let k = utxo_key(seed);
+            let expected_v = utxo_value(seed);
+            match tree.get(&k).unwrap() {
+                Some(v) => {
+                    if v.as_bytes() != expected_v.as_bytes() {
+                        wrong += 1;
+                    }
+                }
+                None => missing += 1,
+            }
+        }
+        assert_eq!(
+            missing,
+            0,
+            "{missing} surviving UTxOs missing from tree (out of {REMAINING})"
+        );
+        assert_eq!(
+            wrong,
+            0,
+            "{wrong} surviving UTxOs have wrong values (out of {REMAINING})"
+        );
+
+        // Phase 4: Verify deleted entries return None (no resurrection).
+        // Sample 10K deleted keys rather than all 400K to keep runtime bounded.
+        eprintln!("[test_mainnet_scale_delete_amplification] verifying 10K deleted keys return None...");
+        let mut rng_state: u64 = 0xfeedface_deadc0de;
+        for _ in 0..10_000 {
+            let seed = next_rand(&mut rng_state) % DELETED;
+            let k = utxo_key(seed);
+            assert!(
+                tree.get(&k).unwrap().is_none(),
+                "deleted key resurrected: seed={seed}"
+            );
+        }
+
+        // Phase 5: Full range scan must return exactly REMAINING entries.
+        // Use the byte-extremes of the 36-byte key space as the scan bounds.
+        eprintln!("[test_mainnet_scale_delete_amplification] range scanning for exact count...");
+        let start = Key::from(vec![0x00u8; 36]);
+        let end = Key::from(vec![0xFFu8; 36]);
+        let count = tree.range(&start, &end).count();
+        assert_eq!(
+            count, REMAINING as usize,
+            "range scan returned {count} entries but expected {REMAINING} after deletes"
+        );
+
+        eprintln!("[test_mainnet_scale_delete_amplification] {REMAINING} entries confirmed — PASS");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 3: WAL crash recovery at 100K scale
+    // ---------------------------------------------------------------------------
+
+    /// Write 100K entries with WAL enabled, using a large memtable to suppress
+    /// all auto-flushes (so data remains only in WAL + in-memory memtable).
+    /// Drop the tree without calling flush() to simulate a process crash.
+    /// Reopen the database and verify all 100K entries are recovered from the WAL.
+    ///
+    /// This validates that:
+    /// - WAL log entries are durable before the process exits.
+    /// - WAL replay on reopen reconstructs the full memtable exactly.
+    /// - No entries are lost, corrupted, or duplicated during replay.
+    ///
+    /// The large memtable (512 MB) ensures zero automatic flushes occur during
+    /// the write phase, making the WAL the sole recovery mechanism.
+    #[test]
+    fn test_mainnet_scale_wal_crash_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().to_path_buf();
+
+        const TOTAL: u64 = 100_000;
+
+        // Phase 1: write without flushing — WAL is the only durability guarantee.
+        {
+            let config = LsmConfig {
+                memtable_size: 512 * 1024 * 1024, // 512 MB — no auto-flush for 100K UTxOs
+                wal_enabled: true,
+                ..mainnet_config()
+            };
+            let mut tree = LsmTree::open(&db_path, config).unwrap();
+
+            eprintln!("[test_mainnet_scale_wal_crash_recovery] writing {TOTAL} entries (WAL only)...");
+            for seed in 0..TOTAL {
+                let k = utxo_key(seed);
+                let v = utxo_value(seed);
+                tree.insert(&k, &v).unwrap();
+            }
+
+            // Drop WITHOUT calling flush() — this is the crash.
+            // All data is in the WAL on disk and the in-memory memtable only.
+            eprintln!("[test_mainnet_scale_wal_crash_recovery] simulating crash (drop without flush)...");
+        }
+
+        // Phase 2: reopen and verify WAL replay recovers all entries.
+        {
+            let config = LsmConfig {
+                memtable_size: 512 * 1024 * 1024,
+                wal_enabled: true,
+                ..mainnet_config()
+            };
+            let tree = LsmTree::open(&db_path, config).unwrap();
+            eprintln!("[test_mainnet_scale_wal_crash_recovery] reopened, verifying {TOTAL} entries...");
+
+            // Verify all TOTAL entries are present and have the correct value.
+            let mut missing = 0usize;
+            let mut wrong = 0usize;
+            for seed in 0..TOTAL {
+                let k = utxo_key(seed);
+                let expected_v = utxo_value(seed);
+                match tree.get(&k).unwrap() {
+                    Some(v) => {
+                        if v.as_bytes() != expected_v.as_bytes() {
+                            wrong += 1;
+                        }
+                    }
+                    None => missing += 1,
+                }
+            }
+            assert_eq!(
+                missing,
+                0,
+                "{missing} entries lost during WAL crash recovery (out of {TOTAL})"
+            );
+            assert_eq!(
+                wrong,
+                0,
+                "{wrong} entries have wrong values after WAL crash recovery (out of {TOTAL})"
+            );
+
+            eprintln!("[test_mainnet_scale_wal_crash_recovery] all {TOTAL} entries recovered — PASS");
+        }
+    }
+}

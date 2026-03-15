@@ -22,6 +22,7 @@ pallas-crypto = { workspace = true }
 pallas-traverse = { workspace = true }
 hickory-resolver = { workspace = true }
 socket2 = { workspace = true }
+num-bigint = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
