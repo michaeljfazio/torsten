@@ -10,5 +10,7 @@ path = "tests/golden_tests.rs"
 
 [dependencies]
 torsten-crypto = { path = "../../crates/torsten-crypto" }
+torsten-network = { path = "../../crates/torsten-network" }
 torsten-primitives = { path = "../../crates/torsten-primitives" }
 hex = "0.4"
+minicbor = { workspace = true }

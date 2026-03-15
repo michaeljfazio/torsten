@@ -21,6 +21,7 @@ use crate::n2n_server::BlockProvider;
 use crate::query_handler::QueryHandler;
 
 use chain_sync::{handle_local_chainsync, ChainSyncCursor};
+pub use state_query::encode_query_result;
 use state_query::handle_state_query;
 use tx_monitor::{handle_tx_monitor, TxMonitorCursor};
 use tx_submission::handle_tx_submission;

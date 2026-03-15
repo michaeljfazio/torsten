@@ -719,7 +719,7 @@ pub(crate) fn parse_utctime_for_test(s: &str) -> (u64, u64, u64) {
     parse_utctime(s)
 }
 
-pub(crate) fn encode_query_result(result: &QueryResult) -> Vec<u8> {
+pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
 
