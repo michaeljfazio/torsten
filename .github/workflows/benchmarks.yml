@@ -1,0 +1,99 @@
+name: Nightly Benchmarks
+
+on:
+  schedule:
+    # Run every night at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bench-
+
+      - name: Run storage benchmarks
+        run: |
+          cargo bench -p torsten-storage --bench storage_bench -- --output-format bencher 2>/dev/null | tee storage_bench.txt || true
+
+      - name: Run UTxO benchmarks
+        run: |
+          cargo bench -p torsten-ledger --bench utxo_bench -- --output-format bencher 2>/dev/null | tee utxo_bench.txt || true
+
+      - name: Run LSM large-scale stress tests
+        run: |
+          cargo test -p torsten-lsm --features large-tests --release -- mainnet_scale 2>&1 | tee lsm_stress.txt || true
+
+      - name: Generate benchmark report
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          REPORT="benches/results/${DATE}-nightly.md"
+          echo "# Nightly Benchmark Results — ${DATE}" > "$REPORT"
+          echo "" >> "$REPORT"
+          echo "Machine: GitHub Actions ubuntu-latest" >> "$REPORT"
+          echo "Branch: main ($(git rev-parse --short HEAD))" >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "## Storage Benchmarks" >> "$REPORT"
+          echo '```' >> "$REPORT"
+          cat storage_bench.txt >> "$REPORT" 2>/dev/null || echo "No results" >> "$REPORT"
+          echo '```' >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "## UTxO Benchmarks" >> "$REPORT"
+          echo '```' >> "$REPORT"
+          cat utxo_bench.txt >> "$REPORT" 2>/dev/null || echo "No results" >> "$REPORT"
+          echo '```' >> "$REPORT"
+          echo "" >> "$REPORT"
+          echo "## LSM Stress Tests" >> "$REPORT"
+          echo '```' >> "$REPORT"
+          cat lsm_stress.txt >> "$REPORT" 2>/dev/null || echo "No results" >> "$REPORT"
+          echo '```' >> "$REPORT"
+
+      - name: Upload benchmark results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_number }}
+          path: benches/results/*-nightly.md
+          retention-days: 90
+
+      - name: Copy results to docs and commit
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          LATEST="benches/results/${DATE}-nightly.md"
+          if [ -f "$LATEST" ]; then
+            cp "$LATEST" docs/src/reference/benchmarks.md
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "benches/results/${DATE}-nightly.md" docs/src/reference/benchmarks.md
+            git commit -m "Update nightly benchmark results (${DATE})" || echo "No changes to commit"
+            git push || echo "Push failed — results saved as artifact"
+          fi
+
+      - name: Store Criterion HTML reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports-${{ github.run_number }}
+          path: target/criterion/
+          retention-days: 30
