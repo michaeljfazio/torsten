@@ -3355,10 +3355,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "torsten-crypto",
- "torsten-ledger",
  "torsten-primitives",
  "torsten-serialization",
- "torsten-storage",
  "tracing",
 ]
 

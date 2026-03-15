@@ -8,8 +8,6 @@ description = "Ouroboros Praos consensus for Torsten"
 torsten-primitives = { workspace = true }
 torsten-crypto = { workspace = true }
 torsten-serialization = { workspace = true }
-torsten-ledger = { workspace = true }
-torsten-storage = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
