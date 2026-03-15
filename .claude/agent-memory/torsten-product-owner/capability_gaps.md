@@ -12,12 +12,18 @@ type: project
 
 ## HIGH Priority Gaps
 
-### Reward Calculation Cross-Validation (NOT DONE)
-- All 19 reward tests cover Rat arithmetic primitives only (GCD, overflow safety)
-- Zero tests validate maxPool' formula output against known-good values
-- No end-to-end reward calculation test with real epoch data
-- Risk: same class as the Alonzo VRF nonce_vrf bug — formula looks correct, tests pass, but could be wrong for real inputs
-- Fix: use Koios historical epoch data (pool_history + epoch_params) as ground truth; Koios MCP is available on preview
+### Reward Cross-Validation Against Historical Data (NOT DONE)
+- Formula tests cover Rat arithmetic primitives and synthetic maxPool unit tests only
+- Zero tests validate actual per-epoch reward output against known-good historical values
+- Koios MCP available: koios_pool_history + koios_epoch_params can give ground truth
+- Risk: same class as the Alonzo VRF nonce_vrf bug — formula looks correct, tests pass, but could produce wrong per-delegator amounts for real inputs
+- RUPD timing change (2026-03-15) makes this even more urgent — rewards now land 1 epoch later; distribution amounts could have regressed
+
+### Testnet Re-Validation After RUPD Change (NOT DONE)
+- The deferred RUPD timing change alters when rewards land in reward accounts
+- Validator run #9 was against the old (immediate) reward code
+- Need a new full sync run from Mithril snapshot to verify 0 validation errors still hold
+- Affects: LocalStateQuery GetRewardAccountBalance, snapshot content, treasury accounting
 
 ### Byron Ledger Validation (NOT IMPLEMENTED)
 - `ByronLedger` struct is a 12-line stub with no transaction validation
@@ -33,34 +39,38 @@ type: project
 
 ## MEDIUM Priority Gaps
 
-### torsten-lsm Production Hardening (NEW - needs stress testing)
-- cardano-lsm replaced by in-house torsten-lsm (crates/torsten-lsm, ~4,500 lines)
-- 84 unit tests pass but no stress test with real UTxO-HD workload (20M+ entries)
-- Key unknowns: compaction under concurrent flush, snapshot atomicity, WAL replay on crash
+### torsten-lsm Mainnet Scale Testing (PARTIAL)
+- Validated at preview testnet scale (~3M UTxOs) — correct
+- Not tested at mainnet scale (20M+ UTxOs, compaction under concurrent flush, WAL crash recovery)
 - No benchmark against prior cardano-lsm baseline (target: ~10,600 blocks/s ImmutableDB replay)
 
 ### Plutus Cost Models (PARTIAL)
 - V1/V2/V3 cost models stored and passed to uplc
-- Cost model CBOR encoding/decoding from protocol parameters is implemented
 - Not validated against cardano-node's eval results for complex scripts
 
 ## COMPLETED (recent)
 
 ### Governance Compliance Bugs (FIXED 2026-03-14)
 - 6 governance bugs fixed: ratification logic, voting thresholds, committee handling, proposal lifecycle
-- 45 unit tests added across governance.rs; now has 45 dedicated tests
-- Matches Haskell cardano-ledger spec for CIP-1694 ratification
+- 45 unit tests added across governance.rs
+
+### torsten-lsm (DONE 2026-03-15)
+- Custom pure Rust LSM engine replacing cardano-lsm
+- 1,830+ tests pass; preview testnet: 2,938,963 correct UTxOs
+
+### RUPD Timing Alignment (DONE 2026-03-15)
+- Rewards deferred 1 epoch matching Haskell's PendingRewardUpdate
+- Reward formulas confirmed correct vs Koios epoch 1235 data
+
+### PageOverflow Fix (DONE 2026-03-15)
+- Large values (13KB+ inline datums) handled via jumbo pages
 
 ## LOW Priority Gaps
 
 ### Ouroboros Genesis Peer Selection (NOT IMPLEMENTED)
 - Standard P2P governor policy used in all GSM states
-- Full Genesis would need dedicated BLP-prioritized peer selection during PreSyncing/Syncing
+- Full Genesis would need BLP-prioritized peer selection during PreSyncing/Syncing
 
 ### CDDL Compliance Verification (NOT DONE)
 - No automated CDDL conformance testing against official Cardano CDDL specs
-- Wire format correctness verified through integration tests with real cardano-node peers
-
-### Lightweight Checkpointing (NOT IMPLEMENTED)
-- Genesis spec calls for lightweight checkpoints to speed up trustless bootstrap
-- Only relevant for --consensus-mode genesis (not default Mithril path)
+- Wire format correctness verified through integration tests only

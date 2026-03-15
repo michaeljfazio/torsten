@@ -40,7 +40,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run tests
+      - name: Run all tests (unit, property, conformance, golden)
         run: cargo test --all
 
   integration-offline:
@@ -89,9 +89,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: torsten-macos-aarch64
-          # Windows disabled: cardano-lsm v1.0.1 has compilation errors on MSVC
-          # (missing std::io::Read import, unsafe block in session_lock.rs)
-          # Re-enable when upstream is fixed.
+          # Windows disabled: fs2 file locking behaves differently on MSVC.
+          # Re-enable when torsten-lsm session_lock.rs is ported to Windows.
           # - os: windows-latest
           #   target: x86_64-pc-windows-msvc
           #   artifact: torsten-windows-x86_64

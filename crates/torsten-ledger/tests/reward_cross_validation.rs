@@ -254,7 +254,10 @@ fn test_supply_conservation() {
     // Circulation (MAX_SUPPLY - reserves) should be positive and growing
     let circ_1232 = MAX_SUPPLY - val(EPOCH_1232.reserves);
     let circ_1234 = MAX_SUPPLY - val(EPOCH_1234.reserves);
-    assert!(circ_1234 > circ_1232, "circulation should increase as reserves decrease");
+    assert!(
+        circ_1234 > circ_1232,
+        "circulation should increase as reserves decrease"
+    );
 }
 
 #[test]

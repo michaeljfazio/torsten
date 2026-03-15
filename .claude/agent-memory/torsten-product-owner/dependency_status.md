@@ -15,7 +15,7 @@ type: project
 | Dependency | Current | Status |
 |---|---|---|
 | pallas-* (6 crates) | 1.0.0-alpha.5 | Pre-release alpha. Watch for stable 1.0.0 release. |
-| cardano-lsm | git branch fix/index-based-get | Fork. Upstream PR #2 submitted. Migrate when merged. |
+| cardano-lsm | REPLACED | Replaced by torsten-lsm (in-house pure Rust LSM). No longer a dependency. |
 | vrf_dalek | git main branch | No tagged release. Monitor for stability. |
 
 ## Stable Dependencies (Up to Date)

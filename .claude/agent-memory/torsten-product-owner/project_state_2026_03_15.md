@@ -1,54 +1,54 @@
 ---
 name: project_state_2026_03_15
-description: State assessment as of 2026-03-15, after torsten-lsm milestone and before incremental compliance cycle
+description: State assessment as of 2026-03-15, after torsten-lsm + RUPD + PageOverflow milestones
 type: project
 ---
 
-# Torsten State Assessment — 2026-03-15
+# Torsten State Assessment — 2026-03-15 (Updated)
 
-**Why:** Post-torsten-lsm milestone assessment, establishing the baseline for the incremental compliance development cycle targeting preview testnet full protocol compliance.
+**Why:** Tracks completed milestones and open gaps after the torsten-lsm and RUPD alignment work.
 
 **How to apply:** Use when asked about current state, gap analysis, or what to work on next.
 
-## Major Milestone Completed
+## Milestones Completed (as of 2026-03-15)
 
-### torsten-lsm (NEW, 2026-03-15)
-- Replaced `cardano-lsm` (external git dependency) with `crates/torsten-lsm` — a pure Rust LSM-tree engine written in-house
-- Features: WAL + crash recovery, lazy levelling compaction (T=4), blocked bloom filters, LRU block cache, fence pointer indexes, persistent snapshots via hard links, CRC32 checksums, exclusive session lock
-- `UtxoStore` in `torsten-ledger` now delegates to `torsten-lsm` via `LsmTree`
-- 84 LSM tests pass; full workspace 1,236+ tests pass (one flaky log-cleanup timing test, non-critical)
+### torsten-lsm (custom LSM engine)
+- Replaced cardano-lsm with in-house pure Rust LSM engine (~4,500 lines)
+- WAL + crash recovery, lazy levelling compaction (T=4), blocked bloom filters, LRU block cache
+- Stress-tested against preview testnet: 2,938,963 UTxOs correct
+- 1,830+ tests pass, zero clippy warnings
 
-## Test Suite Health (2026-03-15)
-- Test count: ~1,236 tests across all crates (excluding conformance/golden)
-- One flaky test: `logging::tests::test_cleanup_old_logs_removes_expired` in torsten-node — timing-sensitive file mtime test, passes when run in isolation, fails intermittently in parallel test runs (low priority)
-- Conformance tests: 174 vectors (UTXO, CERT, GOV, EPOCH) — all pass
-- Golden tests: VRF nonintegral + N2C golden CBOR — all pass
+### RUPD Timing Alignment
+- Rewards now deferred by 1 epoch matching Haskell's RUPD (PendingRewardUpdate)
+- calculate_rewards() stores result; apply_pending_reward_update() applies it at NEXT boundary
+- Code confirmed correct in epoch.rs: step 1 applies pending, step 3 computes new pending
+- **Reward formulas confirmed correct vs Koios epoch 1235 data**
+- **This change has NOT been re-validated on testnet yet** (run #9 was the prior code)
 
-## Key Gaps Remaining for Preview Testnet Compliance
+### PageOverflow Fix
+- Large Cardano values (13KB+ inline datums) now handled via jumbo pages in torsten-lsm
 
-### 1. torsten-lsm Production Hardening (HIGH)
-The new LSM engine is ~4,500 lines with good unit tests but has NOT been stress-tested with a real UTxO-HD workload (20M+ entries, compaction under load, snapshot during replay). Key unknowns:
-- Compaction correctness under concurrent flush + compact
-- Snapshot atomicity: uses hard links which work on the same filesystem but need validation
-- WAL replay correctness after ungraceful shutdown with partially-flushed memtable
-- Range scan correctness across memtable + multiple SSTable levels
-- No benchmark against cardano-lsm baseline (ImmutableDB: ~10,600 blocks/s target)
+### Flaky Test Fix
+- test_cleanup_old_logs_removes_expired is now deterministic
 
-### 2. Reward Calculation Cross-Validation (HIGH)
-- Zero end-to-end tests validate maxPool' output against historical Koios data
-- Same failure mode as the Alonzo VRF nonce_vrf bug — could be silent and wrong
-- Koios MCP is available and has epoch_info, pool_history endpoints
+## Key Risk: RUPD Requires Testnet Re-validation
+The RUPD timing change alters when rewards land in reward accounts. This affects:
+- GetRewardAccountBalance LocalStateQuery responses (tag 7)
+- Snapshot content at epoch boundaries (mark/set/go)
+- Treasury and reserve accounting per epoch
 
-### 3. Byron Ledger Validation (MEDIUM-HIGH)
-- ByronLedger struct is a stub — no transaction validation
-- Only affects genesis-from-Byron sync (Mithril users start post-Byron)
-- Preview testnet starts from Shelley, so this is lower urgency for preview
+Run #9 validation did NOT trigger the two carried-over bugs from run #7:
+- ScriptDataHash ignoring reference scripts (likely already fixed at line 940)
+- CollateralHasTokens with collateral_return (net calc appears correct)
 
-### 4. Ouroboros Genesis LoE Enforcement (MEDIUM)
-- LoE computed but not wired into block pipeline
-- Only matters for --consensus-mode genesis (not default)
+## Highest-Impact Open Gap: Reward Cross-Validation
+No end-to-end test validates actual per-pool reward output against historical Koios data.
+Formula tests only cover primitives (Rat arithmetic, maxPool unit tests with synthetic params).
+Koios MCP is available on preview network — use koios_pool_history + koios_epoch_params.
 
-## Risk for Preview Testnet Run
-- **torsten-lsm under real load**: the biggest unknown — has never seen a 4M-block replay with 20M UTxO entries
-- **Flaky log cleanup test**: minor, but indicates test isolation issues
-- **WAL recovery path**: not tested with real crash scenarios
+## Other Open Gaps (in priority order)
+1. Reward cross-validation with Koios historical data (HIGH — could be silently wrong)
+2. Testnet re-run after RUPD change to confirm 100% sync with no errors (HIGH)
+3. torsten-lsm stress test with mainnet scale (20M+ UTxOs) — preview coverage is ~3M
+4. Byron ledger validation (MEDIUM — only needed for genesis-from-Byron mainnet sync)
+5. Ouroboros Genesis LoE wiring (MEDIUM — not default mode)

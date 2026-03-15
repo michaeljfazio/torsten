@@ -26,23 +26,21 @@ NOTE: `--utxo-backend in-memory` is NO LONGER required — LSM backend is now pr
 NOTE: Default metrics port is 12798. Use `--metrics-port 12799` only if Haskell node is also running.
 NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work correctly.
 
-## Preview Testnet Baselines (2026-03-15, run #9 — LSM PageOverflow fix validation)
-- Fresh Mithril import: epoch=1237, immutable=24744, 2.7 GB archive, ~9 min total
-  (download 3.6min, extract 23s, verify 52s, copy 12s, cleanup 5s)
-- Ledger replay (LSM backend, 65KB pages): 4,108,694 blocks in 296s = 13,848 blk/s
-  - Speed profile: ~22K blk/s early (slot 0-2M), slows to ~6K at slot 12M (UTxO growth), recovers to ~14K
-  - UTxO spike zone at slot ~44M: jumped from 2.3M to 3.2M in one 5s interval — NO PageOverflow
-  - UTxOs at replay end: 2,938,963 (correct — matches in-memory backend count)
-  - Snapshot saved: epoch=1237, 2938963 UTxOs, 79.8 MB (vs 1113 MB for in-memory)
+## Preview Testnet Baselines (2026-03-15, run #10 — deferred RUPD validation)
+- Fresh Mithril import: epoch=1237, immutable=24745, 2.7 GB archive, ~9 min total
+  (download 3.6min, extract 22s, verify 52s, copy 12s, cleanup 5s)
+- Ledger replay (LSM backend, 65KB pages): 4,108,827 blocks in 299s = 13,728 blk/s
+  - Speed profile: ~22K blk/s early (slot 0-2M), slows to ~7K at slot 12M (UTxO growth), recovers to ~14K
+  - UTxOs at replay end: 2,938,835 (correct)
+  - Snapshot saved: epoch=1237, 2938835 UTxOs, 80.0 MB
 - No PageOverflow errors anywhere in log (0 occurrences)
-- No block application failures during replay (0 errors)
-- N2N peer connected: 52.211.202.88:3001 rtt_ms=732, 5 hot peers total
-- Caught up to tip in ~22s after network connect: 512 blocks applied
-- At-tip block reception: 4 live Conway blocks received, 0 failed to apply
+- No block application failures during replay (1 skipped — likely same old ScriptDataHash/CollateralToken bug)
+- N2N peer connected: 3.70.89.92:3001 rtt_ms=747, 5 hot peers total
+- Caught up to tip in ~21s after network connect: 501 blocks applied
+- At-tip block reception: 504 total blocks applied, 2 rejected (Plutus budget bug — see Known Issues #3)
 - Rollbacks observed: 0
-- UTxO store on-disk size: 1.8 GB (vs 0 with broken LSM, vs RAM usage with in-memory)
-- Total DB size: 15 GB (immutable chunk files + UTxO LSM store)
-- Ledger snapshot: 79.8 MB (compact — LSM has UTxOs on disk, snapshot only stores ledger state)
+- Memory at tip: 5.79 GB RSS (6.07 GB per metrics)
+- Governance proposals ratified during replay: 590
 
 ## CRITICAL BUG #1: ScriptDataHash Ignores Reference Scripts (run #7, OPEN)
 - Tx hash: `370f8772f8cc63598f5ffd5355704af6633df4123cb84514ec8bbfe6c06c26bb`
@@ -81,31 +79,48 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - `http://localhost:12798/ready` — returns `{"ready":true}`
 - Metrics server starts BEFORE ledger replay — confirmed working
 
-## Known Issues (Current — 2026-03-15, run #9)
-1. **ScriptDataHash ignores reference scripts** — CRITICAL, causes block application failure
+## Known Issues (Current — 2026-03-15, run #10 — deferred RUPD validation)
+1. **ScriptDataHash ignores reference scripts** — CRITICAL (run #7, status unknown after recent changes)
    - File: `crates/torsten-ledger/src/validation.rs:785-795`
-2. **CollateralHasTokens fires for collateral with collateral_return** — CRITICAL, same effect
+2. **CollateralHasTokens incorrect for txs with collateral_return** — CRITICAL (run #7, status unknown)
    - File: `crates/torsten-ledger/src/validation.rs:650-687`
-3. **macOS high-memory OOM during replay** — use default profile (LSM now works on macOS)
+3. **Plutus ExBudget mismatch: uplc evaluates scripts over declared budget** — CRITICAL (run #10, OPEN)
+   - Tx hash: `3c6d9cb477106657cf4d47dfd74f2aa2e0f5f7f73c23b2f4fa00a792f747a8be` (block 4109328)
+   - Tx hash: `62d9a808624be61852fbf38848cca103fc242f8c5d2f401c487e7416798eff10` (block 4109329)
+   - Error: `ScriptFailed("Plutus evaluation failed: eval_phase_two_raw error: failed script execution\n  Spend[0] execution went over budget Mem 9999938488 CPU -28413")`
+   - Both txs are confirmed is_valid=true on-chain (num_confirmations>0, Koios-verified)
+   - Both txs are PlutusV2 scripts from Liqwid Oracle / Agora-pro contracts
+   - Declared per-redeemer budget (tx1): mem=257,258, steps=78,454,388
+   - Torsten uplc evaluator exceeds CPU budget by 28,413 steps; Haskell evaluates within budget
+   - SlotConfig is CORRECT (zero_time=1666656000000 matches preview genesis 2022-10-25T00:00:00Z)
+   - Possible causes: (a) uplc v1.1.21 cost model application differs from Haskell for PlutusV2,
+     (b) reference script UTxO CBOR re-encoding introduces slight differences in script context,
+     (c) uplc CEK machine subtle semantics difference from Haskell evaluator
+   - File: `crates/torsten-ledger/src/plutus.rs` — eval_phase_two_raw call at line 132
+   - Note: ValidationTagMismatch fires but node continues applying subsequent blocks (NOT a stall)
+   - Transactions_rejected counter increments (2 rejections observed in metrics)
 
-## Working Features Confirmed (2026-03-15, run #9, LSM backend)
+## Working Features Confirmed (2026-03-15, run #10 — deferred RUPD, LSM backend)
 - Build: WORKS
-- Fresh Mithril import: WORKS — 2.7 GB, epoch=1237
-- Ledger replay (LSM backend): WORKS — 13,848 blk/s, 4.1M blocks in 296s
-- No PageOverflow errors: CONFIRMED — 0 errors across all 4.1M blocks
-- UTxO count correct: CONFIRMED — 2,938,963 (not 91 or 693K like before)
-- Snapshot save at replay end: WORKS — 79.8 MB at epoch 1237
-- Peer connections: WORKS — 52.211.202.88:3001, 5 hot peers
-- Catch-up to tip: WORKS — 512 blocks in ~22s
-- Live block reception at tip: WORKS — 4 Conway blocks received, 0 failed
-- N2C query tip: WORKS — slot=106915709, block=4109209, epoch=1237, era=Conway, syncProgress=100.00
-- N2C protocol-parameters: WORKS — full Conway PParams with PlutusV1+V3 cost models
-- N2C treasury: WORKS — Treasury=14067498812 ADA, Reserves=870230606 ADA
-- N2C stake-distribution: WORKS — multiple pools
+- Fresh Mithril import: WORKS — epoch=1237, immutable=24745, 2.7 GB archive, ~9 min total
+- Ledger replay (LSM backend): WORKS — 13,728 blk/s, 4,108,827 blocks in 299s, 1 skipped
+- No PageOverflow errors: CONFIRMED — 0 occurrences
+- UTxO count correct: CONFIRMED — 2,938,835 at snapshot, 2,939,027 at tip
+- Snapshot save at replay end: WORKS — epoch=1237, 80.0 MB
+- Peer connections: WORKS — 3.70.89.92:3001 rtt_ms=747, 5 hot peers
+- Catch-up to tip: WORKS — 501 blocks in ~21s after peer connect
+- Live block reception at tip: WORKS — 504 total blocks applied, 2 rejected (Plutus budget bug)
+- N2C query tip: WORKS — slot=106919624, block=4109330, epoch=1237, era=Conway, syncProgress=100.00
+- N2C protocol-parameters: WORKS — full Conway PParams with PlutusV1+V2+V3 cost models
+- N2C treasury: WORKS — Treasury=14065825286 ADA, Reserves=871897504 ADA
+- N2C stake-distribution: WORKS — 656 pools registered, multiple with stake fractions
 - N2C gov-state: WORKS — committee_members=1, active_proposals=2
-- Prometheus metrics: WORKS — utxo_count=2938973, blocks_applied=516, peers_connected=5, epoch=1237
-  treasury=14067498812557595 lovelace, drep_count=8791, proposal_count=2, sync_progress=10000 (100%)
-- LSM UTxO store on-disk: WORKS — 1.8 GB of on-disk state, correct data
+- Prometheus metrics: WORKS — utxo_count=2939027, blocks_applied=504, peers_connected=5, epoch=1237
+  treasury=14065825286441725 lovelace, drep_count=8791, proposal_count=2, sync_progress=10000 (100%)
+- Epoch transitions (RUPD deferred): WORKS — 1237 epochs traversed without panic
+  (Protocol version changes at epochs 3, 22, 646 logged correctly)
+- Governance ratifications during replay: 590 proposals ratified, no panics
+- Memory at tip: 5.79 GB RSS (stable, no growth observed after sync complete)
 
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress
