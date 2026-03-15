@@ -43,5 +43,6 @@
 # Reference
 
 - [Protocol Parameters](./reference/protocol-parameters.md)
+- [Benchmarks](./reference/benchmarks.md)
 - [Third-Party Licenses](./reference/third-party-licenses.md)
 - [Troubleshooting](./reference/troubleshooting.md)

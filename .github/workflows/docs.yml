@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'benches/results/**'
   workflow_dispatch:
 
 permissions:
@@ -36,6 +37,13 @@ jobs:
 
       - name: Install Mermaid preprocessor
         run: mdbook-mermaid install docs
+
+      - name: Copy latest benchmark results to docs
+        run: |
+          LATEST=$(ls -t benches/results/*.md 2>/dev/null | head -1)
+          if [ -n "$LATEST" ]; then
+            cp "$LATEST" docs/src/reference/benchmarks.md
+          fi
 
       - name: Build documentation
         run: mdbook build docs
