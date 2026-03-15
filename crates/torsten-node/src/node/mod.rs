@@ -1,0 +1,1993 @@
+//! Main Torsten node: struct definition, initialization, and run loop orchestration.
+//!
+//! This module owns the `Node` struct and the top-level lifecycle methods (`new`,
+//! `run`).  All subsystem logic is delegated to focused sub-modules:
+//!
+//! - [`epoch`]  — Snapshot policy, ledger snapshot save/prune/restore
+//! - [`serve`]  — N2N/N2C server adapters (BlockProvider, TxValidator, metrics bridges)
+//! - [`query`]  — N2C LocalStateQuery response building (`update_query_state`)
+//! - [`sync`]   — Pipelined ChainSync loop, block processing, rollback, replay
+
+pub(crate) mod epoch;
+pub(crate) mod query;
+pub(crate) mod serve;
+pub(crate) mod sync;
+
+use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::signal;
+use tokio::sync::{watch, RwLock};
+use tracing::{debug, error, info, warn};
+
+use torsten_consensus::OuroborosPraos;
+use torsten_ledger::{BlockValidationMode, LedgerState};
+use torsten_mempool::{Mempool, MempoolConfig};
+use torsten_network::server::NodeServerConfig;
+use torsten_network::{
+    BlockFetchPool, DiffusionMode, Governor, GovernorEvent, N2CServer, NodeServer,
+    NodeToNodeClient, PeerManager, PeerManagerConfig, PipelinedPeerClient, QueryHandler,
+    TxValidator,
+};
+use torsten_primitives::block::Point;
+use torsten_primitives::protocol_params::ProtocolParameters;
+use torsten_storage::ChainDB;
+
+use crate::config::NodeConfig;
+use crate::genesis::{AlonzoGenesis, ByronGenesis, ConwayGenesis, ShelleyGenesis};
+use crate::topology::Topology;
+
+// ─── NodeArgs ────────────────────────────────────────────────────────────────
+
+pub struct NodeArgs {
+    pub config: NodeConfig,
+    pub topology: Topology,
+    pub topology_path: PathBuf,
+    pub database_path: PathBuf,
+    pub socket_path: PathBuf,
+    pub host_addr: String,
+    pub port: u16,
+    /// Directory containing the config file (for resolving relative genesis paths)
+    pub config_dir: PathBuf,
+    /// Path to KES signing key (enables block production)
+    pub shelley_kes_key: Option<PathBuf>,
+    /// Path to VRF signing key (enables block production)
+    pub shelley_vrf_key: Option<PathBuf>,
+    /// Path to operational certificate (enables block production)
+    pub shelley_operational_certificate: Option<PathBuf>,
+    /// Path to cold signing key (accepted for cardano-node compatibility)
+    pub _shelley_cold_key: Option<PathBuf>,
+    /// Prometheus metrics port (0 to disable)
+    pub metrics_port: u16,
+    /// Maximum number of transactions in the mempool
+    pub mempool_max_tx: usize,
+    /// Maximum mempool size in bytes
+    pub mempool_max_bytes: usize,
+    /// Maximum snapshots to retain on disk
+    pub snapshot_max_retained: usize,
+    /// Minimum blocks between bulk-sync snapshots
+    pub snapshot_bulk_min_blocks: u64,
+    /// Minimum seconds between bulk-sync snapshots
+    pub snapshot_bulk_min_secs: u64,
+    /// Storage configuration (block index type, UTxO backend, LSM tuning)
+    pub storage_config: torsten_storage::StorageConfig,
+    /// Consensus mode: "praos" (default) or "genesis" (enables genesis bootstrap)
+    pub consensus_mode: String,
+    /// Force ValidateAll mode on every block (paranoid/auditing mode)
+    pub validate_all_blocks: bool,
+}
+
+// ─── Node struct ─────────────────────────────────────────────────────────────
+
+pub struct Node {
+    pub(crate) config: NodeConfig,
+    pub(crate) topology: Topology,
+    pub(crate) chain_db: Arc<RwLock<ChainDB>>,
+    pub(crate) ledger_state: Arc<RwLock<LedgerState>>,
+    pub(crate) consensus: OuroborosPraos,
+    pub(crate) mempool: Arc<Mempool>,
+    /// Held to keep the N2N/N2C server tasks alive for the node's lifetime
+    _server: NodeServer,
+    pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
+    pub(crate) peer_manager: Arc<RwLock<PeerManager>>,
+    pub(crate) socket_path: PathBuf,
+    pub(crate) database_path: PathBuf,
+    pub(crate) listen_addr: std::net::SocketAddr,
+    pub(crate) network_magic: u64,
+    /// Byron epoch length in absolute slots (10 * k). For correct slot
+    /// computation on non-mainnet networks.
+    pub(crate) byron_epoch_length: u64,
+    /// Byron slot duration in milliseconds (from genesis, default 20000).
+    pub(crate) byron_slot_duration_ms: u64,
+    pub(crate) shelley_genesis: Option<ShelleyGenesis>,
+    pub(crate) topology_path: PathBuf,
+    pub(crate) metrics: Arc<crate::metrics::NodeMetrics>,
+    /// Block producer credentials (None = relay-only mode)
+    pub(crate) block_producer: Option<crate::forge::BlockProducerCredentials>,
+    /// Broadcast sender for announcing forged blocks to connected peers
+    pub(crate) block_announcement_tx:
+        Option<tokio::sync::broadcast::Sender<torsten_network::BlockAnnouncement>>,
+    /// Broadcast sender for notifying connected peers of chain rollbacks
+    pub(crate) rollback_announcement_tx:
+        Option<tokio::sync::broadcast::Sender<torsten_network::RollbackAnnouncement>>,
+    /// Prometheus metrics port
+    pub(crate) metrics_port: u16,
+    /// Expected Blake2b-256 hash of the Byron genesis block (from config or computed from file)
+    pub(crate) expected_byron_genesis_hash: Option<torsten_primitives::hash::Hash32>,
+    /// Expected Blake2b-256 hash of the Shelley genesis block (from config or computed from file)
+    pub(crate) expected_shelley_genesis_hash: Option<torsten_primitives::hash::Hash32>,
+    /// Whether genesis block validation has been performed (only need to validate once)
+    pub(crate) genesis_validated: bool,
+    /// Count of epoch transitions observed since node startup.
+    /// Used to determine when the epoch nonce is reliable for VRF verification.
+    /// After Mithril import, we need at least 2 epoch transitions for the
+    /// rolling nonce to be correctly accumulated.
+    pub(crate) epoch_transitions_observed: u32,
+    /// Snapshot policy controlling when ledger snapshots are taken.
+    pub(crate) snapshot_policy: epoch::SnapshotPolicy,
+    /// Consensus mode: "praos" (default) or "genesis"
+    pub(crate) consensus_mode: String,
+    /// Force full Phase-2 Plutus validation on all blocks
+    pub(crate) validate_all_blocks: bool,
+    /// Watch receiver for current disk space level, updated by disk monitor
+    pub(crate) disk_space_rx: watch::Receiver<crate::disk_monitor::DiskSpaceLevel>,
+    /// Genesis State Machine — drives LoE enforcement and GDD.
+    ///
+    /// When genesis mode is disabled the GSM immediately enters CaughtUp
+    /// and `loe_limit()` always returns `None`, so there is no overhead on
+    /// the normal (Praos) sync path.  Stored as an `Arc<RwLock<…>>` so that
+    /// the background GSM evaluation task can write state transitions while
+    /// the sync pipeline holds a read lock to query `loe_limit()`.
+    pub(crate) gsm: Arc<RwLock<crate::gsm::GenesisStateMachine>>,
+}
+
+// ─── Node impl: new() ────────────────────────────────────────────────────────
+
+impl Node {
+    pub fn new(args: NodeArgs) -> Result<Self> {
+        let chain_db = Arc::new(RwLock::new(ChainDB::open_with_config(
+            &args.database_path,
+            &args.storage_config.immutable,
+        )?));
+
+        let mut protocol_params = ProtocolParameters::mainnet_defaults();
+
+        // Load Byron genesis if configured
+        let config_dir = args.config_dir.clone();
+        let mut byron_epoch_length: u64 = 0; // 0 = use pallas defaults (mainnet)
+        let mut byron_slot_duration_ms: u64 = 20_000; // default 20s, overridden by genesis
+        let mut byron_genesis_file_hash: Option<torsten_primitives::hash::Hash32> = None;
+        let byron_genesis_utxos: Vec<(Vec<u8>, u64)> =
+            if let Some(ref genesis_path) = args.config.byron_genesis_file {
+                let genesis_path = config_dir.join(genesis_path);
+                match ByronGenesis::load_with_hash(&genesis_path) {
+                    Ok((genesis, hash)) => {
+                        let utxos = genesis.initial_utxos();
+                        let k = genesis.security_param();
+                        byron_epoch_length = 10 * k;
+                        byron_slot_duration_ms = genesis.slot_duration_ms();
+                        info!(
+                            magic = genesis.protocol_magic(),
+                            k,
+                            epoch_len = byron_epoch_length,
+                            slot_duration_ms = byron_slot_duration_ms,
+                            utxos = utxos.len(),
+                            "Byron genesis loaded",
+                        );
+                        byron_genesis_file_hash = Some(hash);
+                        utxos.into_iter().map(|e| (e.address, e.lovelace)).collect()
+                    }
+                    Err(e) => {
+                        warn!("Failed to load Byron genesis: {e}");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+        // Load Shelley genesis if configured (with hash for nonce initialization)
+        let (shelley_genesis, shelley_genesis_hash) =
+            if let Some(ref genesis_path) = args.config.shelley_genesis_file {
+                let genesis_path = config_dir.join(genesis_path);
+                match ShelleyGenesis::load_with_hash(&genesis_path) {
+                    Ok((genesis, hash)) => {
+                        info!(
+                            magic = genesis.network_magic,
+                            start = %genesis.system_start,
+                            epoch_len = genesis.epoch_length,
+                            "Shelley genesis loaded",
+                        );
+                        genesis.apply_to_protocol_params(&mut protocol_params);
+                        (Some(genesis), Some(hash))
+                    }
+                    Err(e) => {
+                        warn!("Failed to load Shelley genesis: {e}");
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
+        // Load Alonzo genesis if configured
+        if let Some(ref genesis_path) = args.config.alonzo_genesis_file {
+            let genesis_path = config_dir.join(genesis_path);
+            match AlonzoGenesis::load(&genesis_path) {
+                Ok(genesis) => {
+                    info!(
+                        max_val_size = genesis.max_value_size,
+                        collateral_pct = genesis.collateral_percentage,
+                        "Alonzo genesis loaded",
+                    );
+                    genesis.apply_to_protocol_params(&mut protocol_params);
+                }
+                Err(e) => {
+                    warn!("Failed to load Alonzo genesis: {e}");
+                }
+            }
+        }
+
+        // Load Conway genesis if configured
+        let mut conway_committee_threshold: Option<(u64, u64)> = None;
+        let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
+        if let Some(ref genesis_path) = args.config.conway_genesis_file {
+            let genesis_path = config_dir.join(genesis_path);
+            match ConwayGenesis::load(&genesis_path) {
+                Ok(genesis) => {
+                    info!(
+                        drep_deposit = genesis.d_rep_deposit,
+                        gov_deposit = genesis.gov_action_deposit,
+                        committee_min = genesis.committee_min_size,
+                        "Conway genesis loaded",
+                    );
+                    conway_committee_threshold = genesis.committee_threshold();
+                    conway_committee_members = genesis.committee_members();
+                    genesis.apply_to_protocol_params(&mut protocol_params);
+                }
+                Err(e) => {
+                    warn!("Failed to load Conway genesis: {e}");
+                }
+            }
+        }
+
+        // Compute network magic early — needed for shelley transition epoch lookup
+        let network_magic = args.config.network_magic.unwrap_or_else(|| {
+            if let Some(ref sg) = shelley_genesis {
+                sg.network_magic
+            } else {
+                args.config.network.magic()
+            }
+        });
+
+        // Try to load existing ledger snapshot
+        let snapshot_path = args.database_path.join("ledger-snapshot.bin");
+        let mut ledger = if snapshot_path.exists() {
+            match LedgerState::load_snapshot(&snapshot_path) {
+                Ok(mut state) => {
+                    // Re-apply genesis config in case it changed
+                    if let Some(ref genesis) = shelley_genesis {
+                        state.set_epoch_length(genesis.epoch_length, genesis.security_param);
+                        state.set_slot_config(genesis.slot_config());
+                        state.set_update_quorum(genesis.update_quorum);
+                    }
+                    let ste = epoch::shelley_transition_epoch_for_magic(network_magic);
+                    state.set_shelley_transition(ste, byron_epoch_length);
+                    if let Some(hash) = shelley_genesis_hash {
+                        state.genesis_hash = hash;
+                    }
+                    // Validate snapshot tip exists in ChainDB. If the tip hash
+                    // is not in storage (e.g., DB was wiped, different chain, or
+                    // volatile blocks were lost), the snapshot is stale and must
+                    // be discarded to prevent "block does not connect" errors.
+                    let snapshot_valid = match state.tip.point {
+                        Point::Origin => true,
+                        Point::Specific(snapshot_slot, ref hash) => {
+                            // Use try_read() since we're in a sync context within tokio.
+                            // The lock was just created so this will always succeed.
+                            match chain_db.try_read() {
+                                Ok(db) => {
+                                    let exists = db.has_block(hash);
+                                    if !exists {
+                                        let db_tip = db.get_tip();
+                                        let db_tip_slot =
+                                            db_tip.point.slot().map(|s| s.0).unwrap_or(0);
+                                        if snapshot_slot.0 > db_tip_slot {
+                                            warn!(
+                                                "Ledger snapshot is ahead of ChainDB (snapshot={}, chaindb={}); \
+                                                 node may have crashed before ChainDB persist — discarding snapshot, \
+                                                 will replay from storage",
+                                                state.tip, db_tip,
+                                            );
+                                        } else {
+                                            warn!(
+                                                "Ledger snapshot is stale (snapshot={}, chaindb={})",
+                                                state.tip, db_tip,
+                                            );
+                                        }
+                                    }
+                                    exists
+                                }
+                                Err(_) => {
+                                    warn!("Could not acquire ChainDB lock for snapshot validation, assuming valid");
+                                    true
+                                }
+                            }
+                        }
+                    };
+
+                    if snapshot_valid {
+                        info!(
+                            epoch = state.epoch.0,
+                            utxos = state.utxo_set.len(),
+                            tip = %state.tip,
+                            "Ledger restored from snapshot",
+                        );
+                        state
+                    } else {
+                        warn!("Discarding stale ledger snapshot, will replay from ChainDB");
+                        Self::init_fresh_ledger(
+                            &protocol_params,
+                            shelley_genesis.as_ref(),
+                            shelley_genesis_hash,
+                            &byron_genesis_utxos,
+                            network_magic,
+                            byron_epoch_length,
+                        )
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load ledger snapshot, starting fresh: {e}");
+                    Self::init_fresh_ledger(
+                        &protocol_params,
+                        shelley_genesis.as_ref(),
+                        shelley_genesis_hash,
+                        &byron_genesis_utxos,
+                        network_magic,
+                        byron_epoch_length,
+                    )
+                }
+            }
+        } else {
+            // No native snapshot — start fresh and replay from ChainDB.
+            // (Haskell ledger state import is not supported for UTxO-HD format.)
+            Self::init_fresh_ledger(
+                &protocol_params,
+                shelley_genesis.as_ref(),
+                shelley_genesis_hash,
+                &byron_genesis_utxos,
+                network_magic,
+                byron_epoch_length,
+            )
+        };
+        // Apply Conway genesis committee threshold and members if not already set
+        if let Some((num, den)) = conway_committee_threshold {
+            if ledger.governance.committee_threshold.is_none() {
+                use torsten_primitives::transaction::Rational;
+                std::sync::Arc::make_mut(&mut ledger.governance).committee_threshold =
+                    Some(Rational {
+                        numerator: num,
+                        denominator: den,
+                    });
+                debug!("Applied Conway genesis committee quorum threshold ({num}/{den})");
+            }
+        }
+        // Seed initial committee members from Conway genesis if committee is empty
+        if ledger.governance.committee_expiration.is_empty() && !conway_committee_members.is_empty()
+        {
+            use torsten_primitives::hash::Hash32;
+            for (hash_bytes, expiration) in &conway_committee_members {
+                let cold_key = Hash32::from_bytes(*hash_bytes);
+                std::sync::Arc::make_mut(&mut ledger.governance)
+                    .committee_expiration
+                    .insert(cold_key, torsten_primitives::EpochNo(*expiration));
+            }
+            debug!(
+                "Seeded {} initial committee members from Conway genesis",
+                conway_committee_members.len()
+            );
+        }
+
+        // Wire up on-disk UTxO store if LSM backend is configured
+        if matches!(
+            args.storage_config.utxo.backend,
+            torsten_storage::UtxoBackend::Lsm
+        ) {
+            let utxo_path = args.database_path.join("utxo-store");
+            let utxo_cfg = &args.storage_config.utxo;
+            match torsten_ledger::utxo_store::UtxoStore::open_with_config(
+                &utxo_path,
+                utxo_cfg.memtable_size_mb,
+                utxo_cfg.block_cache_size_mb,
+                utxo_cfg.bloom_filter_bits_per_key,
+            ) {
+                Ok(store) => {
+                    let store_count = store.len();
+                    info!(
+                        path = %utxo_path.display(),
+                        memtable_mb = utxo_cfg.memtable_size_mb,
+                        cache_mb = utxo_cfg.block_cache_size_mb,
+                        "UTxO store attached (LSM)"
+                    );
+                    ledger.attach_utxo_store(store);
+
+                    // If the ledger has a non-origin tip but the UTxO store has
+                    // significantly fewer entries than expected, the store data
+                    // was lost or incomplete (crash, session lock, etc.).
+                    // Force a full re-replay by resetting the ledger tip to origin.
+                    let ledger_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    if ledger_slot > 0 {
+                        // A synced preview testnet has ~3M UTxOs, mainnet ~15M.
+                        // If the store has less than 100K entries for a non-trivial
+                        // ledger tip, the data is almost certainly incomplete.
+                        let min_expected = if ledger_slot > 10_000_000 { 100_000 } else { 0 };
+                        if store_count < min_expected {
+                            warn!(
+                                utxo_count = store_count,
+                                ledger_slot,
+                                min_expected,
+                                "UTxO store appears incomplete ({} entries for slot {}). \
+                                 Resetting ledger to force full re-replay.",
+                                store_count,
+                                ledger_slot
+                            );
+                            ledger.reset_to_origin();
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to open UTxO store at {}: {e}, continuing with in-memory UTxOs",
+                        utxo_path.display()
+                    );
+                }
+            }
+        }
+
+        let ledger_state = Arc::new(RwLock::new(ledger));
+
+        let consensus = if let Some(ref genesis) = shelley_genesis {
+            OuroborosPraos::with_genesis_params(
+                genesis.active_slots_coeff,
+                genesis.security_param,
+                torsten_primitives::time::EpochLength(genesis.epoch_length),
+                genesis.slots_per_k_e_s_period,
+                genesis.max_k_e_s_evolutions,
+            )
+        } else {
+            OuroborosPraos::new()
+        };
+        info!(
+            epoch_len = consensus.epoch_length.0,
+            k = consensus.security_param,
+            f = consensus.active_slot_coeff,
+            kes_period = consensus.slots_per_kes_period,
+            max_kes = consensus.max_kes_evolutions,
+            "Consensus: Praos",
+        );
+
+        let mempool = Arc::new(Mempool::new(MempoolConfig {
+            max_transactions: args.mempool_max_tx,
+            max_bytes: args.mempool_max_bytes,
+            ..MempoolConfig::default()
+        }));
+
+        let socket_path = args.socket_path.clone();
+        let listen_addr: std::net::SocketAddr =
+            format!("{}:{}", args.host_addr, args.port).parse()?;
+        // network_magic computed earlier (before ledger snapshot loading)
+        let server_config = NodeServerConfig {
+            listen_addr,
+            socket_path: args.socket_path,
+            max_connections: 200,
+        };
+        let server = NodeServer::new(server_config);
+
+        // Wire up live UTxO provider before wrapping in lock
+        let mut qh = QueryHandler::new();
+        qh.set_utxo_provider(Arc::new(serve::LedgerUtxoProvider {
+            ledger: ledger_state.clone(),
+        }));
+        let query_handler = Arc::new(RwLock::new(qh));
+
+        // Load block producer credentials if key paths are provided.
+        // If ANY block production flag is set, ALL three must be present — a partial
+        // configuration is an error, not a silent fallback to relay mode.
+        let bp_flags = [
+            ("--shelley-vrf-key", &args.shelley_vrf_key),
+            ("--shelley-kes-key", &args.shelley_kes_key),
+            (
+                "--shelley-operational-certificate",
+                &args.shelley_operational_certificate,
+            ),
+        ];
+        let provided: Vec<&str> = bp_flags
+            .iter()
+            .filter(|(_, v)| v.is_some())
+            .map(|(name, _)| *name)
+            .collect();
+        let missing: Vec<&str> = bp_flags
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(name, _)| *name)
+            .collect();
+
+        let block_producer = if provided.is_empty() {
+            info!("Relay-only mode (no block producer keys)");
+            None
+        } else if !missing.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Incomplete block producer configuration: provided {} but missing {}. \
+                 All three flags (--shelley-kes-key, --shelley-vrf-key, \
+                 --shelley-operational-certificate) are required for block production.",
+                provided.join(", "),
+                missing.join(", "),
+            ));
+        } else {
+            let vrf_path = args.shelley_vrf_key.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("VRF signing key path required for block production")
+            })?;
+            let kes_path = args.shelley_kes_key.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("KES signing key path required for block production")
+            })?;
+            let opcert_path = args
+                .shelley_operational_certificate
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Operational certificate path required for block production")
+                })?;
+            let creds =
+                crate::forge::BlockProducerCredentials::load(vrf_path, kes_path, opcert_path)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load block producer credentials: {e}. \
+                     Check that the key files and operational certificate are valid."
+                        )
+                    })?;
+            info!(
+                pool = %creds.pool_id,
+                opcert_seq = creds.opcert_sequence,
+                kes_period = creds.opcert_kes_period,
+                "Block producer mode",
+            );
+            Some(creds)
+        };
+
+        // Determine expected genesis hashes for genesis block validation.
+        // Config hash fields take priority (ByronGenesisHash, ShelleyGenesisHash);
+        // fall back to hashes computed from the genesis files themselves.
+        let expected_byron_genesis_hash = args
+            .config
+            .byron_genesis_hash
+            .as_deref()
+            .and_then(|h| torsten_primitives::hash::Hash32::from_hex(h).ok())
+            .or(byron_genesis_file_hash);
+        let expected_shelley_genesis_hash = args
+            .config
+            .shelley_genesis_hash
+            .as_deref()
+            .and_then(|h| torsten_primitives::hash::Hash32::from_hex(h).ok())
+            .or(shelley_genesis_hash);
+
+        if let Some(ref h) = expected_byron_genesis_hash {
+            debug!("Expected Byron genesis hash: {}", h.to_hex());
+        }
+        if let Some(ref h) = expected_shelley_genesis_hash {
+            debug!("Expected Shelley genesis hash: {}", h.to_hex());
+        }
+
+        // Build the GSM here so it is owned by the Node struct. This lets
+        // `process_forward_blocks` query `loe_limit()` without needing to
+        // pass the Arc through every call site.  When genesis mode is off the
+        // GSM starts in CaughtUp and `loe_limit()` always returns None.
+        let genesis_enabled = args.consensus_mode == "genesis";
+        let gsm_config = crate::gsm::GsmConfig {
+            marker_path: args.database_path.join("caught_up.marker"),
+            ..Default::default()
+        };
+        let gsm = Arc::new(RwLock::new(crate::gsm::GenesisStateMachine::new(
+            gsm_config,
+            genesis_enabled,
+        )));
+
+        Ok(Node {
+            config: args.config,
+            topology: args.topology,
+            chain_db,
+            ledger_state,
+            consensus,
+            mempool,
+            _server: server,
+            query_handler,
+            peer_manager: Arc::new(RwLock::new(PeerManager::new(PeerManagerConfig::default()))),
+            socket_path,
+            database_path: args.database_path,
+            listen_addr,
+            network_magic,
+            byron_epoch_length,
+            byron_slot_duration_ms,
+            snapshot_policy: epoch::SnapshotPolicy::with_params(
+                shelley_genesis
+                    .as_ref()
+                    .map(|g| g.security_param)
+                    .unwrap_or(2160),
+                args.snapshot_max_retained,
+                args.snapshot_bulk_min_blocks,
+                args.snapshot_bulk_min_secs,
+            ),
+            shelley_genesis,
+            topology_path: args.topology_path,
+            metrics: Arc::new(crate::metrics::NodeMetrics::new()),
+            block_producer,
+            block_announcement_tx: None,
+            rollback_announcement_tx: None,
+            metrics_port: args.metrics_port,
+            expected_byron_genesis_hash,
+            expected_shelley_genesis_hash,
+            genesis_validated: false,
+            epoch_transitions_observed: 0,
+            consensus_mode: args.consensus_mode,
+            validate_all_blocks: args.validate_all_blocks,
+            disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
+            gsm,
+        })
+    }
+
+    // ─── run() ───────────────────────────────────────────────────────────────
+
+    pub async fn run(&mut self) -> Result<()> {
+        let tip = self.chain_db.read().await.get_tip();
+
+        // If ChainDB already has blocks, genesis was validated on a prior run
+        if tip.point != Point::Origin {
+            self.genesis_validated = true;
+        }
+
+        {
+            let ls = self.ledger_state.read().await;
+            info!(
+                tip = %tip,
+                utxos = ls.utxo_set.len(),
+                mempool_txs = self.mempool.len(),
+                "Chain tip",
+            );
+        }
+
+        // Setup shutdown signal (SIGINT + SIGTERM) early so the node can be
+        // gracefully stopped during replay (which can take 30+ minutes).
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        #[cfg(unix)]
+        {
+            let shutdown_tx_clone = shutdown_tx.clone();
+            tokio::spawn(async move {
+                // Startup-time panic is acceptable — if we can't register signal
+                // handlers, the node cannot shut down gracefully.
+                let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = signal::ctrl_c() => {
+                        info!("SIGINT received, shutting down");
+                    }
+                    _ = sigterm.recv() => {
+                        info!("SIGTERM received, shutting down");
+                    }
+                }
+                shutdown_tx_clone.send(true).ok();
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            let shutdown_tx_clone = shutdown_tx.clone();
+            tokio::spawn(async move {
+                signal::ctrl_c().await.ok();
+                info!("Shutdown signal received");
+                shutdown_tx_clone.send(true).ok();
+            });
+        }
+
+        // Start Prometheus metrics server before replay so /health, /ready,
+        // and /metrics are available during the (potentially long) replay window.
+        if self.metrics_port > 0 {
+            let metrics = self.metrics.clone();
+            let port = self.metrics_port;
+            tokio::spawn(async move {
+                if let Err(e) = crate::metrics::start_metrics_server(port, metrics).await {
+                    error!(
+                        port,
+                        "Metrics server failed to start: {e} — node will continue without metrics"
+                    );
+                }
+            });
+        }
+
+        // Replay blocks from ChainDB if the ledger is behind storage.
+        // This happens after a Mithril snapshot import — blocks are in storage
+        // but the ledger hasn't processed them yet.
+        let replay_start = std::time::Instant::now();
+        self.replay_ledger_from_storage(shutdown_rx.clone()).await;
+        self.metrics
+            .set_replay_duration_secs(replay_start.elapsed().as_secs());
+        if *shutdown_rx.borrow() {
+            info!("Shutdown requested during replay, exiting");
+            return Ok(());
+        }
+
+        // Initialize query state from current ledger so N2C queries
+        // work immediately (before we reach chain tip or the periodic timer fires)
+        self.update_query_state().await;
+
+        // SIGHUP handler is set up after peer_manager initialization below
+
+        // Start disk space monitor on the database volume
+        {
+            let (disk_level_tx, disk_level_rx) =
+                watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok);
+            self.disk_space_rx = disk_level_rx;
+            let db_path = self.database_path.clone();
+            let metrics = self.metrics.clone();
+            let disk_shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                crate::disk_monitor::start_disk_monitor(
+                    db_path,
+                    metrics,
+                    disk_shutdown_rx,
+                    disk_level_tx,
+                )
+                .await;
+            });
+        }
+
+        // Start N2C server on Unix socket
+        let mut n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());
+        let slot_config = self.ledger_state.read().await.slot_config;
+        n2c_server.set_tx_validator(Arc::new(serve::LedgerTxValidator {
+            ledger: self.ledger_state.clone(),
+            slot_config,
+            metrics: self.metrics.clone(),
+        }));
+        n2c_server.set_block_provider(Arc::new(serve::ChainDBBlockProvider {
+            chain_db: self.chain_db.clone(),
+        }));
+        n2c_server.set_connection_metrics(Arc::new(serve::N2CConnectionMetrics {
+            metrics: self.metrics.clone(),
+        }));
+        debug!("N2C server: Plutus tx validation and block delivery enabled");
+        let n2c_socket_path = self.socket_path.clone();
+        let n2c_shutdown_rx = shutdown_rx.clone();
+        let n2c_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = n2c_server.listen(&n2c_socket_path, n2c_shutdown_rx).await {
+                error!("N2C server error: {e}");
+                n2c_shutdown_tx.send(true).ok();
+            }
+        });
+
+        // Initialize peer manager
+        {
+            let pm_config = PeerManagerConfig {
+                diffusion_mode: DiffusionMode::InitiatorAndResponder,
+                peer_sharing_enabled: true,
+                ..PeerManagerConfig::default()
+            };
+            *self.peer_manager.write().await = PeerManager::new(pm_config);
+        }
+        let peer_manager = self.peer_manager.clone();
+
+        // Register topology peers in the peer manager with full metadata
+        let detailed_peers = self.topology.detailed_peers();
+        if detailed_peers.is_empty() {
+            warn!("No peers configured in topology");
+            return Ok(());
+        }
+        if self.topology.has_bootstrap_peers() {
+            info!(
+                "Bootstrap peers configured (trustable: {})",
+                self.topology.has_trustable_peers()
+            );
+        }
+        {
+            // Resolve all DNS addresses BEFORE acquiring the write lock to avoid
+            // holding the lock during potentially slow DNS lookups.
+            let mut resolved_peers = Vec::new();
+            for peer in &detailed_peers {
+                match tokio::net::lookup_host(format!("{}:{}", peer.address, peer.port)).await {
+                    Ok(addrs) => {
+                        for socket_addr in addrs {
+                            resolved_peers.push((socket_addr, peer.trustable, peer.advertise));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            address = %peer.address,
+                            port = peer.port,
+                            "Failed to resolve peer address: {e}"
+                        );
+                    }
+                }
+            }
+            let mut pm = peer_manager.write().await;
+            for (socket_addr, trustable, advertise) in resolved_peers {
+                pm.add_config_peer(socket_addr, trustable, advertise);
+            }
+            let stats = pm.stats();
+            info!(
+                known = stats.known_peers,
+                mode = ?pm.diffusion_mode(),
+                "Peers",
+            );
+        }
+        let peers = self.topology.all_peers();
+
+        // Setup SIGHUP handler for topology reload
+        #[cfg(unix)]
+        {
+            let topology_path = self.topology_path.clone();
+            let pm_for_sighup = peer_manager.clone();
+            tokio::spawn(async move {
+                let mut hup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Failed to setup SIGHUP handler: {e}");
+                        return;
+                    }
+                };
+                loop {
+                    hup.recv().await;
+                    info!(
+                        "SIGHUP received — reloading topology from {}",
+                        topology_path.display()
+                    );
+                    match Topology::load(&topology_path) {
+                        Ok(new_topology) => {
+                            let new_peers = new_topology.detailed_peers();
+                            // Resolve DNS before acquiring the write lock
+                            let mut resolved = Vec::new();
+                            for peer in &new_peers {
+                                match tokio::net::lookup_host(format!(
+                                    "{}:{}",
+                                    peer.address, peer.port
+                                ))
+                                .await
+                                {
+                                    Ok(addrs) => {
+                                        for socket_addr in addrs {
+                                            resolved.push((
+                                                socket_addr,
+                                                peer.trustable,
+                                                peer.advertise,
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            address = %peer.address,
+                                            port = peer.port,
+                                            "Failed to resolve peer address during topology reload: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            let mut pm = pm_for_sighup.write().await;
+                            let added = resolved.len();
+                            for (socket_addr, trustable, advertise) in resolved {
+                                pm.add_config_peer(socket_addr, trustable, advertise);
+                            }
+                            info!(
+                                "Topology reloaded: {added} peers registered, {}",
+                                pm.stats()
+                            );
+                        }
+                        Err(e) => {
+                            error!("Failed to reload topology: {e}");
+                        }
+                    }
+                }
+            });
+        }
+
+        // Start N2N server for inbound peer connections (bidirectional mode)
+        let mut n2n_server = torsten_network::n2n_server::N2NServer::with_config(
+            self.listen_addr,
+            self.network_magic,
+            self.query_handler.clone(),
+            Arc::new(serve::ChainDBBlockProvider {
+                chain_db: self.chain_db.clone(),
+            }),
+            200,
+            self.peer_manager.read().await.diffusion_mode() == DiffusionMode::InitiatorAndResponder,
+            torsten_network::n2n_server::PeerSharingMode::PeerSharingEnabled,
+        );
+        n2n_server.set_mempool(self.mempool.clone());
+        n2n_server.set_peer_manager(self.peer_manager.clone());
+        n2n_server.set_connection_metrics(Arc::new(serve::N2NConnectionMetrics {
+            metrics: self.metrics.clone(),
+        }));
+        // Get the broadcast senders before spawning the server
+        self.block_announcement_tx = Some(n2n_server.block_announcement_sender());
+        self.rollback_announcement_tx = Some(n2n_server.rollback_announcement_sender());
+        debug!(
+            "N2N server: diffusion_mode={:?}, peer_sharing=enabled",
+            self.peer_manager.read().await.diffusion_mode()
+        );
+        let n2n_shutdown_rx = shutdown_rx.clone();
+        let n2n_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = n2n_server.listen(n2n_shutdown_rx).await {
+                error!("N2N server error: {e}");
+                // Fatal: trigger node shutdown on bind failure (e.g. address already in use)
+                n2n_shutdown_tx.send(true).ok();
+            }
+        });
+
+        // Start ledger-based peer discovery task
+        {
+            let ledger = self.ledger_state.clone();
+            let pm = peer_manager.clone();
+            let topology = self.topology.clone();
+            let shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                // Check every 5 minutes for new ledger peers
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                interval.tick().await; // skip first immediate tick
+                let mut shutdown = shutdown;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = shutdown.changed() => { break; }
+                    }
+
+                    let current_slot = {
+                        let ls = ledger.read().await;
+                        ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
+                    };
+
+                    if !topology.ledger_peers_enabled(current_slot) {
+                        continue;
+                    }
+
+                    // Extract relay addresses from registered pools
+                    let relays: Vec<(String, u16)> = {
+                        let ls = ledger.read().await;
+                        let mut relays = Vec::new();
+                        for pool_reg in ls.pool_params.values() {
+                            for relay in &pool_reg.relays {
+                                match relay {
+                                    torsten_primitives::transaction::Relay::SingleHostAddr {
+                                        port,
+                                        ipv4,
+                                        ..
+                                    } => {
+                                        if let (Some(port), Some(ipv4)) = (port, ipv4) {
+                                            let addr = format!(
+                                                "{}.{}.{}.{}",
+                                                ipv4[0], ipv4[1], ipv4[2], ipv4[3]
+                                            );
+                                            relays.push((addr, *port));
+                                        }
+                                    }
+                                    torsten_primitives::transaction::Relay::SingleHostName {
+                                        port,
+                                        dns_name,
+                                    } => {
+                                        if let Some(port) = port {
+                                            relays.push((dns_name.clone(), *port));
+                                        }
+                                    }
+                                    torsten_primitives::transaction::Relay::MultiHostName {
+                                        dns_name,
+                                    } => {
+                                        relays.push((dns_name.clone(), 3001));
+                                    }
+                                }
+                            }
+                        }
+                        relays
+                    };
+
+                    if relays.is_empty() {
+                        continue;
+                    }
+
+                    // Sample a subset of ledger peers
+                    // (don't try to resolve all thousands of pool relays)
+                    let sample_size = 20.min(relays.len());
+                    let step = relays.len() / sample_size;
+                    let offset = (current_slot as usize) % step.max(1);
+                    let sample: Vec<_> = relays
+                        .iter()
+                        .skip(offset)
+                        .step_by(step.max(1))
+                        .take(sample_size)
+                        .collect();
+
+                    // Resolve all DNS addresses before acquiring the write lock
+                    let mut resolved_addrs = Vec::new();
+                    for (host, port) in sample {
+                        if let Ok(mut addrs) =
+                            tokio::net::lookup_host(format!("{host}:{port}")).await
+                        {
+                            if let Some(socket_addr) = addrs.next() {
+                                resolved_addrs.push(socket_addr);
+                            }
+                        }
+                    }
+                    if !resolved_addrs.is_empty() {
+                        let mut pm_w = pm.write().await;
+                        for socket_addr in &resolved_addrs {
+                            pm_w.add_ledger_peer(*socket_addr);
+                        }
+                        let added = resolved_addrs.len();
+                        debug!(
+                            "Ledger peer discovery: +{added} peers from {} relays, {}",
+                            relays.len(),
+                            pm_w.stats()
+                        );
+                    }
+                }
+            });
+        }
+
+        let network_magic = self.network_magic;
+
+        // The GSM is initialized in Node::new() and stored as self.gsm.
+        // Clone the Arc here so the background evaluation task can hold a
+        // reference independently of the borrow on `self`.
+        let genesis_enabled = self.consensus_mode == "genesis";
+        if genesis_enabled {
+            info!(
+                state = %self.gsm.blocking_read().state(),
+                "Genesis mode enabled — note: lightweight checkpointing and Genesis-specific \
+                 peer selection are not yet implemented. The GSM provides basic state tracking \
+                 (PreSyncing/Syncing/CaughtUp) and density-based peer disconnection."
+            );
+        }
+
+        // Spawn GSM evaluation task
+        if genesis_enabled {
+            let gsm_ref = self.gsm.clone();
+            let gsm_pm = peer_manager.clone();
+            let gsm_metrics = self.metrics.clone();
+            let gsm_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                interval.tick().await;
+                let mut shutdown = gsm_shutdown;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = shutdown.changed() => { break; }
+                    }
+
+                    let active_blp = {
+                        let pm = gsm_pm.read().await;
+                        pm.active_big_ledger_peer_count()
+                    };
+
+                    let mut gsm_w = gsm_ref.write().await;
+                    // Read actual tip age and ChainSync idle state from metrics.
+                    // tip_age_secs: seconds since the last received block's slot time.
+                    // all_idle: true when ChainSync has been idle long enough to indicate
+                    // we're at the chain tip (no new blocks arriving).
+                    let tip_age_secs = gsm_metrics
+                        .tip_age_secs
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let chainsync_idle = gsm_metrics
+                        .chainsync_idle_secs
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    // Consider "all idle" when ChainSync has been idle for >30 seconds
+                    // (indicating no new blocks arriving — we're likely at tip)
+                    let all_idle = chainsync_idle > 30;
+                    gsm_w.evaluate(active_blp, all_idle, tip_age_secs);
+                }
+            });
+        }
+
+        // Spawn the P2P governor task — periodically evaluates peer targets
+        // and emits connect/disconnect/promote/demote events
+        {
+            let governor_pm = peer_manager.clone();
+            let governor_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut governor = Governor::new(Default::default());
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await; // skip first immediate tick
+                let mut shutdown = governor_shutdown;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = shutdown.changed() => { break; }
+                    }
+
+                    // Run governor evaluation
+                    let events = {
+                        let pm = governor_pm.read().await;
+                        let mut all_events = governor.evaluate(&pm);
+                        // Also check churn
+                        all_events.extend(governor.maybe_churn(&pm));
+                        all_events
+                    };
+
+                    // Execute governor events
+                    if !events.is_empty() {
+                        let mut pm = governor_pm.write().await;
+                        for event in &events {
+                            match event {
+                                GovernorEvent::Promote(addr) => {
+                                    pm.promote_to_hot(addr);
+                                }
+                                GovernorEvent::Demote(addr) => {
+                                    pm.demote_to_warm(addr);
+                                }
+                                GovernorEvent::Disconnect(addr) => {
+                                    pm.peer_disconnected(addr);
+                                }
+                                GovernorEvent::Connect(_) => {
+                                    // Connection events are handled by the main loop
+                                    // via peers_to_connect()
+                                }
+                            }
+                        }
+                        pm.recompute_reputations();
+                    }
+                }
+            });
+        }
+
+        // Main connection loop — connect to peers and sync
+        let mut retry_count = 0u32;
+        let base_delay_secs = 5u64;
+        let max_delay_secs = 60u64;
+
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            // Get peers to connect to from the peer manager
+            let targets: Vec<std::net::SocketAddr> = {
+                let pm = peer_manager.read().await;
+                pm.peers_to_connect()
+            };
+
+            // If peer manager has no targets, fall back to topology list
+            let mut client = None;
+            if !targets.is_empty() {
+                for addr in &targets {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    let target = addr.to_string();
+                    debug!("Connecting to peer {target}...");
+                    let connect_start = std::time::Instant::now();
+                    let connect_result = tokio::select! {
+                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        _ = shutdown_rx.changed() => break,
+                    };
+                    match connect_result {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
+                            let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+                            self.metrics.record_handshake_rtt(rtt_ms);
+                            let mut pm = peer_manager.write().await;
+                            pm.peer_connected(addr, 14, torsten_network::ConnectionDirection::Outbound);
+                            pm.record_handshake_rtt(addr, rtt_ms);
+                            pm.promote_to_hot(addr);
+                            drop(pm);
+                            info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected");
+                            client = Some((c, *addr));
+                            break;
+                        }
+                        Err(e) => {
+                            peer_manager.write().await.peer_failed(addr);
+                            debug!("Failed to connect to {target}: {e}");
+                        }
+                    }
+                }
+            } else {
+                // Fallback: try topology peers directly
+                for (addr, port) in &peers {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    let target = format!("{addr}:{port}");
+                    debug!("Connecting to peer {target}...");
+                    let connect_result = tokio::select! {
+                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        _ = shutdown_rx.changed() => break,
+                    };
+                    match connect_result {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
+                            info!(peer = %target, "Peer connected");
+                            let sock_addr = c.remote_addr().to_owned();
+                            client = Some((c, sock_addr));
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("Failed to connect to {target}: {e}");
+                        }
+                    }
+                }
+            }
+
+            let (mut active_client, peer_addr) = match client {
+                Some(c) => {
+                    retry_count = 0;
+                    c
+                }
+                None => {
+                    retry_count += 1;
+                    let delay = base_delay_secs
+                        .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
+                        .min(max_delay_secs);
+                    warn!(
+                        retry_count,
+                        delay_secs = delay,
+                        "Could not connect to any peer, retrying..."
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+
+            // Log peer manager state
+            {
+                let pm = peer_manager.read().await;
+                debug!("P2P: {}", pm.stats());
+            }
+
+            // Spawn PeerSharing client: request peers from connected peer in background
+            {
+                let ps_peer_addr = peer_addr;
+                let ps_network_magic = network_magic;
+                let ps_peer_manager = peer_manager.clone();
+                tokio::spawn(async move {
+                    match torsten_network::request_peers_from(
+                        ps_peer_addr.to_string().as_str(),
+                        ps_network_magic,
+                        10,
+                    )
+                    .await
+                    {
+                        Ok(peers) => {
+                            if peers.is_empty() {
+                                debug!("PeerSharing: no peers received from {ps_peer_addr}");
+                            } else {
+                                debug!(
+                                    "PeerSharing: received {} peers from {ps_peer_addr}",
+                                    peers.len()
+                                );
+                                let mut pm = ps_peer_manager.write().await;
+                                for addr in peers {
+                                    pm.add_shared_peer(addr);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("PeerSharing with {ps_peer_addr}: {e}");
+                        }
+                    }
+                });
+            }
+
+            // Connect additional peers as block fetchers for parallel block fetch
+            let mut fetch_pool = BlockFetchPool::new();
+            {
+                let pm = peer_manager.read().await;
+                let additional_peers: Vec<std::net::SocketAddr> = pm
+                    .peers_to_connect()
+                    .into_iter()
+                    .filter(|a| *a != peer_addr)
+                    .take(4)
+                    .collect();
+                drop(pm);
+
+                for addr in &additional_peers {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    let target = addr.to_string();
+                    let connect_start = std::time::Instant::now();
+                    let connect_result = tokio::select! {
+                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        _ = shutdown_rx.changed() => break,
+                    };
+                    match connect_result {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
+                            let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+                            self.metrics.record_handshake_rtt(rtt_ms);
+                            let mut pm = peer_manager.write().await;
+                            pm.peer_connected(addr, 14, torsten_network::ConnectionDirection::Outbound);
+                            pm.record_handshake_rtt(addr, rtt_ms);
+                            pm.promote_to_hot(addr);
+                            drop(pm);
+                            debug!("Connected block fetcher to {target} ({rtt_ms:.0}ms)");
+                            fetch_pool.add_fetcher(c);
+                        }
+                        Err(e) => {
+                            warn!("Failed to connect fetcher to {target}: {e}");
+                        }
+                    }
+                }
+                // If no fetchers connected, add a dedicated fetcher to the primary peer.
+                // This is necessary because the primary client connection is used for
+                // pipelined ChainSync headers and can't simultaneously fetch blocks.
+                if fetch_pool.is_empty() && !*shutdown_rx.borrow() {
+                    let target = peer_addr.to_string();
+                    let connect_result = tokio::select! {
+                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        _ = shutdown_rx.changed() => {
+                            info!(fetchers = 0, "Block fetchers ready");
+                            continue;
+                        }
+                    };
+                    match connect_result {
+                        Ok(mut c) => {
+                            c.set_byron_epoch_length(self.byron_epoch_length);
+                            debug!("Connected dedicated block fetcher to primary peer {target}");
+                            fetch_pool.add_fetcher(c);
+                        }
+                        Err(e) => {
+                            warn!("Failed to connect dedicated fetcher to {target}: {e}");
+                        }
+                    }
+                }
+                info!(fetchers = fetch_pool.len(), "Block fetchers ready");
+            }
+
+            // Create pipelined ChainSync connection to same peer for high-throughput headers
+            if *shutdown_rx.borrow() {
+                break;
+            }
+            let pipelined_client = {
+                let target = peer_addr.to_string();
+                let connect_result = tokio::select! {
+                    r = PipelinedPeerClient::connect(&*target, network_magic) => r,
+                    _ = shutdown_rx.changed() => { break; }
+                };
+                match connect_result {
+                    Ok(mut pc) => {
+                        pc.set_byron_epoch_length(self.byron_epoch_length);
+                        debug!("Pipelined ChainSync client connected to {target}");
+                        // Take the TxSubmission channel and spawn a background tx fetcher
+                        if let Some(txsub_channel) = pc.take_txsub_channel() {
+                            let mempool = self.mempool.clone();
+                            let ledger = self.ledger_state.clone();
+                            let slot_config = self.ledger_state.read().await.slot_config;
+                            let shutdown = shutdown_rx.clone();
+                            let txsub_metrics = self.metrics.clone();
+                            tokio::spawn(async move {
+                                let validator: Option<Arc<dyn TxValidator>> =
+                                    Some(Arc::new(serve::LedgerTxValidator {
+                                        ledger,
+                                        slot_config,
+                                        metrics: txsub_metrics,
+                                    }));
+                                let mut client =
+                                    torsten_network::TxSubmissionClient::new(txsub_channel);
+                                let mut shutdown = shutdown;
+                                tokio::select! {
+                                    result = client.run(mempool, validator) => {
+                                        match result {
+                                            Ok(stats) => {
+                                                debug!(
+                                                    "TxSubmission2 session ended (rx={}, ok={}, rej={}, dup={})",
+                                                    stats.received, stats.accepted, stats.rejected, stats.duplicate,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                debug!("TxSubmission2 client error: {e}");
+                                            }
+                                        }
+                                        // Keep the client (and its AgentChannel) alive until
+                                        // the connection is closed. Dropping the channel would
+                                        // cause the demuxer to crash when the peer sends a
+                                        // delayed response on the TxSubmission2 protocol.
+                                        shutdown.changed().await.ok();
+                                    }
+                                    _ = shutdown.changed() => {
+                                        debug!("TxSubmission2 client: shutdown");
+                                    }
+                                }
+                            });
+                        }
+                        Some(pc)
+                    }
+                    Err(e) => {
+                        warn!("Pipelined client failed, using serial headers: {e}");
+                        None
+                    }
+                }
+            };
+
+            // Run chain sync with connected peer + fetch pool
+            let sync_shutdown = shutdown_rx.clone();
+            match self
+                .chain_sync_loop(
+                    &mut active_client,
+                    pipelined_client,
+                    fetch_pool,
+                    sync_shutdown,
+                    peer_addr,
+                )
+                .await
+            {
+                Ok(()) => {
+                    active_client.disconnect().await;
+                    peer_manager.write().await.peer_disconnected(&peer_addr);
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                    info!("Peer disconnected, reconnecting...");
+                }
+                Err(e) => {
+                    // Mark as failed (not just disconnected) so PeerManager
+                    // deprioritizes this peer on the next connection attempt.
+                    // This is important after sleep/hibernate where stale peers
+                    // should be avoided in favor of responsive ones.
+                    peer_manager.write().await.peer_failed(&peer_addr);
+                    warn!("Sync error: {e}, will reconnect...");
+                }
+            }
+
+            // Brief delay before reconnecting
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = shutdown_rx.changed() => { break; }
+            }
+        }
+
+        // Flush volatile blocks, persist ChainDB, and save ledger snapshot,
+        // with a timeout to prevent hanging on shutdown.
+        let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            {
+                let mut db = self.chain_db.write().await;
+                match db.flush_all_to_immutable() {
+                    Ok(n) if n > 0 => {
+                        info!(blocks = n, "Flushed volatile blocks to ImmutableDB")
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!("Failed to flush volatile blocks on shutdown: {e}"),
+                }
+                if let Err(e) = db.persist() {
+                    error!("Failed to persist ChainDB on shutdown: {e}");
+                }
+            }
+            self.save_ledger_snapshot().await;
+        })
+        .await;
+
+        match shutdown_result {
+            Ok(()) => info!("Shutdown complete"),
+            Err(_) => {
+                error!("Graceful shutdown timed out after 30s, forcing exit");
+                std::process::exit(1);
+            }
+        }
+        Ok(())
+    }
+
+    // ─── init_fresh_ledger() ─────────────────────────────────────────────────
+
+    /// Create a fresh ledger state with genesis configuration applied.
+    pub(crate) fn init_fresh_ledger(
+        protocol_params: &ProtocolParameters,
+        shelley_genesis: Option<&ShelleyGenesis>,
+        shelley_genesis_hash: Option<torsten_primitives::Hash32>,
+        byron_genesis_utxos: &[(Vec<u8>, u64)],
+        network_magic: u64,
+        byron_epoch_length: u64,
+    ) -> LedgerState {
+        let mut ledger = LedgerState::new(protocol_params.clone());
+        if let Some(genesis) = shelley_genesis {
+            ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
+            ledger.set_slot_config(genesis.slot_config());
+            ledger.set_update_quorum(genesis.update_quorum);
+        }
+        // Set Byron→Shelley transition boundary for correct HFC epoch numbering
+        let shelley_transition_epoch = epoch::shelley_transition_epoch_for_magic(network_magic);
+        ledger.set_shelley_transition(shelley_transition_epoch, byron_epoch_length);
+        if let Some(hash) = shelley_genesis_hash {
+            ledger.set_genesis_hash(hash);
+        }
+        if !byron_genesis_utxos.is_empty() {
+            ledger.seed_genesis_utxos(byron_genesis_utxos);
+        }
+        ledger
+    }
+
+    // ─── try_forge_block() ───────────────────────────────────────────────────
+
+    /// Attempt to forge a block if we are in block producer mode and are the slot leader.
+    ///
+    /// Called every slot when the node is caught up to the chain tip.
+    pub(crate) async fn try_forge_block(&mut self) {
+        let creds = match &self.block_producer {
+            Some(c) => c,
+            None => return, // relay-only mode
+        };
+
+        // Don't forge if epoch nonce isn't established yet (e.g., post-Mithril import)
+        if !self.consensus.nonce_established {
+            debug!("Forge: skipping — epoch nonce not yet established");
+            return;
+        }
+
+        // Compute current slot from wall-clock time
+        let wall_clock_slot = self.current_wall_clock_slot();
+
+        let ls = self.ledger_state.read().await;
+        let tip_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+        let next_slot = match wall_clock_slot {
+            Some(wc) if wc.0 > tip_slot => wc,
+            _ => {
+                // No genesis or wall clock behind tip — skip forging
+                return;
+            }
+        };
+        let epoch_nonce = ls.epoch_nonce;
+        let block_number = torsten_primitives::time::BlockNo(ls.current_block_number().0 + 1);
+        let prev_hash = ls
+            .tip
+            .point
+            .hash()
+            .copied()
+            .unwrap_or(torsten_primitives::hash::Hash32::ZERO);
+        let slots_per_kes_period = self.consensus.slots_per_kes_period;
+
+        // Calculate relative stake from the "set" snapshot (used for leader election)
+        let (relative_stake, pool_stake_lovelace) = if let Some(set_snapshot) = &ls.snapshots.set {
+            let total_stake: u64 = set_snapshot.pool_stake.values().map(|s| s.0).sum();
+            let pool_stake = set_snapshot
+                .pool_stake
+                .get(&creds.pool_id)
+                .map(|s| s.0)
+                .unwrap_or(0);
+            if total_stake > 0 {
+                (pool_stake as f64 / total_stake as f64, pool_stake)
+            } else {
+                (0.0, 0)
+            }
+        } else {
+            debug!(
+                pool_id = %creds.pool_id,
+                "Forge: skipping — no 'set' snapshot available"
+            );
+            (0.0, 0)
+        };
+        drop(ls);
+
+        if relative_stake == 0.0 {
+            // Log periodically so the operator knows stake hasn't activated yet
+            if next_slot.0 % 100 == 0 {
+                debug!(
+                    slot = next_slot.0,
+                    pool_id = %creds.pool_id,
+                    pool_stake = pool_stake_lovelace,
+                    "Forge: pool has zero relative stake in 'set' snapshot — waiting for delegation"
+                );
+            }
+            return;
+        }
+
+        // Check if we are the slot leader
+        self.metrics
+            .leader_checks_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let is_leader = crate::forge::check_slot_leadership(
+            creds,
+            next_slot,
+            &epoch_nonce,
+            relative_stake,
+            self.consensus.active_slot_coeff,
+        );
+
+        if !is_leader {
+            self.metrics
+                .leader_checks_not_elected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Log periodically so operators can confirm the VRF check is running
+            if next_slot.0 % 20 == 0 {
+                info!(
+                    slot = next_slot.0,
+                    pool_id = %creds.pool_id,
+                    stake = format_args!("{relative_stake:.6}"),
+                    "Slot leader check: not elected"
+                );
+            }
+            return;
+        }
+
+        info!(
+            slot = next_slot.0,
+            pool_id = %creds.pool_id,
+            stake = format_args!("{relative_stake:.6}"),
+            "Slot leader check: ELECTED — forging block",
+        );
+
+        // Collect transactions from mempool using protocol params limits
+        let ls = self.ledger_state.read().await;
+        let max_block_body_size = ls.protocol_params.max_block_body_size;
+        let protocol_version_major = ls.protocol_params.protocol_version_major;
+        let protocol_version_minor = ls.protocol_params.protocol_version_minor;
+        let current_era = ls.era;
+        drop(ls);
+        let transactions = self
+            .mempool
+            .get_txs_for_block(500, max_block_body_size as usize);
+        let config = crate::forge::BlockProducerConfig {
+            protocol_version: torsten_primitives::block::ProtocolVersion {
+                major: protocol_version_major,
+                minor: protocol_version_minor,
+            },
+            _max_block_body_size: max_block_body_size,
+            _max_txs_per_block: 500,
+            era: current_era,
+            slots_per_kes_period,
+        };
+
+        match crate::forge::forge_block(
+            creds,
+            &config,
+            next_slot,
+            block_number,
+            prev_hash,
+            &epoch_nonce,
+            transactions,
+        ) {
+            Ok((block, cbor)) => {
+                // Store the forged block in ChainDB
+                {
+                    let mut db = self.chain_db.write().await;
+                    if let Err(e) = db.add_block(
+                        *block.hash(),
+                        block.slot(),
+                        block.block_number(),
+                        *block.prev_hash(),
+                        cbor,
+                    ) {
+                        error!("Failed to store forged block: {e}");
+                        return;
+                    }
+                }
+
+                // Apply to ledger
+                {
+                    let mut ls = self.ledger_state.write().await;
+                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
+                        error!("Failed to apply forged block to ledger: {e}");
+                        return;
+                    }
+                }
+
+                // Remove confirmed transactions from mempool
+                let confirmed: Vec<_> = block.transactions.iter().map(|tx| tx.hash).collect();
+                if !confirmed.is_empty() {
+                    self.mempool.remove_txs(&confirmed);
+                }
+
+                // Update consensus tip
+                self.consensus.update_tip(block.tip());
+
+                self.metrics
+                    .blocks_forged
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    block = block_number.0,
+                    slot = next_slot.0,
+                    txs = block.transactions.len(),
+                    "Block forged",
+                );
+
+                // Announce the new block to all connected peers
+                if let Some(ref tx) = self.block_announcement_tx {
+                    let mut hash_bytes = [0u8; 32];
+                    hash_bytes.copy_from_slice(block.header.header_hash.as_ref());
+                    tx.send(torsten_network::BlockAnnouncement {
+                        slot: next_slot.0,
+                        hash: hash_bytes,
+                        block_number: block_number.0,
+                    })
+                    .ok();
+                    self.metrics
+                        .blocks_announced
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Err(e) => {
+                self.metrics
+                    .forge_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                error!("Block forging failed: {e}");
+            }
+        }
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    use torsten_primitives::block::{
+        Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput,
+    };
+    use torsten_primitives::era::Era;
+    use torsten_primitives::hash::Hash32;
+    use torsten_primitives::time::{BlockNo, SlotNo};
+
+    use super::serve::ChainDBBlockProvider;
+    use super::sync::validate_genesis_blocks;
+    use crate::config::NodeConfig;
+
+    /// Helper to create a minimal test block with the given era, block number, hash, and prev_hash.
+    fn make_test_block(
+        era: Era,
+        block_no: u64,
+        slot: u64,
+        hash: Hash32,
+        prev_hash: Hash32,
+    ) -> Block {
+        Block {
+            header: BlockHeader {
+                header_hash: hash,
+                prev_hash,
+                issuer_vkey: vec![],
+                vrf_vkey: vec![],
+                vrf_result: VrfOutput {
+                    output: vec![],
+                    proof: vec![],
+                },
+                block_number: BlockNo(block_no),
+                slot: SlotNo(slot),
+                epoch_nonce: Hash32::ZERO,
+                body_size: 0,
+                body_hash: Hash32::ZERO,
+                operational_cert: OperationalCert {
+                    hot_vkey: vec![],
+                    sequence_number: 0,
+                    kes_period: 0,
+                    sigma: vec![],
+                },
+                protocol_version: ProtocolVersion { major: 0, minor: 0 },
+                kes_signature: vec![],
+            },
+            transactions: vec![],
+            era,
+            raw_cbor: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_genesis_empty_blocks() {
+        // Empty block list should pass validation
+        let result = validate_genesis_blocks(&[], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_genesis_skips_non_genesis_block() {
+        // Block with block_number > 0 should skip validation
+        let block = make_test_block(
+            Era::Byron,
+            42,
+            100,
+            Hash32::from_bytes([1u8; 32]),
+            Hash32::from_bytes([2u8; 32]),
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_hash_match() {
+        let expected_hash = Hash32::from_bytes([0xAA; 32]);
+        let block = make_test_block(Era::Byron, 0, 0, expected_hash, Hash32::ZERO);
+        let result = validate_genesis_blocks(&[block], Some(&expected_hash), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_hash_mismatch() {
+        let expected_hash = Hash32::from_bytes([0xAA; 32]);
+        let wrong_hash = Hash32::from_bytes([0xBB; 32]);
+        let block = make_test_block(Era::Byron, 0, 0, wrong_hash, Hash32::ZERO);
+        let result = validate_genesis_blocks(&[block], Some(&expected_hash), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Byron genesis block hash mismatch"));
+        assert!(err.contains(&expected_hash.to_hex()));
+        assert!(err.contains(&wrong_hash.to_hex()));
+    }
+
+    #[test]
+    fn test_validate_byron_genesis_no_expected_hash() {
+        // When no expected hash is configured, validation should pass (with warning)
+        let block = make_test_block(
+            Era::Byron,
+            0,
+            0,
+            Hash32::from_bytes([0xCC; 32]),
+            Hash32::ZERO,
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_prev_hash_match() {
+        // For Shelley-first chains, prev_hash of block 0 is the genesis hash
+        let genesis_hash = Hash32::from_bytes([0xDD; 32]);
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            genesis_hash,
+        );
+        let result = validate_genesis_blocks(&[block], None, Some(&genesis_hash));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_prev_hash_mismatch() {
+        let expected_genesis = Hash32::from_bytes([0xDD; 32]);
+        let wrong_prev = Hash32::from_bytes([0xEE; 32]);
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            wrong_prev,
+        );
+        let result = validate_genesis_blocks(&[block], None, Some(&expected_genesis));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Shelley genesis hash mismatch"));
+        assert!(err.contains(&expected_genesis.to_hex()));
+        assert!(err.contains(&wrong_prev.to_hex()));
+    }
+
+    #[test]
+    fn test_validate_shelley_genesis_no_expected_hash() {
+        // When no expected Shelley hash is configured, validation should pass
+        let block = make_test_block(
+            Era::Shelley,
+            0,
+            0,
+            Hash32::from_bytes([0x11; 32]),
+            Hash32::from_bytes([0x22; 32]),
+        );
+        let result = validate_genesis_blocks(&[block], None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_byron_and_shelley_batch() {
+        // A batch starting with Byron genesis block 0 followed by more blocks
+        let byron_hash = Hash32::from_bytes([0xAA; 32]);
+        let b0 = make_test_block(Era::Byron, 0, 0, byron_hash, Hash32::ZERO);
+        let b1 = make_test_block(Era::Byron, 1, 1, Hash32::from_bytes([0xBB; 32]), byron_hash);
+
+        let result = validate_genesis_blocks(&[b0, b1], Some(&byron_hash), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_conway_genesis_prev_hash() {
+        // Conway era block at genesis (block 0) — still Shelley-based
+        let genesis_hash = Hash32::from_bytes([0xFF; 32]);
+        let block = make_test_block(
+            Era::Conway,
+            0,
+            0,
+            Hash32::from_bytes([0x33; 32]),
+            genesis_hash,
+        );
+        // Conway is Shelley-based, so Shelley genesis hash should be validated
+        let result = validate_genesis_blocks(&[block], None, Some(&genesis_hash));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_conway_genesis_prev_hash_mismatch() {
+        let expected = Hash32::from_bytes([0xFF; 32]);
+        let wrong = Hash32::from_bytes([0x00; 32]);
+        let block = make_test_block(Era::Conway, 0, 0, Hash32::from_bytes([0x33; 32]), wrong);
+        let result = validate_genesis_blocks(&[block], None, Some(&expected));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_genesis_hash_parsing() {
+        let json = r#"{
+            "Network": "Testnet",
+            "NetworkMagic": 2,
+            "ByronGenesisFile": "preview-byron-genesis.json",
+            "ByronGenesisHash": "81cf23542e33d64c541699926c2b5e6e9c286583f0c8a3fb5f22ea7b352dd174",
+            "ShelleyGenesisFile": "preview-shelley-genesis.json",
+            "ShelleyGenesisHash": "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+        }"#;
+
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.byron_genesis_hash.as_deref(),
+            Some("81cf23542e33d64c541699926c2b5e6e9c286583f0c8a3fb5f22ea7b352dd174")
+        );
+        assert_eq!(
+            config.shelley_genesis_hash.as_deref(),
+            Some("363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d")
+        );
+
+        // Verify the hashes parse into Hash32 correctly
+        let byron_hash = Hash32::from_hex(config.byron_genesis_hash.as_ref().unwrap()).unwrap();
+        assert_ne!(byron_hash, Hash32::ZERO);
+
+        let shelley_hash = Hash32::from_hex(config.shelley_genesis_hash.as_ref().unwrap()).unwrap();
+        assert_ne!(shelley_hash, Hash32::ZERO);
+    }
+
+    #[test]
+    fn test_config_without_genesis_hashes() {
+        let json = r#"{
+            "Network": "Testnet",
+            "NetworkMagic": 2,
+            "ByronGenesisFile": "preview-byron-genesis.json",
+            "ShelleyGenesisFile": "preview-shelley-genesis.json"
+        }"#;
+
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.byron_genesis_hash.is_none());
+        assert!(config.shelley_genesis_hash.is_none());
+        assert!(config.alonzo_genesis_hash.is_none());
+        assert!(config.conway_genesis_hash.is_none());
+    }
+
+    /// Regression test: BlockProvider methods must not panic when called
+    /// from within a tokio async runtime. Previously, bare `blocking_read()`
+    /// would panic with "Cannot block the current thread from within a runtime".
+    /// The fix wraps them in `tokio::task::block_in_place`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_block_provider_works_inside_async_runtime() {
+        use torsten_network::n2n_server::BlockProvider;
+        use torsten_storage::ChainDB;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = ChainDB::open(tmp.path()).unwrap();
+        let provider = ChainDBBlockProvider {
+            chain_db: Arc::new(RwLock::new(db)),
+        };
+
+        // These would panic before the block_in_place fix
+        let tip = provider.get_tip();
+        assert_eq!(tip.block_number, 0);
+
+        let result = provider.get_block(&[0u8; 32]);
+        assert!(result.is_none());
+
+        let result = provider.has_block(&[0u8; 32]);
+        assert!(!result);
+
+        let result = provider.get_next_block_after_slot(0);
+        assert!(result.is_none());
+    }
+
+    /// Regression test: tokio RwLock blocking_read inside block_in_place
+    /// must not panic in a multi-threaded async runtime. This covers the
+    /// pattern used by both LedgerUtxoProvider and ChainDBBlockProvider.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_blocking_read_via_block_in_place_does_not_panic() {
+        let lock = Arc::new(RwLock::new(42u64));
+        let value = tokio::task::block_in_place(|| {
+            let guard = lock.blocking_read();
+            *guard
+        });
+        assert_eq!(value, 42);
+    }
+}
