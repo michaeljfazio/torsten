@@ -7,7 +7,7 @@ use torsten_primitives::transaction::{
     DRep, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, info, warn};
+use tracing::{debug, trace, warn};
 
 impl LedgerState {
     /// Process a governance proposal.
@@ -199,13 +199,9 @@ impl LedgerState {
         for (action_id, action, _expires) in &candidates {
             // Check prev_action_id chain
             if !prev_action_as_expected(action, &self.governance) {
-                info!(
+                trace!(
                     action_id = %action_id.transaction_id.to_hex(),
                     action_type = ?std::mem::discriminant(action),
-                    enacted_pparam = ?self.governance.enacted_pparam_update.as_ref().map(|id| id.transaction_id.to_hex()),
-                    enacted_committee = ?self.governance.enacted_committee.as_ref().map(|id| id.transaction_id.to_hex()),
-                    enacted_hard_fork = ?self.governance.enacted_hard_fork.as_ref().map(|id| id.transaction_id.to_hex()),
-                    enacted_constitution = ?self.governance.enacted_constitution.as_ref().map(|id| id.transaction_id.to_hex()),
                     "Governance proposal: prev_action_id chain mismatch — skipping"
                 );
                 continue;
@@ -254,11 +250,9 @@ impl LedgerState {
                     no_confidence_stake,
                 );
                 if met {
-                    info!(
+                    debug!(
                         action_id = %action_id.transaction_id.to_hex(),
                         action_type = ?std::mem::discriminant(action),
-                        drep_yes, drep_total, spo_yes, total_spo_stake,
-                        cc_yes, cc_total,
                         "Governance proposal RATIFIED"
                     );
                     // Enact immediately and update roots (for chain validation of subsequent proposals)
@@ -269,12 +263,9 @@ impl LedgerState {
                         delayed = true;
                     }
                 } else if !matches!(action, GovAction::InfoAction) {
-                    debug!(
+                    trace!(
                         action_id = %action_id.transaction_id.to_hex(),
                         action_type = ?std::mem::discriminant(action),
-                        drep_yes, drep_total, spo_yes, total_spo_stake,
-                        cc_yes, cc_total,
-                        bootstrap = self.is_bootstrap_phase(),
                         "Governance proposal NOT ratified"
                     );
                 }
@@ -778,7 +769,7 @@ impl LedgerState {
                         "Governance protocol parameter update rejected"
                     );
                 } else {
-                    info!("Governance   protocol parameters updated");
+                    debug!("Governance   protocol parameters updated");
                 }
             }
             GovAction::HardForkInitiation {
@@ -786,7 +777,7 @@ impl LedgerState {
             } => {
                 self.protocol_params.protocol_version_major = protocol_version.0;
                 self.protocol_params.protocol_version_minor = protocol_version.1;
-                info!(
+                debug!(
                     "Governance   hard fork initiated (protocol version {}.{})",
                     protocol_version.0, protocol_version.1
                 );
@@ -816,7 +807,7 @@ impl LedgerState {
                             .or_insert(Lovelace(0)) += Lovelace(actual);
                     }
                 }
-                info!(
+                debug!(
                     "Governance   treasury withdrawal: {} lovelace to {} accounts",
                     total,
                     withdrawals.len()
@@ -830,7 +821,7 @@ impl LedgerState {
                 gov.committee_expiration.clear();
                 gov.committee_threshold = None; // Match Haskell SNothing
                 gov.no_confidence = true;
-                info!("Governance   no confidence motion enacted, committee disbanded");
+                debug!("Governance   no confidence motion enacted, committee disbanded");
             }
             GovAction::UpdateCommittee {
                 members_to_remove,
@@ -863,7 +854,7 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance).committee_threshold = Some(threshold.clone());
                 // UpdateCommittee restores confidence
                 Arc::make_mut(&mut self.governance).no_confidence = false;
-                info!(
+                debug!(
                     "Governance   committee updated: {} removed, {} added, threshold={}/{}",
                     members_to_remove.len(),
                     members_to_add.len(),
@@ -873,7 +864,7 @@ impl LedgerState {
             }
             GovAction::NewConstitution { constitution, .. } => {
                 Arc::make_mut(&mut self.governance).constitution = Some(constitution.clone());
-                info!(
+                debug!(
                     "Governance   new constitution enacted (script_hash: {:?})",
                     constitution.script_hash.as_ref().map(|h| h.to_hex())
                 );
