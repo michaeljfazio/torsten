@@ -11,6 +11,14 @@ use std::collections::VecDeque;
 /// Maximum number of sparkline samples to retain (one sample per poll interval).
 const SPARKLINE_CAPACITY: usize = 60;
 
+/// Push a value onto a ring buffer VecDeque, evicting the oldest if at capacity.
+fn push_to_ring(ring: &mut VecDeque<u64>, value: u64) {
+    if ring.len() >= SPARKLINE_CAPACITY {
+        ring.pop_front();
+    }
+    ring.push_back(value);
+}
+
 /// Active panel for keyboard navigation (Tab cycling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePanel {
@@ -30,6 +38,28 @@ impl ActivePanel {
             ActivePanel::Governance => ActivePanel::Chain,
         }
     }
+
+    /// Cycle to the previous panel in order.
+    pub fn prev(self) -> Self {
+        match self {
+            ActivePanel::Chain => ActivePanel::Governance,
+            ActivePanel::Peers => ActivePanel::Chain,
+            ActivePanel::Performance => ActivePanel::Peers,
+            ActivePanel::Governance => ActivePanel::Performance,
+        }
+    }
+
+    /// Jump to a specific panel by 1-based index (1=Chain, 2=Peers, ...).
+    /// Returns `None` if the index is out of range.
+    pub fn from_index(idx: usize) -> Option<Self> {
+        match idx {
+            1 => Some(ActivePanel::Chain),
+            2 => Some(ActivePanel::Peers),
+            3 => Some(ActivePanel::Performance),
+            4 => Some(ActivePanel::Governance),
+            _ => None,
+        }
+    }
 }
 
 /// Full application state for the TUI dashboard.
@@ -39,8 +69,16 @@ pub struct App {
     /// Historical block-rate values for the sparkline widget.
     /// Each entry is blocks_applied delta since the previous sample.
     pub block_rate_history: VecDeque<u64>,
+    /// Historical tx validation rate (delta per poll interval).
+    pub tx_rate_history: VecDeque<u64>,
+    /// Historical mempool depth snapshots (tx count per poll).
+    pub mempool_depth_history: VecDeque<u64>,
+    /// Historical memory usage snapshots (bytes per poll).
+    pub memory_history: VecDeque<u64>,
     /// Previous blocks_applied value (for computing deltas).
     prev_blocks_applied: u64,
+    /// Previous txs_validated value (for computing deltas).
+    prev_txs_validated: u64,
     /// Whether this is the first metrics update (skip delta on first sample).
     first_update: bool,
     /// Currently focused panel.
@@ -55,6 +93,12 @@ pub struct App {
     pub epoch_slots_remaining: u64,
     /// Epoch progress as a percentage (0.0 - 100.0).
     pub epoch_progress_pct: f64,
+    /// Seconds remaining until the next epoch boundary.
+    pub epoch_time_remaining_secs: u64,
+    /// Slot position within the current epoch.
+    pub slot_in_epoch: u64,
+    /// Network-specific epoch length in slots. 0 = auto-detect from metrics.
+    pub epoch_length_override: u64,
 }
 
 impl App {
@@ -63,7 +107,11 @@ impl App {
         Self {
             metrics: MetricsSnapshot::default(),
             block_rate_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
+            tx_rate_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
+            mempool_depth_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
+            memory_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
             prev_blocks_applied: 0,
+            prev_txs_validated: 0,
             first_update: true,
             active_panel: ActivePanel::Chain,
             show_help: false,
@@ -71,42 +119,61 @@ impl App {
             layout_mode: None,
             epoch_slots_remaining: 0,
             epoch_progress_pct: 0.0,
+            epoch_time_remaining_secs: 0,
+            slot_in_epoch: 0,
+            epoch_length_override: 0,
         }
     }
 
     /// Update the app state with a new metrics snapshot.
     ///
-    /// Computes the block-rate delta and pushes it onto the sparkline history.
+    /// Computes block-rate, tx-rate deltas and pushes snapshots onto
+    /// the respective sparkline histories.
     pub fn update_metrics(&mut self, snapshot: MetricsSnapshot) {
         let current_blocks = snapshot.get_u64("torsten_blocks_applied_total");
+        let current_txs = snapshot.get_u64("torsten_transactions_validated_total");
+        let mempool_count = snapshot.get_u64("torsten_mempool_tx_count");
+        let mem_bytes = snapshot.get_u64("torsten_mem_resident_bytes");
 
         if self.first_update {
-            // First sample: no delta to compute, just record the baseline.
+            // First sample: no delta to compute, just record baselines.
             self.first_update = false;
             self.prev_blocks_applied = current_blocks;
+            self.prev_txs_validated = current_txs;
         } else {
             // Compute blocks applied since last poll.
-            let delta = current_blocks.saturating_sub(self.prev_blocks_applied);
+            let block_delta = current_blocks.saturating_sub(self.prev_blocks_applied);
             self.prev_blocks_applied = current_blocks;
+            push_to_ring(&mut self.block_rate_history, block_delta);
 
-            // Push to sparkline history, evicting oldest if at capacity.
-            if self.block_rate_history.len() >= SPARKLINE_CAPACITY {
-                self.block_rate_history.pop_front();
-            }
-            self.block_rate_history.push_back(delta);
+            // Compute txs validated since last poll.
+            let tx_delta = current_txs.saturating_sub(self.prev_txs_validated);
+            self.prev_txs_validated = current_txs;
+            push_to_ring(&mut self.tx_rate_history, tx_delta);
+
+            // Snapshot mempool depth and memory usage.
+            push_to_ring(&mut self.mempool_depth_history, mempool_count);
+            push_to_ring(&mut self.memory_history, mem_bytes);
         }
 
         // Compute epoch progress from slot_number and epoch_length.
-        // Default epoch length for Cardano is 432,000 slots (5 days at 1s slots).
-        let epoch_length = snapshot.get_u64("torsten_epoch_length");
-        let epoch_length = if epoch_length > 0 {
-            epoch_length
+        // Use override if set, otherwise try the metric, otherwise fall back to 432,000.
+        let epoch_length = if self.epoch_length_override > 0 {
+            self.epoch_length_override
         } else {
-            432_000
+            let metric_len = snapshot.get_u64("torsten_epoch_length");
+            if metric_len > 0 {
+                metric_len
+            } else {
+                432_000
+            }
         };
         let slot = snapshot.get_u64("torsten_slot_number");
         let slot_in_epoch = slot % epoch_length;
+        self.slot_in_epoch = slot_in_epoch;
         self.epoch_slots_remaining = epoch_length.saturating_sub(slot_in_epoch);
+        // Each slot is 1 second on Cardano.
+        self.epoch_time_remaining_secs = self.epoch_slots_remaining;
         self.epoch_progress_pct = if epoch_length > 0 {
             (slot_in_epoch as f64 / epoch_length as f64) * 100.0
         } else {
@@ -116,9 +183,41 @@ impl App {
         self.metrics = snapshot;
     }
 
+    /// Compute the current tx throughput (txs per second) based on the last
+    /// sparkline sample and the poll interval.
+    pub fn txs_per_second(&self, poll_interval_secs: f64) -> f64 {
+        self.tx_rate_history.back().copied().unwrap_or(0) as f64 / poll_interval_secs
+    }
+
+    /// Get the effective epoch length (respecting overrides).
+    pub fn epoch_length(&self) -> u64 {
+        if self.epoch_length_override > 0 {
+            self.epoch_length_override
+        } else {
+            let metric_len = self.metrics.get_u64("torsten_epoch_length");
+            if metric_len > 0 {
+                metric_len
+            } else {
+                432_000
+            }
+        }
+    }
+
     /// Cycle to the next panel.
     pub fn next_panel(&mut self) {
         self.active_panel = self.active_panel.next();
+    }
+
+    /// Cycle to the previous panel.
+    pub fn prev_panel(&mut self) {
+        self.active_panel = self.active_panel.prev();
+    }
+
+    /// Jump to a specific panel by 1-based index (1-4).
+    pub fn jump_to_panel(&mut self, idx: usize) {
+        if let Some(panel) = ActivePanel::from_index(idx) {
+            self.active_panel = panel;
+        }
     }
 
     /// Toggle the help overlay.
@@ -234,6 +333,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
+            labeled: std::collections::HashMap::new(),
             connected: true,
             error: None,
         }
@@ -364,5 +464,111 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_prev_panel_cycling() {
+        let mut app = App::new();
+        assert_eq!(app.active_panel, ActivePanel::Chain);
+        app.prev_panel();
+        assert_eq!(app.active_panel, ActivePanel::Governance);
+        app.prev_panel();
+        assert_eq!(app.active_panel, ActivePanel::Performance);
+        app.prev_panel();
+        assert_eq!(app.active_panel, ActivePanel::Peers);
+        app.prev_panel();
+        assert_eq!(app.active_panel, ActivePanel::Chain);
+    }
+
+    #[test]
+    fn test_jump_to_panel() {
+        let mut app = App::new();
+        app.jump_to_panel(3);
+        assert_eq!(app.active_panel, ActivePanel::Performance);
+        app.jump_to_panel(1);
+        assert_eq!(app.active_panel, ActivePanel::Chain);
+        // Out-of-range index is ignored.
+        app.jump_to_panel(5);
+        assert_eq!(app.active_panel, ActivePanel::Chain);
+        app.jump_to_panel(0);
+        assert_eq!(app.active_panel, ActivePanel::Chain);
+    }
+
+    #[test]
+    fn test_tx_rate_history() {
+        let mut app = App::new();
+
+        // First update: baselines recorded, no delta.
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_blocks_applied_total", 100.0),
+            ("torsten_transactions_validated_total", 50.0),
+        ]));
+        assert!(app.tx_rate_history.is_empty());
+
+        // Second update: tx delta = 80 - 50 = 30.
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_blocks_applied_total", 110.0),
+            ("torsten_transactions_validated_total", 80.0),
+        ]));
+        assert_eq!(app.tx_rate_history.len(), 1);
+        assert_eq!(app.tx_rate_history[0], 30);
+    }
+
+    #[test]
+    fn test_mempool_and_memory_history() {
+        let mut app = App::new();
+
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_mempool_tx_count", 5.0),
+            ("torsten_mem_resident_bytes", 1_000_000.0),
+        ]));
+        // First update: no snapshot pushed.
+        assert!(app.mempool_depth_history.is_empty());
+        assert!(app.memory_history.is_empty());
+
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_mempool_tx_count", 8.0),
+            ("torsten_mem_resident_bytes", 2_000_000.0),
+        ]));
+        assert_eq!(app.mempool_depth_history.len(), 1);
+        assert_eq!(app.mempool_depth_history[0], 8);
+        assert_eq!(app.memory_history[0], 2_000_000);
+    }
+
+    #[test]
+    fn test_epoch_time_remaining() {
+        let mut app = App::new();
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_slot_number", 100_000.0),
+            ("torsten_epoch_length", 432_000.0),
+        ]));
+        assert_eq!(app.slot_in_epoch, 100_000);
+        assert_eq!(app.epoch_slots_remaining, 332_000);
+        assert_eq!(app.epoch_time_remaining_secs, 332_000);
+    }
+
+    #[test]
+    fn test_epoch_length_override() {
+        let mut app = App::new();
+        app.epoch_length_override = 86_400;
+        app.update_metrics(make_snapshot(vec![("torsten_slot_number", 43_200.0)]));
+        assert_eq!(app.slot_in_epoch, 43_200);
+        assert_eq!(app.epoch_length(), 86_400);
+        assert!((app.epoch_progress_pct - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_txs_per_second() {
+        let mut app = App::new();
+        app.update_metrics(make_snapshot(vec![(
+            "torsten_transactions_validated_total",
+            0.0,
+        )]));
+        app.update_metrics(make_snapshot(vec![(
+            "torsten_transactions_validated_total",
+            20.0,
+        )]));
+        // 20 txs in 2 second poll = 10 tx/s.
+        assert!((app.txs_per_second(2.0) - 10.0).abs() < 0.01);
     }
 }

@@ -38,14 +38,29 @@ pub struct SparklineHistory<'a> {
     color_high: Color,
 }
 
+#[allow(dead_code)]
 impl<'a> SparklineHistory<'a> {
     /// Create a new sparkline from a data source with default colors.
+    ///
+    /// An optional `base_color` can be provided to set all three gradient
+    /// tiers to the same hue (useful when the sparkline represents a single
+    /// metric that doesn't need traffic-light coloring).
     pub fn new(data: &'a VecDeque<u64>) -> Self {
         Self {
             data,
             color_low: Color::Green,
             color_mid: Color::Yellow,
             color_high: Color::Red,
+        }
+    }
+
+    /// Create a sparkline where all bars use the same color.
+    pub fn with_color(data: &'a VecDeque<u64>, color: Color) -> Self {
+        Self {
+            data,
+            color_low: color,
+            color_mid: color,
+            color_high: color,
         }
     }
 

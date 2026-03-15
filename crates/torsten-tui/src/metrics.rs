@@ -11,6 +11,12 @@ use std::collections::HashMap;
 pub struct MetricsSnapshot {
     /// Raw metric name -> value mapping for all simple (non-histogram) metrics.
     pub values: HashMap<String, f64>,
+    /// Labeled metric values. Key format: "metric_name:label_value" -> count.
+    ///
+    /// Parses Prometheus lines like `metric_name{key="value"} 123` into
+    /// entries keyed as `"metric_name:value"`.
+    #[allow(dead_code)]
+    pub labeled: HashMap<String, f64>,
     /// Whether the last scrape succeeded.
     pub connected: bool,
     /// Error message from the last failed scrape, if any.
@@ -30,50 +36,91 @@ impl MetricsSnapshot {
     }
 }
 
-/// Parse Prometheus text exposition format into a HashMap of metric name -> value.
+/// Result of parsing Prometheus exposition text.
+struct ParsedMetrics {
+    /// Simple (unlabeled) metric values.
+    values: HashMap<String, f64>,
+    /// Labeled metric values with key format "metric_name:label_value".
+    labeled: HashMap<String, f64>,
+}
+
+/// Parse Prometheus text exposition format into both simple and labeled metric maps.
 ///
-/// Only parses lines matching `metric_name value` (no labels, no histograms).
+/// Simple lines (`metric_name value`) go into `values`.
+/// Labeled lines (`metric_name{key="value"} 123`) go into `labeled`
+/// with key format `"metric_name:value"` (using the first label's value).
 /// Comment lines (starting with #) are skipped.
-fn parse_prometheus(text: &str) -> HashMap<String, f64> {
-    let mut map = HashMap::new();
+fn parse_prometheus(text: &str) -> ParsedMetrics {
+    let mut values = HashMap::new();
+    let mut labeled = HashMap::new();
+
     for line in text.lines() {
         let line = line.trim();
-        // Skip comments and empty lines
+        // Skip comments and empty lines.
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Skip histogram bucket/sum/count lines (handled separately if needed)
-        if line.contains('{') {
-            continue;
-        }
-        // Parse "metric_name value"
-        let mut parts = line.split_whitespace();
-        if let (Some(name), Some(value_str)) = (parts.next(), parts.next()) {
-            if let Ok(value) = value_str.parse::<f64>() {
-                map.insert(name.to_string(), value);
+
+        if let Some(brace_start) = line.find('{') {
+            // Labeled metric: extract name, first label value, and metric value.
+            let metric_name = &line[..brace_start];
+            if let Some(brace_end) = line.find('}') {
+                let labels_str = &line[brace_start + 1..brace_end];
+                let value_str = line[brace_end + 1..].trim();
+
+                // Parse the numeric value after the closing brace.
+                if let Ok(value) = value_str.parse::<f64>() {
+                    // Extract first label value: key="value" or key='value'.
+                    if let Some(eq_pos) = labels_str.find('=') {
+                        let label_val = labels_str[eq_pos + 1..]
+                            .trim_matches('"')
+                            .split('"')
+                            .next()
+                            .unwrap_or("");
+                        // Also handle comma-separated labels by taking only up to first comma.
+                        let label_val = label_val.split(',').next().unwrap_or(label_val);
+                        let key = format!("{}:{}", metric_name, label_val);
+                        labeled.insert(key, value);
+                    }
+                }
+            }
+        } else {
+            // Simple unlabeled metric.
+            let mut parts = line.split_whitespace();
+            if let (Some(name), Some(value_str)) = (parts.next(), parts.next()) {
+                if let Ok(value) = value_str.parse::<f64>() {
+                    values.insert(name.to_string(), value);
+                }
             }
         }
     }
-    map
+
+    ParsedMetrics { values, labeled }
 }
 
 /// Fetch metrics from the Prometheus endpoint and return a parsed snapshot.
 pub async fn fetch_metrics(url: &str) -> MetricsSnapshot {
     match reqwest::get(url).await {
         Ok(resp) => match resp.text().await {
-            Ok(body) => MetricsSnapshot {
-                values: parse_prometheus(&body),
-                connected: true,
-                error: None,
-            },
+            Ok(body) => {
+                let parsed = parse_prometheus(&body);
+                MetricsSnapshot {
+                    values: parsed.values,
+                    labeled: parsed.labeled,
+                    connected: true,
+                    error: None,
+                }
+            }
             Err(e) => MetricsSnapshot {
                 values: HashMap::new(),
+                labeled: HashMap::new(),
                 connected: false,
                 error: Some(format!("Failed to read response: {e}")),
             },
         },
         Err(e) => MetricsSnapshot {
             values: HashMap::new(),
+            labeled: HashMap::new(),
             connected: false,
             error: Some(format!("Connection failed: {e}")),
         },
@@ -112,16 +159,16 @@ torsten_peers_hot 5
 torsten_peers_warm 3
 torsten_peers_cold 8
 "#;
-        let map = parse_prometheus(input);
-        assert_eq!(map["torsten_slot_number"], 106919624.0);
-        assert_eq!(map["torsten_block_number"], 4109330.0);
-        assert_eq!(map["torsten_epoch_number"], 1237.0);
-        assert_eq!(map["torsten_sync_progress_percent"], 9982.0);
-        assert_eq!(map["torsten_peers_connected"], 5.0);
+        let parsed = parse_prometheus(input);
+        assert_eq!(parsed.values["torsten_slot_number"], 106919624.0);
+        assert_eq!(parsed.values["torsten_block_number"], 4109330.0);
+        assert_eq!(parsed.values["torsten_epoch_number"], 1237.0);
+        assert_eq!(parsed.values["torsten_sync_progress_percent"], 9982.0);
+        assert_eq!(parsed.values["torsten_peers_connected"], 5.0);
     }
 
     #[test]
-    fn test_parse_prometheus_skips_histograms() {
+    fn test_parse_prometheus_labeled_metrics() {
         let input = r#"
 # TYPE torsten_peer_handshake_rtt_ms histogram
 torsten_peer_handshake_rtt_ms_bucket{le="1"} 0
@@ -131,13 +178,34 @@ torsten_peer_handshake_rtt_ms_sum 555
 torsten_peer_handshake_rtt_ms_count 10
 torsten_slot_number 42
 "#;
-        let map = parse_prometheus(input);
-        // Histogram bucket lines (with labels) should be skipped
-        assert!(!map.contains_key("torsten_peer_handshake_rtt_ms_bucket"));
-        // But sum and count lines (no labels) are parsed
-        assert_eq!(map["torsten_peer_handshake_rtt_ms_sum"], 555.0);
-        assert_eq!(map["torsten_peer_handshake_rtt_ms_count"], 10.0);
-        assert_eq!(map["torsten_slot_number"], 42.0);
+        let parsed = parse_prometheus(input);
+        // Labeled lines go into `labeled` map.
+        assert_eq!(
+            parsed.labeled["torsten_peer_handshake_rtt_ms_bucket:1"],
+            0.0
+        );
+        assert_eq!(
+            parsed.labeled["torsten_peer_handshake_rtt_ms_bucket:5"],
+            2.0
+        );
+        assert_eq!(
+            parsed.labeled["torsten_peer_handshake_rtt_ms_bucket:+Inf"],
+            10.0
+        );
+        // Sum and count (no labels) are in `values`.
+        assert_eq!(parsed.values["torsten_peer_handshake_rtt_ms_sum"], 555.0);
+        assert_eq!(parsed.values["torsten_peer_handshake_rtt_ms_count"], 10.0);
+        assert_eq!(parsed.values["torsten_slot_number"], 42.0);
+    }
+
+    #[test]
+    fn test_parse_prometheus_multi_label() {
+        let input = r#"
+http_requests_total{method="GET",endpoint="/api"} 42
+"#;
+        let parsed = parse_prometheus(input);
+        // Uses first label value.
+        assert_eq!(parsed.labeled["http_requests_total:GET"], 42.0);
     }
 
     #[test]

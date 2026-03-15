@@ -9,6 +9,7 @@
 //! ```bash
 //! torsten-tui                                         # defaults
 //! torsten-tui --metrics-url http://host:12798/metrics # custom endpoint
+//! torsten-tui --network-magic 2                       # preview testnet epoch length
 //! ```
 
 mod app;
@@ -48,12 +49,40 @@ struct Args {
     /// URL of the Torsten Prometheus metrics endpoint.
     #[arg(long, default_value = DEFAULT_METRICS_URL)]
     metrics_url: String,
+
+    /// Network magic for epoch length calculation.
+    ///
+    /// Preview = 2 (epoch length 86,400 slots = 1 day).
+    /// Mainnet = 764824073 (epoch length 432,000 slots = 5 days).
+    /// Preprod = 1 (epoch length 432,000 slots = 5 days).
+    ///
+    /// When omitted, the epoch length is auto-detected from Prometheus metrics
+    /// or defaults to 432,000 slots (mainnet).
+    #[arg(long)]
+    network_magic: Option<u64>,
+}
+
+/// Determine epoch length from network magic.
+///
+/// Returns 0 if the magic is unknown (falls back to auto-detection).
+fn epoch_length_from_magic(magic: u64) -> u64 {
+    match magic {
+        2 => 86_400,            // Preview testnet: 1 day
+        1 => 432_000,           // Preprod: 5 days
+        764_824_073 => 432_000, // Mainnet: 5 days
+        _ => 0,                 // Unknown: auto-detect
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let mut app = App::new();
+
+    // Apply network magic epoch length override if provided.
+    if let Some(magic) = args.network_magic {
+        app.epoch_length_override = epoch_length_from_magic(magic);
+    }
 
     // Setup terminal
     enable_raw_mode()?;
@@ -111,7 +140,11 @@ async fn run_loop(
                         KeyCode::Tab => {
                             app.next_panel();
                         }
-                        KeyCode::Char('h') => {
+                        KeyCode::BackTab => {
+                            // Shift+Tab: cycle panels backward
+                            app.prev_panel();
+                        }
+                        KeyCode::Char('h') | KeyCode::Char('?') => {
                             app.toggle_help();
                         }
                         KeyCode::Char('m') => {
@@ -122,6 +155,11 @@ async fn run_loop(
                             let snapshot = fetch_metrics(metrics_url).await;
                             app.update_metrics(snapshot);
                             last_fetch = tokio::time::Instant::now();
+                        }
+                        // Number keys 1-4: jump to specific panel
+                        KeyCode::Char(c @ '1'..='4') => {
+                            let idx = (c as u8 - b'0') as usize;
+                            app.jump_to_panel(idx);
                         }
                         _ => {}
                     }

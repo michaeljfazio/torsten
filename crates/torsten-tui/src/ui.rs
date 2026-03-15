@@ -8,7 +8,9 @@
 
 use crate::app::{ActivePanel, App};
 use crate::layout::{compute_layout, LayoutMode};
+use crate::widgets::epoch_progress::EpochProgress;
 use crate::widgets::header_bar::HeaderBar;
+use crate::widgets::mempool_gauge::MempoolGauge;
 use crate::widgets::sparkline_history::SparklineHistory;
 use crate::widgets::sync_progress::SyncProgressBar;
 use ratatui::{
@@ -68,7 +70,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-/// Render the 2-line header bar widget.
+/// Render the header bar widget. Uses line 1 for status summary and line 2
+/// for the epoch countdown progress bar showing slot position and time remaining.
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let (_, is_synced, is_stalled) = app.sync_status();
     let pct = app.sync_progress_pct();
@@ -87,7 +90,24 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         connected: app.metrics.connected,
     };
 
+    // Line 1: rendered by the HeaderBar widget (it uses both lines).
+    // We override line 2 with our EpochProgress widget for better detail.
     frame.render_widget(header, area);
+
+    // Overlay line 2 with the EpochProgress widget if we have space.
+    if area.height >= 2 {
+        let epoch_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: 1,
+        };
+        let epoch_len = app.epoch_length();
+        frame.render_widget(
+            EpochProgress::new(app.slot_in_epoch, epoch_len, app.epoch_time_remaining_secs),
+            epoch_area,
+        );
+    }
 }
 
 /// Create a styled block with optional active-panel highlight.
@@ -349,6 +369,14 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the Performance panel (bordered).
+///
+/// Layout:
+/// - Blocks/s with sparkline
+/// - TX/s with sparkline
+/// - UTxOs, Memory
+/// - Mempool gauge
+/// - Block production (only when forging)
+/// - Applied/Received counts
 fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Performance;
     let block = panel_block("Performance", is_active);
@@ -362,6 +390,7 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
     let w = inner.width.saturating_sub(4);
 
     let bps = app.blocks_per_second(POLL_INTERVAL_SECS);
+    let tps = app.txs_per_second(POLL_INTERVAL_SECS);
     let utxo_count = App::format_number(app.metrics.get_u64("torsten_utxo_count"));
     let mem_bytes = app.metrics.get_u64("torsten_mem_resident_bytes");
     let mem_str = App::format_bytes(mem_bytes);
@@ -369,19 +398,17 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
     let mempool_bytes = app.metrics.get_u64("torsten_mempool_bytes");
     let blocks_applied = App::format_number(app.metrics.get_u64("torsten_blocks_applied_total"));
     let blocks_received = App::format_number(app.metrics.get_u64("torsten_blocks_received_total"));
+    let blocks_forged = app.metrics.get_u64("torsten_blocks_forged_total");
 
-    // Leave space for sparkline on the right side
+    // Sparkline dimensions.
     let sparkline_width = inner.width.saturating_sub(2).min(30) as usize;
 
-    let lines = vec![
+    let mut lines = vec![
         Line::default(),
-        metric_line_aligned(
-            "Blocks/s:    ",
-            App::format_number(bps as u64),
-            ACCENT_CYAN,
-            w,
-        ),
-        Line::default(), // sparkline row placeholder
+        metric_line_aligned("Blocks/s:    ", format!("{}", bps as u64), ACCENT_CYAN, w),
+        Line::default(), // block rate sparkline row placeholder
+        metric_line_aligned("TX/s:        ", format!("{}", tps as u64), ACCENT_GREEN, w),
+        Line::default(), // tx rate sparkline row placeholder
         Line::default(),
         metric_line_aligned("UTxOs:       ", utxo_count, BRIGHT_WHITE, w),
         metric_line_aligned(
@@ -402,14 +429,54 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
             BRIGHT_WHITE,
             w,
         ),
-        Line::default(),
-        metric_line_aligned("Applied:     ", blocks_applied, DIM_WHITE, w),
-        metric_line_aligned("Received:    ", blocks_received, DIM_WHITE, w),
+        Line::default(), // mempool gauge row placeholder
     ];
+
+    // Block production section (only when blocks_forged > 0).
+    if blocks_forged > 0 {
+        let slots_checked = App::format_number(app.metrics.get_u64("torsten_slots_checked_total"));
+        let missed = app
+            .metrics
+            .get_u64("torsten_slots_checked_total")
+            .saturating_sub(blocks_forged);
+        lines.push(Line::default());
+        lines.push(metric_line_aligned(
+            "Forged:      ",
+            App::format_number(blocks_forged),
+            ACCENT_GREEN,
+            w,
+        ));
+        lines.push(metric_line_aligned(
+            "Slots check: ",
+            slots_checked,
+            DIM_WHITE,
+            w,
+        ));
+        lines.push(metric_line_aligned(
+            "Missed:      ",
+            App::format_number(missed),
+            if missed > 0 { ACCENT_YELLOW } else { DIM_WHITE },
+            w,
+        ));
+    }
+
+    lines.push(Line::default());
+    lines.push(metric_line_aligned(
+        "Applied:     ",
+        blocks_applied,
+        DIM_WHITE,
+        w,
+    ));
+    lines.push(metric_line_aligned(
+        "Received:    ",
+        blocks_received,
+        DIM_WHITE,
+        w,
+    ));
 
     frame.render_widget(Paragraph::new(lines), inner);
 
-    // Render sparkline on the right portion of the panel, aligned with Blocks/s row
+    // Render block rate sparkline (row index 2 within inner).
     if inner.height > 2 && !app.block_rate_history.is_empty() {
         let spark_area = Rect {
             x: inner.right().saturating_sub(sparkline_width as u16 + 1),
@@ -418,13 +485,40 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
             height: 1,
         };
         frame.render_widget(
-            SparklineHistory::new(&app.block_rate_history, ACCENT_CYAN),
+            SparklineHistory::with_color(&app.block_rate_history, ACCENT_CYAN),
             spark_area,
         );
+    }
+
+    // Render TX rate sparkline (row index 4 within inner).
+    if inner.height > 4 && !app.tx_rate_history.is_empty() {
+        let spark_area = Rect {
+            x: inner.right().saturating_sub(sparkline_width as u16 + 1),
+            y: inner.y + 4,
+            width: sparkline_width as u16,
+            height: 1,
+        };
+        frame.render_widget(
+            SparklineHistory::with_color(&app.tx_rate_history, ACCENT_GREEN),
+            spark_area,
+        );
+    }
+
+    // Render mempool gauge (row index 9 within inner).
+    if inner.height > 9 && inner.width > 8 {
+        let gauge_area = Rect {
+            x: inner.x + 2,
+            y: inner.y + 9,
+            width: inner.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(MempoolGauge::new(mempool_txs), gauge_area);
     }
 }
 
 /// Render the Governance panel (bordered).
+///
+/// Includes treasury, DRep/proposal counts, pool stats, and disk info.
 fn render_governance(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Governance;
     let block = panel_block("Governance", is_active);
@@ -438,8 +532,9 @@ fn render_governance(frame: &mut Frame, app: &App, area: Rect) {
     let proposals = App::format_number(app.metrics.get_u64("torsten_proposal_count"));
     let pools = App::format_number(app.metrics.get_u64("torsten_pool_count"));
     let delegations = App::format_number(app.metrics.get_u64("torsten_delegation_count"));
+    let disk_avail = app.metrics.get_u64("torsten_disk_available_bytes");
 
-    let lines = vec![
+    let mut lines = vec![
         Line::default(),
         metric_line_aligned(
             "Treasury:    ",
@@ -454,6 +549,24 @@ fn render_governance(frame: &mut Frame, app: &App, area: Rect) {
         metric_line_aligned("Pools:       ", pools, ACCENT_CYAN, w),
         metric_line_aligned("Delegations: ", delegations, DIM_WHITE, w),
     ];
+
+    // Disk info: show when available (> 0 means the metric is being emitted).
+    if disk_avail > 0 {
+        let disk_color = if disk_avail > 50_000_000_000 {
+            ACCENT_GREEN // > 50 GB
+        } else if disk_avail > 10_000_000_000 {
+            ACCENT_YELLOW // > 10 GB
+        } else {
+            ACCENT_RED // < 10 GB
+        };
+        lines.push(Line::default());
+        lines.push(metric_line_aligned(
+            "Disk avail:  ",
+            App::format_bytes(disk_avail),
+            disk_color,
+            w,
+        ));
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -652,12 +765,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("uit  ", Style::default().fg(DIM_WHITE)),
         Span::styled(
-            "[Tab]",
+            "[Tab/S-Tab]",
             Style::default()
                 .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" cycle  ", Style::default().fg(DIM_WHITE)),
+        Span::styled(
+            "[1-4]",
+            Style::default()
+                .fg(ACCENT_BLUE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" panel  ", Style::default().fg(DIM_WHITE)),
         Span::styled(
             "[m]",
             Style::default()
@@ -670,12 +790,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("  ", Style::default()),
         Span::styled(
-            "[h]",
+            "[?]",
             Style::default()
                 .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("elp  ", Style::default().fg(DIM_WHITE)),
+        Span::styled("help  ", Style::default().fg(DIM_WHITE)),
         Span::styled("  \u{2502}  ", Style::default().fg(BORDER_NORMAL)),
         Span::styled(
             "torsten-tui",
@@ -688,8 +808,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render a centered help overlay on top of everything.
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let overlay_width = 44u16;
-    let overlay_height = 16u16;
+    let overlay_width = 48u16;
+    let overlay_height = 20u16;
 
     let x = area.x + area.width.saturating_sub(overlay_width) / 2;
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
@@ -727,9 +847,11 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::default(),
         help_key_line("q / Esc", "Quit"),
-        help_key_line("Tab", "Cycle panels"),
+        help_key_line("Tab", "Cycle panels forward"),
+        help_key_line("Shift+Tab", "Cycle panels backward"),
+        help_key_line("1-4", "Jump to panel (1=Chain, etc.)"),
         help_key_line("m", "Toggle layout mode"),
-        help_key_line("h", "Toggle this help"),
+        help_key_line("h / ?", "Toggle this help"),
         help_key_line("r", "Force refresh metrics"),
         Line::default(),
         Line::from(Span::styled(
