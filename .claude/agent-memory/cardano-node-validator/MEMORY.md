@@ -4,9 +4,9 @@
 - Node binary: `./target/release/torsten-node`
 - CLI binary: `./target/release/torsten-cli`
 - Config dir: `./config/` (preview-config.json, preview-topology.json)
-- Preview DB: `./db-preview/` — slot ~106.778M, block ~4.1048M, epoch 1235
-- Ledger snapshot: `<db>/ledger-snapshot.bin` (~65 MB without UTxOs — see Known Issues #3)
-- Node logs: `/tmp/torsten-validation-run.log`
+- Preview DB: `./db-preview/` — slot ~106.809M, block ~4.1059M, epoch 1236
+- Ledger snapshot: `<db>/ledger-snapshot.bin` (~1.1 GB with UTxOs when using in-memory backend)
+- Node logs: `/tmp/torsten-validation-run2.log`
 
 ## Startup Command Pattern
 ```
@@ -16,102 +16,105 @@ TORSTEN_PIPELINE_DEPTH=150 ./target/release/torsten-node run \
   --database-path ./db-preview \
   --socket-path ./node.sock \
   --host-addr 0.0.0.0 --port 3001 \
+  --metrics-port 12799 \
+  --storage-profile minimal \
+  --utxo-backend in-memory \
   > /tmp/torsten-validation-run.log 2>&1 &
 ```
 NOTE: Always `pkill -f torsten-node && rm -f ./node.sock` before restart.
-NOTE: Delete `db-preview/ledger-snapshot.bin` to force fresh replay with genesis seeding.
+NOTE: Use `--utxo-backend in-memory` to avoid LSM OOM crash during full replay on macOS.
+NOTE: Use `--metrics-port 12799` to avoid conflict with Haskell cardano-node on 12798.
+NOTE: `--storage-profile minimal` + `--utxo-backend in-memory` is required for macOS (OOM otherwise).
 
-## Preview Testnet Baselines (2026-03-14, run #6 — main 6b32d4c)
-- DB at slot ~106.778M / block ~4.1048M / epoch 1235 (resumed from run #5 snapshot)
-- Build: already built (incremental, 0.17s) — previous release binary still valid
-- New commits: 4806c2a (Phase-2 Plutus, P2P governor, GSM, enhanced mempool), 6b32d4c (MsgRejectTx CBOR)
-- Snapshot loaded: epoch=1235, utxos=0 (UTxO-HD LSM persistence bug still present, unfixed)
-- Single peer connected at startup: 3.74.40.92:3001 rtt_ms=738 (5 hot peers total)
-- Catch-up to tip after snapshot load: 9 blocks in ~86s (slower due to sparse blocks at tip)
-- "Caught up to chain tip blocks_applied=9" at T+86s
-- At-tip block reception: 3 blocks received each with 1 tx, all failed to apply (UTxO bug)
+## Preview Testnet Baselines (2026-03-14, run #7 — main 982bbf8)
+- Fresh Mithril import: epoch=1236, immutable=24719, 2.7 GB archive, ~6 min total
+- Build: incremental 39.78s (multiple crates rebuilt: primitives, serialization, ledger, etc.)
+- New commits since run #6: 982bbf8 (137 new tests), 7604365 (metrics before replay),
+  1cabd20 (fix O(n) address index removal), 183e06e (production readiness: crash recovery, observability)
+- Ledger replay (in-memory UTxO, minimal profile): 4,105,234 blocks in 116s = 35,164 blk/s peak
+  - Speed profile: ~25K blk/s early, slows to ~8K at slot 12M (UTxO growth), recovers to ~35K
+  - UTxOs at replay end: 2,938,400 (vs 0 in run #6 which used LSM backend)
+  - Snapshot saved automatically at epoch transition: epoch=1235, 2938400 UTxOs, 1113.3 MB
+- N2N peer connected: 3.134.226.73:3001 rtt_ms=570, 5 hot peers total
+- Epoch transition during tip catch-up: epoch=1236, ChainDB persisted
+- Caught up in ~35s after network connect: 617 blocks applied
+- At-tip block reception: 622 blocks total, 2 blocks FAILED to apply (validation bugs)
 - Rollbacks observed: 0
-- Flush on SIGTERM: 12 volatile blocks flushed → 65.3 MB snapshot saved → Shutdown complete
-- Cascading UTxO divergence observed: tx outputs from failed blocks referenced by subsequent blocks
+- SIGTERM shutdown: 623 volatile blocks flushed, 1,112 MB snapshot saved, Shutdown complete
 
-## Prometheus Metrics Port Conflict Note
-- Haskell cardano-node also runs on `localhost:12798` (127.0.0.1 only)
-- Torsten binds to `*:12798` (all interfaces)
-- `curl http://localhost:12798/metrics` hits the HASKELL node (more specific binding wins)
-- Use `curl http://192.168.1.112:12798/metrics` (LAN IP) to reach Torsten metrics (IP may vary)
-- Or: kill the Haskell node before running Torsten for exclusive port access
-- NOTE: Metrics gauges show 0 for ~30s after startup before first update. This is normal.
+## CRITICAL BUG #1: ScriptDataHash Ignores Reference Scripts (run #7, OPEN)
+- Tx hash: `370f8772f8cc63598f5ffd5355704af6633df4123cb84514ec8bbfe6c06c26bb`
+- Block: 4105851 / slot 106808990 — confirmed VALID on chain by Koios (num_confirmations>0)
+- Error: `ScriptDataHashMismatch { expected: "7482...", actual: "dfe1..." }`
+- Root cause: `compute_script_data_hash` in `validation.rs:785-787` computes `has_v1/v2/v3`
+  from witness-embedded scripts only — ignores reference scripts in `body.reference_inputs`
+- When a tx uses ONLY reference scripts (no embedded scripts in witness_set), all has_vN = false
+  → language views = empty map → computed hash is wrong
+- Fix: look up reference inputs in utxo_set to detect their script versions; include those in has_vN
+- File: `crates/torsten-ledger/src/validation.rs` lines 785-795
+- Ledger spec: language views must include cost models for ALL script languages used, including via reference
 
-## N2C Client Bug: Large Response Reassembly (2026-03-13, OPEN)
-- **BUG**: `recv_segment()` in `crates/torsten-network/src/n2c_client.rs:687` only handles ONE mux segment
-- Fix needed: collect multiple segments with same protocol_id until CBOR is complete
-- Queries affected: `query drep-state` and `query pool-params` (and any large response)
-- Error message: `Error: Failed to query DRep state: Protocol error: response too large`
+## CRITICAL BUG #2: CollateralHasTokens Incorrect for Transactions with CollateralReturn (run #7, OPEN)
+- Tx hash: `95cdd9d9489916be8bc6cd8aa86b34a7a4651bf673f599a4195fd1ddbd1678b4`
+- Block: 4105853 / slot 106809022 — confirmed VALID on chain by Koios (num_confirmations>0)
+- Error: `CollateralHasTokens("eb499984...#1")`
+- Root cause: `validation.rs:654-657` rejects any collateral input with multi-asset tokens
+- Actual Cardano rule: collateral inputs CAN have tokens as long as a `collateral_return` output
+  returns the tokens back; only the NET collateral (collateral_total - collateral_return) must be pure ADA
+- Fix: only raise `CollateralHasTokens` if there is no `collateral_return` that accounts for the tokens
+  OR if the net balance has non-ADA assets
+- File: `crates/torsten-ledger/src/validation.rs` lines 650-687
+- Note: both bugs together caused 2 blocks to be skipped at tip, diverging from the canonical chain
 
-## Storage Architecture (post-redesign, commit 83c4f11)
-- ImmutableDB: append-only `.chunk` + `.secondary` files (db-preview/immutable/)
-- tip.meta file tracks immutable tip (binary: slot u64 BE + hash32 + block_no u64 BE)
-- VolatileDB: in-memory HashMap, last k=2160 blocks, LOST ON RESTART
-- ChainDB: routes volatile→immutable for blocks deeper than k
-- UtxoStore: cardano-lsm in `db-preview/utxo-store/` (active/, snapshots/ subdirs)
-- Ledger snapshot: bincode-serialized LedgerState, epoch-numbered + latest symlink
+## FIXED (run #7): UTxO-HD LSM Store Not Persisted (2026-03-14)
+- Using `--utxo-backend in-memory` workaround fully resolves the issue
+- With in-memory backend: utxo_count=2,938,477 in metrics (vs 0 with LSM backend)
+- Snapshot is 1.1 GB (vs ~65 MB with LSM backend)
+- The underlying LSM persistence bug is still present for the LSM backend specifically
 
-## FIXED: Shutdown Flush (2026-03-13, validated multiple runs)
-- On SIGTERM: volatile blocks flushed to ImmutableDB FIRST, then snapshot saved
-- Log: "Flushed volatile blocks to ImmutableDB blocks=N" → "Snapshot saved" → "Shutdown complete"
-- On restart: snapshot loads in <1 second (NO replay) — confirmed working
-- File: `crates/torsten-storage/src/chain_db.rs` (flush_all_to_immutable)
-- File: `crates/torsten-node/src/node.rs` line ~1890 (shutdown flow)
+## Prometheus Metrics Port
+- Use `--metrics-port 12799` to avoid conflict with Haskell cardano-node on 12798
+- `http://localhost:12799/metrics` — works fine
+- `http://localhost:12799/health` — returns JSON with syncProgress, last_block_received_at
+- `http://localhost:12799/ready` — returns `{"ready":true}`
+- NEW in run #7: metrics server starts BEFORE ledger replay (commit 7604365) — confirmed working
 
-## CRITICAL BUG: UTxO-HD LSM Store Not Persisted (2026-03-14, OPEN — unfixed in run #6)
-- Root cause: `open_with_config()` called on startup instead of loading existing LSM data
-- Also: `save_utxo_snapshot()` in `crates/torsten-ledger/src/state/mod.rs:863` is NEVER called
-- Effect: every restart loses entire UTxO state → blocks with transactions fail to apply
-- Error pattern: `InputNotFound("txhash#N")` for ALL inputs in any tx-containing block
-- Symptom: `utxo_count=0` in Prometheus metrics, snapshot is ~65MB (not ~1.1GB)
-- Cascading divergence: failed tx outputs get referenced by later blocks, compounding failures
-- Files to fix:
-  1. `crates/torsten-node/src/node.rs` ~line 927: call `open_from_snapshot()` if snapshot exists
-  2. `crates/torsten-ledger/src/state/mod.rs:863`: `save_utxo_snapshot()` exists but is dead code
-  3. Shutdown: add call to `save_utxo_snapshot()` alongside snapshot save
+## Known Issues (Current — 2026-03-14, run #7)
+1. **ScriptDataHash ignores reference scripts** — CRITICAL, causes block application failure
+   - File: `crates/torsten-ledger/src/validation.rs:785-795`
+2. **CollateralHasTokens fires for collateral with collateral_return** — CRITICAL, same effect
+   - File: `crates/torsten-ledger/src/validation.rs:650-687`
+3. **transactions_rejected metric stays 0 even when txs rejected** — INFO, metrics bug
+   - Block-level application failures not wired to `transactions_rejected` counter
+   - File: `crates/torsten-node/src/node.rs` (apply_block failure path)
+4. **LSM UTxO backend loses data on restart** — use `--utxo-backend in-memory` as workaround
+5. **macOS OOM during replay with high-memory/LSM profile** — use `minimal` + `in-memory`
 
-## Known Issues (Current — 2026-03-14, run #6)
-1. **Bincode snapshot version mismatch on struct field addition** — non-fatal, warning fires
-   - Warning: `WARN torsten_ledger::state: Snapshot version mismatch — snapshot may fail to load.`
-   - File: `crates/torsten-ledger/src/state/mod.rs` (SNAPSHOT_VERSION = 2, load_snapshot)
-2. **N2C large response reassembly** — `recv_segment` only handles one 65535-byte segment
-   - Affects: `query drep-state`, `query pool-params`
-   - File: `crates/torsten-network/src/n2c_client.rs:687`
-3. **CRITICAL: UTxO-HD LSM store not persisted between restarts** — see CRITICAL BUG section above
-
-## Working Features Confirmed (2026-03-14, run #6, main branch 6b32d4c)
-- Build: WORKS — incremental compile, 0.17s (no crates recompiled)
-- Snapshot load: WORKS — epoch=1235, instant load, no warning
-- Peer connections: WORKS — 3.74.40.92:3001 rtt_ms=738, 5 hot peers
-- Catch-up to tip: WORKS — 9 blocks applied in ~86s after snapshot restore
-- Empty-block processing: WORKS — blocks with txs=0 apply cleanly
-- N2C query tip: WORKS — syncProgress=100.00%, era=Conway, epoch=1235, slot=106778502
-- N2C treasury: WORKS — Treasury=9,141,780,486 ADA, Reserves=2,620,888,790 ADA
-- N2C constitution: WORKS — empty URL + zero hash + no guardrail (expected on preview)
-- N2C protocol-parameters: WORKS — full Conway PParams with Plutus V1/V3 cost models
-- N2C stake-distribution: WORKS — 657 pools listed with fractions
-- N2C gov-state: WORKS — committee_members=7, active_proposals=2 (TreasuryWithdrawals)
-- N2C ratify-state: WORKS — enacted=0, expired=0, delayed=false
-- N2C constitution: WORKS — empty URL, zero hash, no guardrail script
-- Prometheus metrics: WORKS — http://192.168.1.112:12798/metrics (use LAN IP)
-  - blocks_applied=12, sync_progress=10000 (100.00%), utxo_count=0 (BUG)
-  - peers_connected=5, hot=5, epoch=1235, treasury=9.14T lovelace
-  - drep_count=8791, proposal_count=2, pool_count=657, delegation_count=11560
-  - NOTE: metrics show zeros for ~30s on startup before first update — normal behavior
-- SIGTERM shutdown: WORKS — flushes 12 volatile blocks, saves 65.3 MB snapshot instantly
-- MsgRejectTx CBOR encoding: NEW in 6b32d4c — not tested (no mempool tx submission done)
-- GSM/P2P governor/enhanced mempool: NEW in 4806c2a — code present, no GSM state visible in logs
+## Working Features Confirmed (2026-03-14, run #7, main branch 982bbf8)
+- Build: WORKS — incremental compile 39.78s
+- Fresh Mithril import: WORKS — 2.7 GB, epoch=1236
+- Ledger replay (in-memory): WORKS — 35K blk/s, 4.1M blocks in 116s
+- Snapshot save during replay (epoch transition): WORKS — 1113 MB at epoch 1235
+- Peer connections: WORKS — 3.134.226.73:3001, 5 hot peers
+- Catch-up to tip: WORKS — 617 blocks in ~35s
+- Empty-block processing at tip: WORKS
+- N2C query tip: WORKS — slot=106808997, block=4105852, epoch=1236, era=Conway, syncProgress=100.00
+- N2C protocol-parameters: WORKS — full Conway PParams with PlutusV1+V3 cost models
+- N2C treasury: WORKS — Treasury=9142820104 ADA, Reserves=2615692514 ADA
+- N2C stake-distribution: WORKS — 657 pools
+- N2C gov-state: WORKS — committee_members=7, active_proposals=2
+- N2C constitution: WORKS — empty URL, zero hash, no guardrail
+- Prometheus metrics: WORKS — all gauges, counters, histograms populated
+  - blocks_applied=622, utxo_count=2938477, peers_connected=5, epoch=1236
+  - treasury=9142820104206891 lovelace, drep_count=8791, proposal_count=2
+- Health endpoint: WORKS — JSON with syncProgress, last_block_received_at
+- Ready endpoint: WORKS — {"ready":true}
+- SIGTERM shutdown: WORKS — 623 volatile blocks flushed, 1112 MB snapshot, Shutdown complete
 
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress
-- N2N port 3001 / Metrics port 12798 — conflict if old node running
-- No `torsten-config.json` — use `config/preview-config.json` directly
-- On restart after clean SIGTERM: snapshot loads in <1 second (NO replay) — WORKS
-- On restart after crash/SIGKILL: still does full replay — volatile data lost without flush
 - CLI subcommand is `query treasury` (not `query account-state`)
 - gov-state shows committee_members=7 — governance active on preview
+- After clean shutdown with in-memory backend: snapshot is ~1.1 GB (full UTxO state)
+- Replay speed slows at slot ~12M due to UTxO growth to ~1.5M entries; recovers after slot ~15M
+- First OOM crash (run #7 attempt 1): high-memory + LSM backend during replay at block ~1.85M

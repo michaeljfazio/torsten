@@ -172,6 +172,27 @@ Uses real mainnet transaction examples (not synthetic).
 6. **Conway governance cert validation**: Not visible in the phase1/conway.rs function list — may be incomplete for DRep/CC certs.
 7. **Alpha stability**: All 1.x APIs are alpha and may break between releases.
 
+### CRITICAL BUG: script_data_hash multi-language support is broken in pallas-validate
+
+`check_script_data_hash` in `pallas-validate/src/phase1/conway.rs` calls `cost_model_for_tx()` which uses `itertools::max(tx_languages.iter())` — this picks only the **highest** language version and builds a single `LanguageView` from it. This is fundamentally wrong for multi-language transactions.
+
+The Haskell spec (`getConwayScriptsNeeded` / `mkScriptIntegrity`) produces a **Set** of `LangDepView`, one per language used, and encodes them all as a map. A V1+V2 transaction needs TWO entries in the language views map.
+
+The `pallas-primitives::conway::ScriptData` struct itself has the same design flaw — it holds `language_view: Option<LanguageView>` (singular), not a set.
+
+Additionally, `tx_languages()` in pallas-validate does NOT do `scriptsNeeded ∩ scriptsProvided` intersection — it just checks presence of scripts in the witness set and reference inputs. This means it can include languages from scripts that are provided but not needed.
+
+### CRITICAL BUG: pallas-validate Conway `tx_languages()` has a V1+V2+V3 bug
+
+```rust
+// From pallas-validate/src/phase1/conway.rs
+} else {
+    vec![Language::PlutusV1, Language::PlutusV2]  // BUG: drops V3!
+}
+```
+
+When all three languages are present, the function returns only `[V1, V2]`, dropping V3 entirely. This is a hardcoded bug in the multi-language branch.
+
 ## Comparison to torsten-ledger
 
 Torsten's `torsten-ledger` implements:

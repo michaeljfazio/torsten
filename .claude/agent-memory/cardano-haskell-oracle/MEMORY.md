@@ -50,6 +50,9 @@
 - Default pipeline marks: lowMark=200, highMark=300 (pipelineDecisionLowHighMark)
 - See [chainsync-at-tip.md](chainsync-at-tip.md)
 
+## Conway Governance Ratification
+- See [conway-ratification-details.md](conway-ratification-details.md) - Complete CIP-1694 ratification algorithm, threshold functions, enactment priority, committee expiry, DRep activity, parameter groups, treasury cap, delaying actions, prevActionId
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
@@ -94,3 +97,10 @@
 - Active versions: V14 (Plomin HF, mandatory), V15 (SRV DNS)
 - Versions 7-13 obsolete
 - Mini-protocol IDs: Handshake=0, ChainSync=2, BlockFetch=3, TxSubmission=4, KeepAlive=8, PeerSharing=10
+
+## Test Vectors for Conformance
+- See [test-vectors-reference.md](test-vectors-reference.md) — Full catalog of test vectors from all Haskell repos
+- ouroboros-consensus golden: 1620 raw CBOR files (blocks, queries, results, disk state per era/version)
+- cardano-ledger: CDDL specs, PParams JSON golden, Alonzo block/tx CBOR, non-integral VRF math vectors
+- plutus: 999 UPLC conformance tests (program + expected result + budget)
+- ouroboros-network: CDDL specs for all 10 mini-protocols
