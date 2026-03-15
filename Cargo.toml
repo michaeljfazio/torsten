@@ -67,7 +67,7 @@ pallas-primitives = "1.0.0-alpha.5"
 pallas-traverse = "1.0.0-alpha.5"
 pallas-crypto = { version = "1.0.0-alpha.5", features = ["kes"] }
 pallas-addresses = "1.0.0-alpha.5"
-vrf_dalek = { git = "https://github.com/input-output-hk/vrf", branch = "main" }
+vrf_dalek = { git = "https://github.com/input-output-hk/vrf", rev = "03ac038e9b92c754ebbcb71824866d93f25e27f3" }
 curve25519-dalek-fork = { package = "curve25519-dalek", git = "https://github.com/iquerejeta/curve25519-dalek", branch = "ietf03_vrf_compat_ell2" }
 
 # Storage

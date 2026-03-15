@@ -3471,6 +3471,7 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "minicbor 0.25.1",
+ "num-bigint",
  "pallas-crypto 1.0.0-alpha.5",
  "pallas-network",
  "pallas-traverse 1.0.0-alpha.5",
@@ -3880,7 +3881,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vrf_dalek"
 version = "0.1.0"
-source = "git+https://github.com/input-output-hk/vrf?branch=main#03ac038e9b92c754ebbcb71824866d93f25e27f3"
+source = "git+https://github.com/input-output-hk/vrf?rev=03ac038e9b92c754ebbcb71824866d93f25e27f3#03ac038e9b92c754ebbcb71824866d93f25e27f3"
 dependencies = [
  "curve25519-dalek 3.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
