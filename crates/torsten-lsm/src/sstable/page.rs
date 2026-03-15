@@ -1,22 +1,23 @@
-//! Fixed-size page format for SSTable storage.
+//! Variable-size page format for SSTable storage.
 //!
-//! Each page is exactly `page_size` bytes (default 4096). Layout:
+//! Each page has a minimum size of `page_size` (default 65536) but can be
+//! larger for oversized entries. Layout:
 //!
 //! ```text
 //! [entry_count: u16 LE]      offset 0
-//! [data_end:    u16 LE]      offset 2  (byte offset where entries end)
-//! [crc32:       u32 LE]      offset 4  (CRC of bytes [8..data_end])
-//! [entries...]               offset 8
-//! [zero padding...]          offset data_end
+//! [data_end:    u32 LE]      offset 2  (byte offset where entries end)
+//! [crc32:       u32 LE]      offset 6  (CRC of bytes [HEADER..data_end])
+//! [entries...]               offset 10
+//! [zero padding...]          offset data_end .. page boundary
 //! ```
 //!
 //! Each entry within a page:
 //! ```text
-//! [key_len:   u16 LE]
-//! [key_bytes: key_len]
-//! [tag:       u8]           0 = tombstone, 1 = value present
-//! [value_len: u16 LE]      only if tag == 1
-//! [value_bytes: value_len]  only if tag == 1
+//! [key_len:     u16 LE]
+//! [key_bytes:   key_len]
+//! [tag:         u8]           0 = tombstone, 1 = value present
+//! [value_len:   u32 LE]      only if tag == 1
+//! [value_bytes: value_len]    only if tag == 1
 //! ```
 //!
 //! Entries within a page are sorted by key for binary search.
@@ -28,8 +29,8 @@ use crate::error::{Error, Result};
 use crate::key::Key;
 use crate::value::Value;
 
-/// Header size in bytes: entry_count(2) + data_end(2) + crc32(4).
-pub const PAGE_HEADER_SIZE: usize = 8;
+/// Header size in bytes: entry_count(2) + data_end(4) + crc32(4).
+pub const PAGE_HEADER_SIZE: usize = 10;
 
 /// Tag byte indicating a live value entry.
 const TAG_VALUE: u8 = 1;
@@ -39,54 +40,58 @@ const TAG_TOMBSTONE: u8 = 0;
 /// A decoded page containing sorted entries.
 #[derive(Debug, Clone)]
 pub struct Page {
-    /// Sorted entries: key → optional value (None = tombstone).
+    /// Sorted entries: key -> optional value (None = tombstone).
     pub entries: Vec<(Key, Option<Value>)>,
 }
 
 impl Page {
     /// Calculate the on-disk size of an entry.
+    /// key_len(2) + key + tag(1) + [value_len(4) + value if present]
     pub fn entry_size(key: &Key, value: &Option<Value>) -> usize {
         let mut size = 2 + key.len() + 1; // key_len + key + tag
         if let Some(v) = value {
-            size += 2 + v.len(); // value_len + value
+            size += 4 + v.len(); // value_len(u32) + value
         }
         size
     }
 
-    /// Encode this page into a fixed-size buffer.
+    /// Encode this page into a buffer.
     ///
-    /// Returns the encoded page bytes of exactly `page_size` length.
-    /// All entries must fit within `page_size - PAGE_HEADER_SIZE` bytes.
-    pub fn encode(&self, page_size: usize) -> Result<Vec<u8>> {
-        let data_capacity = page_size - PAGE_HEADER_SIZE;
+    /// The buffer is at least `min_page_size` bytes, but may be larger if the
+    /// entries require more space. Returns the encoded bytes (which may exceed
+    /// `min_page_size` for oversized entries).
+    pub fn encode(&self, min_page_size: usize) -> Result<Vec<u8>> {
+        let data_capacity = min_page_size.saturating_sub(PAGE_HEADER_SIZE);
         let mut data_buf = Vec::with_capacity(data_capacity);
 
         for (key, value) in &self.entries {
             encode_entry(&mut data_buf, key, value)?;
         }
 
-        if data_buf.len() > data_capacity {
-            return Err(Error::PageOverflow {
-                needed: data_buf.len(),
-                available: data_capacity,
-            });
-        }
+        // Compute the actual page size needed (round up to min_page_size alignment)
+        let needed = PAGE_HEADER_SIZE + data_buf.len();
+        let actual_page_size = if needed <= min_page_size {
+            min_page_size
+        } else {
+            // Round up to next multiple of min_page_size for alignment
+            needed.div_ceil(min_page_size) * min_page_size
+        };
 
-        let data_end = (PAGE_HEADER_SIZE + data_buf.len()) as u16;
+        let data_end = (PAGE_HEADER_SIZE + data_buf.len()) as u32;
         let crc = crc32fast::hash(&data_buf);
 
-        let mut page_buf = Vec::with_capacity(page_size);
+        let mut page_buf = Vec::with_capacity(actual_page_size);
         page_buf.write_u16::<LittleEndian>(self.entries.len() as u16)?;
-        page_buf.write_u16::<LittleEndian>(data_end)?;
+        page_buf.write_u32::<LittleEndian>(data_end)?;
         page_buf.write_u32::<LittleEndian>(crc)?;
         page_buf.extend_from_slice(&data_buf);
-        // Zero-pad to page_size
-        page_buf.resize(page_size, 0);
+        // Zero-pad to actual page size
+        page_buf.resize(actual_page_size, 0);
 
         Ok(page_buf)
     }
 
-    /// Decode a page from a fixed-size buffer.
+    /// Decode a page from a buffer.
     ///
     /// Verifies the CRC32 checksum and returns an error on mismatch.
     pub fn decode(buf: &[u8]) -> Result<Self> {
@@ -99,7 +104,7 @@ impl Page {
 
         let mut cursor = Cursor::new(buf);
         let entry_count = cursor.read_u16::<LittleEndian>()? as usize;
-        let data_end = cursor.read_u16::<LittleEndian>()? as usize;
+        let data_end = cursor.read_u32::<LittleEndian>()? as usize;
         let expected_crc = cursor.read_u32::<LittleEndian>()?;
 
         // Validate data_end is within bounds
@@ -149,7 +154,7 @@ fn encode_entry<W: Write>(w: &mut W, key: &Key, value: &Option<Value>) -> Result
     match value {
         Some(v) => {
             w.write_all(&[TAG_VALUE])?;
-            w.write_u16::<LittleEndian>(v.len() as u16)?;
+            w.write_u32::<LittleEndian>(v.len() as u32)?;
             w.write_all(v.as_ref())?;
         }
         None => {
@@ -167,7 +172,7 @@ fn decode_entry<R: Read>(r: &mut R) -> Result<(Key, Option<Value>)> {
 
     let tag = r.read_u8()?;
     let value = if tag == TAG_VALUE {
-        let value_len = r.read_u16::<LittleEndian>()? as usize;
+        let value_len = r.read_u32::<LittleEndian>()? as usize;
         let mut value_buf = vec![0u8; value_len];
         r.read_exact(&mut value_buf)?;
         Some(Value::new(value_buf))
@@ -239,10 +244,10 @@ mod tests {
 
     #[test]
     fn test_entry_size() {
-        // key_len(2) + key(3) + tag(1) + value_len(2) + value(5) = 13
+        // key_len(2) + key(3) + tag(1) + value_len(4) + value(5) = 15
         let key = Key::from([1, 2, 3]);
         let val = Some(Value::from([1, 2, 3, 4, 5]));
-        assert_eq!(Page::entry_size(&key, &val), 13);
+        assert_eq!(Page::entry_size(&key, &val), 15);
 
         // Tombstone: key_len(2) + key(3) + tag(1) = 6
         let tomb = None;
@@ -255,5 +260,42 @@ mod tests {
         let encoded = page.encode(4096).unwrap();
         let decoded = Page::decode(&encoded).unwrap();
         assert!(decoded.entries.is_empty());
+    }
+
+    #[test]
+    fn test_oversized_entry() {
+        // A single entry larger than the normal page data capacity
+        let key = Key::from([1, 2, 3]);
+        let large_value = Value::from(vec![42u8; 8000]); // 8KB value
+        let page = Page {
+            entries: vec![(key.clone(), Some(large_value.clone()))],
+        };
+
+        // With 4096-byte pages, this entry won't fit in one page but
+        // the encoder should produce an oversized page
+        let encoded = page.encode(4096).unwrap();
+        assert!(encoded.len() > 4096); // Should be rounded up
+        assert_eq!(encoded.len() % 4096, 0); // Aligned to page_size
+
+        let decoded = Page::decode(&encoded).unwrap();
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].0.as_ref(), &[1, 2, 3]);
+        assert_eq!(decoded.entries[0].1.as_ref().unwrap().len(), 8000);
+    }
+
+    #[test]
+    fn test_very_large_entry() {
+        // Simulate a Cardano transaction output with a large inline datum
+        // (~13KB, matching what was seen on preview testnet)
+        let key = Key::from([0xAB; 36]); // 36-byte Cardano UTxO key
+        let large_value = Value::from(vec![0xCD; 13_300]); // ~13.3KB value
+        let page = Page {
+            entries: vec![(key.clone(), Some(large_value.clone()))],
+        };
+
+        let encoded = page.encode(4096).unwrap();
+        let decoded = Page::decode(&encoded).unwrap();
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].1.as_ref().unwrap().len(), 13_300);
     }
 }

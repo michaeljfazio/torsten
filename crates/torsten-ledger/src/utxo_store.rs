@@ -191,12 +191,21 @@ impl UtxoStore {
     }
 
     /// Insert a new UTxO entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the LSM tree insert fails. A missing UTxO entry causes
+    /// unrecoverable ledger state divergence — it is better to crash and
+    /// restart than to silently lose UTxO data.
     pub fn insert(&mut self, input: TransactionInput, output: TransactionOutput) {
         let key = encode_key(&input);
         let value = encode_value(&output);
         if let Err(e) = self.tree.insert(&key, &value) {
-            warn!("UtxoStore insert error: {e}");
-            return;
+            panic!(
+                "FATAL: UtxoStore insert failed for {}#{}: {e}. \
+                 Cannot continue — UTxO loss causes unrecoverable ledger divergence.",
+                input.transaction_id, input.index
+            );
         }
         if self.indexing_enabled {
             self.address_index
@@ -217,8 +226,11 @@ impl UtxoStore {
         };
         if output.is_some() {
             if let Err(e) = self.tree.delete(&key) {
-                warn!("UtxoStore delete error: {e}");
-                return None;
+                panic!(
+                    "FATAL: UtxoStore delete failed for {}#{}: {e}. \
+                     Cannot continue — failed UTxO delete causes unrecoverable ledger divergence.",
+                    input.transaction_id, input.index
+                );
             }
             self.count = self.count.saturating_sub(1);
             if self.indexing_enabled {

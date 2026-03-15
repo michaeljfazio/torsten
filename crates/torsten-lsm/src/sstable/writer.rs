@@ -1,8 +1,9 @@
 //! SSTable writer: flushes sorted entries to page-aligned files.
 //!
 //! Takes a sorted iterator of `(Key, Option<Value>)` entries and writes them
-//! into 4096-byte pages. Returns the fence pointer entries (first key + offset)
-//! and bloom filter populated with all live keys.
+//! into pages. Normal entries share pages (default 65536 bytes), but oversized
+//! entries (e.g., Cardano UTxOs with large inline datums) get their own
+//! jumbo pages that are rounded up to the page_size alignment.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -48,17 +49,17 @@ pub fn write_sstable(
     for (key, value) in entries {
         let entry_size = Page::entry_size(key, value);
 
-        // If this entry alone exceeds page capacity, write it as a single-entry page
-        // (this handles large values that can't share a page with others)
+        // If adding this entry would exceed the current page, flush first
         if page_data_size + entry_size > data_capacity && !page_entries.is_empty() {
-            // Flush current page
+            // Flush current page (normal size)
             let page = Page {
                 entries: std::mem::take(&mut page_entries),
             };
             fence.add(page.entries[0].0.clone(), page_offset);
             let encoded = page.encode(page_size)?;
+            let written_size = encoded.len();
             file.write_all(&encoded)?;
-            page_offset += page_size as u64;
+            page_offset += written_size as u64;
             page_count += 1;
             page_data_size = 0;
         }
@@ -77,6 +78,7 @@ pub fn write_sstable(
             entries: std::mem::take(&mut page_entries),
         };
         fence.add(page.entries[0].0.clone(), page_offset);
+        // Page::encode handles oversized entries by producing a larger page
         let encoded = page.encode(page_size)?;
         file.write_all(&encoded)?;
         page_count += 1;
@@ -127,8 +129,6 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0u16..500 {
             let key = Key::from(i.to_be_bytes());
-            // ~200 byte values, entry overhead ~205 bytes
-            // 4088 bytes data capacity / 205 ≈ 19 entries per page
             let value = Value::from(vec![i as u8; 200]);
             entries.push((key, Some(value)));
         }
@@ -153,6 +153,24 @@ mod tests {
         let result = write_sstable(&path, &entries, 4096, 10).unwrap();
         assert_eq!(result.entry_count, 3);
         // Tombstones ARE in the bloom filter (needed for correct lookup)
+        assert!(result.bloom.may_contain(&Key::from([2])));
+    }
+
+    #[test]
+    fn test_write_sstable_oversized_entry() {
+        // Simulate a Cardano UTxO with a large inline datum (~13KB)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.data");
+
+        let entries: Vec<(Key, Option<Value>)> = vec![
+            (Key::from([1]), Some(Value::from(vec![10u8; 100]))),
+            (Key::from([2]), Some(Value::from(vec![20u8; 13_300]))), // 13.3KB
+            (Key::from([3]), Some(Value::from(vec![30u8; 100]))),
+        ];
+
+        // Even with 4096-byte pages, oversized entries should succeed
+        let result = write_sstable(&path, &entries, 4096, 10).unwrap();
+        assert_eq!(result.entry_count, 3);
         assert!(result.bloom.may_contain(&Key::from([2])));
     }
 }

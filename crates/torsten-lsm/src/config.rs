@@ -32,8 +32,10 @@ pub struct LsmConfig {
     /// Default: 64 MB.
     pub wal_segment_size: usize,
 
-    /// SSTable page size in bytes. Must be a power of 2.
-    /// Default: 4096.
+    /// SSTable page size in bytes. Should be a power of 2.
+    /// Default: 65536 (64KB). Large enough for Cardano UTxO values with
+    /// inline datums (max ~16KB). Oversized entries that exceed the page
+    /// capacity are automatically placed in jumbo pages.
     pub page_size: usize,
 }
 
@@ -46,17 +48,18 @@ impl Default for LsmConfig {
             size_ratio: 4,
             wal_enabled: true,
             wal_segment_size: 64 * 1024 * 1024, // 64 MB
-            page_size: 4096,
+            page_size: 65536,
         }
     }
 }
 
 impl LsmConfig {
-    /// Maximum entry size (key + value) that fits in a single page.
-    /// Accounts for page header (8 bytes) and entry overhead (5 bytes per entry).
+    /// Maximum entry size (key + value) that fits in a single normal page.
+    /// Accounts for page header (10 bytes) and entry overhead (7 bytes per entry).
+    /// Entries exceeding this size are handled via jumbo pages.
     pub fn max_entry_size(&self) -> usize {
-        // page_header(8) + key_len(2) + key + tag(1) + value_len(2) + value
-        self.page_size.saturating_sub(8 + 5)
+        // page_header(10) + key_len(2) + key + tag(1) + value_len(4) + value
+        self.page_size.saturating_sub(10 + 7)
     }
 
     /// Maximum number of pages in the block cache.
@@ -77,18 +80,18 @@ mod tests {
         assert_eq!(config.bloom_filter_bits_per_key, 10);
         assert_eq!(config.size_ratio, 4);
         assert!(config.wal_enabled);
-        assert_eq!(config.page_size, 4096);
+        assert_eq!(config.page_size, 65536);
     }
 
     #[test]
     fn test_max_entry_size() {
         let config = LsmConfig::default();
-        assert_eq!(config.max_entry_size(), 4096 - 8 - 5);
+        assert_eq!(config.max_entry_size(), 65536 - 10 - 7);
     }
 
     #[test]
     fn test_cache_capacity() {
         let config = LsmConfig::default();
-        assert_eq!(config.cache_capacity(), 256 * 1024 * 1024 / 4096);
+        assert_eq!(config.cache_capacity(), 256 * 1024 * 1024 / 65536);
     }
 }
