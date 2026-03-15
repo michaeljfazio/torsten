@@ -5,6 +5,7 @@
 //! for the sparkline, and UI navigation state.
 
 use crate::metrics::MetricsSnapshot;
+use crate::theme::{self, Theme, THEMES};
 use std::collections::VecDeque;
 
 /// Maximum number of sparkline samples to retain (one sample per poll interval).
@@ -48,6 +49,8 @@ pub struct App {
     pub show_help: bool,
     /// Whether the application should exit.
     pub should_quit: bool,
+    /// Index into [`THEMES`] for the currently active theme.
+    pub theme_index: usize,
 }
 
 impl App {
@@ -61,6 +64,7 @@ impl App {
             active_panel: ActivePanel::Chain,
             show_help: false,
             should_quit: false,
+            theme_index: 0,
         }
     }
 
@@ -97,6 +101,21 @@ impl App {
     /// Toggle the help overlay.
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    /// Return a reference to the currently active theme.
+    pub fn current_theme(&self) -> &'static Theme {
+        &THEMES[self.theme_index]
+    }
+
+    /// Cycle to the next theme, wrapping around after the last.
+    pub fn cycle_theme(&mut self) {
+        self.theme_index = theme::cycle_theme(self.theme_index);
+    }
+
+    /// Set the theme by index. Clamps to valid range.
+    pub fn set_theme(&mut self, index: usize) {
+        self.theme_index = index.min(THEMES.len() - 1);
     }
 
     /// Determine the sync status label and associated color hint.
@@ -327,5 +346,34 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_theme_cycling() {
+        let mut app = App::new();
+        assert_eq!(app.theme_index, 0);
+        assert_eq!(app.current_theme().name, "Default");
+
+        app.cycle_theme();
+        assert_eq!(app.theme_index, 1);
+        assert_eq!(app.current_theme().name, "Monokai");
+
+        // Cycle through all themes and back to start
+        for _ in 0..6 {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_index, 0);
+        assert_eq!(app.current_theme().name, "Default");
+    }
+
+    #[test]
+    fn test_set_theme() {
+        let mut app = App::new();
+        app.set_theme(4);
+        assert_eq!(app.current_theme().name, "Nord");
+
+        // Clamp to max
+        app.set_theme(100);
+        assert_eq!(app.theme_index, 6);
     }
 }

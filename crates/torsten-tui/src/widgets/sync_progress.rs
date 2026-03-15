@@ -1,9 +1,9 @@
 //! Custom sync progress bar widget with color-coded status indication.
 //!
 //! Renders a horizontal gauge showing chain sync progress with:
-//! - Green fill when synced (>= 99.9%)
-//! - Yellow fill when actively syncing
-//! - Red fill when stalled
+//! - Configurable fill color when synced (>= 99.9%)
+//! - Configurable fill color when actively syncing
+//! - Configurable fill color when stalled
 //! - Percentage label centered in the bar
 
 use ratatui::{
@@ -21,6 +21,14 @@ pub struct SyncProgressBar {
     is_synced: bool,
     /// Whether the node is stalled.
     is_stalled: bool,
+    /// Fill color when synced.
+    color_synced: Color,
+    /// Fill color when syncing.
+    color_syncing: Color,
+    /// Fill color when stalled.
+    color_stalled: Color,
+    /// Color for the unfilled portion of the bar.
+    color_empty: Color,
 }
 
 impl SyncProgressBar {
@@ -32,17 +40,45 @@ impl SyncProgressBar {
             progress,
             is_synced,
             is_stalled,
+            color_synced: Color::Green,
+            color_syncing: Color::Yellow,
+            color_stalled: Color::Red,
+            color_empty: Color::DarkGray,
         }
+    }
+
+    /// Set the fill color used when the node is synced.
+    pub fn fill_color_synced(mut self, color: Color) -> Self {
+        self.color_synced = color;
+        self
+    }
+
+    /// Set the fill color used when the node is actively syncing.
+    pub fn fill_color_syncing(mut self, color: Color) -> Self {
+        self.color_syncing = color;
+        self
+    }
+
+    /// Set the fill color used when the node is stalled.
+    pub fn fill_color_stalled(mut self, color: Color) -> Self {
+        self.color_stalled = color;
+        self
+    }
+
+    /// Set the color for the unfilled (empty) portion of the bar.
+    pub fn empty_color(mut self, color: Color) -> Self {
+        self.color_empty = color;
+        self
     }
 
     /// Determine the fill color based on sync state.
     fn bar_color(&self) -> Color {
         if self.is_synced {
-            Color::Green
+            self.color_synced
         } else if self.is_stalled {
-            Color::Red
+            self.color_stalled
         } else {
-            Color::Yellow
+            self.color_syncing
         }
     }
 }
@@ -61,7 +97,7 @@ impl Widget for SyncProgressBar {
         for x in area.left()..area.left().saturating_add(filled_width) {
             if x < area.right() {
                 buf[(x, area.top())]
-                    .set_char('━')
+                    .set_char('\u{2501}')
                     .set_style(Style::default().fg(color));
             }
         }
@@ -69,8 +105,8 @@ impl Widget for SyncProgressBar {
         // Render the unfilled portion
         for x in area.left().saturating_add(filled_width)..area.right() {
             buf[(x, area.top())]
-                .set_char('━')
-                .set_style(Style::default().fg(Color::DarkGray));
+                .set_char('\u{2501}')
+                .set_style(Style::default().fg(self.color_empty));
         }
 
         // Render the percentage label centered

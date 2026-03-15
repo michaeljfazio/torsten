@@ -13,6 +13,7 @@
 
 mod app;
 mod metrics;
+mod theme;
 mod ui;
 mod widgets;
 
@@ -47,12 +48,23 @@ struct Args {
     /// URL of the Torsten Prometheus metrics endpoint.
     #[arg(long, default_value = DEFAULT_METRICS_URL)]
     metrics_url: String,
+
+    /// Initial color theme (default, monokai, solarized-dark, solarized-light,
+    /// nord, dracula, catppuccin-mocha). Press 't' at runtime to cycle.
+    #[arg(long, default_value = "default")]
+    theme: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let mut app = App::new();
+
+    // Apply --theme CLI argument (case-insensitive, hyphens mapped to spaces).
+    let theme_name = args.theme.replace('-', " ");
+    if let Some(idx) = theme::find_theme_by_name(&theme_name) {
+        app.set_theme(idx);
+    }
 
     // Setup terminal
     enable_raw_mode()?;
@@ -85,7 +97,8 @@ async fn run_loop(
 
     loop {
         // Render the current state
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        let theme = app.current_theme();
+        terminal.draw(|frame| ui::draw(frame, app, theme))?;
 
         // Poll for events with a short timeout so we can check the metrics timer
         let timeout = POLL_INTERVAL
@@ -112,6 +125,9 @@ async fn run_loop(
                         }
                         KeyCode::Char('h') => {
                             app.toggle_help();
+                        }
+                        KeyCode::Char('t') => {
+                            app.cycle_theme();
                         }
                         KeyCode::Char('r') => {
                             // Force immediate refresh
