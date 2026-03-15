@@ -636,31 +636,50 @@ impl LedgerState {
                 BlockValidationMode::ApplyOnly => ByronApplyMode::ApplyOnly,
             };
 
-            // apply_byron_block uses a two-pass model: it collects UTxO changes
-            // into a ByronBlockEffect using only the lookup closure (shared borrow),
-            // then we apply them below with mutable borrows. This avoids overlapping
-            // borrows on self.utxo_set.
-            let effect = apply_byron_block(
-                &block.transactions,
-                fee_policy,
-                block.slot().0,
-                byron_mode,
-                |input| self.utxo_set.lookup(input),
-            )
-            .map_err(|e| LedgerError::BlockTxValidationFailed {
-                slot: e.slot,
-                tx_hash: e.tx_hash,
-                errors: e.reason.to_string(),
-            })?;
+            // Process each Byron transaction one at a time so that outputs
+            // created by an earlier transaction in the block are immediately
+            // visible to later transactions (within-block spending chains).
+            //
+            // We use `apply_byron_block` with a single-transaction slice and
+            // apply each effect to self.utxo_set before moving on. This keeps
+            // all Byron rule logic in byron.rs while preserving sequential
+            // visibility without a single overlapping borrow.
+            let mut total_byron_fees = Lovelace(0);
+            // Duplicate-tx guard mirrors apply_byron_block's inner dedup logic.
+            let mut seen_hashes = std::collections::HashSet::new();
+            for tx in &block.transactions {
+                if !seen_hashes.insert(tx.hash) {
+                    warn!(
+                        tx_hash = %tx.hash.to_hex(),
+                        slot = block.slot().0,
+                        "Byron: duplicate tx hash in block, skipping"
+                    );
+                    continue;
+                }
+                let effect = apply_byron_block(
+                    std::slice::from_ref(tx),
+                    fee_policy,
+                    block.slot().0,
+                    byron_mode,
+                    |input| self.utxo_set.lookup(input),
+                )
+                .map_err(|e| LedgerError::BlockTxValidationFailed {
+                    slot: e.slot,
+                    tx_hash: e.tx_hash,
+                    errors: e.reason.to_string(),
+                })?;
 
-            // Apply the collected effects to the UTxO set
-            for input in &effect.spent {
-                self.utxo_set.remove(input);
+                // Apply each tx's effects immediately so subsequent txs in the
+                // same block see the correct UTxO state.
+                for input in &effect.spent {
+                    self.utxo_set.remove(input);
+                }
+                for (input, output) in effect.created {
+                    self.utxo_set.insert(input, output);
+                }
+                total_byron_fees.0 = total_byron_fees.0.saturating_add(effect.fees.0);
             }
-            for (input, output) in effect.created {
-                self.utxo_set.insert(input, output);
-            }
-            self.epoch_fees += effect.fees;
+            self.epoch_fees += total_byron_fees;
 
             // Track block production and nonce state (same as Shelley+)
             if !block.header.issuer_vkey.is_empty() {

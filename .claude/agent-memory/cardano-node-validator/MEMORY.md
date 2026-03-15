@@ -79,7 +79,7 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - `http://localhost:12798/ready` — returns `{"ready":true}`
 - Metrics server starts BEFORE ledger replay — confirmed working
 
-## Known Issues (Current — 2026-03-15, run #10 — deferred RUPD validation)
+## Known Issues (Current — 2026-03-15, run #11 — mainnet smoke test)
 1. **ScriptDataHash ignores reference scripts** — CRITICAL (run #7, status unknown after recent changes)
    - File: `crates/torsten-ledger/src/validation.rs:785-795`
 2. **CollateralHasTokens incorrect for txs with collateral_return** — CRITICAL (run #7, status unknown)
@@ -99,6 +99,40 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
    - File: `crates/torsten-ledger/src/plutus.rs` — eval_phase_two_raw call at line 132
    - Note: ValidationTagMismatch fires but node continues applying subsequent blocks (NOT a stall)
    - Transactions_rejected counter increments (2 rejections observed in metrics)
+4. **FIXED: Stale peer detection incorrect wall-clock slot for mainnet** (run #11, FIXED in same session)
+   - Root cause: `current_wall_clock_slot()` in `node.rs:4938-4951` used Shelley genesis system_start
+     with Shelley slot length (1s), giving ~267M slots. Mainnet is actually at ~182M slots because
+     Byron had 208 epochs × 21,600 slots × 20s = 89.85 million seconds before Shelley started.
+   - Effect: ALL mainnet peers rejected as "stale" (lag_slots=85363203), node never synced.
+   - Fix: Updated `current_wall_clock_slot()` to account for Byron era duration before computing
+     Shelley slots. Formula: total_slot = byron_transition_epoch × byron_epoch_length + shelley_slots
+   - File: `crates/torsten-node/src/node.rs` function `current_wall_clock_slot()`
+5. **CRITICAL: Byron Epoch Boundary Block (EBB) causes chain sync stall on mainnet** (run #11, OPEN)
+   - Error: `Block does not connect to tip: expected 3bd04916..., got 1941d944... slot=21600 block_no=21587`
+   - Occurs at FIRST Byron epoch boundary (epoch 0 → epoch 1, absolute slot 21600 on mainnet)
+   - The EBB's prev_hash does not match the ledger tip — indicating either the EBB has an unexpected
+     prev_hash chain, or a preceding EBB was not properly applied to update the ledger tip
+   - Symptom: persistent reconnect loop — node stalls permanently, never advances past slot ~21600
+   - Context: "Block count mismatch: expected=35 got=36" warning precedes failure — extra block is the EBB
+   - Fix needed: verify EBB prev_hash handling in `decode_block_header` for mainnet Byron EBBs;
+     ensure the EBB slot computed by pallas matches what's stored as ledger tip; investigate why
+     prev_hash chain has a gap (possibly a second EBB in the epoch 0→1 transition)
+   - Files: `crates/torsten-serialization/src/multi_era.rs:decode_block_header`,
+     `crates/torsten-ledger/src/state/mod.rs:apply_block`
+   - Note: Preview testnet has NO Byron era (starts directly in Shelley at epoch 0), so this bug
+     only manifests on mainnet and preprod
+
+## Mainnet Config Facts (run #11 — 2026-03-15)
+- Config files: `config/mainnet-config.json`, `config/mainnet-topology.json`, `config/mainnet-*-genesis.json`
+- Network magic: 764824073, Byron k=2160, epoch_length=21600, slot_duration=20s, UTxOs=14505
+- Shelley genesis system_start: 2017-09-23T21:44:51Z (Byron genesis start, NOT Shelley start)
+- Shelley first slot: 4,492,800 (= 208 Byron epochs × 21,600 Byron slots)
+- Current mainnet tip: ~slot 182,015,000, ~block 13,162,400, epoch ~618
+- Wall clock slot formula: byron_slots + (now - shelley_start) / 1s
+  = 208*21600 + (now - 2020-07-29T21:44:51Z) = ~182M (matches actual mainnet tip)
+- Mithril snapshot: epoch=618, immutable=8423, 52.8 GB, download rate ~900 MB/min (1 hour total)
+- Mainnet bootstrap peers: backbone.cardano.iog.io:3001, backbone.mainnet.cardanofoundation.org:3001
+- First Byron epoch boundary is at slot 21600 (epoch 0→1 transition), block_no ~21587
 
 ## Working Features Confirmed (2026-03-15, run #10 — deferred RUPD, LSM backend)
 - Build: WORKS

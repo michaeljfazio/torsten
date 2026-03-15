@@ -876,6 +876,95 @@ mod tests {
         assert_eq!(db.volatile.len(), SECURITY_PARAM_K);
     }
 
+    /// Verify that `flush_to_immutable_loe` respects the LoE slot ceiling.
+    ///
+    /// Scenario: add k+10 blocks.  Normally `flush_to_immutable` would move
+    /// the first 10 blocks to immutable.  With a LoE slot that covers only
+    /// the first 5 of those finalizable blocks, only those 5 should be
+    /// flushed.
+    #[test]
+    fn test_flush_to_immutable_loe_caps_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Add k+10 blocks.  Each block i has slot = i * 10.
+        for i in 1..=(SECURITY_PARAM_K as u64 + 10) {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            let mut prev_bytes = [0u8; 32];
+            prev_bytes[0..8].copy_from_slice(&(i - 1).to_be_bytes());
+            let prev = Hash32::from_bytes(prev_bytes);
+            db.add_block(
+                hash,
+                SlotNo(i * 10),
+                BlockNo(i),
+                prev,
+                format!("block{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // With LoE slot = 50 only blocks 1–5 (slots 10,20,30,40,50) qualify.
+        // Normally the first 10 blocks are finalizable (k+10 - k = 10).
+        let flushed = db.flush_to_immutable_loe(50).unwrap();
+        assert_eq!(
+            flushed, 5,
+            "LoE should limit flush to blocks with slot ≤ 50"
+        );
+
+        // Blocks 1–5 should now be in immutable.
+        for i in 1u64..=5 {
+            let mut h = [0u8; 32];
+            h[0..8].copy_from_slice(&i.to_be_bytes());
+            assert!(db.has_block(&Hash32::from_bytes(h)));
+        }
+
+        // Blocks 6+ are still volatile (within LoE constraint).
+        assert_eq!(
+            db.volatile.len(),
+            SECURITY_PARAM_K + 5,
+            "Blocks beyond loe_slot must remain in volatile"
+        );
+
+        // Lifting the LoE (no slot ceiling) should flush the remaining 5.
+        let flushed2 = db.flush_to_immutable().unwrap();
+        assert_eq!(flushed2, 5);
+    }
+
+    /// Verify that a LoE slot of 0 prevents any flush (PreSyncing state).
+    #[test]
+    fn test_flush_to_immutable_loe_zero_blocks_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        for i in 1..=(SECURITY_PARAM_K as u64 + 10) {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            let mut prev_bytes = [0u8; 32];
+            prev_bytes[0..8].copy_from_slice(&(i - 1).to_be_bytes());
+            let prev = Hash32::from_bytes(prev_bytes);
+            db.add_block(
+                hash,
+                SlotNo(i * 10),
+                BlockNo(i),
+                prev,
+                format!("block{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // LoE slot = 0 — no block has slot 0, so nothing should flush.
+        let flushed = db.flush_to_immutable_loe(0).unwrap();
+        assert_eq!(flushed, 0, "LoE=0 must block all immutable advancement");
+        assert_eq!(
+            db.volatile.len(),
+            SECURITY_PARAM_K + 10,
+            "All blocks must stay volatile when LoE=0"
+        );
+    }
+
     #[test]
     fn test_flush_all_to_immutable() {
         let dir = tempfile::tempdir().unwrap();

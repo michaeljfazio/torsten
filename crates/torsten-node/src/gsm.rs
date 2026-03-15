@@ -23,14 +23,19 @@
 //!   the PreSyncing and Syncing phases. Currently, peer selection uses the
 //!   standard P2P governor policy for all states.
 //!
-//! - **LoE enforcement in block application**: The `loe_limit()` method
-//!   computes the constraint but it is not yet wired into the block
-//!   application pipeline to actually limit immutable tip advancement.
-//!
 //! These limitations do not affect normal operation. The Genesis protocol
 //! features are future-proofing for the Ouroboros Genesis hard fork, which
 //! will enable trustless bootstrap from an empty database without relying
 //! on Mithril snapshots.
+//!
+//! ## LoE enforcement
+//!
+//! `loe_limit()` is wired into `process_forward_blocks()` in `node.rs`.
+//! When the GSM is in PreSyncing or Syncing state, `flush_to_immutable_loe()`
+//! is called with the peer tip slot as the ceiling so that the immutable tip
+//! cannot advance past the common prefix of all candidate chains.  When the
+//! GSM reaches CaughtUp, `loe_limit()` returns `None` and the normal
+//! unconstrained `flush_to_immutable()` is used instead.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -196,7 +201,6 @@ impl GenesisStateMachine {
     ///
     /// Returns the maximum immutable tip slot that block application should
     /// advance to. Returns `None` if there is no constraint (CaughtUp state).
-    #[allow(dead_code)]
     pub fn loe_limit(&self, candidate_tips: &[Point]) -> Option<u64> {
         if !self.enabled {
             return None; // No constraint
