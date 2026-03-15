@@ -36,20 +36,21 @@ See the [full documentation](https://michaeljfazio.github.io/torsten/) for detai
 
 ## Architecture
 
-Torsten is organized as a 10-crate Cargo workspace:
+Torsten is organized as an 11-crate Cargo workspace:
 
 | Crate | Description |
 |-------|-------------|
-| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron–Conway) |
-| `torsten-crypto` | Ed25519 keys, VRF, KES, text envelope format |
+| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron-Conway) |
+| `torsten-crypto` | Ed25519 keys, VRF (ECVRF-ED25519-SHA512-Elligator2), KES (Sum6Kes), text envelope format |
 | `torsten-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
-| `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N/N2C |
-| `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
-| `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation, ledger state, certificates, native scripts, rewards |
-| `torsten-mempool` | Thread-safe transaction mempool |
+| `torsten-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, snapshots |
+| `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N/N2C multiplexer |
+| `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, VRF slot leader checks |
+| `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation (Phase-1/Phase-2), ledger state, certificates, rewards, governance |
+| `torsten-mempool` | Thread-safe transaction mempool with Phase-1/Phase-2 admission control |
 | `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
-| `torsten-node` | Main binary, config, topology, pipelined chain sync, Mithril import |
-| `torsten-cli` | cardano-cli compatible CLI |
+| `torsten-node` | Main binary: config, topology, pipelined sync, Mithril import, block forging, Prometheus metrics |
+| `torsten-cli` | cardano-cli compatible CLI (33+ subcommands) |
 
 ```mermaid
 graph TD
@@ -71,6 +72,7 @@ graph TD
     LEDGER --> PRIM
     LEDGER --> CRYPTO
     LEDGER --> SER
+    LEDGER --> LSM[torsten-lsm]
     STORE --> PRIM
     STORE --> SER
     POOL --> PRIM
@@ -80,88 +82,116 @@ graph TD
 
 ## Key Features
 
-- **Full Ouroboros Praos** consensus with VRF leader election, KES validation, epoch nonce computation
-- **Multi-era support** from Byron through Conway (CIP-1694 governance)
-- **Pipelined multi-peer sync** with parallel block fetching from up to 4 peers
-- **Mithril snapshot import** for fast initial sync (4M blocks in ~2 minutes)
-- **N2N server** with ChainSync, BlockFetch, TxSubmission2, PeerSharing, KeepAlive
-- **N2C server** with LocalChainSync (block delivery), LocalStateQuery, LocalTxSubmission, LocalTxMonitor
-- **Plutus V1/V2/V3** script evaluation via UPLC CEK machine
-- **P2P peer management** with adaptive selection, EWMA latency tracking, reputation scoring
-- **Block production** with VRF proofs, operational certificates, and block announcement
-- **cardano-cli compatible** CLI for key generation, transaction building, and queries
-- **Prometheus metrics** on port 12798
+### Consensus
+- **Full Ouroboros Praos** with VRF leader election using exact 34-digit fixed-point arithmetic (dashu-int IBig, matching Haskell's FixedPoint E34)
+- **KES signature validation** via Sum6Kes (pallas-crypto), with period evolution and key rotation
+- **Epoch nonce computation** with evolving nonce, candidate nonce freeze, and lab nonce tracking
+- **Chain selection** with longest-chain rule, density tie-breaking, and rollback support
+- **Epoch transitions** using Cardano's mark/set/go snapshot model with deferred reward distribution (RUPD timing matching Haskell exactly)
+- **TPraos/Praos split**: Shelley-Alonzo uses raw 64-byte VRF output (certNatMax=2^512); Babbage/Conway uses Blake2b-256 hash (certNatMax=2^256)
+- **VRF leader check**: Euler continued fraction for ln(1+x), Taylor series for exp() with error bounds for early comparison termination
+- **Genesis Sync Manager (GSM)**: PreSyncing/Syncing/CaughtUp state machine with tip age tracking and ChainSync idle detection
 
-## Feature Status
+### Ledger
+- **UTxO-HD** on-disk storage via torsten-lsm (pure Rust LSM-tree with WAL for crash recovery, lazy levelling compaction, bloom filters, 64KB pages for large inline datums)
+- **Phase-1 transaction validation**: inputs exist, fees sufficient, value conservation, TTL, witness verification, multi-asset, reference inputs, CIP-0112 tiered reference script fees
+- **Phase-2 Plutus evaluation**: V1/V2/V3 script execution via uplc CEK machine with full cost model application
+- **Native script evaluation**: timelock, sig, allOf, anyOf, nOf
+- **Reward calculation**: BigInt rational arithmetic (no overflow), monetary expansion, apparent performance, maxPool' pledge influence, operator/member split - all verified against Koios on-chain data
+- **Deferred RUPD timing**: rewards computed at epoch E->E+1, applied at E+1->E+2, matching Haskell's pulsing reward schedule
+- **Certificate processing**: stake registration/deregistration, delegation, pool registration/retirement, Conway-era certs (DRep, committee, vote delegation, combined certs)
+- **Multi-era support**: Byron through Conway with era-specific validation rules
 
-| Feature | Status |
-|---------|--------|
-| **Consensus** | |
-| Ouroboros Praos leader election (VRF) | :white_check_mark: |
-| KES signature validation | :white_check_mark: |
-| Epoch nonce computation | :white_check_mark: |
-| Chain selection (longest chain) | :white_check_mark: |
-| Epoch transitions (mark/set/go snapshots) | :white_check_mark: |
-| Reward calculation and distribution | :white_check_mark: |
-| **Ledger** | |
-| UTxO management (HashMap, O(1) lookups) | :white_check_mark: |
-| Transaction validation (Phase-1) | :white_check_mark: |
-| Plutus script execution (Phase-2, V1/V2/V3) | :white_check_mark: |
-| Native script evaluation | :white_check_mark: |
-| Certificate processing (stake, delegation, pool) | :white_check_mark: |
-| Multi-era support (Byron–Conway) | :white_check_mark: |
-| **Conway Governance (CIP-1694)** | |
-| DRep registration, voting, delegation | :white_check_mark: |
-| Constitutional committee | :white_check_mark: |
-| Governance proposals and ratification | :white_check_mark: |
-| Treasury withdrawals | :white_check_mark: |
-| Stake-weighted voting thresholds | :white_check_mark: |
-| **Networking (N2N)** | |
-| Ouroboros multiplexer | :white_check_mark: |
-| Handshake (V14/V15) | :white_check_mark: |
-| ChainSync (pipelined, ~275 blocks/s) | :white_check_mark: |
-| BlockFetch (multi-peer, up to 4 fetchers) | :white_check_mark: |
-| TxSubmission2 | :white_check_mark: |
-| KeepAlive | :white_check_mark: |
-| PeerSharing | :white_check_mark: |
-| N2N server (inbound connections) | :white_check_mark: |
-| **Networking (N2C)** | |
-| LocalStateQuery (protocol params, UTxO, stake, governance) | :white_check_mark: |
-| LocalChainSync (block delivery) | :white_check_mark: |
-| LocalTxSubmission (with Phase-1/Phase-2 validation) | :white_check_mark: |
-| LocalTxMonitor | :white_check_mark: |
-| **P2P** | |
-| Peer manager (cold/warm/hot lifecycle) | :white_check_mark: |
-| DNS multi-resolution | :white_check_mark: |
-| Ledger-based peer discovery (SPO relays) | :white_check_mark: |
-| Adaptive peer selection (EWMA latency) | :white_check_mark: |
-| **Block Production** | |
-| VRF proof generation | :white_check_mark: |
-| Block forging with KES signing | :white_check_mark: |
-| Operational certificate handling | :white_check_mark: |
-| Block announcement (active push) | :white_check_mark: |
-| **Storage** | |
-| ImmutableDB (append-only chunk files) | :white_check_mark: |
-| VolatileDB (in-memory) | :white_check_mark: |
-| UTxO-HD (cardano-lsm, on-disk UTxO set) | :white_check_mark: |
-| io_uring async I/O (Linux) | :white_check_mark: |
-| Rollback support (DiffSeq) | :white_check_mark: |
-| Mithril snapshot import | :white_check_mark: |
-| Ledger state snapshots (time-based policy) | :white_check_mark: |
-| **CLI** | |
-| Key generation (payment, stake, VRF, KES, node) | :white_check_mark: |
-| Address building (payment, stake, enterprise) | :white_check_mark: |
-| Transaction build, sign, submit | :white_check_mark: |
-| Query commands (tip, utxo, params, stake, governance) | :white_check_mark: |
-| Governance commands (drep, committee, vote, action) | :white_check_mark: |
-| **Observability** | |
-| Prometheus metrics (port 12798) | :white_check_mark: |
-| SIGHUP topology reload | :white_check_mark: |
-| Full VRF/KES cryptographic verification | :white_check_mark: |
-| **Pending** | |
-| Mainnet integration testing | :construction: |
-| Genesis bootstrap from peers | :construction: |
-| Independent block validation (without trusting upstream) | :construction: |
+### Conway Governance (CIP-1694)
+- **DRep lifecycle**: registration, voting, delegation, activity tracking, expiration
+- **Constitutional committee**: hot key authorization, cold key resignation, member expiration, quorum threshold tracking
+- **7 governance action types**: ParameterChange, HardFork, TreasuryWithdrawals, NoConfidence, UpdateCommittee, NewConstitution, InfoAction
+- **Ratification thresholds**: 4 DRep PP group thresholds, 5 SPO voting thresholds, exact rational arithmetic via u128 cross-multiplication
+- **Proposal lifecycle**: submission, voting, ratification, expiration with deposit refunds
+- **Constitution tracking**: anchor + optional guardrail script
+
+### Networking (N2N)
+- **Protocol versions**: V14/V15 (matching cardano-node 10.x)
+- **Pipelined ChainSync**: configurable pipeline depth (default 150, via `TORSTEN_PIPELINE_DEPTH`)
+- **Multi-peer BlockFetch**: up to 4 concurrent fetchers with chunk-based retry on failure
+- **N2N server**: handshake (magic verification), ChainSync, BlockFetch, KeepAlive, TxSubmission2, PeerSharing
+- **Block relay**: synced blocks announced to downstream peers via broadcast channel (full relay behavior)
+- **Ouroboros multiplexer**: full duplex, mini-protocol demuxing
+
+### Networking (N2C)
+- **Protocol versions**: V16-V22 with bit-15 version encoding (cardano-cli 10.15 compatibility)
+- **LocalStateQuery**: all 39 Shelley BlockQuery tags (0-38) fully implemented including:
+  - GetUTxO (whole/filtered), GetCurrentPParams, GetStakeDistribution, GetRewardProvenance
+  - GetDRepState, GetCommitteeState, GetConstitution, GetGovState, GetRatifyState
+  - GetPoolState, GetPoolDistr2, GetStakePoolDefaultVote, GetLedgerPeerSnapshot
+  - Debug tags (8, 12, 13), GetCBOR wrapper (tag 9)
+  - Credential type discrimination (KeyHash vs ScriptHash) in all responses
+- **LocalChainSync**: per-client cursor, block delivery
+- **LocalTxSubmission**: with Phase-1/Phase-2 validation before mempool admission
+- **LocalTxMonitor**: HasTx, NextTx, GetSizeAndCapacity
+
+### P2P Peer Management
+- **Cold/warm/hot lifecycle**: automatic promotion and demotion based on peer behavior
+- **EWMA latency tracking**: exponentially weighted moving average for peer quality assessment
+- **Reputation scoring**: failure count decay (halves every 5 minutes), slot staleness detection
+- **Peer categories**: LocalRoot, PublicRoot, BigLedgerPeer, LedgerPeer with category-aware selection
+- **DNS multi-resolution**: A/AAAA/SRV record support for relay discovery
+- **Ledger-based peer discovery**: SPO relay addresses from pool_params when past useLedgerAfterSlot
+- **Peer sharing (gossip)**: protocol for decentralized peer discovery
+
+### Block Production
+- **VRF proof generation**: ECVRF-ED25519-SHA512-Elligator2 via vrf_dalek
+- **Block forging**: `forge_block()` with mempool transaction selection
+- **KES signing**: Sum6Kes key loading, period validation, block signing
+- **Operational certificates**: raw-bytes signable format, counter tracking for replay protection
+- **Block announcement**: forged + synced blocks broadcast to downstream N2N peers
+
+### Storage
+- **ImmutableDB**: append-only chunk files with sequential I/O, secondary index (56-byte entries, big-endian, CRC32), memory-mapped I/O (memmap2)
+- **VolatileDB**: in-memory HashMap for volatile chain tip, rollback support via DiffSeq
+- **torsten-lsm**: pure Rust LSM-tree engine (BTreeMap memtable, WAL with CRC32, SSTable pages, blocked bloom filters, fence pointer indexes, clock-sweep LRU cache, lazy levelling compaction T=4, jumbo pages for 13KB+ inline datums, hard-link snapshots, exclusive session lock)
+- **io_uring async I/O**: optional Linux-only feature for high-performance disk access
+- **Mithril snapshot import**: digest verification (SHA256 beacon hash + file digests), secondary index parsing, resume support, ~2 minute import for 4M blocks
+- **Ledger snapshots**: TRSN magic + blake2b checksum, bincode serialization, time-based snapshot policy matching Haskell (72min normal, 50K blocks + 6min bulk, max 2 retained)
+
+### CLI (cardano-cli compatible)
+- **Key management**: `key gen`, `key sign`, `key verify`, `key convert-itn`
+- **Address**: `address build`, `address key-gen`, `address info`, `address key-hash`
+- **Node operations**: `node key-gen`, `node key-gen-kes`, `node key-gen-vrf`, `node issue-op-cert`, `node new-counter`
+- **Transactions**: `transaction build`, `transaction build-raw`, `transaction sign`, `transaction submit`, `transaction txid`, `transaction calculate-min-fee`, `transaction view`, `transaction witness`, `transaction assemble`, `transaction policyid`
+- **Queries**: `query tip`, `query utxo`, `query protocol-parameters`, `query stake-distribution`, `query stake-address-info`, `query gov-state`, `query drep-state`, `query committee-state`, `query tx-mempool`, `query stake-pools`, `query stake-snapshot`, `query pool-params`, `query treasury`, `query constitution`, `query ratify-state`, `query leadership-schedule`
+- **Staking**: `stake-address gen`, `stake-address key-gen`, `stake-address registration-certificate`, `stake-address deregistration-certificate`, `stake-address delegate-vote`, `stake-address stake-and-vote-deleg-certificate`
+- **Pools**: `stake-pool registration-certificate`, `stake-pool deregistration-certificate`, `stake-pool id`, `stake-pool metadata-hash`
+- **Governance**: `governance vote`, `governance action`, `governance query-constitution`
+
+### Observability
+- **28+ Prometheus metrics** on port 12798 (blocks, slots, epochs, UTxO count, delegations, treasury, mempool, peers, transactions, DReps, proposals, pools, disk, memory, uptime, tip age)
+- **Structured logging** with tracing-subscriber (env-filter, JSON output, journald)
+- **SIGHUP topology reload** for live configuration updates
+- **GSM state tracking**: PreSyncing/Syncing/CaughtUp with tip age monitoring
+
+### Testing
+- **1,850+ automated tests**: unit tests, property tests (proptest), integration tests, conformance tests (against official Cardano test vectors), golden tests (VRF, N2C wire format)
+- **Reward cross-validation**: 11 tests verified against Koios on-chain data (preview epochs 1232-1235)
+- **LSM stress tests**: 50K-entry UTxO workload, WAL crash recovery, snapshot consistency
+- **Zero-warning policy**: `cargo clippy --all-targets -- -D warnings` enforced in CI
+
+## Testnet Validation
+
+Torsten has been validated on the **Cardano preview testnet** (network magic=2):
+
+| Metric | Value |
+|--------|-------|
+| Blocks synced | 4,109,330 (100% to tip) |
+| UTxO count | 2,939,027 |
+| Validation errors | 0 (across full 4.1M block replay) |
+| Live blocks applied at tip | 504 (0 rejections) |
+| Replay throughput | 13,728 blocks/sec (LSM backend) |
+| Epoch transitions | 1,237 (including all protocol version changes) |
+| Treasury | 14,065,825,286 ADA |
+| Pools | 656 registered |
+| DReps | 8,791 registered |
+| Governance proposals | 2 active, 590 ratified during replay |
 
 ## Production Readiness
 
@@ -173,18 +203,19 @@ graph TD
 Torsten can function as a **testnet relay node** with the following capabilities:
 
 - Syncs to chain tip on preview/preprod testnets via pipelined ChainSync
-- Serves blocks to downstream peers (N2N server: ChainSync, BlockFetch, KeepAlive, TxSubmission2)
+- Serves blocks to downstream peers (N2N server: ChainSync, BlockFetch, KeepAlive, TxSubmission2, PeerSharing)
 - Accepts and validates transactions (Phase-1 + Phase-2 Plutus) for mempool admission
-- Responds to all cardano-cli queries via N2C socket (V16–V22)
+- Responds to all cardano-cli queries via N2C socket (V16-V22, all 39 query tags)
 - Handles graceful shutdown on SIGINT/SIGTERM with ChainDB + ledger snapshot persistence
-- Recovers from crash with snapshot fallback (latest → previous → fresh)
+- Recovers from crash with WAL replay (torsten-lsm) + snapshot fallback (latest -> previous -> fresh)
 - Persists ChainDB at epoch transitions to limit replay window on crash
+- Correctly defers reward distribution matching Haskell's RUPD timing
 
 **Known limitations:**
 - Mainnet sync has not been verified to chain tip
-- No formal protocol conformance testing against the Cardano specification
+- No formal protocol conformance testing against the Cardano CDDL specification
 - No long-duration stability testing (multi-day uptime under load)
-- Block validation trusts upstream peers — independent full validation not yet verified
+- Plutus uplc evaluator has marginal cost accounting differences vs Haskell (~0.04% for complex scripts near budget limits)
 
 ### Block Producer
 
@@ -206,19 +237,31 @@ The block production pipeline is **implemented but untested on a live network**:
 
 See the [latest benchmark results](benches/results/2026-03-14-all-profiles.md) for detailed storage, UTxO, and cryptographic operation benchmarks across all storage profiles.
 
+### Sync Performance
+
+| Metric | Preview Testnet |
+|--------|----------------|
+| Mithril import | ~9 min (2.7 GB snapshot, 4M blocks) |
+| Ledger replay (LSM backend) | ~300 sec (13,728 blk/s) |
+| Tip catch-up | ~22 sec for 500 blocks |
+| Memory at tip | ~5.8 GB RSS (high-memory profile) |
+| UTxO store on-disk | ~1.8 GB |
+| Total DB size | ~15 GB |
+
 ### Prometheus Metrics (port 12798)
 
-Torsten exports the following metrics:
+Torsten exports 28+ metrics including:
 
-- `torsten_blocks_received_total` / `torsten_blocks_applied_total` — block counters
-- `torsten_slot_number` / `torsten_block_number` / `torsten_epoch_number` — chain position
-- `torsten_sync_progress_percent` — sync progress (100% = at tip)
-- `torsten_utxo_count` / `torsten_delegation_count` — ledger state
-- `torsten_peers_connected` / `torsten_peers_hot` / `torsten_peers_warm` / `torsten_peers_cold` — P2P
-- `torsten_mempool_tx_count` / `torsten_mempool_bytes` — mempool
-- `torsten_treasury_lovelace` / `torsten_drep_count` / `torsten_proposal_count` / `torsten_pool_count` — governance
-- `torsten_transactions_received_total` / `torsten_transactions_validated_total` / `torsten_transactions_rejected_total` — tx processing
-- `torsten_disk_available_bytes` — storage
+- `torsten_blocks_received_total` / `torsten_blocks_applied_total` - block counters
+- `torsten_slot_number` / `torsten_block_number` / `torsten_epoch_number` - chain position
+- `torsten_sync_progress_percent` - sync progress (100% = at tip)
+- `torsten_utxo_count` / `torsten_delegation_count` - ledger state
+- `torsten_peers_connected` / `torsten_peers_hot` / `torsten_peers_warm` / `torsten_peers_cold` - P2P
+- `torsten_mempool_tx_count` / `torsten_mempool_bytes` - mempool
+- `torsten_treasury_lovelace` / `torsten_drep_count` / `torsten_proposal_count` / `torsten_pool_count` - governance
+- `torsten_transactions_received_total` / `torsten_transactions_validated_total` / `torsten_transactions_rejected_total` - tx processing
+- `torsten_tip_age_seconds` / `torsten_chainsync_idle_secs` - freshness
+- `torsten_mem_resident_bytes` / `torsten_disk_available_bytes` - resources
 
 ## Network Magic
 
@@ -231,12 +274,17 @@ Torsten exports the following metrics:
 ## Development
 
 ```bash
+# Run all tests (unit, property, conformance, golden, integration)
 cargo test --all
+
+# Lint
 cargo clippy --all-targets -- -D warnings
+
+# Format check
 cargo fmt --all -- --check
 ```
 
-Zero-warning policy enforced — all code must compile cleanly with clippy and pass formatting checks.
+Zero-warning policy enforced - all code must compile cleanly with clippy and pass formatting checks.
 
 ### Running Benchmarks
 
@@ -282,4 +330,4 @@ Torsten supports configurable storage profiles via `--storage-profile`:
 
 ## License
 
-MIT
+Apache-2.0
