@@ -324,7 +324,9 @@ impl Node {
                                 if next_slot.0 > rollback_slot {
                                     break;
                                 }
-                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
+                                // Minimal decode: rollback replay uses ApplyOnly
+                                // mode, so witness-set data is never read.
+                                match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
                                         if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                             error!(
@@ -631,7 +633,9 @@ impl Node {
                                 if next_slot.0 >= target_slot {
                                     break; // Reached the incoming batch
                                 }
-                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
+                                // Minimal decode: gap-bridge replay uses ApplyOnly
+                                // mode, so witness-set data is never read.
+                                match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
                                         if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                             warn!(
@@ -1115,8 +1119,10 @@ impl Node {
             if let Ok(Some((_next_slot, _hash, cbor))) =
                 db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
             {
+                // Minimal decode: only block.prev_hash() (a header field)
+                // is read here — no witness-set access needed.
                 if let Ok(block) =
-                    torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                    torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
                         &cbor,
                         self.byron_epoch_length,
                     )
@@ -1900,7 +1906,12 @@ impl Node {
                     return Err(anyhow::anyhow!("shutdown requested"));
                 }
 
-                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                // Minimal decode: chunk replay always uses ApplyOnly mode.
+                // Skipping witness-set parsing is the primary replay speedup:
+                // the witness set (vkey witnesses, scripts, redeemers, Plutus
+                // data) is the largest per-tx allocation and is never read by
+                // the ledger during ApplyOnly block application.
+                match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
                     cbor, bel,
                 ) {
                     Ok(block) => {
@@ -2061,7 +2072,9 @@ impl Node {
 
             match block_data {
                 Ok(Some((slot, _hash, cbor))) => {
-                    match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                    // Minimal decode: LSM replay always uses ApplyOnly mode;
+                    // witness-set fields are never accessed.
+                    match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
                         &cbor,
                         self.byron_epoch_length,
                     ) {

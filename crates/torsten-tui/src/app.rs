@@ -121,45 +121,39 @@ impl RttBands {
         };
 
         // Prefer explicit _min / _max gauges if the node publishes them.
-        // Otherwise approximate:
-        //   min → midpoint of the lowest non-empty bucket
-        //   max → midpoint of the highest non-empty bucket
+        // Otherwise approximate from the lowest / highest populated bucket midpoints.
+        let min_approx: Option<f64> = if band_0_50 > 0 {
+            Some(25.0) // midpoint of 0-50ms
+        } else if band_50_100 > 0 {
+            Some(75.0)
+        } else if band_100_200 > 0 {
+            Some(150.0)
+        } else if total > 0 {
+            Some(200.0)
+        } else {
+            None
+        };
+        let max_approx: Option<f64> = if total > 0 && band_200_plus > 0 {
+            Some(300.0) // representative for 200ms+
+        } else if band_100_200 > 0 {
+            Some(150.0)
+        } else if band_50_100 > 0 {
+            Some(75.0)
+        } else if band_0_50 > 0 {
+            Some(25.0)
+        } else {
+            None
+        };
         let min_ms = snap
             .values
             .get("torsten_peer_handshake_rtt_ms_min")
             .copied()
-            .or_else(|| {
-                // Lowest populated bucket gives an upper bound; use midpoint.
-                if band_0_50 > 0 {
-                    Some(25.0) // midpoint of 0-50ms
-                } else if band_50_100 > 0 {
-                    Some(75.0)
-                } else if band_100_200 > 0 {
-                    Some(150.0)
-                } else if total > 0 {
-                    Some(200.0)
-                } else {
-                    None
-                }
-            });
+            .or(min_approx);
         let max_ms = snap
             .values
             .get("torsten_peer_handshake_rtt_ms_max")
             .copied()
-            .or_else(|| {
-                // Highest populated bucket gives a lower bound; use midpoint.
-                if total > 0 && band_200_plus > 0 {
-                    Some(300.0) // representative for 200ms+
-                } else if band_100_200 > 0 {
-                    Some(150.0)
-                } else if band_50_100 > 0 {
-                    Some(75.0)
-                } else if band_0_50 > 0 {
-                    Some(25.0)
-                } else {
-                    None
-                }
-            });
+            .or(max_approx);
 
         RttBands {
             band_0_50,

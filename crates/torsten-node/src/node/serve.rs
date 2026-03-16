@@ -298,6 +298,12 @@ pub(crate) fn convert_validation_error(
                 "Governance features not available pre-Conway (current protocol version: {current_version})"
             ),
         },
+        VE::TreasuryValueMismatch { declared, actual } => TxValidationError::ScriptFailed {
+            reason: format!("Treasury value mismatch: declared {declared}, actual {actual}"),
+        },
+        VE::UnelectedCommitteeMember { cold_credential_hash } => TxValidationError::ScriptFailed {
+            reason: format!("Unelected committee member: {cold_credential_hash}"),
+        },
     }
 }
 

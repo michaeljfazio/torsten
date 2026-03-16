@@ -7028,7 +7028,15 @@ fn governance_test_state() -> LedgerState {
             .insert(key, Lovelace(1_000_000_000_000));
     }
 
-    // Register 5 SPOs with pool stake
+    // Register 5 SPOs with pool stake.
+    // Also add delegations from synthetic stake credentials → each pool, so that
+    // when process_epoch_transition builds the new "mark" snapshot from live
+    // delegations, the pool_stake map is populated.  This matches the real chain
+    // where delegators must be registered for pool stake to count.
+    //
+    // Per CIP-1694 the mark snapshot (current epoch) is used for SPO voting
+    // power, not the set (previous epoch).  Both the snapshot pre-seeded here
+    // and the freshly built mark (via delegations) carry 2T lovelace per pool.
     for i in 0..5 {
         let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
         Arc::make_mut(&mut state.pool_params).insert(
@@ -7047,24 +7055,35 @@ fn governance_test_state() -> LedgerState {
                 metadata_hash: None,
             },
         );
+        // Create a synthetic delegator for each pool so the epoch-transition
+        // mark builder picks up this stake.
+        let spo_cred = Hash32::from_bytes([200 + i as u8; 32]);
+        Arc::make_mut(&mut state.delegations).insert(spo_cred, pool_id);
+        state
+            .stake_distribution
+            .stake_map
+            .insert(spo_cred, Lovelace(2_000_000_000_000));
+        Arc::make_mut(&mut state.reward_accounts).insert(spo_cred, Lovelace(0));
     }
 
-    // Set up snapshots with pool stake (needed for SPO voting power)
+    // Pre-seed the mark snapshot so SPO voting power is available even before
+    // the first epoch transition.  After process_epoch_transition the existing
+    // mark is rotated to set and a fresh mark is built from delegations (above),
+    // so SPO power is preserved across the rotation.
     let mut pool_stake = HashMap::new();
     for i in 0..5 {
         let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
         pool_stake.insert(pool_id, Lovelace(2_000_000_000_000));
     }
-    // Put in mark so after epoch transition rotation (mark→set), it's available
     state.snapshots.mark = Some(StakeSnapshot {
         epoch: EpochNo(0),
-        delegations: Arc::new(HashMap::new()),
+        delegations: Arc::clone(&state.delegations),
         pool_stake,
         pool_params: Arc::clone(&state.pool_params),
         stake_distribution: Arc::new(HashMap::new()),
     });
 
-    // Prevent epoch transitions from clearing manually-set stake
+    // Prevent epoch transitions from triggering a full UTxO scan.
     state.needs_stake_rebuild = false;
 
     state
@@ -7925,4 +7944,170 @@ fn test_block_does_not_connect_without_ebb_advance() {
         matches!(result, Err(LedgerError::BlockDoesNotConnect { .. })),
         "Block referencing an EBB without advance_past_ebb must be rejected: {result:?}"
     );
+}
+
+// ============================================================================
+// Conway LEDGERS rule tests
+// ============================================================================
+
+/// Build a minimal Conway state (protocol 9) with an empty UTxO set and the
+/// given treasury balance.  The epoch is set to 0, epoch_length to 100.
+fn make_conway_state_with_treasury(treasury: u64) -> LedgerState {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    params.committee_min_size = 0;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+    state.needs_stake_rebuild = false;
+    state.treasury = Lovelace(treasury);
+    state
+}
+
+/// Conway LEDGERS rule: when a transaction body declares `currentTreasuryValue`
+/// (field 19) and the value does not match the ledger's treasury balance, the
+/// block must be rejected.
+#[test]
+fn test_treasury_value_mismatch_rejects_block() {
+    // Ledger treasury = 1_000_000 lovelace
+    let mut state = make_conway_state_with_treasury(1_000_000);
+
+    // Build a transaction that declares treasury_value = 9_999 (wrong)
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([1u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = Some(Lovelace(9_999));
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+    assert!(
+        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
+            if errors.contains("TreasuryValueMismatch")),
+        "A mismatched treasury_value must reject the block; got: {result:?}"
+    );
+}
+
+/// Conway LEDGERS rule: when `currentTreasuryValue` matches exactly, validation
+/// must succeed (the check alone must not reject a valid block — further checks
+/// are short-circuited here by the empty-input transaction which would normally
+/// fail Phase-1; we use ApplyOnly to confirm the happy path skips the check).
+#[test]
+fn test_treasury_value_matching_does_not_reject_in_validate_all() {
+    // Ledger treasury = 500_000 lovelace
+    let mut state = make_conway_state_with_treasury(500_000);
+
+    // Build a transaction with the CORRECT treasury_value
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([2u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = Some(Lovelace(500_000));
+
+    // The transaction has no inputs so Phase-1 will fail with NoInputs —
+    // that's fine; the test only checks that the *treasury* check itself
+    // does not fire.  We inspect the error message to confirm.
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+    // Must NOT be a TreasuryValueMismatch error
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("TreasuryValueMismatch"),
+            "Correct treasury_value must not produce TreasuryValueMismatch; got: {errors}"
+        );
+    }
+    // Any other error (e.g. Phase-1 NoInputs) is acceptable — the treasury
+    // check itself passed.
+}
+
+/// Conway LEDGERS rule: when `treasury_value` is absent from the tx body, the
+/// check must not fire (field 19 is optional; pre-Conway and many Conway txs
+/// omit it).
+#[test]
+fn test_treasury_value_absent_skips_check() {
+    let mut state = make_conway_state_with_treasury(42_000);
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([3u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = None; // field absent — check must not fire
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("TreasuryValueMismatch"),
+            "Absent treasury_value must never produce TreasuryValueMismatch; got: {errors}"
+        );
+    }
+}
+
+/// Build a minimal Conway state that has one CC member with the given cold
+/// credential hash in `committee_expiration`.
+fn make_conway_state_with_cc_member(cold_key: torsten_primitives::hash::Hash32) -> LedgerState {
+    let mut state = make_conway_state_with_treasury(0);
+    Arc::make_mut(&mut state.governance)
+        .committee_expiration
+        .insert(cold_key, EpochNo(1000));
+    state
+}
+
+/// Conway LEDGERS rule: a `CommitteeHotAuth` certificate whose cold credential
+/// is NOT present in `committee_expiration` must be rejected ("failOnNonEmpty
+/// unelected" predicate in Haskell `conwayCertsPredFailure`).
+#[test]
+fn test_committee_hot_auth_unelected_cold_credential_rejected() {
+    // CC member's cold key
+    let cold_cred = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let cold_key = credential_to_hash(&cold_cred);
+    let mut state = make_conway_state_with_cc_member(cold_key);
+
+    // Attacker tries to authorize a hot key for a DIFFERENT cold credential
+    // that is NOT in the committee.
+    let outsider_cold = Credential::VerificationKey(Hash28::from_bytes([99u8; 28]));
+    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([77u8; 28]));
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([4u8; 32]));
+    tx.is_valid = true;
+    tx.body.certificates = vec![Certificate::CommitteeHotAuth {
+        cold_credential: outsider_cold,
+        hot_credential: hot_cred,
+    }];
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+    assert!(
+        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
+            if errors.contains("UnelectedCommitteeMember")),
+        "CommitteeHotAuth for non-member cold key must be rejected; got: {result:?}"
+    );
+}
+
+/// Conway LEDGERS rule: a `CommitteeHotAuth` certificate whose cold credential
+/// IS present in `committee_expiration` must not be rejected by the unelected
+/// check.  (The block may still fail Phase-1 for other reasons; we only verify
+/// the CC check does not fire.)
+#[test]
+fn test_committee_hot_auth_elected_cold_credential_not_rejected_by_cc_check() {
+    let cold_cred = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let cold_key = credential_to_hash(&cold_cred);
+    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
+    let mut state = make_conway_state_with_cc_member(cold_key);
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([5u8; 32]));
+    tx.is_valid = true;
+    tx.body.certificates = vec![Certificate::CommitteeHotAuth {
+        cold_credential: cold_cred,
+        hot_credential: hot_cred,
+    }];
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("UnelectedCommitteeMember"),
+            "Elected CC member must not trigger UnelectedCommitteeMember; got: {errors}"
+        );
+    }
 }

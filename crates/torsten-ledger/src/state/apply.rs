@@ -9,7 +9,9 @@
 //! - Phase-1 and Phase-2 (Plutus) transaction validation
 //! - Applying UTxO changes, certificates, governance, and fee accumulation
 
-use super::{stake_credential_hash, BlockValidationMode, LedgerError, LedgerState};
+use super::{
+    credential_to_hash, stake_credential_hash, BlockValidationMode, LedgerError, LedgerState,
+};
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::validation::{
@@ -19,6 +21,7 @@ use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
 use torsten_primitives::time::EpochNo;
+use torsten_primitives::transaction::Certificate;
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
 
@@ -307,6 +310,80 @@ impl LedgerState {
                 let has_redeemers = !tx.witness_set.redeemers.is_empty();
 
                 if tx.is_valid {
+                    // -------------------------------------------------------
+                    // Conway LEDGERS rule: submittedTreasuryValue == actualTreasuryValue
+                    //
+                    // When the transaction body includes `currentTreasuryValue`
+                    // (field 19, Conway+), the block producer asserts that the
+                    // ledger's treasury has a specific balance at the point this
+                    // transaction executes.  A mismatch means the block is
+                    // invalid (the producer's world-view diverged from ours).
+                    //
+                    // Only checked in Conway (protocol >= 9) and only when the
+                    // field is actually present — pre-Conway transactions never
+                    // carry this field.
+                    //
+                    // Reference: Cardano Blueprint LEDGERS flowchart,
+                    // "submittedTreasuryValue == currentTreasuryValue" predicate;
+                    // Haskell `conwayLedgerFn` in
+                    // `Cardano.Ledger.Conway.Rules.Ledger`.
+                    // -------------------------------------------------------
+                    if self.protocol_params.protocol_version_major >= 9 {
+                        if let Some(declared_treasury) = tx.body.treasury_value {
+                            if declared_treasury.0 != self.treasury.0 {
+                                return Err(LedgerError::BlockTxValidationFailed {
+                                    slot: block.slot().0,
+                                    tx_hash: tx.hash.to_hex(),
+                                    errors: format!(
+                                        "TreasuryValueMismatch: tx declared {}, ledger has {}",
+                                        declared_treasury.0, self.treasury.0
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    // -------------------------------------------------------
+                    // Conway LEDGERS rule: failOnNonEmpty unelectedCommitteeMembers
+                    //
+                    // A `CommitteeHotAuth` certificate is only valid when the
+                    // cold credential is listed in the current constitutional
+                    // committee (`committee_expiration` map populated by the last
+                    // enacted `UpdateCommittee` governance action).  Issuing a
+                    // hot-key authorisation for a cold credential that is not a
+                    // sitting CC member is rejected by the `CERT` rule.
+                    //
+                    // Only enforced in Conway (protocol >= 9).  Pre-Conway eras
+                    // have no constitutional committee, so the check would always
+                    // trivially fail.
+                    //
+                    // Reference: Haskell `conwayCertsPredFailure` / `CERT` rule,
+                    // "unelected" predicate in
+                    // `Cardano.Ledger.Conway.Rules.Certs`.
+                    // -------------------------------------------------------
+                    if self.protocol_params.protocol_version_major >= 9 {
+                        for cert in &tx.body.certificates {
+                            if let Certificate::CommitteeHotAuth {
+                                cold_credential, ..
+                            } = cert
+                            {
+                                let cold_key = credential_to_hash(cold_credential);
+                                if !self.governance.committee_expiration.contains_key(&cold_key) {
+                                    return Err(LedgerError::BlockTxValidationFailed {
+                                        slot: block.slot().0,
+                                        tx_hash: tx.hash.to_hex(),
+                                        errors: format!(
+                                            "UnelectedCommitteeMember: \
+                                             CommitteeHotAuth cold credential {} \
+                                             is not in the current constitutional committee",
+                                            cold_key.to_hex()
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     // Producer claims tx is valid — verify with full validation.
                     // Use tx raw_cbor size as tx_size (approximate, sufficient for validation).
                     let tx_size = tx.raw_cbor.as_ref().map_or(0, |c| c.len() as u64);

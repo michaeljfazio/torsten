@@ -720,14 +720,24 @@ impl LedgerState {
     }
 
     /// Compute the voting power of a stake pool: total delegated stake.
+    ///
+    /// Per CIP-1694 and the Haskell Ratify.hs implementation, SPO voting power
+    /// is measured against the **mark** snapshot (the stake distribution captured
+    /// at the beginning of the current epoch, immediately before the epoch
+    /// transition). Using `set` (two epochs prior) would delay the effect of new
+    /// delegations by an extra epoch compared to the specification.
+    ///
+    /// Reference: Haskell `spoVotingPower` in `Cardano.Ledger.Conway.Governance.Procedures`
+    /// uses `ssStakeMarkPoolDistr` (the mark pool distribution).
     pub(crate) fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
-        // Use the "set" snapshot (previous epoch) for voting power, falling back to current
-        if let Some(ref snapshot) = self.snapshots.set {
+        // Use the "mark" snapshot (current epoch stake) for voting power — CIP-1694 spec.
+        if let Some(ref snapshot) = self.snapshots.mark {
             if let Some(stake) = snapshot.pool_stake.get(pool_id) {
                 return stake.0;
             }
         }
-        // Fallback: compute from current delegations (UTxO + rewards)
+        // Fallback: compute from current delegations (UTxO + rewards).
+        // This path is taken during the first two epochs before snapshots are populated.
         debug!("SPO voting power: falling back to O(n) delegation scan — snapshot not available");
         let mut total = 0u64;
         for (stake_cred, delegated_pool) in self.delegations.iter() {
@@ -740,16 +750,22 @@ impl LedgerState {
 
     /// Compute total active SPO stake across all pools.
     /// Used as the denominator for SPO voting thresholds.
+    ///
+    /// Per CIP-1694, the denominator is derived from the **mark** snapshot
+    /// (same snapshot used for individual pool voting power) to keep the
+    /// ratio consistent. Haskell uses `ssStakeMarkPoolDistr` for both the
+    /// numerator (per-pool power) and this denominator.
     fn compute_total_spo_stake(&self) -> u64 {
-        // Use "set" snapshot if available (previous epoch), else current pool_stake
-        if let Some(ref snapshot) = self.snapshots.set {
+        // Use "mark" snapshot if available (current epoch), else fall back.
+        if let Some(ref snapshot) = self.snapshots.mark {
             let total: u64 = snapshot
                 .pool_stake
                 .values()
                 .fold(0u64, |acc, s| acc.saturating_add(s.0));
             return total.max(1);
         }
-        // Fallback: sum all pool stake from current delegations (UTxO + rewards)
+        // Fallback: sum all pool stake from current delegations (UTxO + rewards).
+        // This path is taken during the first two epochs before snapshots are populated.
         let mut total = 0u64;
         for stake_cred in self.delegations.keys() {
             total = total.saturating_add(self.credential_stake(stake_cred));
@@ -3103,5 +3119,116 @@ mod tests {
         };
         assert!(check_threshold(100, 100, &threshold));
         assert!(!check_threshold(99, 100, &threshold));
+    }
+
+    // ========================================================================
+    // SPO voting power snapshot tests (mark vs set)
+    // ========================================================================
+
+    /// Verify that `compute_spo_voting_power` reads from the **mark** snapshot,
+    /// not from `set`.  CIP-1694 specifies the mark (current-epoch) stake
+    /// distribution for SPO voting power.
+    #[test]
+    fn test_spo_voting_power_uses_mark_snapshot() {
+        use crate::state::StakeSnapshot;
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let pool_id = Hash28::from_bytes([10u8; 28]);
+
+        // Populate ONLY the mark snapshot with stake for this pool.
+        // The set snapshot has a different (lower) amount.
+        let mut mark_pool_stake = std::collections::HashMap::new();
+        mark_pool_stake.insert(pool_id, Lovelace(5_000_000_000));
+        state.snapshots.mark = Some(StakeSnapshot {
+            epoch: EpochNo(1),
+            delegations: Arc::new(std::collections::HashMap::new()),
+            pool_stake: mark_pool_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(std::collections::HashMap::new()),
+        });
+
+        let mut set_pool_stake = std::collections::HashMap::new();
+        set_pool_stake.insert(pool_id, Lovelace(1_000_000_000)); // deliberately different
+        state.snapshots.set = Some(StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(std::collections::HashMap::new()),
+            pool_stake: set_pool_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(std::collections::HashMap::new()),
+        });
+
+        // SPO voting power must come from mark (5B), not set (1B)
+        let power = state.compute_spo_voting_power(&pool_id);
+        assert_eq!(
+            power, 5_000_000_000,
+            "compute_spo_voting_power must read from mark snapshot per CIP-1694"
+        );
+    }
+
+    /// Verify that `compute_total_spo_stake` (the denominator for SPO voting
+    /// thresholds) also reads from the mark snapshot.
+    #[test]
+    fn test_compute_total_spo_stake_uses_mark_snapshot() {
+        use crate::state::StakeSnapshot;
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let pool_a = Hash28::from_bytes([1u8; 28]);
+        let pool_b = Hash28::from_bytes([2u8; 28]);
+
+        // Mark has both pools: total = 8B
+        let mut mark_stake = std::collections::HashMap::new();
+        mark_stake.insert(pool_a, Lovelace(3_000_000_000));
+        mark_stake.insert(pool_b, Lovelace(5_000_000_000));
+        state.snapshots.mark = Some(StakeSnapshot {
+            epoch: EpochNo(2),
+            delegations: Arc::new(std::collections::HashMap::new()),
+            pool_stake: mark_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(std::collections::HashMap::new()),
+        });
+
+        // Set has only one pool: total = 1B (stale, should NOT be used)
+        let mut set_stake = std::collections::HashMap::new();
+        set_stake.insert(pool_a, Lovelace(1_000_000_000));
+        state.snapshots.set = Some(StakeSnapshot {
+            epoch: EpochNo(1),
+            delegations: Arc::new(std::collections::HashMap::new()),
+            pool_stake: set_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(std::collections::HashMap::new()),
+        });
+
+        let total = state.compute_total_spo_stake();
+        assert_eq!(
+            total, 8_000_000_000,
+            "compute_total_spo_stake must sum from mark snapshot per CIP-1694"
+        );
+    }
+
+    /// Without any snapshots, SPO voting power falls back to the O(n) live
+    /// delegation scan.  Ensure the fallback returns sensible results and does
+    /// not panic.
+    #[test]
+    fn test_spo_voting_power_fallback_no_snapshots() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        let pool_id = Hash28::from_bytes([77u8; 28]);
+        let stake_cred = Hash32::from_bytes([88u8; 32]);
+
+        // No snapshots — must fall back to live delegation scan
+        assert!(state.snapshots.mark.is_none());
+        assert!(state.snapshots.set.is_none());
+
+        // With a delegation pointing to pool_id and some stake
+        Arc::make_mut(&mut state.delegations).insert(stake_cred, pool_id);
+        state
+            .stake_distribution
+            .stake_map
+            .insert(stake_cred, Lovelace(9_000_000));
+
+        let power = state.compute_spo_voting_power(&pool_id);
+        assert_eq!(
+            power, 9_000_000,
+            "fallback scan must return live stake when no mark snapshot exists"
+        );
     }
 }

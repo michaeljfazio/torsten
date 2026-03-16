@@ -143,6 +143,23 @@ pub enum ValidationError {
     },
     #[error("Governance feature requires Conway era (protocol >= 9), current protocol version is {current_version}")]
     GovernancePreConway { current_version: u64 },
+    /// Conway LEDGERS rule: the block producer's declared treasury value in the
+    /// transaction body (`currentTreasuryValue`, field 19) must match the
+    /// ledger's tracked treasury balance exactly.
+    ///
+    /// Reference: Cardano Blueprint `LEDGERS` flowchart, "submittedTreasuryValue
+    /// == currentTreasuryValue" predicate.
+    #[error("Treasury value mismatch: tx declared {declared}, ledger has {actual}")]
+    TreasuryValueMismatch { declared: u64, actual: u64 },
+    /// Conway LEDGERS rule: the `CommitteeHotAuth` certificate's cold credential
+    /// must correspond to a member currently elected to the constitutional
+    /// committee (`committee_expiration` map).  Authorising a hot key for an
+    /// unrecognised cold credential is rejected ("failOnNonEmpty unelected").
+    ///
+    /// Reference: Cardano ledger `conwayWitsVKeyNeeded` / `CERT` rule,
+    /// "ccHotKeyOK" predicate from the Haskell implementation.
+    #[error("CommitteeHotAuth cold credential is not a current CC member: {cold_credential_hash}")]
+    UnelectedCommitteeMember { cold_credential_hash: String },
 }
 
 // ---------------------------------------------------------------------------
