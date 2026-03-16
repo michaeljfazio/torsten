@@ -43,6 +43,7 @@ pub struct TipResult {
 
 /// Result of a generic query
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum LocalQueryResult {
     Tip(TipResult),
     EpochNo(u64),

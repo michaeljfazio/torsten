@@ -2,6 +2,7 @@ use thiserror::Error;
 use torsten_primitives::network::NetworkId;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum HandshakeError {
     #[error("Version mismatch: {0}")]
     VersionMismatch(String),
@@ -22,6 +23,7 @@ pub enum HandshakeError {
 /// with us.  Genesis-specific behaviour (e.g. the `query` mode extensions)
 /// will be added when the Genesis protocol layer is implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NodeToNodeVersion {
     V14 = 14,
     V15 = 15,
@@ -32,6 +34,7 @@ pub enum NodeToNodeVersion {
 
 /// Supported node-to-client protocol versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NodeToClientVersion {
     V16 = 16,
     V17 = 17,
@@ -39,6 +42,7 @@ pub enum NodeToClientVersion {
 
 /// Version data exchanged during handshake
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VersionData {
     pub network_magic: u64,
     pub initiator_and_responder: bool,
@@ -47,6 +51,7 @@ pub struct VersionData {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PeerSharing {
     PeerSharingDisabled,
     PeerSharingEnabled,
@@ -57,6 +62,7 @@ pub enum PeerSharing {
 /// We advertise V14, V15, and V16 so that any peer running cardano-node ≥ 8.x
 /// can negotiate a shared version.  V16 capabilities are identical to V15 for
 /// now — Genesis-specific extensions will be wired in separately.
+#[allow(dead_code)]
 pub fn propose_versions(network: NetworkId) -> Vec<(u32, VersionData)> {
     let magic = network.magic();
     // Helper to build a standard VersionData for a given version number.
@@ -76,6 +82,7 @@ pub fn propose_versions(network: NetworkId) -> Vec<(u32, VersionData)> {
 
 /// Handshake state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum HandshakeState {
     /// Initial state - client proposes versions
     StPropose,

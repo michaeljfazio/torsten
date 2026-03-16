@@ -68,6 +68,7 @@ impl PeerConnection {
 
 /// Peer selection policy
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PeerSelectionConfig {
     pub target_active_peers: usize,
     pub target_established_peers: usize,

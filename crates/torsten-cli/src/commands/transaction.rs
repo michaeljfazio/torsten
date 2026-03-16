@@ -3577,6 +3577,7 @@ mod tests {
     ///
     /// Each entry: (tx_hash, output_index, lovelace, tokens)
     /// where tokens is a slice of (policy_bytes, asset_name_bytes, quantity).
+    #[allow(clippy::type_complexity)]
     fn build_utxo_msg_result_with_tokens(
         entries: &[(&[u8; 32], u32, u64, &[(&[u8], &[u8], u64)])],
     ) -> Vec<u8> {

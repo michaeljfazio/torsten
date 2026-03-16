@@ -6,6 +6,7 @@ use torsten_primitives::block::Point;
 /// This is how wallets query UTxOs, protocol parameters, stake distribution, etc.
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum LocalStateQueryMessage {
     // Client messages
     Acquire(Option<Point>),
@@ -21,6 +22,7 @@ pub enum LocalStateQueryMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AcquireFailure {
     PointTooOld,
     PointNotOnChain,
@@ -28,6 +30,7 @@ pub enum AcquireFailure {
 
 /// Supported query types
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum QueryRequest {
     /// Get current protocol parameters
     GetCurrentPParams,
@@ -63,6 +66,7 @@ pub enum QueryRequest {
 
 /// Query response
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum QueryResponse {
     /// Raw CBOR response
     Cbor(Vec<u8>),
@@ -71,6 +75,7 @@ pub enum QueryResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum LocalStateQueryState {
     StIdle,
     StAcquiring,

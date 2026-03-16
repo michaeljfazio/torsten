@@ -9,6 +9,7 @@ pub mod txsubmission;
 
 /// Mini-protocol IDs as used by the Ouroboros multiplexer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum MiniProtocolId {
     Handshake = 0,
     ChainSync = 2,
@@ -23,6 +24,7 @@ pub enum MiniProtocolId {
 }
 
 impl MiniProtocolId {
+    #[allow(dead_code)]
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
             0 => Some(MiniProtocolId::Handshake),
@@ -42,6 +44,7 @@ impl MiniProtocolId {
 
 /// Direction of a mini-protocol message
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Direction {
     /// Message from initiator to responder
     InitiatorToResponder,
@@ -51,6 +54,7 @@ pub enum Direction {
 
 /// Agency: who has the right to send the next message
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Agency {
     Client,
     Server,

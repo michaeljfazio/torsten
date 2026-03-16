@@ -4,6 +4,7 @@
 /// via Unix domain socket.
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum LocalTxSubmissionMessage {
     SubmitTx(Vec<u8>),
     AcceptTx,
@@ -12,6 +13,7 @@ pub enum LocalTxSubmissionMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum LocalTxSubmissionState {
     StIdle,
     StBusy,

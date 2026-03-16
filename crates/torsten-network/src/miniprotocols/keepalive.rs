@@ -3,6 +3,7 @@
 /// Simple ping/pong protocol to keep connections alive
 /// and measure round-trip time.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum KeepAliveMessage {
     KeepAlive(u16),
     KeepAliveResponse(u16),
@@ -10,12 +11,14 @@ pub enum KeepAliveMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum KeepAliveState {
     StClient,
     StServer,
     StDone,
 }
 
+#[allow(dead_code)]
 pub struct KeepAliveClient {
     pub state: KeepAliveState,
     pub cookie: u16,
@@ -28,6 +31,7 @@ impl Default for KeepAliveClient {
 }
 
 impl KeepAliveClient {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         KeepAliveClient {
             state: KeepAliveState::StClient,
@@ -35,6 +39,7 @@ impl KeepAliveClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn next_cookie(&mut self) -> u16 {
         self.cookie = self.cookie.wrapping_add(1);
         self.cookie

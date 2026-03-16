@@ -5,6 +5,7 @@ use torsten_primitives::block::Point;
 /// The block-fetch protocol allows downloading ranges of blocks
 /// identified by points on the chain.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum BlockFetchMessage {
     // Client messages
     RequestRange(Point, Point),
@@ -19,6 +20,7 @@ pub enum BlockFetchMessage {
 
 /// Block-fetch state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum BlockFetchState {
     /// Client has agency
     StIdle,
@@ -30,6 +32,7 @@ pub enum BlockFetchState {
     StDone,
 }
 
+#[allow(dead_code)]
 pub struct BlockFetchClient {
     pub state: BlockFetchState,
 }
@@ -41,6 +44,7 @@ impl Default for BlockFetchClient {
 }
 
 impl BlockFetchClient {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         BlockFetchClient {
             state: BlockFetchState::StIdle,

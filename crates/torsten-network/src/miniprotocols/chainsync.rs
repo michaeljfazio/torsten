@@ -6,6 +6,7 @@ use torsten_primitives::block::{Point, Tip};
 /// by following the server's chain. It supports both header-only
 /// and full-block variants.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ChainSyncMessage {
     // Client messages
     RequestNext,
@@ -22,6 +23,7 @@ pub enum ChainSyncMessage {
 
 /// Data delivered with a RollForward message
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RollForwardData {
     /// Block header (for node-to-node chain sync)
     BlockHeader(Vec<u8>),
@@ -31,6 +33,7 @@ pub enum RollForwardData {
 
 /// Chain-sync state machine states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum ChainSyncState {
     /// Client has agency - can request next or find intersection
     StIdle,
@@ -43,6 +46,7 @@ pub enum ChainSyncState {
 }
 
 /// Chain-sync client state
+#[allow(dead_code)]
 pub struct ChainSyncClient {
     pub state: ChainSyncState,
     pub known_points: Vec<Point>,
@@ -56,6 +60,7 @@ impl Default for ChainSyncClient {
 }
 
 impl ChainSyncClient {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         ChainSyncClient {
             state: ChainSyncState::StIdle,
@@ -65,6 +70,7 @@ impl ChainSyncClient {
     }
 
     /// Generate find-intersect message with exponentially spaced points
+    #[allow(dead_code)]
     pub fn find_intersect_points(chain: &[Point], max_points: usize) -> Vec<Point> {
         if chain.is_empty() {
             return vec![Point::Origin];

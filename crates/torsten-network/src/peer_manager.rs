@@ -110,6 +110,7 @@ const CIRCUIT_BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(300);
 /// Tracked peer state
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
+    #[allow(dead_code)]
     pub address: SocketAddr,
     pub temperature: PeerTemperature,
     pub source: PeerSource,
@@ -349,6 +350,7 @@ impl Default for PeerManagerConfig {
 
 /// Events emitted by the peer manager
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum PeerManagerEvent {
     /// Should connect to this peer
     Connect(SocketAddr),

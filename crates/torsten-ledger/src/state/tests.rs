@@ -4686,8 +4686,7 @@ fn setup_governance_state(
                 active: true,
             },
         );
-        let delegator_cred =
-            Credential::VerificationKey(Hash28::from_bytes([(i + 100) as u8; 28]));
+        let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 100) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
         Arc::make_mut(&mut state.governance)
             .vote_delegations
@@ -4773,8 +4772,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
     let (mut state, _dreps) = setup_governance_state(5, 1_000_000_000);
 
     for i in 0..3u32 {
-        let delegator_cred =
-            Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
+        let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
         Arc::make_mut(&mut state.governance)
             .vote_delegations
@@ -4825,8 +4823,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
     let (mut state, dreps) = setup_governance_state(5, 1_000_000_000);
 
     for i in 0..3u32 {
-        let delegator_cred =
-            Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
+        let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
         Arc::make_mut(&mut state.governance)
             .vote_delegations
@@ -7808,8 +7805,7 @@ fn test_ebb_bridge_full_sequence() {
     assert_eq!(state.tip.block_number, BlockNo(1001));
 
     // Subsequent block in epoch 1 connects normally (no EBB)
-    let second_epoch1_block =
-        make_byron_block_ebb_test(21_700, 1002, *first_epoch1_block.hash());
+    let second_epoch1_block = make_byron_block_ebb_test(21_700, 1002, *first_epoch1_block.hash());
     state
         .apply_block(&second_epoch1_block, BlockValidationMode::ApplyOnly)
         .expect("second epoch1 block should apply normally");

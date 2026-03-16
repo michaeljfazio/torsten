@@ -22,8 +22,10 @@ pub enum MuxError {
     #[error("Invalid segment header")]
     InvalidHeader,
     #[error("Payload too large: {0} bytes")]
+    #[allow(dead_code)]
     PayloadTooLarge(usize),
     #[error("Unknown mini-protocol: {0}")]
+    #[allow(dead_code)]
     UnknownProtocol(u16),
 }
 
