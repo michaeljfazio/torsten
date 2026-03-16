@@ -110,7 +110,7 @@ bech32 = "0.11"
 base16ct = { version = "0.2", features = ["alloc"] }
 bs58 = "0.5"
 bincode = "1"
-uplc = { git = "https://github.com/aiken-lang/aiken.git", rev = "6806d52211fbb469ae13aa0e0290aeb6b9b3e8cf" }
+uplc = { git = "https://github.com/michaeljfazio/aiken.git", branch = "torsten-budget-tolerance" }
 crc32fast = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json"], default-features = false }
 hickory-resolver = "0.25"
