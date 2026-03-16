@@ -399,19 +399,32 @@ pub(crate) fn handle_debug_epoch_state(state: &NodeStateSnapshot) -> QueryResult
     }
 }
 
-/// Handle DebugNewEpochState (tag 12) — new epoch state summary.
+/// Handle DebugNewEpochState (tag 12) — full Haskell-compatible NewEpochState.
 ///
-/// In the Haskell node this returns the full serialized NewEpochState.
-/// We return the key tracking fields.
+/// cncli's `snapshot` command uses this query to extract the per-credential
+/// stake distribution (mark/set/go snapshots) for pool leader-schedule
+/// computation.  We return the full array(7) structure that Haskell encodes.
 pub(crate) fn handle_debug_new_epoch_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: DebugNewEpochState");
-    let slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+    // Build block-count maps from the per-pool epoch block counts.
+    // cncli doesn't use these for snapshot purposes, but the Haskell structure
+    // places them at [0] and [1] of NewEpochState, so we include them.
+    let blocks_made_prev: Vec<(Vec<u8>, u64)> = state.epoch_blocks_by_pool.clone();
+    let blocks_made_cur: Vec<(Vec<u8>, u64)> = Vec::new();
+
     QueryResult::DebugNewEpochState {
         epoch: state.epoch.0,
-        block_number: state.block_number.0,
-        slot,
-        protocol_major: state.protocol_version_major,
-        protocol_minor: state.protocol_version_minor,
+        blocks_made_prev,
+        blocks_made_cur,
+        treasury: state.treasury,
+        reserves: state.reserves,
+        snap_mark: Box::new(state.snap_mark.clone()),
+        snap_set: Box::new(state.snap_set.clone()),
+        snap_go: Box::new(state.snap_go.clone()),
+        snap_fee: state.snap_fee,
+        total_active_stake: state.total_active_stake,
+        pool_distr: state.stake_pools.clone(),
     }
 }
 
@@ -522,15 +535,10 @@ mod tests {
         let state = make_state();
         let result = handle_debug_new_epoch_state(&state);
         match result {
-            QueryResult::DebugNewEpochState {
-                epoch,
-                block_number,
-                slot,
-                ..
-            } => {
+            QueryResult::DebugNewEpochState { epoch, treasury, reserves, .. } => {
                 assert_eq!(epoch, 42);
-                assert_eq!(block_number, 999);
-                assert_eq!(slot, 0); // origin tip
+                assert_eq!(treasury, 1_000_000_000);
+                assert_eq!(reserves, 10_000_000_000);
             }
             _ => panic!("Expected DebugNewEpochState"),
         }

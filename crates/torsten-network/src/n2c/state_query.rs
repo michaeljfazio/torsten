@@ -594,6 +594,48 @@ fn encode_relay_cbor(
     }
 }
 
+/// Encode a single Cardano `SnapShot` as array(3) per Haskell wire format.
+///
+/// SnapShot = array(3):
+///   [0] stake_map       — Map<Credential(29B), Lovelace>
+///   [1] delegation_map  — Map<Credential(29B), pool_id(28B)>
+///   [2] pool_params_map — Map<pool_id(28B), PoolParams(array(9))>
+///
+/// Credential (29 bytes) = 1-byte type prefix (0x00=KeyHash, 0x01=ScriptHash)
+/// followed by 28 bytes of the hash.
+///
+/// cncli reads these maps to compute the leader schedule for a pool operator.
+fn encode_snap_shot(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    snap: &crate::query_handler::SnapshotStakeData,
+) {
+    enc.array(3).ok();
+
+    // [0] stake_map: Map<Credential(29B), Lovelace>
+    enc.map(snap.stake_entries.len() as u64).ok();
+    for (cred_type, cred_hash, lovelace) in &snap.stake_entries {
+        // Credential key: 1-byte type prefix || 28-byte hash
+        let mut key = Vec::with_capacity(29);
+        key.push(*cred_type);
+        key.extend_from_slice(cred_hash);
+        enc.bytes(&key).ok();
+        enc.u64(*lovelace).ok();
+    }
+
+    // [1] delegation_map: Map<Credential(29B), pool_id(28B)>
+    enc.map(snap.delegation_entries.len() as u64).ok();
+    for (cred_type, cred_hash, pool_id) in &snap.delegation_entries {
+        let mut key = Vec::with_capacity(29);
+        key.push(*cred_type);
+        key.extend_from_slice(cred_hash);
+        enc.bytes(&key).ok();
+        enc.bytes(pool_id).ok();
+    }
+
+    // [2] pool_params_map: Map<pool_id(28B), PoolParams>
+    encode_pool_params_map(enc, &snap.pool_params);
+}
+
 /// Encode a Map<pool_hash(28), PoolParams> for pool state queries.
 fn encode_pool_params_map(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
@@ -1399,19 +1441,101 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
         }
         QueryResult::DebugNewEpochState {
             epoch,
-            block_number,
-            slot,
-            protocol_major,
-            protocol_minor,
+            blocks_made_prev,
+            blocks_made_cur,
+            treasury,
+            reserves,
+            snap_mark,
+            snap_set,
+            snap_go,
+            snap_fee,
+            total_active_stake,
+            pool_distr,
         } => {
-            // New epoch state summary: array(5)
-            // [epoch, block_number, slot, protocol_major, protocol_minor]
-            enc.array(5).ok();
+            // Full Haskell-compatible NewEpochState (array(7)):
+            //
+            //   [0] EpochNo
+            //   [1] BlocksMade (prev epoch) — Map<pool_id_28B, u64>
+            //   [2] BlocksMade (cur  epoch) — Map<pool_id_28B, u64>
+            //   [3] EpochState — array(4) [AccountState, LedgerState, SnapShots, NonMyopic]
+            //   [4] StrictMaybe RewardUpdate — array(0) for Nothing
+            //   [5] PoolDistr — Map<pool_id_28B, IndividualPoolStake>
+            //   [6] Extra — array(0) (Conway-era field, empty)
+            //
+            // cncli reads [3][2] (SnapShots) to extract the per-credential
+            // stake distribution for leader-schedule computation.
+            enc.array(7).ok();
+
+            // [0] EpochNo
             enc.u64(*epoch).ok();
-            enc.u64(*block_number).ok();
-            enc.u64(*slot).ok();
-            enc.u64(*protocol_major).ok();
-            enc.u64(*protocol_minor).ok();
+
+            // [1] BlocksMade previous epoch: Map<pool_id(28B), u64>
+            enc.map(blocks_made_prev.len() as u64).ok();
+            for (pool_id, count) in blocks_made_prev {
+                enc.bytes(pool_id).ok();
+                enc.u64(*count).ok();
+            }
+
+            // [2] BlocksMade current epoch: Map<pool_id(28B), u64>
+            enc.map(blocks_made_cur.len() as u64).ok();
+            for (pool_id, count) in blocks_made_cur {
+                enc.bytes(pool_id).ok();
+                enc.u64(*count).ok();
+            }
+
+            // [3] EpochState = array(4)
+            enc.array(4).ok();
+
+            // [3][0] AccountState = array(2) [treasury, reserves]
+            enc.array(2).ok();
+            enc.u64(*treasury).ok();
+            enc.u64(*reserves).ok();
+
+            // [3][1] LedgerState — simplified empty placeholder.
+            // cncli does not parse this field; it only inspects [3][2].
+            // We encode a minimal valid array(2) [UTxOState, CertState] with
+            // empty contents so that a CBOR parser can skip past it.
+            enc.array(2).ok();
+            // UTxOState = array(5): utxo_map, deposited, fees, gov_state, donation
+            enc.array(5).ok();
+            enc.map(0).ok();  // empty UTxO map
+            enc.u64(0).ok();  // deposited = 0
+            enc.u64(0).ok();  // fees = 0
+            // GovState placeholder (array(0))
+            enc.array(0).ok();
+            enc.u64(0).ok();  // donation = 0
+            // CertState = array(3): VState, PState, DState (all empty)
+            enc.array(3).ok();
+            enc.array(0).ok(); // VState placeholder
+            enc.array(0).ok(); // PState placeholder
+            enc.array(0).ok(); // DState placeholder
+
+            // [3][2] SnapShots = array(4) [mark, set, go, fee]
+            enc.array(4).ok();
+            encode_snap_shot(enc, snap_mark);
+            encode_snap_shot(enc, snap_set);
+            encode_snap_shot(enc, snap_go);
+            enc.u64(*snap_fee).ok();
+
+            // [3][3] NonMyopic — empty map (cncli doesn't use this)
+            enc.map(0).ok();
+
+            // [4] StrictMaybe RewardUpdate = Nothing = array(0)
+            enc.array(0).ok();
+
+            // [5] PoolDistr: Map<pool_id(28B), IndividualPoolStake>
+            // IndividualPoolStake = array(2) [tag(30)[num,den], vrf_hash(32B)]
+            let total = (*total_active_stake).max(1);
+            enc.map(pool_distr.len() as u64).ok();
+            for pool in pool_distr {
+                enc.bytes(&pool.pool_id).ok();
+                enc.array(2).ok();
+                encode_tagged_rational(enc, pool.stake, total);
+                enc.bytes(&pool.vrf_keyhash).ok();
+            }
+
+            // [6] Extra = array(0)
+            enc.array(0).ok();
         }
         QueryResult::DebugChainDepState {
             last_slot,

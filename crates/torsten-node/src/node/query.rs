@@ -55,6 +55,93 @@ pub(crate) fn credential_to_bytes(
     }
 }
 
+/// Build a `SnapshotStakeData` from a single `StakeSnapshot`.
+///
+/// The `script_creds` set distinguishes script-hash credentials (type=1) from
+/// verification-key credentials (type=0).  We use the live ledger's
+/// `script_stake_credentials` set as an approximation — credential types are
+/// stable once registered, so this is accurate.
+///
+/// Each credential hash is truncated to 28 bytes (the snapshot stores Hash32
+/// where the upper 4 bytes are zero-padding used for HashMap keying).
+fn build_snapshot_stake_data(
+    snap: &torsten_ledger::state::StakeSnapshot,
+    script_creds: &std::collections::HashSet<torsten_primitives::hash::Hash32>,
+) -> torsten_network::query_handler::SnapshotStakeData {
+    use torsten_network::query_handler::{PoolParamsSnapshot, RelaySnapshot, SnapshotStakeData};
+
+    // stake_entries: one entry per delegated credential
+    let mut stake_entries = Vec::with_capacity(snap.stake_distribution.len());
+    for (cred_hash, lovelace) in snap.stake_distribution.iter() {
+        let cred_type = script_creds.contains(cred_hash) as u8;
+        // Use the lower 28 bytes of the Hash32 key
+        let hash28 = cred_hash.as_ref()[..28].to_vec();
+        stake_entries.push((cred_type, hash28, lovelace.0));
+    }
+
+    // delegation_entries: map credential → pool_id
+    let mut delegation_entries = Vec::with_capacity(snap.delegations.len());
+    for (cred_hash, pool_id) in snap.delegations.iter() {
+        let cred_type = script_creds.contains(cred_hash) as u8;
+        let hash28 = cred_hash.as_ref()[..28].to_vec();
+        delegation_entries.push((cred_type, hash28, pool_id.as_ref().to_vec()));
+    }
+
+    // pool_params: convert snapshot pool params to PoolParamsSnapshot
+    let pool_params: Vec<PoolParamsSnapshot> = snap
+        .pool_params
+        .iter()
+        .map(|(pool_id, reg)| {
+            let relays: Vec<RelaySnapshot> = reg
+                .relays
+                .iter()
+                .map(|r| match r {
+                    torsten_primitives::transaction::Relay::SingleHostAddr {
+                        port,
+                        ipv4,
+                        ipv6,
+                    } => RelaySnapshot::SingleHostAddr {
+                        port: *port,
+                        ipv4: *ipv4,
+                        ipv6: *ipv6,
+                    },
+                    torsten_primitives::transaction::Relay::SingleHostName {
+                        port,
+                        dns_name,
+                    } => RelaySnapshot::SingleHostName {
+                        port: *port,
+                        dns_name: dns_name.clone(),
+                    },
+                    torsten_primitives::transaction::Relay::MultiHostName { dns_name } => {
+                        RelaySnapshot::MultiHostName {
+                            dns_name: dns_name.clone(),
+                        }
+                    }
+                })
+                .collect();
+            PoolParamsSnapshot {
+                pool_id: pool_id.as_ref().to_vec(),
+                vrf_keyhash: reg.vrf_keyhash.as_ref().to_vec(),
+                pledge: reg.pledge.0,
+                cost: reg.cost.0,
+                margin_num: reg.margin_numerator,
+                margin_den: reg.margin_denominator,
+                reward_account: reg.reward_account.clone(),
+                owners: reg.owners.iter().map(|o| o.as_ref().to_vec()).collect(),
+                relays,
+                metadata_url: reg.metadata_url.clone(),
+                metadata_hash: reg.metadata_hash.map(|h| h.as_ref().to_vec()),
+            }
+        })
+        .collect();
+
+    SnapshotStakeData {
+        stake_entries,
+        delegation_entries,
+        pool_params,
+    }
+}
+
 // ─── Node impl: query state ───────────────────────────────────────────────────
 
 impl Node {
@@ -273,6 +360,37 @@ impl Node {
                 total_go_stake,
             }
         };
+
+        // Build full per-credential snapshot data for DebugNewEpochState (cncli snapshot).
+        // We use the live script_stake_credentials set to determine credential types.
+        let snap_mark = ls
+            .snapshots
+            .mark
+            .as_ref()
+            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .unwrap_or_default();
+        let snap_set = ls
+            .snapshots
+            .set
+            .as_ref()
+            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .unwrap_or_default();
+        let snap_go = ls
+            .snapshots
+            .go
+            .as_ref()
+            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .unwrap_or_default();
+
+        // Build per-pool epoch block count map for NewEpochState [1]/[2] fields.
+        // Haskell places the *previous* epoch's BlocksMade at [1] and the current
+        // at [2].  We expose the current epoch's counts as [1] (best approximation
+        // without a previous-epoch tracker), and leave [2] empty.
+        let epoch_blocks_by_pool: Vec<(Vec<u8>, u64)> = ls
+            .epoch_blocks_by_pool
+            .iter()
+            .map(|(pool_id, count)| (pool_id.as_ref().to_vec(), *count))
+            .collect();
 
         // Build pool params entries
         let pool_params_entries: Vec<PoolParamsSnapshot> = ls
@@ -568,6 +686,11 @@ impl Node {
                 .and_then(|c| c.script_hash.as_ref().map(|h| h.as_ref().to_vec())),
             stake_addresses,
             stake_snapshots,
+            snap_mark,
+            snap_set,
+            snap_go,
+            snap_fee: 0, // Haskell tracks accumulated unclaimed fees; we use 0 as approximation
+            epoch_blocks_by_pool,
             pool_params_entries,
             pending_retirements: ls
                 .pending_retirements

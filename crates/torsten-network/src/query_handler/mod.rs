@@ -14,8 +14,9 @@ pub use types::{
     GenesisConfigSnapshot, GovActionId, GovStateSnapshot, LedgerPeerEntry, MultiAssetSnapshot,
     NodeStateSnapshot, NonMyopicRewardEntry, PoolDefaultVoteEntry, PoolParamsSnapshot,
     PoolRewardInfo, PoolStakeSnapshotEntry, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult,
-    RelaySnapshot, ShelleyPParamsSnapshot, StakeAddressSnapshot, StakeDelegDepositEntry,
-    StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider, UtxoSnapshot, VoteDelegateeEntry,
+    RelaySnapshot, ShelleyPParamsSnapshot, SnapshotStakeData, StakeAddressSnapshot,
+    StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider,
+    UtxoSnapshot, VoteDelegateeEntry,
 };
 
 /// Handler for local state queries.
@@ -1143,6 +1144,8 @@ mod tests {
         handler.update_state(NodeStateSnapshot {
             epoch: EpochNo(10),
             block_number: BlockNo(500),
+            treasury: 1_000_000,
+            reserves: 2_000_000,
             tip: Tip {
                 point: torsten_primitives::block::Point::Specific(
                     SlotNo(12345),
@@ -1155,16 +1158,13 @@ mod tests {
         match query(&handler, 12) {
             QueryResult::DebugNewEpochState {
                 epoch,
-                block_number,
-                slot,
-                protocol_major,
-                protocol_minor,
+                treasury,
+                reserves,
+                ..
             } => {
                 assert_eq!(epoch, 10);
-                assert_eq!(block_number, 500);
-                assert_eq!(slot, 12345);
-                assert_eq!(protocol_major, 10); // default
-                assert_eq!(protocol_minor, 0);
+                assert_eq!(treasury, 1_000_000);
+                assert_eq!(reserves, 2_000_000);
             }
             other => panic!("Expected DebugNewEpochState, got {other:?}"),
         }

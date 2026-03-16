@@ -69,13 +69,32 @@ pub enum QueryResult {
         delegations: u64,
         rewards: u64,
     },
-    /// DebugNewEpochState (tag 12): new epoch state summary
+    /// DebugNewEpochState (tag 12): full Haskell-compatible NewEpochState.
+    ///
+    /// cncli's `snapshot` command parses this response and expects the full
+    /// Haskell `NewEpochState` CBOR structure (array(7)).  The critical part
+    /// it reads is `[3][2]` — the `SnapShots` containing mark/set/go data.
     DebugNewEpochState {
         epoch: u64,
-        block_number: u64,
-        slot: u64,
-        protocol_major: u64,
-        protocol_minor: u64,
+        /// Blocks made in the previous epoch (pool_id_28B → count)
+        blocks_made_prev: Vec<(Vec<u8>, u64)>,
+        /// Blocks made in the current epoch (pool_id_28B → count)
+        blocks_made_cur: Vec<(Vec<u8>, u64)>,
+        /// Account state (treasury, reserves)
+        treasury: u64,
+        reserves: u64,
+        /// Mark snapshot (most recent epoch boundary)
+        snap_mark: Box<SnapshotStakeData>,
+        /// Set snapshot (one epoch ago)
+        snap_set: Box<SnapshotStakeData>,
+        /// Go snapshot (two epochs ago)
+        snap_go: Box<SnapshotStakeData>,
+        /// Snapshot fee (lovelace unclaimed at last epoch boundary)
+        snap_fee: u64,
+        /// Total active stake for GetStakeDistribution (used in PoolDistr)
+        total_active_stake: u64,
+        /// Current pool stake distribution (pool_id_28B → (stake_rational_num, stake_rational_den, vrf_hash_32B))
+        pool_distr: Vec<StakePoolSnapshot>,
     },
     /// DebugChainDepState (tag 13): consensus chain dependent state
     DebugChainDepState {
@@ -195,6 +214,24 @@ pub struct PoolStakeSnapshotEntry {
     pub mark_stake: u64,
     pub set_stake: u64,
     pub go_stake: u64,
+}
+
+/// Full per-credential stake snapshot for a single mark/set/go epoch snapshot.
+///
+/// This is the data cncli's `snapshot` command needs via `DebugNewEpochState` (tag 12).
+/// It carries the three sub-maps that Haskell encodes inside `SnapShot`:
+///   - `stake_map`       — credential(29B) → lovelace
+///   - `delegation_map`  — credential(29B) → pool_id(28B)
+///   - `pool_params_map` — pool_id(28B)    → pool registration params
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotStakeData {
+    /// (credential_type_byte, credential_hash_28B, lovelace)
+    /// credential_type_byte: 0x00=KeyHash, 0x01=ScriptHash
+    pub stake_entries: Vec<(u8, Vec<u8>, u64)>,
+    /// (credential_type_byte, credential_hash_28B, pool_id_28B)
+    pub delegation_entries: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    /// Pool params at snapshot time
+    pub pool_params: Vec<PoolParamsSnapshot>,
 }
 
 /// Pool relay snapshot for CBOR encoding
@@ -686,6 +723,16 @@ pub struct NodeStateSnapshot {
     pub stake_addresses: Vec<StakeAddressSnapshot>,
     /// Stake snapshots (mark/set/go) for stake-snapshot queries
     pub stake_snapshots: StakeSnapshotsResult,
+    /// Full per-credential mark snapshot (for DebugNewEpochState / cncli snapshot)
+    pub snap_mark: SnapshotStakeData,
+    /// Full per-credential set snapshot
+    pub snap_set: SnapshotStakeData,
+    /// Full per-credential go snapshot
+    pub snap_go: SnapshotStakeData,
+    /// Snapshot fee (unclaimed lovelace at last epoch boundary)
+    pub snap_fee: u64,
+    /// Per-pool block counts for the current epoch (pool_id → count)
+    pub epoch_blocks_by_pool: Vec<(Vec<u8>, u64)>,
     /// Pool parameters for pool-params queries
     pub pool_params_entries: Vec<PoolParamsSnapshot>,
     /// Pending pool retirements: Map<EpochNo, Vec<pool_hash>>
@@ -775,6 +822,11 @@ impl Default for NodeStateSnapshot {
             constitution_script: None,
             stake_addresses: Vec::new(),
             stake_snapshots: StakeSnapshotsResult::default(),
+            snap_mark: SnapshotStakeData::default(),
+            snap_set: SnapshotStakeData::default(),
+            snap_go: SnapshotStakeData::default(),
+            snap_fee: 0,
+            epoch_blocks_by_pool: Vec::new(),
             pool_params_entries: Vec::new(),
             pending_retirements: Vec::new(),
             pool_deposit: 500_000_000,
