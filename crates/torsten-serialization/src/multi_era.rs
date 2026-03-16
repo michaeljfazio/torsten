@@ -602,6 +602,8 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
     //   Nullable::Some(x)  → aux data IS present; decode x
     //   Nullable::Null     → aux data explicitly null in CBOR (`f6`)
     //   Nullable::Undefined → aux data absent (4th element not present)
+    // KeepRaw<T> implements Deref<Target = T> (not AsRef<T>). Rust's auto-deref
+    // coercion handles the `&KeepRaw<T>` → `&T` conversion automatically here.
     let raw_aux: &PallasAux = if let Some(alonzo) = tx.as_alonzo() {
         match &alonzo.auxiliary_data {
             Nullable::Some(x) => x,
