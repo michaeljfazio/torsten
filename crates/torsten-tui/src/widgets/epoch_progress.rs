@@ -1,8 +1,10 @@
-//! Narrow epoch countdown progress bar widget.
+//! Epoch progress bar widget for the Chain panel.
 //!
-//! Displays the slot position within the current epoch as a thin horizontal
-//! bar with a label showing "Slot X / Y | ~Nd Nh Mm remaining". Uses the
-//! theme accent color for the filled portion.
+//! Renders a single-line progress bar showing:
+//! - Filled portion proportional to `slot_in_epoch / epoch_length`
+//! - A centred label: `"Epoch NNN  XX.X%  ~Nd Nh Nm remaining"`
+//!
+//! The fill colour is cornflower-blue by default and can be overridden.
 
 use ratatui::{
     buffer::Buffer,
@@ -11,20 +13,22 @@ use ratatui::{
     widgets::Widget,
 };
 
-/// Accent color for the epoch progress fill.
-const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237);
-const DIM_WHITE: Color = Color::Rgb(160, 160, 170);
+/// Default fill colour for the epoch progress bar.
+const DEFAULT_FILL: Color = Color::Rgb(100, 149, 237); // cornflower blue
+const DIM: Color = Color::Rgb(160, 160, 170);
 
-/// A narrow progress bar showing epoch slot position and time remaining.
+/// A single-line epoch progress bar widget.
 pub struct EpochProgress {
-    /// Current slot within the epoch.
+    /// Current slot position within the epoch.
     pub slot_in_epoch: u64,
-    /// Total epoch length in slots.
+    /// Total epoch length in slots (must be > 0).
     pub epoch_length: u64,
     /// Seconds remaining until the next epoch boundary.
     pub time_remaining_secs: u64,
-    /// Fill color for the progress bar.
+    /// Fill colour for the progress bar.
     pub fill_color: Color,
+    /// Epoch number (shown in the centred label when > 0).
+    pub epoch: u64,
 }
 
 impl EpochProgress {
@@ -34,22 +38,30 @@ impl EpochProgress {
             slot_in_epoch,
             epoch_length: epoch_length.max(1),
             time_remaining_secs,
-            fill_color: ACCENT_BLUE,
+            fill_color: DEFAULT_FILL,
+            epoch: 0,
         }
     }
 
-    /// Set a custom fill color.
-    pub fn _fill_color(mut self, color: Color) -> Self {
+    /// Set the epoch number shown inside the bar label.
+    pub fn with_epoch(mut self, epoch: u64) -> Self {
+        self.epoch = epoch;
+        self
+    }
+
+    /// Override the fill colour.
+    #[allow(dead_code)]
+    pub fn with_fill_color(mut self, color: Color) -> Self {
         self.fill_color = color;
         self
     }
 
-    /// Compute the progress ratio [0.0, 1.0].
+    /// Progress ratio in [0.0, 1.0].
     fn ratio(&self) -> f64 {
         (self.slot_in_epoch as f64 / self.epoch_length as f64).clamp(0.0, 1.0)
     }
 
-    /// Format the time remaining as a human-readable duration.
+    /// Format the time remaining as a compact duration string.
     fn format_remaining(&self) -> String {
         let secs = self.time_remaining_secs;
         let days = secs / 86400;
@@ -74,20 +86,22 @@ impl Widget for EpochProgress {
         let ratio = self.ratio();
         let filled = ((area.width as f64) * ratio) as u16;
         let remaining = self.format_remaining();
+        let pct = ratio * 100.0;
 
-        // Build the label.
-        let label = format!(
-            " Slot {} / {} | {} ",
-            format_compact(self.slot_in_epoch),
-            format_compact(self.epoch_length),
-            remaining
-        );
-
-        // If the label is too wide, use a shorter version.
-        let label = if label.len() as u16 > area.width {
-            format!(" {:.0}% | {} ", ratio * 100.0, remaining)
+        // Build centred label.  Try the full form first, fall back to short form.
+        let label_full = if self.epoch > 0 {
+            format!(" Epoch {}  {:.1}%  {} ", self.epoch, pct, remaining)
         } else {
-            label
+            format!(" {:.1}%  {} ", pct, remaining)
+        };
+        let label_short = format!(" {:.1}% ", pct);
+
+        let label = if label_full.len() as u16 <= area.width {
+            label_full
+        } else if label_short.len() as u16 <= area.width {
+            label_short
+        } else {
+            String::new()
         };
 
         let label_start = area.left() + area.width.saturating_sub(label.len() as u16) / 2;
@@ -100,45 +114,31 @@ impl Widget for EpochProgress {
 
             let in_filled = col < filled;
 
-            // Check if this position is within the label.
-            let label_idx = col.saturating_sub(label_start.saturating_sub(area.left())) as usize;
-            let in_label =
-                x >= label_start && label_idx < label.len() && x < label_start + label.len() as u16;
+            // Check if this column falls inside the label text.
+            let label_offset = col.saturating_sub(label_start.saturating_sub(area.left())) as usize;
+            let in_label = !label.is_empty() && x >= label_start && label_offset < label.len();
 
             if in_label {
-                let ch = label.as_bytes()[label_idx] as char;
+                let ch = label.as_bytes()[label_offset] as char;
                 let (fg, bg) = if in_filled {
                     (Color::Black, self.fill_color)
                 } else {
-                    (DIM_WHITE, Color::Reset)
+                    (DIM, Color::Reset)
                 };
                 buf[(x, area.top())]
                     .set_char(ch)
                     .set_style(Style::default().fg(fg).bg(bg));
             } else if in_filled {
                 buf[(x, area.top())]
-                    .set_char('\u{2588}')
+                    .set_char('\u{2588}') // full block
                     .set_style(Style::default().fg(self.fill_color));
             } else {
                 buf[(x, area.top())]
-                    .set_char('\u{2591}')
+                    .set_char('\u{2591}') // light shade
                     .set_style(Style::default().fg(Color::DarkGray));
             }
         }
     }
-}
-
-/// Format a number with comma separators in a compact way.
-fn format_compact(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
 }
 
 #[cfg(test)]
@@ -146,62 +146,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_epoch_progress_renders_without_panic() {
-        let widget = EpochProgress::new(200_000, 432_000, 232_000);
+    fn test_renders_without_panic() {
+        let w = EpochProgress::new(200_000, 432_000, 232_000).with_epoch(1234);
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        w.render(area, &mut buf);
     }
 
     #[test]
-    fn test_epoch_progress_at_zero() {
-        let widget = EpochProgress::new(0, 432_000, 432_000);
-        assert!((widget.ratio() - 0.0).abs() < 0.001);
+    fn test_ratio_bounds() {
+        assert!((EpochProgress::new(0, 432_000, 0).ratio() - 0.0).abs() < 1e-9);
+        assert!((EpochProgress::new(432_000, 432_000, 0).ratio() - 1.0).abs() < 1e-9);
+        assert!((EpochProgress::new(216_000, 432_000, 0).ratio() - 0.5).abs() < 1e-9);
     }
 
     #[test]
-    fn test_epoch_progress_at_full() {
-        let widget = EpochProgress::new(432_000, 432_000, 0);
-        assert!((widget.ratio() - 1.0).abs() < 0.001);
+    fn test_format_remaining() {
+        let w = |secs| EpochProgress::new(0, 432_000, secs);
+        assert_eq!(w(90061).format_remaining(), "~1d 1h 1m");
+        assert_eq!(w(3661).format_remaining(), "~1h 1m");
+        assert_eq!(w(300).format_remaining(), "~5m");
     }
 
     #[test]
-    fn test_epoch_progress_halfway() {
-        let widget = EpochProgress::new(216_000, 432_000, 216_000);
-        assert!((widget.ratio() - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_format_remaining_days() {
-        let widget = EpochProgress::new(0, 432_000, 90061);
-        assert_eq!(widget.format_remaining(), "~1d 1h 1m");
-    }
-
-    #[test]
-    fn test_format_remaining_hours() {
-        let widget = EpochProgress::new(0, 432_000, 3661);
-        assert_eq!(widget.format_remaining(), "~1h 1m");
-    }
-
-    #[test]
-    fn test_format_remaining_minutes() {
-        let widget = EpochProgress::new(0, 432_000, 300);
-        assert_eq!(widget.format_remaining(), "~5m");
-    }
-
-    #[test]
-    fn test_format_compact() {
-        assert_eq!(format_compact(432_000), "432,000");
-        assert_eq!(format_compact(0), "0");
-        assert_eq!(format_compact(1_000_000), "1,000,000");
-    }
-
-    #[test]
-    fn test_narrow_area() {
-        let widget = EpochProgress::new(200_000, 432_000, 232_000);
+    fn test_narrow_area_no_panic() {
+        let w = EpochProgress::new(200_000, 432_000, 232_000);
         let area = Rect::new(0, 0, 5, 1);
         let mut buf = Buffer::empty(area);
-        // Should bail early without panic.
-        widget.render(area, &mut buf);
+        w.render(area, &mut buf);
+    }
+
+    #[test]
+    fn test_epoch_label_in_bar() {
+        let w = EpochProgress::new(216_000, 432_000, 216_000).with_epoch(500);
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        w.render(area, &mut buf);
+        let rendered: String = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            rendered.contains("500"),
+            "epoch number should appear in bar"
+        );
     }
 }

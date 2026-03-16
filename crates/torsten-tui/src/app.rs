@@ -1,63 +1,145 @@
 //! Application state and update logic.
 //!
 //! The `App` struct holds all state needed to render the TUI dashboard,
-//! including the latest metrics snapshot, historical block-rate samples
-//! for the sparkline, and UI navigation state.
+//! including the latest metrics snapshot, computed epoch progress values,
+//! RTT histogram buckets, and UI navigation state (active theme, etc).
 
-use crate::layout::LayoutMode;
 use crate::metrics::MetricsSnapshot;
-use std::collections::VecDeque;
+use crate::theme::{cycle_theme, THEMES};
 
-/// Maximum number of sparkline samples to retain (one sample per poll interval).
-const SPARKLINE_CAPACITY: usize = 60;
-
-/// Push a value onto a ring buffer VecDeque, evicting the oldest if at capacity.
-fn push_to_ring(ring: &mut VecDeque<u64>, value: u64) {
-    if ring.len() >= SPARKLINE_CAPACITY {
-        ring.pop_front();
-    }
-    ring.push_back(value);
-}
-
-/// Active panel for keyboard navigation (Tab cycling).
+/// Network name derived from the `torsten_network_magic` metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivePanel {
-    Chain,
-    Peers,
-    Performance,
-    Governance,
+pub enum Network {
+    Mainnet,
+    Preview,
+    Preprod,
+    Guild,
+    Unknown,
 }
 
-impl ActivePanel {
-    /// Cycle to the next panel in order.
-    pub fn next(self) -> Self {
-        match self {
-            ActivePanel::Chain => ActivePanel::Peers,
-            ActivePanel::Peers => ActivePanel::Performance,
-            ActivePanel::Performance => ActivePanel::Governance,
-            ActivePanel::Governance => ActivePanel::Chain,
+impl Network {
+    /// Resolve from the raw magic integer scraped from Prometheus.
+    pub fn from_magic(magic: u64) -> Self {
+        match magic {
+            764_824_073 => Network::Mainnet,
+            2 => Network::Preview,
+            1 => Network::Preprod,
+            141 => Network::Guild,
+            _ => Network::Unknown,
         }
     }
 
-    /// Cycle to the previous panel in order.
-    pub fn prev(self) -> Self {
+    /// Human-readable label.
+    pub fn label(self) -> &'static str {
         match self {
-            ActivePanel::Chain => ActivePanel::Governance,
-            ActivePanel::Peers => ActivePanel::Chain,
-            ActivePanel::Performance => ActivePanel::Peers,
-            ActivePanel::Governance => ActivePanel::Performance,
+            Network::Mainnet => "Mainnet",
+            Network::Preview => "Preview",
+            Network::Preprod => "Preprod",
+            Network::Guild => "Guild",
+            Network::Unknown => "Unknown",
         }
     }
 
-    /// Jump to a specific panel by 1-based index (1=Chain, 2=Peers, ...).
-    /// Returns `None` if the index is out of range.
-    pub fn from_index(idx: usize) -> Option<Self> {
-        match idx {
-            1 => Some(ActivePanel::Chain),
-            2 => Some(ActivePanel::Peers),
-            3 => Some(ActivePanel::Performance),
-            4 => Some(ActivePanel::Governance),
-            _ => None,
+    /// Return the slot-per-epoch length for the network.
+    pub fn epoch_length(self) -> u64 {
+        match self {
+            // Preview: 1 day = 86,400 slots
+            Network::Preview => 86_400,
+            // Mainnet / Preprod: 5 days = 432,000 slots
+            Network::Mainnet | Network::Preprod | Network::Guild | Network::Unknown => 432_000,
+        }
+    }
+}
+
+/// RTT histogram buckets derived from the `torsten_peer_handshake_rtt_ms` histogram.
+///
+/// Buckets are cumulative (standard Prometheus histogram); we convert to per-band counts.
+#[derive(Debug, Clone, Default)]
+pub struct RttBands {
+    /// Peers with RTT 0–50 ms.
+    pub band_0_50: u64,
+    /// Peers with RTT 50–100 ms.
+    pub band_50_100: u64,
+    /// Peers with RTT 100–200 ms.
+    pub band_100_200: u64,
+    /// Peers with RTT 200 ms+.
+    pub band_200_plus: u64,
+    /// Lowest RTT observed (ms), or None if no samples.
+    pub min_ms: Option<f64>,
+    /// Average RTT across all samples (ms), or None if no samples.
+    pub avg_ms: Option<f64>,
+    /// Highest RTT observed (ms), or None if no samples.
+    pub max_ms: Option<f64>,
+}
+
+impl RttBands {
+    /// Parse RTT band counts from the raw Prometheus histogram metrics.
+    ///
+    /// The Prometheus histogram for `torsten_peer_handshake_rtt_ms` exposes:
+    ///   - `torsten_peer_handshake_rtt_ms_bucket_le_50`  (cumulative count ≤ 50 ms)
+    ///   - `torsten_peer_handshake_rtt_ms_bucket_le_100` (cumulative count ≤ 100 ms)
+    ///   - `torsten_peer_handshake_rtt_ms_bucket_le_200` (cumulative count ≤ 200 ms)
+    ///   - `torsten_peer_handshake_rtt_ms_count`         (total count)
+    ///   - `torsten_peer_handshake_rtt_ms_sum`           (total sum ms)
+    ///
+    /// Note: the histogram parser in `metrics.rs` uses synthetic metric names
+    /// (with label suffix stripped) for buckets emitted with `{le="..."}` labels.
+    /// We rely on the labeled bucket values stored under the `histogram_buckets` map.
+    pub fn from_snapshot(snap: &MetricsSnapshot) -> Self {
+        // Cumulative counts from histogram buckets (stored with le-label suffix).
+        let le50 = snap
+            .histogram_buckets
+            .get("torsten_peer_handshake_rtt_ms")
+            .and_then(|buckets| buckets.get("50"))
+            .copied()
+            .unwrap_or(0.0) as u64;
+        let le100 = snap
+            .histogram_buckets
+            .get("torsten_peer_handshake_rtt_ms")
+            .and_then(|buckets| buckets.get("100"))
+            .copied()
+            .unwrap_or(0.0) as u64;
+        let le200 = snap
+            .histogram_buckets
+            .get("torsten_peer_handshake_rtt_ms")
+            .and_then(|buckets| buckets.get("200"))
+            .copied()
+            .unwrap_or(0.0) as u64;
+        let total = snap.get_u64("torsten_peer_handshake_rtt_ms_count");
+        let sum = snap.get("torsten_peer_handshake_rtt_ms_sum");
+
+        // Per-band counts (convert from cumulative).
+        let band_0_50 = le50;
+        let band_50_100 = le100.saturating_sub(le50);
+        let band_100_200 = le200.saturating_sub(le100);
+        let band_200_plus = total.saturating_sub(le200);
+
+        let avg_ms = if total > 0 {
+            Some(sum / total as f64)
+        } else {
+            None
+        };
+
+        // Min/max RTT are not available from a standard Prometheus histogram;
+        // we approximate min as the lowest populated bucket boundary and max
+        // from the _max gauge if published, otherwise leave as None.
+        let min_ms = snap
+            .values
+            .get("torsten_peer_handshake_rtt_ms_min")
+            .copied();
+        let max_ms = snap
+            .values
+            .get("torsten_peer_handshake_rtt_ms_max")
+            .copied();
+
+        RttBands {
+            band_0_50,
+            band_50_100,
+            band_100_200,
+            band_200_plus,
+            min_ms,
+            avg_ms,
+            max_ms,
         }
     }
 }
@@ -66,39 +148,24 @@ impl ActivePanel {
 pub struct App {
     /// Latest scraped metrics.
     pub metrics: MetricsSnapshot,
-    /// Historical block-rate values for the sparkline widget.
-    /// Each entry is blocks_applied delta since the previous sample.
-    pub block_rate_history: VecDeque<u64>,
-    /// Historical tx validation rate (delta per poll interval).
-    pub tx_rate_history: VecDeque<u64>,
-    /// Historical mempool depth snapshots (tx count per poll).
-    pub mempool_depth_history: VecDeque<u64>,
-    /// Historical memory usage snapshots (bytes per poll).
-    pub memory_history: VecDeque<u64>,
-    /// Previous blocks_applied value (for computing deltas).
-    prev_blocks_applied: u64,
-    /// Previous txs_validated value (for computing deltas).
-    prev_txs_validated: u64,
-    /// Whether this is the first metrics update (skip delta on first sample).
-    first_update: bool,
-    /// Currently focused panel.
-    pub active_panel: ActivePanel,
-    /// Whether the help overlay is visible.
-    pub show_help: bool,
-    /// Whether the application should exit.
-    pub should_quit: bool,
-    /// Manual layout mode override. `None` means auto-detect from terminal size.
-    pub layout_mode: Option<LayoutMode>,
-    /// Number of slots remaining in the current epoch.
-    pub epoch_slots_remaining: u64,
-    /// Epoch progress as a percentage (0.0 - 100.0).
+    /// Network inferred from `torsten_network_magic`.
+    pub network: Network,
+    /// Epoch slot position.
+    pub slot_in_epoch: u64,
+    /// Epoch progress 0.0–100.0.
     pub epoch_progress_pct: f64,
     /// Seconds remaining until the next epoch boundary.
     pub epoch_time_remaining_secs: u64,
-    /// Slot position within the current epoch.
-    pub slot_in_epoch: u64,
-    /// Network-specific epoch length in slots. 0 = auto-detect from metrics.
+    /// Manual epoch length override (0 = auto-detect from metrics/network).
     pub epoch_length_override: u64,
+    /// RTT histogram bands from the last scrape.
+    pub rtt_bands: RttBands,
+    /// Index into `THEMES` for the active theme.
+    pub theme_idx: usize,
+    /// Whether the application should exit.
+    pub should_quit: bool,
+    /// Whether the help overlay is visible.
+    pub show_help: bool,
 }
 
 impl App {
@@ -106,118 +173,86 @@ impl App {
     pub fn new() -> Self {
         Self {
             metrics: MetricsSnapshot::default(),
-            block_rate_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
-            tx_rate_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
-            mempool_depth_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
-            memory_history: VecDeque::with_capacity(SPARKLINE_CAPACITY),
-            prev_blocks_applied: 0,
-            prev_txs_validated: 0,
-            first_update: true,
-            active_panel: ActivePanel::Chain,
-            show_help: false,
-            should_quit: false,
-            layout_mode: None,
-            epoch_slots_remaining: 0,
+            network: Network::Unknown,
+            slot_in_epoch: 0,
             epoch_progress_pct: 0.0,
             epoch_time_remaining_secs: 0,
-            slot_in_epoch: 0,
             epoch_length_override: 0,
+            rtt_bands: RttBands::default(),
+            theme_idx: 0,
+            should_quit: false,
+            show_help: false,
         }
     }
 
     /// Update the app state with a new metrics snapshot.
-    ///
-    /// Computes block-rate, tx-rate deltas and pushes snapshots onto
-    /// the respective sparkline histories.
     pub fn update_metrics(&mut self, snapshot: MetricsSnapshot) {
-        let current_blocks = snapshot.get_u64("torsten_blocks_applied_total");
-        let current_txs = snapshot.get_u64("torsten_transactions_validated_total");
-        let mempool_count = snapshot.get_u64("torsten_mempool_tx_count");
-        let mem_bytes = snapshot.get_u64("torsten_mem_resident_bytes");
-
-        if self.first_update {
-            // First sample: no delta to compute, just record baselines.
-            self.first_update = false;
-            self.prev_blocks_applied = current_blocks;
-            self.prev_txs_validated = current_txs;
-        } else {
-            // Compute blocks applied since last poll.
-            let block_delta = current_blocks.saturating_sub(self.prev_blocks_applied);
-            self.prev_blocks_applied = current_blocks;
-            push_to_ring(&mut self.block_rate_history, block_delta);
-
-            // Compute txs validated since last poll.
-            let tx_delta = current_txs.saturating_sub(self.prev_txs_validated);
-            self.prev_txs_validated = current_txs;
-            push_to_ring(&mut self.tx_rate_history, tx_delta);
-
-            // Snapshot mempool depth and memory usage.
-            push_to_ring(&mut self.mempool_depth_history, mempool_count);
-            push_to_ring(&mut self.memory_history, mem_bytes);
+        // Resolve network from magic.
+        let magic = snapshot.get_u64("torsten_network_magic");
+        if magic > 0 {
+            self.network = Network::from_magic(magic);
         }
 
-        // Compute epoch progress from slot_number and epoch_length.
-        // Use override if set, otherwise try the metric, otherwise fall back to 432,000.
-        let epoch_length = if self.epoch_length_override > 0 {
-            self.epoch_length_override
-        } else {
-            let metric_len = snapshot.get_u64("torsten_epoch_length");
-            if metric_len > 0 {
-                metric_len
-            } else {
-                432_000
-            }
-        };
+        // Compute epoch progress.
+        let epoch_length = self.epoch_length_for_snapshot(&snapshot);
         let slot = snapshot.get_u64("torsten_slot_number");
-        let slot_in_epoch = slot % epoch_length;
+        let slot_in_epoch = slot % epoch_length.max(1);
         self.slot_in_epoch = slot_in_epoch;
-        self.epoch_slots_remaining = epoch_length.saturating_sub(slot_in_epoch);
-        // Each slot is 1 second on Cardano.
-        self.epoch_time_remaining_secs = self.epoch_slots_remaining;
+        self.epoch_slots_remaining_inner(epoch_length, slot_in_epoch);
+
+        // Parse RTT histogram bands.
+        self.rtt_bands = RttBands::from_snapshot(&snapshot);
+
+        self.metrics = snapshot;
+    }
+
+    fn epoch_slots_remaining_inner(&mut self, epoch_length: u64, slot_in_epoch: u64) {
+        let remaining = epoch_length.saturating_sub(slot_in_epoch);
+        self.epoch_time_remaining_secs = remaining;
         self.epoch_progress_pct = if epoch_length > 0 {
             (slot_in_epoch as f64 / epoch_length as f64) * 100.0
         } else {
             0.0
         };
-
-        self.metrics = snapshot;
     }
 
-    /// Compute the current tx throughput (txs per second) based on the last
-    /// sparkline sample and the poll interval.
-    pub fn txs_per_second(&self, poll_interval_secs: f64) -> f64 {
-        self.tx_rate_history.back().copied().unwrap_or(0) as f64 / poll_interval_secs
+    /// Determine epoch length for a snapshot (override > metric > network default > 432,000).
+    fn epoch_length_for_snapshot(&self, snapshot: &MetricsSnapshot) -> u64 {
+        if self.epoch_length_override > 0 {
+            return self.epoch_length_override;
+        }
+        let metric = snapshot.get_u64("torsten_epoch_length");
+        if metric > 0 {
+            return metric;
+        }
+        let magic = snapshot.get_u64("torsten_network_magic");
+        if magic > 0 {
+            let n = Network::from_magic(magic);
+            return n.epoch_length();
+        }
+        432_000
     }
 
-    /// Get the effective epoch length (respecting overrides).
+    /// Get the effective epoch length using current state.
     pub fn epoch_length(&self) -> u64 {
         if self.epoch_length_override > 0 {
-            self.epoch_length_override
-        } else {
-            let metric_len = self.metrics.get_u64("torsten_epoch_length");
-            if metric_len > 0 {
-                metric_len
-            } else {
-                432_000
-            }
+            return self.epoch_length_override;
         }
-    }
-
-    /// Cycle to the next panel.
-    pub fn next_panel(&mut self) {
-        self.active_panel = self.active_panel.next();
-    }
-
-    /// Cycle to the previous panel.
-    pub fn prev_panel(&mut self) {
-        self.active_panel = self.active_panel.prev();
-    }
-
-    /// Jump to a specific panel by 1-based index (1-4).
-    pub fn jump_to_panel(&mut self, idx: usize) {
-        if let Some(panel) = ActivePanel::from_index(idx) {
-            self.active_panel = panel;
+        let metric = self.metrics.get_u64("torsten_epoch_length");
+        if metric > 0 {
+            return metric;
         }
+        self.network.epoch_length()
+    }
+
+    /// Get the current theme.
+    pub fn theme(&self) -> &'static crate::theme::Theme {
+        &THEMES[self.theme_idx]
+    }
+
+    /// Cycle to the next theme.
+    pub fn cycle_theme(&mut self) {
+        self.theme_idx = cycle_theme(self.theme_idx);
     }
 
     /// Toggle the help overlay.
@@ -225,23 +260,15 @@ impl App {
         self.show_help = !self.show_help;
     }
 
-    /// Cycle layout mode: Auto -> Full -> Standard -> Compact -> Auto.
-    pub fn toggle_layout_mode(&mut self) {
-        self.layout_mode = match self.layout_mode {
-            None => Some(LayoutMode::Full),
-            Some(LayoutMode::Full) => Some(LayoutMode::Standard),
-            Some(LayoutMode::Standard) => Some(LayoutMode::Compact),
-            Some(LayoutMode::Compact) => None,
-        };
+    /// Determine whether the node is a block producer (metric 1.0) or relay (0.0).
+    pub fn is_block_producer(&self) -> bool {
+        self.metrics.get("torsten_is_block_producer") >= 1.0
     }
 
-    /// Determine the sync status label and associated color hint.
+    /// Determine current sync status.
     ///
-    /// Returns (label, is_synced, is_stalled):
-    /// - "Synced" when progress >= 99.9%
-    /// - "Stalled" when tip_age > 300s and progress < 99%
-    /// - "Syncing XX.XX%" otherwise
-    pub fn sync_status(&self) -> (&str, bool, bool) {
+    /// Returns (label, is_synced, is_stalled).
+    pub fn sync_status(&self) -> (&'static str, bool, bool) {
         let pct_raw = self.metrics.get("torsten_sync_progress_percent");
         let pct = pct_raw / 100.0;
         let tip_age = self.metrics.get_u64("torsten_tip_age_seconds");
@@ -255,32 +282,71 @@ impl App {
         }
     }
 
-    /// Format sync progress as a percentage string.
+    /// Sync progress as a percentage (0.0–100.0).
     pub fn sync_progress_pct(&self) -> f64 {
         self.metrics.get("torsten_sync_progress_percent") / 100.0
     }
 
-    /// Compute the current block rate (blocks per second) based on the last
-    /// sparkline sample and the poll interval.
-    pub fn blocks_per_second(&self, poll_interval_secs: f64) -> f64 {
-        self.block_rate_history.back().copied().unwrap_or(0) as f64 / poll_interval_secs
+    /// Infer current era from the protocol major version metric.
+    ///
+    /// Protocol versions:
+    ///   0-1: Byron, 2-3: Shelley, 4: Allegra, 5: Mary, 6: Alonzo, 7: Babbage, 8+: Conway
+    pub fn current_era(&self) -> &'static str {
+        let major = self.metrics.get_u64("torsten_protocol_major_version");
+        // If the metric isn't exposed yet, fall back to epoch-based inference.
+        if major == 0 {
+            let epoch = self.metrics.get_u64("torsten_epoch_number");
+            return match self.network {
+                Network::Mainnet => {
+                    if epoch >= 394 {
+                        "Conway"
+                    } else if epoch >= 365 {
+                        "Babbage"
+                    } else {
+                        "Alonzo"
+                    }
+                }
+                Network::Preview => {
+                    if epoch >= 670 {
+                        "Conway"
+                    } else {
+                        "Babbage"
+                    }
+                }
+                Network::Preprod => {
+                    if epoch >= 160 {
+                        "Conway"
+                    } else {
+                        "Babbage"
+                    }
+                }
+                _ => "Conway",
+            };
+        }
+        match major {
+            0 | 1 => "Byron",
+            2 | 3 => "Shelley",
+            4 => "Allegra",
+            5 => "Mary",
+            6 => "Alonzo",
+            7 => "Babbage",
+            _ => "Conway",
+        }
     }
 
-    /// Format a lovelace amount as a human-readable ADA string with suffix.
-    /// e.g. 14_070_000_000_000 -> "14.07T"
-    pub fn format_ada(lovelace: u64) -> String {
-        let ada = lovelace as f64 / 1_000_000.0;
-        if ada >= 1_000_000_000_000.0 {
-            format!("{:.2}T", ada / 1_000_000_000_000.0)
-        } else if ada >= 1_000_000_000.0 {
-            format!("{:.2}B", ada / 1_000_000_000.0)
-        } else if ada >= 1_000_000.0 {
-            format!("{:.2}M", ada / 1_000_000.0)
-        } else if ada >= 1_000.0 {
-            format!("{:.2}K", ada / 1_000.0)
-        } else {
-            format!("{:.2}", ada)
+    // ---- Formatting helpers ----
+
+    /// Format a large number with comma separators.
+    pub fn format_number(n: u64) -> String {
+        let s = n.to_string();
+        let mut result = String::with_capacity(s.len() + s.len() / 3);
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                result.push(',');
+            }
+            result.push(c);
         }
+        result.chars().rev().collect()
     }
 
     /// Format bytes as human-readable size.
@@ -294,19 +360,6 @@ impl App {
         } else {
             format!("{} B", bytes)
         }
-    }
-
-    /// Format a large number with comma separators.
-    pub fn format_number(n: u64) -> String {
-        let s = n.to_string();
-        let mut result = String::with_capacity(s.len() + s.len() / 3);
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 {
-                result.push(',');
-            }
-            result.push(c);
-        }
-        result.chars().rev().collect()
     }
 
     /// Format uptime as a human-readable duration.
@@ -324,53 +377,71 @@ impl App {
     }
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     fn make_snapshot(values: Vec<(&str, f64)>) -> MetricsSnapshot {
         MetricsSnapshot {
             values: values
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
-            _labeled: std::collections::HashMap::new(),
+            histogram_buckets: HashMap::new(),
             connected: true,
-            _error: None,
+            error: None,
         }
     }
 
     #[test]
-    fn test_block_rate_history() {
-        let mut app = App::new();
-
-        // First update: no delta pushed
-        app.update_metrics(make_snapshot(vec![("torsten_blocks_applied_total", 100.0)]));
-        assert!(app.block_rate_history.is_empty());
-
-        // Second update: delta = 150 - 100 = 50
-        app.update_metrics(make_snapshot(vec![("torsten_blocks_applied_total", 150.0)]));
-        assert_eq!(app.block_rate_history.len(), 1);
-        assert_eq!(app.block_rate_history[0], 50);
-
-        // Third update: delta = 200 - 150 = 50
-        app.update_metrics(make_snapshot(vec![("torsten_blocks_applied_total", 200.0)]));
-        assert_eq!(app.block_rate_history.len(), 2);
-        assert_eq!(app.block_rate_history[1], 50);
+    fn test_network_from_magic() {
+        assert_eq!(Network::from_magic(764_824_073), Network::Mainnet);
+        assert_eq!(Network::from_magic(2), Network::Preview);
+        assert_eq!(Network::from_magic(1), Network::Preprod);
+        assert_eq!(Network::from_magic(0), Network::Unknown);
     }
 
     #[test]
-    fn test_sparkline_capacity() {
-        let mut app = App::new();
-        app.update_metrics(make_snapshot(vec![("torsten_blocks_applied_total", 0.0)]));
+    fn test_network_epoch_length() {
+        assert_eq!(Network::Preview.epoch_length(), 86_400);
+        assert_eq!(Network::Mainnet.epoch_length(), 432_000);
+        assert_eq!(Network::Preprod.epoch_length(), 432_000);
+    }
 
-        // Fill beyond capacity
-        for i in 1..=70 {
-            app.update_metrics(make_snapshot(vec![(
-                "torsten_blocks_applied_total",
-                i as f64,
-            )]));
-        }
-        assert_eq!(app.block_rate_history.len(), SPARKLINE_CAPACITY);
+    #[test]
+    fn test_epoch_progress_update() {
+        let mut app = App::new();
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_slot_number", 43_200.0),
+            ("torsten_network_magic", 2.0), // Preview: 86,400 slots/epoch
+        ]));
+        assert_eq!(app.slot_in_epoch, 43_200);
+        assert!((app.epoch_progress_pct - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_epoch_length_override() {
+        let mut app = App::new();
+        app.epoch_length_override = 86_400;
+        app.update_metrics(make_snapshot(vec![("torsten_slot_number", 43_200.0)]));
+        assert_eq!(app.epoch_length(), 86_400);
+    }
+
+    #[test]
+    fn test_is_block_producer() {
+        let mut app = App::new();
+        app.metrics = make_snapshot(vec![("torsten_is_block_producer", 1.0)]);
+        assert!(app.is_block_producer());
+
+        app.metrics = make_snapshot(vec![("torsten_is_block_producer", 0.0)]);
+        assert!(!app.is_block_producer());
     }
 
     #[test]
@@ -409,22 +480,16 @@ mod tests {
     }
 
     #[test]
-    fn test_format_ada() {
-        // 14.07T ADA = 14.07e18 lovelace
-        assert_eq!(App::format_ada(14_070_000_000_000_000_000), "14.07T");
-        // 14.07B ADA = 14.07e15 lovelace
-        assert_eq!(App::format_ada(14_070_000_000_000_000), "14.07B");
-        // 14.07M ADA = 14.07e12 lovelace
-        assert_eq!(App::format_ada(14_070_000_000_000), "14.07M");
-        assert_eq!(App::format_ada(1_000_000), "1.00");
-    }
-
-    #[test]
-    fn test_format_bytes() {
-        assert_eq!(App::format_bytes(6_076_211_200), "5.7 GB");
-        assert_eq!(App::format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(App::format_bytes(1024), "1.0 KB");
-        assert_eq!(App::format_bytes(500), "500 B");
+    fn test_theme_cycling() {
+        let mut app = App::new();
+        assert_eq!(app.theme_idx, 0);
+        app.cycle_theme();
+        assert_eq!(app.theme_idx, 1);
+        // Cycle through all and back to 0.
+        for _ in 0..6 {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_idx, 0);
     }
 
     #[test]
@@ -436,6 +501,14 @@ mod tests {
     }
 
     #[test]
+    fn test_format_bytes() {
+        assert_eq!(App::format_bytes(6_076_211_200), "5.7 GB");
+        assert_eq!(App::format_bytes(1_048_576), "1.0 MB");
+        assert_eq!(App::format_bytes(1024), "1.0 KB");
+        assert_eq!(App::format_bytes(500), "500 B");
+    }
+
+    #[test]
     fn test_format_uptime() {
         assert_eq!(App::format_uptime(90061), "1d 1h 1m");
         assert_eq!(App::format_uptime(3661), "1h 1m");
@@ -443,17 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn test_panel_cycling() {
+    fn test_current_era_from_protocol_version() {
         let mut app = App::new();
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-        app.next_panel();
-        assert_eq!(app.active_panel, ActivePanel::Peers);
-        app.next_panel();
-        assert_eq!(app.active_panel, ActivePanel::Performance);
-        app.next_panel();
-        assert_eq!(app.active_panel, ActivePanel::Governance);
-        app.next_panel();
-        assert_eq!(app.active_panel, ActivePanel::Chain);
+        app.metrics = make_snapshot(vec![("torsten_protocol_major_version", 9.0)]);
+        assert_eq!(app.current_era(), "Conway");
+
+        app.metrics = make_snapshot(vec![("torsten_protocol_major_version", 7.0)]);
+        assert_eq!(app.current_era(), "Babbage");
+
+        app.metrics = make_snapshot(vec![("torsten_protocol_major_version", 6.0)]);
+        assert_eq!(app.current_era(), "Alonzo");
     }
 
     #[test]
@@ -464,111 +536,5 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
-    }
-
-    #[test]
-    fn test_prev_panel_cycling() {
-        let mut app = App::new();
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-        app.prev_panel();
-        assert_eq!(app.active_panel, ActivePanel::Governance);
-        app.prev_panel();
-        assert_eq!(app.active_panel, ActivePanel::Performance);
-        app.prev_panel();
-        assert_eq!(app.active_panel, ActivePanel::Peers);
-        app.prev_panel();
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-    }
-
-    #[test]
-    fn test_jump_to_panel() {
-        let mut app = App::new();
-        app.jump_to_panel(3);
-        assert_eq!(app.active_panel, ActivePanel::Performance);
-        app.jump_to_panel(1);
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-        // Out-of-range index is ignored.
-        app.jump_to_panel(5);
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-        app.jump_to_panel(0);
-        assert_eq!(app.active_panel, ActivePanel::Chain);
-    }
-
-    #[test]
-    fn test_tx_rate_history() {
-        let mut app = App::new();
-
-        // First update: baselines recorded, no delta.
-        app.update_metrics(make_snapshot(vec![
-            ("torsten_blocks_applied_total", 100.0),
-            ("torsten_transactions_validated_total", 50.0),
-        ]));
-        assert!(app.tx_rate_history.is_empty());
-
-        // Second update: tx delta = 80 - 50 = 30.
-        app.update_metrics(make_snapshot(vec![
-            ("torsten_blocks_applied_total", 110.0),
-            ("torsten_transactions_validated_total", 80.0),
-        ]));
-        assert_eq!(app.tx_rate_history.len(), 1);
-        assert_eq!(app.tx_rate_history[0], 30);
-    }
-
-    #[test]
-    fn test_mempool_and_memory_history() {
-        let mut app = App::new();
-
-        app.update_metrics(make_snapshot(vec![
-            ("torsten_mempool_tx_count", 5.0),
-            ("torsten_mem_resident_bytes", 1_000_000.0),
-        ]));
-        // First update: no snapshot pushed.
-        assert!(app.mempool_depth_history.is_empty());
-        assert!(app.memory_history.is_empty());
-
-        app.update_metrics(make_snapshot(vec![
-            ("torsten_mempool_tx_count", 8.0),
-            ("torsten_mem_resident_bytes", 2_000_000.0),
-        ]));
-        assert_eq!(app.mempool_depth_history.len(), 1);
-        assert_eq!(app.mempool_depth_history[0], 8);
-        assert_eq!(app.memory_history[0], 2_000_000);
-    }
-
-    #[test]
-    fn test_epoch_time_remaining() {
-        let mut app = App::new();
-        app.update_metrics(make_snapshot(vec![
-            ("torsten_slot_number", 100_000.0),
-            ("torsten_epoch_length", 432_000.0),
-        ]));
-        assert_eq!(app.slot_in_epoch, 100_000);
-        assert_eq!(app.epoch_slots_remaining, 332_000);
-        assert_eq!(app.epoch_time_remaining_secs, 332_000);
-    }
-
-    #[test]
-    fn test_epoch_length_override() {
-        let mut app = App::new();
-        app.epoch_length_override = 86_400;
-        app.update_metrics(make_snapshot(vec![("torsten_slot_number", 43_200.0)]));
-        assert_eq!(app.slot_in_epoch, 43_200);
-        assert_eq!(app.epoch_length(), 86_400);
-        assert!((app.epoch_progress_pct - 50.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn test_txs_per_second() {
-        let mut app = App::new();
-        app.update_metrics(make_snapshot(vec![(
-            "torsten_transactions_validated_total",
-            0.0,
-        )]));
-        app.update_metrics(make_snapshot(vec![(
-            "torsten_transactions_validated_total",
-            20.0,
-        )]));
-        // 20 txs in 2 second poll = 10 tx/s.
-        assert!((app.txs_per_second(2.0) - 10.0).abs() < 0.01);
     }
 }

@@ -2,6 +2,8 @@
 //!
 //! Provides a [`Theme`] struct with all color fields used across the UI,
 //! seven built-in theme definitions, and a helper to cycle between them.
+//!
+//! Themes are cycled with the `t` key.
 
 use ratatui::style::Color;
 
@@ -34,14 +36,8 @@ pub struct Theme {
     pub border: Color,
     /// Border color for the currently active panel.
     pub border_active: Color,
-    /// Panel title text color (inactive panels).
+    /// Panel title text color.
     pub title: Color,
-    /// Sparkline bar color for low values (< 33%).
-    pub spark_low: Color,
-    /// Sparkline bar color for mid values (33-66%).
-    pub spark_mid: Color,
-    /// Sparkline bar color for high values (> 66%).
-    pub spark_high: Color,
     /// Progress gauge filled portion color.
     pub gauge_fill: Color,
     /// Progress gauge empty portion color.
@@ -62,9 +58,6 @@ pub const THEME_DEFAULT: Theme = Theme {
     border: Color::Rgb(70, 70, 85),
     border_active: Color::Rgb(100, 149, 237),
     title: Color::Rgb(180, 180, 200),
-    spark_low: Color::Rgb(80, 220, 100),
-    spark_mid: Color::Rgb(255, 215, 0),
-    spark_high: Color::Rgb(255, 80, 80),
     gauge_fill: Color::Rgb(80, 220, 100),
     gauge_empty: Color::DarkGray,
 };
@@ -83,9 +76,6 @@ pub const THEME_MONOKAI: Theme = Theme {
     border: Color::Rgb(62, 61, 50),
     border_active: Color::Rgb(102, 217, 239),
     title: Color::Rgb(248, 248, 242),
-    spark_low: Color::Rgb(166, 226, 46),
-    spark_mid: Color::Rgb(253, 151, 31),
-    spark_high: Color::Rgb(249, 38, 114),
     gauge_fill: Color::Rgb(166, 226, 46),
     gauge_empty: Color::Rgb(62, 61, 50),
 };
@@ -104,9 +94,6 @@ pub const THEME_SOLARIZED_DARK: Theme = Theme {
     border: Color::Rgb(7, 54, 66),    // #073642 base02
     border_active: Color::Rgb(38, 139, 210),
     title: Color::Rgb(147, 161, 161), // #93A1A1 base1
-    spark_low: Color::Rgb(133, 153, 0),
-    spark_mid: Color::Rgb(181, 137, 0),
-    spark_high: Color::Rgb(220, 50, 47),
     gauge_fill: Color::Rgb(133, 153, 0),
     gauge_empty: Color::Rgb(7, 54, 66),
 };
@@ -125,9 +112,6 @@ pub const THEME_SOLARIZED_LIGHT: Theme = Theme {
     border: Color::Rgb(238, 232, 213), // #EEE8D5 base2
     border_active: Color::Rgb(38, 139, 210),
     title: Color::Rgb(88, 110, 117), // #586E75 base01
-    spark_low: Color::Rgb(133, 153, 0),
-    spark_mid: Color::Rgb(181, 137, 0),
-    spark_high: Color::Rgb(220, 50, 47),
     gauge_fill: Color::Rgb(133, 153, 0),
     gauge_empty: Color::Rgb(238, 232, 213),
 };
@@ -146,9 +130,6 @@ pub const THEME_NORD: Theme = Theme {
     border: Color::Rgb(59, 66, 82),     // #3B4252 nord1
     border_active: Color::Rgb(136, 192, 208),
     title: Color::Rgb(229, 233, 240), // #E5E9F0 nord5
-    spark_low: Color::Rgb(163, 190, 140),
-    spark_mid: Color::Rgb(235, 203, 139),
-    spark_high: Color::Rgb(191, 97, 106),
     gauge_fill: Color::Rgb(163, 190, 140),
     gauge_empty: Color::Rgb(59, 66, 82),
 };
@@ -167,9 +148,6 @@ pub const THEME_DRACULA: Theme = Theme {
     border: Color::Rgb(68, 71, 90),     // #44475A current line
     border_active: Color::Rgb(189, 147, 249),
     title: Color::Rgb(248, 248, 242),
-    spark_low: Color::Rgb(80, 250, 123),
-    spark_mid: Color::Rgb(241, 250, 140),
-    spark_high: Color::Rgb(255, 85, 85),
     gauge_fill: Color::Rgb(80, 250, 123),
     gauge_empty: Color::Rgb(68, 71, 90),
 };
@@ -188,17 +166,14 @@ pub const THEME_CATPPUCCIN_MOCHA: Theme = Theme {
     border: Color::Rgb(49, 50, 68),     // #313244 surface0
     border_active: Color::Rgb(137, 180, 250),
     title: Color::Rgb(186, 194, 222), // #BAC2DE subtext1
-    spark_low: Color::Rgb(166, 227, 161),
-    spark_mid: Color::Rgb(249, 226, 175),
-    spark_high: Color::Rgb(243, 139, 168),
     gauge_fill: Color::Rgb(166, 227, 161),
     gauge_empty: Color::Rgb(49, 50, 68),
 };
 
-/// All built-in themes, indexed for cycling.
+/// All built-in themes, indexed for cycling with the `t` key.
 pub const THEMES: [Theme; 7] = [
-    THEME_MONOKAI,
     THEME_DEFAULT,
+    THEME_MONOKAI,
     THEME_SOLARIZED_DARK,
     THEME_SOLARIZED_LIGHT,
     THEME_NORD,
@@ -209,13 +184,6 @@ pub const THEMES: [Theme; 7] = [
 /// Return the next theme index, wrapping around to 0 after the last theme.
 pub fn cycle_theme(current: usize) -> usize {
     (current + 1) % THEMES.len()
-}
-
-/// Look up a theme by name (case-insensitive). Returns the index into [`THEMES`],
-/// or `None` if no theme matches.
-pub fn find_theme_by_name(name: &str) -> Option<usize> {
-    let lower = name.to_lowercase();
-    THEMES.iter().position(|t| t.name.to_lowercase() == lower)
 }
 
 #[cfg(test)]
@@ -265,14 +233,6 @@ mod tests {
     #[test]
     fn test_theme_count() {
         assert_eq!(THEMES.len(), 7);
-    }
-
-    #[test]
-    fn test_find_theme_by_name() {
-        assert_eq!(find_theme_by_name("Default"), Some(0));
-        assert_eq!(find_theme_by_name("monokai"), Some(1));
-        assert_eq!(find_theme_by_name("NORD"), Some(4));
-        assert_eq!(find_theme_by_name("nonexistent"), None);
     }
 
     #[test]
