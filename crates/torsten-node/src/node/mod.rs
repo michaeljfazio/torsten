@@ -716,33 +716,13 @@ impl Node {
             return Ok(());
         }
 
-        // After replay, initialize epoch_transitions_observed from the restored
-        // ledger's snapshot state. During replay, epoch transitions are applied
-        // but epoch_transitions_observed is not incremented (it's only incremented
-        // in the live sync path). A Mithril-imported + replayed node will have all
-        // three snapshots (mark, set, go) populated — treating that as 3+ epoch
-        // transitions allows the block producer's nonce_established and
-        // snapshots_established checks to pass immediately without waiting for
-        // 2–3 more live epoch boundaries.
-        {
-            let ls = self.ledger_state.read().await;
-            let transitions = if ls.snapshots.go.is_some() {
-                3u32
-            } else if ls.snapshots.set.is_some() {
-                2
-            } else if ls.snapshots.mark.is_some() {
-                1
-            } else {
-                0
-            };
-            if transitions > self.epoch_transitions_observed {
-                info!(
-                    transitions,
-                    "Initializing epoch_transitions_observed from restored ledger snapshots",
-                );
-                self.epoch_transitions_observed = transitions;
-            }
-        }
+        // NOTE: epoch_transitions_observed is NOT initialized from snapshot state.
+        // The epoch nonce is only reliable after observing live epoch transitions
+        // where VRF contributions are accumulated. A Mithril-imported node must
+        // observe 2+ live epoch boundaries before nonce_established becomes true
+        // and strict VRF verification is enabled. This prevents the node from
+        // rejecting valid blocks whose VRF proofs don't match our replay-derived
+        // (potentially incorrect) epoch nonce.
 
         // If running as block producer, log the pool's stake in the set snapshot
         // so operators can immediately diagnose eligibility issues.
