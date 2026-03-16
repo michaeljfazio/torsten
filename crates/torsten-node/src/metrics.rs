@@ -178,8 +178,11 @@ pub struct NodeMetrics {
     pub last_roll_forward_at: AtomicU64,
     /// Duration of last ledger replay in seconds (stored as f64 bits)
     pub replay_duration_secs: AtomicU64,
-    /// Tip age in seconds (wall_clock - slot_to_time(tip_slot))
+    /// Tip age: stored as the tip slot's POSIX time in milliseconds.
+    /// The actual age is computed dynamically as (now_ms - tip_slot_time_ms) / 1000.
     pub tip_age_secs: AtomicU64,
+    /// POSIX time of the tip slot in milliseconds (for dynamic tip_age computation).
+    pub tip_slot_time_ms: AtomicU64,
     /// Seconds since last RollForward event
     pub chainsync_idle_secs: AtomicU64,
 }
@@ -231,6 +234,7 @@ impl NodeMetrics {
             last_roll_forward_at: AtomicU64::new(0),
             replay_duration_secs: AtomicU64::new(0),
             tip_age_secs: AtomicU64::new(0),
+            tip_slot_time_ms: AtomicU64::new(0),
             chainsync_idle_secs: AtomicU64::new(0),
         }
     }
@@ -368,9 +372,16 @@ impl NodeMetrics {
             .store(now_millis, Ordering::Relaxed);
     }
 
-    /// Set the tip age in seconds.
-    pub fn set_tip_age_secs(&self, secs: u64) {
-        self.tip_age_secs.store(secs, Ordering::Relaxed);
+    /// Set the tip slot time in milliseconds (POSIX). Tip age is computed dynamically.
+    pub fn set_tip_slot_time_ms(&self, slot_time_ms: u64) {
+        self.tip_slot_time_ms.store(slot_time_ms, Ordering::Relaxed);
+        // Also update the snapshot value for backward compat
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let age = now_ms.saturating_sub(slot_time_ms) / 1000;
+        self.tip_age_secs.store(age, Ordering::Relaxed);
     }
 
     /// Set the replay duration in seconds.
@@ -393,6 +404,17 @@ impl NodeMetrics {
 
     /// Format metrics as Prometheus exposition format
     pub(crate) fn to_prometheus(&self) -> String {
+        // Recompute tip_age dynamically at render time for freshness
+        let slot_time_ms = self.tip_slot_time_ms.load(Ordering::Relaxed);
+        if slot_time_ms > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let age = now_ms.saturating_sub(slot_time_ms) / 1000;
+            self.tip_age_secs.store(age, Ordering::Relaxed);
+        }
+
         let mut out = String::with_capacity(2048);
 
         // Counters (monotonically increasing totals)

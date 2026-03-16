@@ -1051,16 +1051,11 @@ impl Node {
                     ls.pool_params.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                // Compute and record tip age (wall clock - slot time)
+                // Store tip slot time for dynamic tip_age computation
                 let sc = &ls.slot_config;
                 let slot_time_ms =
                     sc.zero_time + slot.saturating_sub(sc.zero_slot) * sc.slot_length as u64;
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let tip_age = now_ms.saturating_sub(slot_time_ms) / 1000;
-                self.metrics.set_tip_age_secs(tip_age);
+                self.metrics.set_tip_slot_time_ms(slot_time_ms);
                 // Update chainsync idle time
                 self.metrics.update_chainsync_idle();
                 // Only show sync progress when catching up, not when following the tip
