@@ -545,9 +545,9 @@ mod tests {
     use super::*;
     use crate::query_handler::ProtocolParamsSnapshot;
     use crate::query_handler::QueryResult;
+    use parking_lot::Mutex;
     use query::encode_query_result;
     use std::collections::VecDeque;
-    use parking_lot::Mutex;
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::hash::TransactionHash;
     use torsten_primitives::mempool::{MempoolAddError, MempoolAddResult, MempoolSnapshot};

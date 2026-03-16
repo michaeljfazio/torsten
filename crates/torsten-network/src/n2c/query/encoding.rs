@@ -6,7 +6,7 @@
 //! `mod.rs` stays thin.
 
 use crate::query_handler::{
-    GovActionId, ProtocolParamsSnapshot, ProposalSnapshot, QueryResult, RelaySnapshot,
+    GovActionId, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult, RelaySnapshot,
     ShelleyPParamsSnapshot, SnapshotStakeData, UtxoSnapshot,
 };
 
@@ -385,10 +385,7 @@ pub(crate) fn encode_query_result_value(
 ///
 /// Format: `{0: address_bytes, 1: value, 2?: datum_option, 3?: script_ref}`
 /// Value: `coin` (integer) or `[coin, {policy_id -> {asset_name -> quantity}}]`
-pub(crate) fn encode_utxo_output(
-    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    utxo: &UtxoSnapshot,
-) {
+pub(crate) fn encode_utxo_output(enc: &mut minicbor::Encoder<&mut Vec<u8>>, utxo: &UtxoSnapshot) {
     let has_datum = utxo.datum_hash.is_some();
     let field_count = 2 + has_datum as u64; // address + value + optional datum
     enc.map(field_count).ok();

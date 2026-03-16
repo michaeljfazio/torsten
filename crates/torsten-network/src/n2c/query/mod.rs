@@ -156,7 +156,9 @@ pub(crate) fn parse_utctime_for_test(s: &str) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::encoding::{encode_protocol_params_cbor, encode_query_result, encode_tagged_rational};
+    use super::encoding::{
+        encode_protocol_params_cbor, encode_query_result, encode_tagged_rational,
+    };
     use crate::query_handler::*;
 
     /// Helper: encode a QueryResult and return the raw CBOR bytes.
