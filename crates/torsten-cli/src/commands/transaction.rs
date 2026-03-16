@@ -1,8 +1,15 @@
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::transaction::{ExUnits, PlutusData, Redeemer, RedeemerTag};
+
+/// Multi-asset token map: `(policy_id_bytes, asset_name_bytes) → quantity`.
+///
+/// Used throughout the auto-balance pipeline to accumulate and subtract token
+/// bundles from input and output UTxOs.
+type MultiAssetMap = HashMap<(Vec<u8>, Vec<u8>), u64>;
 
 #[derive(Args, Debug)]
 pub struct TransactionCmd {
@@ -1428,17 +1435,90 @@ pub(crate) fn estimate_fee(
 
 /// Compute a change output to balance the transaction.
 ///
-/// Returns `Some(output)` when there is positive change (after fee) that
-/// exceeds the minimum UTxO value (1 ADA = 1 000 000 lovelace), or `None`
-/// when the change would be zero or below the minimum.
+/// Compute the minimum lovelace required for a UTxO output that carries the
+/// given native tokens.
 ///
-/// Returns an error when `total_inputs < total_outputs + fee` (insufficient
-/// funds), describing the shortfall in lovelace.
+/// The Babbage/Conway formula is:
+/// ```text
+/// min_ada = max(1_000_000, coins_per_utxo_byte * (output_size_bytes + 160))
+/// ```
+///
+/// `output_size_bytes` is a conservative estimate of the serialised output
+/// size derived from the token bundle contents:
+/// - 8 bytes overhead for the CBOR array wrapper and coin field
+/// - 28 bytes per policy ID
+/// - 1 byte CBOR map entry overhead per policy
+/// - length of asset name bytes per asset
+/// - 8 bytes per asset for the quantity
+/// - 1 byte CBOR overhead per asset entry
+///
+/// 160 is the constant overhead used by the Haskell implementation to account
+/// for the key/value UTxO entry overhead in the ledger state.
+pub(crate) fn min_ada_for_output(
+    tokens: &[(String, String, u64)],
+    coins_per_utxo_byte: u64,
+) -> u64 {
+    // Estimate the serialised byte size of the value field.
+    //
+    // When there are no tokens the output is a plain coin output; the minimum
+    // is then the flat 1 ADA floor (no formula needed, just the floor).
+    let output_size_bytes: u64 = if tokens.is_empty() {
+        0
+    } else {
+        // Base: CBOR array(2) header (1 byte) + coin u64 (up to 9 bytes)
+        let mut size: u64 = 10;
+        // Group tokens by policy to mirror the actual CBOR grouping
+        let mut policy_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (policy, asset_name, _) in tokens {
+            policy_map
+                .entry(policy.as_str())
+                .or_default()
+                .push(asset_name.as_str());
+        }
+        for (policy_hex, assets) in &policy_map {
+            // 28-byte policy ID bytes + 1-byte CBOR header
+            size += 29;
+            // Policy-ID hex length is always 56 chars → 28 bytes; ignore hex_len / 2
+            let _ = policy_hex;
+            // Per-asset: name bytes + 1-byte header + 8-byte quantity + 1 overhead
+            for asset_name_hex in assets {
+                size += (asset_name_hex.len() as u64) / 2 + 10;
+            }
+        }
+        size
+    };
+
+    const LEDGER_KEY_OVERHEAD: u64 = 160;
+    const FLAT_MIN: u64 = 1_000_000;
+    let formula = coins_per_utxo_byte.saturating_mul(output_size_bytes + LEDGER_KEY_OVERHEAD);
+    formula.max(FLAT_MIN)
+}
+
+/// Build the change output for auto-balance mode.
+///
+/// Computes:
+/// - lovelace change = `total_inputs - total_outputs - fee`
+/// - token change   = `input_tokens - output_tokens` (tokens in inputs not
+///   consumed by any explicit output are returned to the change address)
+///
+/// The minimum lovelace required to carry the token change bundle is checked
+/// with [`min_ada_for_output`].  If there is insufficient lovelace, an error
+/// is returned with a clear description of the shortfall.
+///
+/// Returns `Some(output)` when there is spendable change, or `None` when the
+/// lovelace change is zero and there are no tokens.
+///
+/// Returns an error when:
+/// - `total_inputs < total_outputs + fee` (insufficient funds), or
+/// - the token change requires more lovelace than is available as change.
 pub(crate) fn calculate_change(
     total_inputs: u64,
     total_outputs: u64,
     fee: u64,
     change_address: &str,
+    input_tokens: &MultiAssetMap,
+    output_tokens: &MultiAssetMap,
+    coins_per_utxo_byte: u64,
 ) -> Result<Option<ParsedTxOutput>> {
     let total_spent = total_outputs
         .checked_add(fee)
@@ -1452,24 +1532,65 @@ pub(crate) fn calculate_change(
         );
     }
 
-    let change = total_inputs - total_spent;
-    // 1 ADA = 1_000_000 lovelace — below this a change output would itself
-    // become unspendable (violates min-UTxO).
-    const MIN_UTXO_LOVELACE: u64 = 1_000_000;
-    if change < MIN_UTXO_LOVELACE {
-        // Change is dust — leave it as an implicit fee contribution.
+    let lovelace_change = total_inputs - total_spent;
+
+    // ── Compute token change ────────────────────────────────────────────────
+    //
+    // For each (policy, asset) present in the inputs, subtract whatever amount
+    // the explicit outputs already consume.  Any positive remainder must be
+    // returned in the change output; native tokens cannot be "burned" silently.
+    let mut token_change: Vec<(String, String, u64)> = Vec::new();
+    for ((policy_bytes, asset_name_bytes), &in_qty) in input_tokens {
+        let out_qty = output_tokens
+            .get(&(policy_bytes.clone(), asset_name_bytes.clone()))
+            .copied()
+            .unwrap_or(0);
+        if in_qty > out_qty {
+            token_change.push((
+                hex::encode(policy_bytes),
+                hex::encode(asset_name_bytes),
+                in_qty - out_qty,
+            ));
+        }
+    }
+    // Sort for deterministic output ordering (policy asc, then asset name asc).
+    token_change.sort();
+
+    // ── Minimum-ADA check ──────────────────────────────────────────────────
+    let min_ada = min_ada_for_output(&token_change, coins_per_utxo_byte);
+
+    if lovelace_change < min_ada && !token_change.is_empty() {
+        bail!(
+            "Insufficient ADA for token-carrying change output: need at least {min_ada} lovelace \
+             to cover the token bundle, but only {lovelace_change} lovelace is available as change. \
+             Add more ADA to your inputs or reduce the number of native tokens."
+        );
+    }
+
+    // When there are no tokens, apply the plain 1 ADA dust floor.
+    if token_change.is_empty() {
+        const MIN_UTXO_LOVELACE: u64 = 1_000_000;
+        if lovelace_change < MIN_UTXO_LOVELACE {
+            // Change is dust — leave it as an implicit fee contribution.
+            return Ok(None);
+        }
+    }
+
+    // No change at all (zero lovelace, no tokens) — no output needed.
+    if lovelace_change == 0 && token_change.is_empty() {
         return Ok(None);
     }
 
     Ok(Some(ParsedTxOutput {
         address: change_address.to_string(),
-        lovelace: change,
-        tokens: Vec::new(),
+        lovelace: lovelace_change,
+        tokens: token_change,
     }))
 }
 
 /// Decode the raw UTxO MsgResult payload from a `GetUTxOByTxIn` response and
-/// return the total lovelace contained in the matched outputs.
+/// return the total lovelace **and** all native tokens contained in the matched
+/// outputs.
 ///
 /// The wire format is:
 /// ```text
@@ -1477,9 +1598,14 @@ pub(crate) fn calculate_change(
 /// ```
 /// where `value` is either a plain uint (ADA-only) or `[uint, multiasset_map]`.
 ///
-/// Only the lovelace (coin) component is summed; multi-asset tokens are ignored
-/// for fee/change purposes.
-fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
+/// The multi-asset map has the wire encoding:
+/// ```text
+/// {bstr(policy_id): {bstr(asset_name): uint(quantity)}}
+/// ```
+///
+/// Returns `(total_lovelace, token_map)` where `token_map` is keyed by
+/// `(policy_id_bytes, asset_name_bytes)`.
+fn sum_utxo_value(raw: &[u8]) -> Result<(u64, MultiAssetMap)> {
     let mut decoder = minicbor::Decoder::new(raw);
 
     // Outer: MsgResult = [4, result]
@@ -1502,10 +1628,11 @@ fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
     // UTxO result: Map<[tx_hash, index], TransactionOutput>
     let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
     if map_len == 0 {
-        return Ok(0);
+        return Ok((0, HashMap::new()));
     }
 
-    let mut total: u64 = 0;
+    let mut total_lovelace: u64 = 0;
+    let mut tokens: MultiAssetMap = HashMap::new();
 
     for _ in 0..map_len {
         // Key: [tx_hash_bytes, output_index]
@@ -1528,7 +1655,8 @@ fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
                     // value: uint (ADA-only) or [uint, multiasset_map]
                     let val_pos = decoder.position();
                     if let Ok(coin) = decoder.u64() {
-                        total = total.checked_add(coin).ok_or_else(|| {
+                        // ADA-only value — no native tokens
+                        total_lovelace = total_lovelace.checked_add(coin).ok_or_else(|| {
                             anyhow::anyhow!("Lovelace overflow summing UTxO values")
                         })?;
                     } else {
@@ -1538,13 +1666,35 @@ fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
                         let coin = decoder
                             .u64()
                             .map_err(|e| anyhow::anyhow!("Cannot read multi-asset coin: {e}"))?;
-                        total = total.checked_add(coin).ok_or_else(|| {
+                        total_lovelace = total_lovelace.checked_add(coin).ok_or_else(|| {
                             anyhow::anyhow!("Lovelace overflow summing UTxO values")
                         })?;
-                        // Skip multiasset map
-                        decoder
-                            .skip()
-                            .map_err(|e| anyhow::anyhow!("Cannot skip multiasset: {e}"))?;
+
+                        // Decode multiasset map: {policy_id_bytes: {asset_name_bytes: qty}}
+                        let policy_count = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                        for _ in 0..policy_count {
+                            let policy_id = decoder
+                                .bytes()
+                                .map_err(|e| anyhow::anyhow!("Cannot read policy ID bytes: {e}"))?
+                                .to_vec();
+                            let asset_count = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
+                            for _ in 0..asset_count {
+                                let asset_name = decoder
+                                    .bytes()
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("Cannot read asset name bytes: {e}")
+                                    })?
+                                    .to_vec();
+                                let qty = decoder.u64().map_err(|e| {
+                                    anyhow::anyhow!("Cannot read token quantity: {e}")
+                                })?;
+                                let entry =
+                                    tokens.entry((policy_id.clone(), asset_name)).or_insert(0);
+                                *entry = entry
+                                    .checked_add(qty)
+                                    .ok_or_else(|| anyhow::anyhow!("Token quantity overflow"))?;
+                            }
+                        }
                     }
                 }
                 _ => {
@@ -1557,14 +1707,21 @@ fn sum_utxo_lovelace(raw: &[u8]) -> Result<u64> {
         }
     }
 
-    Ok(total)
+    Ok((total_lovelace, tokens))
 }
 
-/// Extract `minFeeA` (txFeePerByte) and `minFeeB` (txFeeFixed) from a
-/// protocol-parameters JSON string returned by `query_protocol_params`.
+/// Extract fee coefficients and the UTxO cost-per-byte from a protocol
+/// parameters JSON string returned by `query_protocol_params`.
 ///
-/// Supports both the current cardano-cli field names and legacy aliases.
-fn extract_fee_params(params_json: &str) -> Result<(u64, u64)> {
+/// Returns `(min_fee_a, min_fee_b, coins_per_utxo_byte)`:
+/// - `min_fee_a` — `txFeePerByte` (aka `minFeeA`) in lovelace per byte
+/// - `min_fee_b` — `txFeeFixed`   (aka `minFeeB`) in lovelace (constant term)
+/// - `coins_per_utxo_byte` — `utxoCostPerByte` (aka `coinsPerUtxoByte`) used
+///   for minimum-ADA computation on token-carrying outputs.  Defaults to
+///   4_310 lovelace/byte (current mainnet value) when absent.
+///
+/// Supports both current cardano-cli field names and legacy aliases.
+fn extract_fee_params(params_json: &str) -> Result<(u64, u64, u64)> {
     let pp: serde_json::Value = serde_json::from_str(params_json)
         .map_err(|e| anyhow::anyhow!("Cannot parse protocol params JSON: {e}"))?;
 
@@ -1578,7 +1735,15 @@ fn extract_fee_params(params_json: &str) -> Result<(u64, u64)> {
         .or_else(|| pp["minFeeB"].as_u64())
         .ok_or_else(|| anyhow::anyhow!("Protocol params missing txFeeFixed / minFeeB"))?;
 
-    Ok((min_fee_a, min_fee_b))
+    // utxoCostPerByte is the Babbage/Conway name; coinsPerUtxoByte is a
+    // widely-used alias.  Fall back to 4_310 if neither field is present
+    // (offline / old-format protocol params).
+    let coins_per_utxo_byte = pp["utxoCostPerByte"]
+        .as_u64()
+        .or_else(|| pp["coinsPerUtxoByte"].as_u64())
+        .unwrap_or(4_310);
+
+    Ok((min_fee_a, min_fee_b, coins_per_utxo_byte))
 }
 
 // ─── Build command implementation ──────────────────────────────────────────
@@ -1798,7 +1963,10 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             .query_utxo_by_txin(&utxo_inputs)
             .await
             .map_err(|e| anyhow::anyhow!("UTxO query failed: {e}"))?;
-        let total_inputs = sum_utxo_lovelace(&utxo_raw)
+        // Decode both the total lovelace and the full native-token bundle from
+        // the UTxO query response.  Tokens present in the inputs but absent
+        // from the explicit outputs must appear in the change output.
+        let (total_inputs, input_tokens) = sum_utxo_value(&utxo_raw)
             .map_err(|e| anyhow::anyhow!("Failed to decode UTxO response: {e}"))?;
 
         if total_inputs == 0 {
@@ -1817,10 +1985,26 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         client.release().await.ok();
         client.done().await.ok();
 
-        let (min_fee_a, min_fee_b) = extract_fee_params(&params_json)?;
+        let (min_fee_a, min_fee_b, coins_per_utxo_byte) = extract_fee_params(&params_json)?;
 
-        // Sum the explicit outputs (not counting change yet).
+        // Sum the explicit outputs (lovelace only — for fee arithmetic).
         let total_explicit_outputs: u64 = outputs.iter().map(|o| o.lovelace).sum();
+
+        // Build the output token map: aggregate tokens across all explicit
+        // outputs so we can compute token change = input_tokens - output_tokens.
+        let mut output_tokens: MultiAssetMap = HashMap::new();
+        for output in &outputs {
+            for (policy_hex, asset_name_hex, qty) in &output.tokens {
+                let policy_bytes = hex::decode(policy_hex)?;
+                let asset_bytes = hex::decode(asset_name_hex).unwrap_or_default();
+                let entry = output_tokens
+                    .entry((policy_bytes, asset_bytes))
+                    .or_insert(0);
+                *entry = entry
+                    .checked_add(*qty)
+                    .ok_or_else(|| anyhow::anyhow!("Token quantity overflow in outputs"))?;
+            }
+        }
 
         // ── Iteration 1: estimate fee without change output ─────────────────
         let body_no_change = build_tx_body_cbor(
@@ -1839,27 +2023,27 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         // Assume 1 witness (the payment key). SPO tools can override with --fee.
         let fee_estimate_1 = estimate_fee(&body_no_change, 1, min_fee_a, min_fee_b);
 
-        // Compute tentative change.
+        // Compute tentative change — including any native tokens.
         let change_output_1 = calculate_change(
             total_inputs,
             total_explicit_outputs,
             fee_estimate_1,
             change_addr,
+            &input_tokens,
+            &output_tokens,
+            coins_per_utxo_byte,
         )?;
 
         // ── Iteration 2: re-estimate with the change output included ────────
         //
         // Adding the change output changes the tx body size, which changes
         // the fee, which changes the change amount. One more pass is
-        // sufficient for convergence because the change output size is fixed
-        // (plain ADA output with a constant-length address).
+        // sufficient for convergence.  Token-carrying change outputs are
+        // larger than plain ADA outputs, so including the tokens in this
+        // pass gives an accurate size estimate.
         let mut outputs_with_change = outputs.clone();
         if let Some(ref co) = change_output_1 {
-            outputs_with_change.push(ParsedTxOutput {
-                address: co.address.clone(),
-                lovelace: co.lovelace,
-                tokens: Vec::new(),
-            });
+            outputs_with_change.push(co.clone());
         }
 
         let body_with_change = build_tx_body_cbor(
@@ -1878,8 +2062,15 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         let fee_final = estimate_fee(&body_with_change, 1, min_fee_a, min_fee_b);
 
         // Recompute change with the final fee.
-        let change_output_final =
-            calculate_change(total_inputs, total_explicit_outputs, fee_final, change_addr)?;
+        let change_output_final = calculate_change(
+            total_inputs,
+            total_explicit_outputs,
+            fee_final,
+            change_addr,
+            &input_tokens,
+            &output_tokens,
+            coins_per_utxo_byte,
+        )?;
 
         // Commit: replace `outputs` with the final set (explicit + change).
         if let Some(co) = change_output_final {
@@ -3030,14 +3221,23 @@ mod tests {
 
     // ── Auto-balance: calculate_change tests ─────────────────────────────────
 
+    /// Convenience helper: empty token maps and mainnet coins_per_utxo_byte.
+    fn no_tokens() -> (MultiAssetMap, MultiAssetMap) {
+        (HashMap::new(), HashMap::new())
+    }
+
     #[test]
     fn test_calculate_change_exact_fit() {
         // When inputs exactly cover outputs + fee, change is zero → None.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             10_000_000, // total inputs
             9_800_000,  // total outputs
             200_000,    // fee
             "addr_test1abc",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(
@@ -3049,11 +3249,15 @@ mod tests {
     #[test]
     fn test_calculate_change_dust() {
         // Change below 1 ADA (min-UTxO) is considered dust → None.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             10_000_000, // total inputs
             9_700_000,  // total outputs
             299_999,    // fee  → change = 1 lovelace (dust)
             "addr_test1abc",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(result.is_none(), "dust change must be dropped");
@@ -3062,11 +3266,15 @@ mod tests {
     #[test]
     fn test_calculate_change_spendable() {
         // Change of exactly 1 ADA should produce a change output.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             11_000_000, // total inputs
             9_800_000,  // total outputs
             200_000,    // fee  → change = 1_000_000 = 1 ADA
             "addr_test1abc",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(result.is_some());
@@ -3079,11 +3287,15 @@ mod tests {
     #[test]
     fn test_calculate_change_large_change() {
         // SPO scenario: large wallet, small payment, majority goes to change.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             100_000_000_000, // 100k ADA input
             1_000_000,       // 1 ADA payment
             170_000,         // fee
             "addr_test1change",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(result.is_some());
@@ -3094,11 +3306,15 @@ mod tests {
     #[test]
     fn test_calculate_change_insufficient_funds() {
         // Inputs do not cover outputs + fee → error with shortfall description.
+        let (inp, out) = no_tokens();
         let err = calculate_change(
             5_000_000, // 5 ADA input
             5_000_000, // 5 ADA output (no room for fee)
             200_000,   // fee
             "addr_test1abc",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -3115,11 +3331,15 @@ mod tests {
     #[test]
     fn test_calculate_change_exactly_at_minimum() {
         // Change of exactly MIN_UTXO_LOVELACE (1 ADA) should be included.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             11_200_000, // 11.2 ADA
             10_000_000, // 10 ADA output
             200_000,    // fee
             "addr_test1x",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(result.is_some());
@@ -3129,14 +3349,157 @@ mod tests {
     #[test]
     fn test_calculate_change_just_below_minimum() {
         // Change of MIN_UTXO_LOVELACE - 1 (999_999 lovelace) is dust → None.
+        let (inp, out) = no_tokens();
         let result = calculate_change(
             11_199_999, // 11.199999 ADA
             10_000_000, // 10 ADA output
             200_000,    // fee → change = 999_999
             "addr_test1x",
+            &inp,
+            &out,
+            4_310,
         )
         .unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Native-token change tests ─────────────────────────────────────────────
+
+    /// Build a policy-keyed token entry for `MultiAssetMap`.
+    ///
+    /// `policy_hex` must be 56 hex chars (28 bytes).
+    fn token_entry(policy_hex: &str, asset_name_hex: &str, qty: u64) -> ((Vec<u8>, Vec<u8>), u64) {
+        (
+            (
+                hex::decode(policy_hex).unwrap(),
+                hex::decode(asset_name_hex).unwrap(),
+            ),
+            qty,
+        )
+    }
+
+    #[test]
+    fn test_change_with_native_tokens() {
+        // Input UTxO: 10 ADA + 500 HOSKY tokens.
+        // Explicit output: 5 ADA (ADA-only, no tokens).
+        // Expected change: 5 ADA - fee, plus all 500 HOSKY tokens.
+
+        // 28-byte policy ID (56 hex chars), 5-byte asset name ("HOSKY")
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59"; // "HOSKY" in hex
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 500);
+        input_tokens.insert((p, a), qty);
+
+        let output_tokens: MultiAssetMap = HashMap::new(); // no tokens in explicit outputs
+
+        // fee = 170_000 → change lovelace = 10_000_000 - 5_000_000 - 170_000 = 4_830_000
+        let result = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("should produce a change output with tokens");
+        assert_eq!(change.lovelace, 4_830_000, "lovelace change is wrong");
+        assert_eq!(
+            change.tokens.len(),
+            1,
+            "should carry exactly one token type"
+        );
+        let (cpol, casset, cqty) = &change.tokens[0];
+        assert_eq!(cpol, policy_hex, "policy ID must round-trip correctly");
+        assert_eq!(casset, asset_hex, "asset name must round-trip correctly");
+        assert_eq!(*cqty, 500, "token quantity must be preserved in full");
+    }
+
+    #[test]
+    fn test_change_min_ada_with_tokens() {
+        // Verify min_ada_for_output returns at least 1 ADA for token bundles
+        // and scales with the number of tokens.
+
+        // ADA-only output → always 1 ADA floor.
+        assert_eq!(min_ada_for_output(&[], 4_310), 1_000_000);
+
+        // Single-token output: formula should exceed 1 ADA.
+        let tokens_one: Vec<(String, String, u64)> = vec![(
+            "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef7".to_string(),
+            "484f534b59".to_string(),
+            100,
+        )];
+        let min_one = min_ada_for_output(&tokens_one, 4_310);
+        // size = 10 (base) + 29 (policy) + (5/2=2 + 10) = 51 bytes → formula = 4310*(51+160) = 909_410 → below 1M floor → 1_000_000
+        assert!(
+            min_one >= 1_000_000,
+            "min ADA for token output must be at least 1 ADA, got {min_one}"
+        );
+
+        // Many tokens: the formula result should grow and eventually exceed the 1 ADA floor.
+        let mut many_tokens: Vec<(String, String, u64)> = Vec::new();
+        for i in 0..10u8 {
+            many_tokens.push((
+                format!("{:056x}", i), // 28-byte policy
+                format!("{:016x}", i), // 8-byte asset name
+                u64::from(i) + 1,
+            ));
+        }
+        let min_many = min_ada_for_output(&many_tokens, 4_310);
+        assert!(
+            min_many >= 1_000_000,
+            "multi-token min ADA must be at least 1 ADA, got {min_many}"
+        );
+        // With 10 tokens across 10 policies the formula should clearly beat 1 ADA.
+        // 10 policies × (29 + 8/2 + 10) bytes each ≈ 430 bytes → 4310*(430+160) ≈ 2.5M
+        assert!(
+            min_many > 1_000_000,
+            "with many tokens min ADA should exceed the flat 1 ADA floor, got {min_many}"
+        );
+    }
+
+    #[test]
+    fn test_insufficient_ada_for_token_change() {
+        // Input UTxO: 2 ADA + tokens.
+        // Explicit output consumes 1.8 ADA → only 0.2 ADA available as change.
+        // But the token change output requires at least 1 ADA → must error.
+
+        // 28-byte policy ID (56 hex chars), 5-byte asset name ("HOSKY")
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 1_000);
+        input_tokens.insert((p, a), qty);
+
+        let output_tokens: MultiAssetMap = HashMap::new();
+
+        // 2_000_000 - 1_800_000 - 100_000 = 100_000 lovelace change
+        // min_ada for a token output is at least 1_000_000 → error
+        let err = calculate_change(
+            2_000_000,
+            1_800_000,
+            100_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            4_310,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Insufficient ADA for token-carrying change output"),
+            "expected token-change error, got: {msg}"
+        );
+        assert!(
+            msg.contains("100000"),
+            "error should state available lovelace (100000), got: {msg}"
+        );
     }
 
     // ── Auto-balance: extract_fee_params tests ───────────────────────────────
@@ -3144,19 +3507,31 @@ mod tests {
     #[test]
     fn test_extract_fee_params_current_names() {
         // Current cardano-cli JSON field names (post-Alonzo).
-        let json = r#"{"txFeePerByte": 44, "txFeeFixed": 155381}"#;
-        let (a, b) = extract_fee_params(json).unwrap();
+        let json = r#"{"txFeePerByte": 44, "txFeeFixed": 155381, "utxoCostPerByte": 4310}"#;
+        let (a, b, c) = extract_fee_params(json).unwrap();
         assert_eq!(a, 44);
         assert_eq!(b, 155_381);
+        assert_eq!(c, 4_310);
     }
 
     #[test]
     fn test_extract_fee_params_legacy_names() {
         // Legacy aliases used by older cardano-cli versions.
-        let json = r#"{"minFeeA": 44, "minFeeB": 155381}"#;
-        let (a, b) = extract_fee_params(json).unwrap();
+        let json = r#"{"minFeeA": 44, "minFeeB": 155381, "coinsPerUtxoByte": 4310}"#;
+        let (a, b, c) = extract_fee_params(json).unwrap();
         assert_eq!(a, 44);
         assert_eq!(b, 155_381);
+        assert_eq!(c, 4_310);
+    }
+
+    #[test]
+    fn test_extract_fee_params_default_coins_per_utxo_byte() {
+        // When utxoCostPerByte is absent, the default (4_310) is used.
+        let json = r#"{"txFeePerByte": 44, "txFeeFixed": 155381}"#;
+        let (a, b, c) = extract_fee_params(json).unwrap();
+        assert_eq!(a, 44);
+        assert_eq!(b, 155_381);
+        assert_eq!(c, 4_310, "default coins_per_utxo_byte must be 4310");
     }
 
     #[test]
@@ -3165,9 +3540,9 @@ mod tests {
         assert!(extract_fee_params(json).is_err());
     }
 
-    // ── Auto-balance: sum_utxo_lovelace tests ────────────────────────────────
+    // ── Auto-balance: sum_utxo_value tests ───────────────────────────────────
 
-    /// Build a synthetic UTxO MsgResult payload for testing.
+    /// Build a synthetic UTxO MsgResult payload for testing (ADA-only outputs).
     ///
     /// Format: [4, [Map<[tx_hash, index], {1: lovelace}>]]
     fn build_utxo_msg_result(entries: &[([u8; 32], u32, u64)]) -> Vec<u8> {
@@ -3198,29 +3573,128 @@ mod tests {
         buf
     }
 
-    #[test]
-    fn test_sum_utxo_lovelace_single_entry() {
-        let raw = build_utxo_msg_result(&[([0xab; 32], 0, 5_000_000)]);
-        let total = sum_utxo_lovelace(&raw).unwrap();
-        assert_eq!(total, 5_000_000);
+    /// Build a synthetic UTxO MsgResult payload for testing (multi-asset outputs).
+    ///
+    /// Each entry: (tx_hash, output_index, lovelace, tokens)
+    /// where tokens is a slice of (policy_bytes, asset_name_bytes, quantity).
+    fn build_utxo_msg_result_with_tokens(
+        entries: &[(&[u8; 32], u32, u64, &[(&[u8], &[u8], u64)])],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap(); // MsgResult tag
+        enc.array(1).unwrap(); // HFC wrapper
+
+        enc.map(entries.len() as u64).unwrap();
+        for (hash, index, lovelace, tokens) in entries {
+            // Key
+            enc.array(2).unwrap();
+            enc.bytes(*hash).unwrap();
+            enc.u32(*index).unwrap();
+
+            // Value: {1: [lovelace, {policy: {asset: qty}}]}
+            enc.map(1).unwrap();
+            enc.u32(1).unwrap();
+
+            if tokens.is_empty() {
+                enc.u64(*lovelace).unwrap();
+            } else {
+                // Group by policy for correct wire encoding
+                use std::collections::BTreeMap;
+                let mut policy_map: BTreeMap<&[u8], Vec<(&[u8], u64)>> = BTreeMap::new();
+                for &(policy, asset, qty) in *tokens {
+                    policy_map.entry(policy).or_default().push((asset, qty));
+                }
+
+                enc.array(2).unwrap();
+                enc.u64(*lovelace).unwrap();
+                enc.map(policy_map.len() as u64).unwrap();
+                for (policy, assets) in &policy_map {
+                    enc.bytes(policy).unwrap();
+                    enc.map(assets.len() as u64).unwrap();
+                    for (asset_name, qty) in assets {
+                        enc.bytes(asset_name).unwrap();
+                        enc.u64(*qty).unwrap();
+                    }
+                }
+            }
+        }
+
+        buf
     }
 
     #[test]
-    fn test_sum_utxo_lovelace_multiple_entries() {
+    fn test_sum_utxo_value_single_entry() {
+        let raw = build_utxo_msg_result(&[([0xab; 32], 0, 5_000_000)]);
+        let (total, tokens) = sum_utxo_value(&raw).unwrap();
+        assert_eq!(total, 5_000_000);
+        assert!(tokens.is_empty(), "ADA-only UTxO should have no tokens");
+    }
+
+    #[test]
+    fn test_sum_utxo_value_multiple_entries() {
         let raw = build_utxo_msg_result(&[
             ([0x01; 32], 0, 10_000_000),
             ([0x02; 32], 1, 20_000_000),
             ([0x03; 32], 0, 5_000_000),
         ]);
-        let total = sum_utxo_lovelace(&raw).unwrap();
+        let (total, tokens) = sum_utxo_value(&raw).unwrap();
         assert_eq!(total, 35_000_000);
+        assert!(tokens.is_empty());
     }
 
     #[test]
-    fn test_sum_utxo_lovelace_empty_map() {
+    fn test_sum_utxo_value_empty_map() {
         let raw = build_utxo_msg_result(&[]);
-        let total = sum_utxo_lovelace(&raw).unwrap();
+        let (total, tokens) = sum_utxo_value(&raw).unwrap();
         assert_eq!(total, 0);
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_sum_utxo_value_with_native_tokens() {
+        // A single UTxO output carrying 5 ADA and 500 HOSKY tokens.
+        let policy: [u8; 28] = [0xaa; 28];
+        let asset_name: [u8; 5] = [0x48, 0x4f, 0x53, 0x4b, 0x59]; // "HOSKY"
+
+        let raw = build_utxo_msg_result_with_tokens(&[(
+            &[0xab; 32],
+            0,
+            5_000_000,
+            &[(&policy, &asset_name, 500)],
+        )]);
+
+        let (total, token_map) = sum_utxo_value(&raw).unwrap();
+        assert_eq!(total, 5_000_000, "lovelace must be summed correctly");
+        assert_eq!(token_map.len(), 1, "should decode exactly one token type");
+
+        let qty = token_map
+            .get(&(policy.to_vec(), asset_name.to_vec()))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(qty, 500, "token quantity must match");
+    }
+
+    #[test]
+    fn test_sum_utxo_value_tokens_aggregated_across_utxos() {
+        // Two UTxOs both carrying the same policy/asset — quantities must be summed.
+        let policy: [u8; 28] = [0xbb; 28];
+        let asset_name: [u8; 4] = [0x54, 0x45, 0x53, 0x54]; // "TEST"
+
+        let raw = build_utxo_msg_result_with_tokens(&[
+            (&[0x01; 32], 0, 3_000_000, &[(&policy, &asset_name, 200)]),
+            (&[0x02; 32], 0, 2_000_000, &[(&policy, &asset_name, 300)]),
+        ]);
+
+        let (total_lovelace, token_map) = sum_utxo_value(&raw).unwrap();
+        assert_eq!(total_lovelace, 5_000_000);
+        let qty = token_map
+            .get(&(policy.to_vec(), asset_name.to_vec()))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(qty, 500, "token quantities across UTxOs must be summed");
     }
 
     // ── Plutus data JSON parsing tests ───────────────────────────────────────
