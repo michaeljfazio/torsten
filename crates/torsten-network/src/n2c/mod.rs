@@ -1,5 +1,5 @@
 mod chain_sync;
-mod state_query;
+mod query;
 mod tx_monitor;
 mod tx_submission;
 
@@ -21,8 +21,8 @@ use crate::n2n_server::BlockProvider;
 use crate::query_handler::QueryHandler;
 
 use chain_sync::{handle_local_chainsync, ChainSyncCursor};
-pub use state_query::encode_query_result;
-use state_query::handle_state_query;
+pub use query::encode_query_result;
+use query::handle_state_query;
 use tx_monitor::{handle_tx_monitor, TxMonitorCursor};
 use tx_submission::handle_tx_submission;
 
@@ -545,9 +545,9 @@ mod tests {
     use super::*;
     use crate::query_handler::ProtocolParamsSnapshot;
     use crate::query_handler::QueryResult;
-    use parking_lot::Mutex;
-    use state_query::encode_query_result;
+    use query::encode_query_result;
     use std::collections::VecDeque;
+    use parking_lot::Mutex;
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::hash::TransactionHash;
     use torsten_primitives::mempool::{MempoolAddError, MempoolAddResult, MempoolSnapshot};
@@ -798,12 +798,24 @@ mod tests {
 
     #[test]
     fn test_encode_debug_new_epoch_state() {
+        use crate::query_handler::SnapshotStakeData;
+        let empty_snap = Box::new(SnapshotStakeData {
+            stake_entries: vec![],
+            delegation_entries: vec![],
+            pool_params: vec![],
+        });
         let result = QueryResult::DebugNewEpochState {
             epoch: 100,
-            block_number: 12345,
-            slot: 67890,
-            protocol_major: 10,
-            protocol_minor: 0,
+            blocks_made_prev: vec![],
+            blocks_made_cur: vec![],
+            treasury: 1_000_000,
+            reserves: 10_000_000_000,
+            snap_mark: empty_snap.clone(),
+            snap_set: empty_snap.clone(),
+            snap_go: empty_snap,
+            snap_fee: 0,
+            total_active_stake: 1_000_000_000,
+            pool_distr: vec![],
         };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
@@ -1732,19 +1744,19 @@ mod tests {
     #[test]
     fn test_parse_utctime() {
         // Preview testnet: 2022-04-01T00:00:00Z → (2022, 91, 0)
-        let (y, d, p) = state_query::parse_utctime_for_test("2022-04-01T00:00:00Z");
+        let (y, d, p) = query::parse_utctime_for_test("2022-04-01T00:00:00Z");
         assert_eq!(y, 2022);
         assert_eq!(d, 91); // April 1 = day 91 in non-leap year
         assert_eq!(p, 0);
 
         // Mainnet: 2017-09-23T21:44:51Z
-        let (y, d, p) = state_query::parse_utctime_for_test("2017-09-23T21:44:51Z");
+        let (y, d, p) = query::parse_utctime_for_test("2017-09-23T21:44:51Z");
         assert_eq!(y, 2017);
         assert_eq!(d, 266); // Sep 23 = day 266
         assert_eq!(p, (21 * 3600 + 44 * 60 + 51) * 1_000_000_000_000);
 
         // Leap year: 2024-03-01T00:00:00Z
-        let (y, d, _) = state_query::parse_utctime_for_test("2024-03-01T00:00:00Z");
+        let (y, d, _) = query::parse_utctime_for_test("2024-03-01T00:00:00Z");
         assert_eq!(y, 2024);
         assert_eq!(d, 61); // Jan(31) + Feb(29, leap) + 1 = 61
     }
