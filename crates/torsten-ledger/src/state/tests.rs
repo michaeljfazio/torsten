@@ -1053,18 +1053,23 @@ fn test_epoch_nonce_computation() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    // Evolving nonce: update_evolving_nonce uses nonce_vrf_output directly as a 32-byte pre-computed eta.
-    // Serialization (multi_era.rs) pre-hashes per era:
-    //   TPraos: eta = blake2b_256(nonce_vrf_cert.0)  [stored in nonce_vrf_output]
-    //   Praos:  eta = blake2b_256("N" || vrf_result.0)  [stored in nonce_vrf_output]
-    // In both cases, nonce_vrf_output is 32 bytes and is the direct eta.
-    // update_evolving_nonce then computes: evolving' = blake2b_256(evolving || eta)
+    // Evolving nonce: update_evolving_nonce always hashes nonce_vrf_output once more
+    // before combining — matching pallas generate_rolling_nonce exactly (commit 49f9885).
     //
-    // Here nonce_vrf_output = [0x42;32] (32-byte pre-computed eta).
-    // evolving' = blake2b_256(genesis_hash || [0x42;32])
+    // Serialization (multi_era.rs) pre-hashes per era:
+    //   TPraos (Shelley-Alonzo): eta = blake2b_256(nonce_vrf_cert.0)  [stored in nonce_vrf_output]
+    //   Praos  (Babbage/Conway): eta = blake2b_256("N" || vrf_result.0) [stored in nonce_vrf_output]
+    //
+    // update_evolving_nonce then hashes again and combines:
+    //   eta_hash = blake2b_256(nonce_vrf_output)
+    //   evolving' = blake2b_256(evolving || eta_hash)
+    //
+    // Here nonce_vrf_output = [0x42;32].
+    // evolving' = blake2b_256(genesis_hash || blake2b_256([0x42;32]))
+    let eta_hash = torsten_primitives::hash::blake2b_256(&[0x42u8; 32]);
     let mut expected_evolving = Vec::new();
     expected_evolving.extend_from_slice(genesis_hash.as_bytes());
-    expected_evolving.extend_from_slice(&[0x42u8; 32]); // eta = nonce_vrf_output used directly
+    expected_evolving.extend_from_slice(eta_hash.as_bytes());
     assert_eq!(
         state.evolving_nonce,
         torsten_primitives::hash::blake2b_256(&expected_evolving)
