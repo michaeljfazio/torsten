@@ -1011,6 +1011,14 @@ impl Node {
                         pm.hot_peer_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                    self.metrics.peers_outbound.store(
+                        pm.outbound_peer_count() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    self.metrics.peers_inbound.store(
+                        pm.inbound_peer_count() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     self.metrics.peers_cold.store(
                         pm.cold_peer_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,

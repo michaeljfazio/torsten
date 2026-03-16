@@ -845,6 +845,22 @@ impl PeerManager {
         self.cold_peers.len()
     }
 
+    /// Number of outbound peers (we initiated the connection).
+    pub fn outbound_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|p| p.direction == Some(ConnectionDirection::Outbound))
+            .count()
+    }
+
+    /// Number of inbound peers (they connected to us).
+    pub fn inbound_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|p| p.direction == Some(ConnectionDirection::Inbound))
+            .count()
+    }
+
     /// Get the best N peers by reputation for block fetching.
     /// Returns addresses of hot peers sorted by reputation (best first).
     pub fn best_peers_for_fetch(&self, count: usize) -> Vec<SocketAddr> {
