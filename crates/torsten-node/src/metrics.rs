@@ -9,6 +9,27 @@ use tracing::{error, info};
 /// and sync progress is below 99%.
 const STALLED_THRESHOLD_SECS: u64 = 300; // 5 minutes
 
+/// Tracks process CPU utilization between samples.
+struct CpuTracker {
+    last_sample: std::time::Instant,
+}
+
+impl CpuTracker {
+    fn new() -> Self {
+        Self {
+            last_sample: std::time::Instant::now(),
+        }
+    }
+
+    /// Sample current CPU usage. Returns percentage (0-100+).
+    fn sample(&mut self) -> f64 {
+        let _ = self.last_sample;
+        self.last_sample = std::time::Instant::now();
+        // Placeholder — actual CPU measurement requires platform-specific code
+        0.0
+    }
+}
+
 /// Sync progress threshold (as percentage * 100) at or above which the node is "healthy".
 const SYNCED_THRESHOLD: u64 = 9990; // 99.9% (stored as pct * 100)
 
@@ -180,8 +201,14 @@ pub struct NodeMetrics {
     pub replay_duration_secs: AtomicU64,
     /// Tip age in seconds (wall_clock - slot_to_time(tip_slot))
     pub tip_age_secs: AtomicU64,
+    /// POSIX time of the tip slot in milliseconds (for dynamic tip_age computation).
+    pub tip_slot_time_ms: AtomicU64,
     /// Seconds since last RollForward event
     pub chainsync_idle_secs: AtomicU64,
+    /// CPU tracker for process CPU utilization measurement.
+    cpu_tracker: std::sync::Mutex<CpuTracker>,
+    /// Peak resident memory observed since node start, in bytes.
+    pub peak_mem_bytes: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -231,7 +258,10 @@ impl NodeMetrics {
             last_roll_forward_at: AtomicU64::new(0),
             replay_duration_secs: AtomicU64::new(0),
             tip_age_secs: AtomicU64::new(0),
+            tip_slot_time_ms: AtomicU64::new(0),
             chainsync_idle_secs: AtomicU64::new(0),
+            cpu_tracker: std::sync::Mutex::new(CpuTracker::new()),
+            peak_mem_bytes: AtomicU64::new(0),
         }
     }
 
