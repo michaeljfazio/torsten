@@ -4,7 +4,7 @@ A Cardano node implementation written in Rust, aiming for 100% compatibility wit
 
 Built by [Sandstone Pool](https://www.sandstone.io/)
 
-[Documentation](https://michaeljfazio.github.io/torsten/) | [Developer Wiki](https://github.com/michaeljfazio/torsten/wiki) | [Discussions](https://github.com/michaeljfazio/torsten/discussions)
+[Documentation](https://michaeljfazio.github.io/torsten/) | [Benchmarks](https://michaeljfazio.github.io/torsten/benchmarks/) | [Developer Wiki](https://github.com/michaeljfazio/torsten/wiki) | [Discussions](https://github.com/michaeljfazio/torsten/discussions)
 
 [![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
 [![Code Scanning](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml)
