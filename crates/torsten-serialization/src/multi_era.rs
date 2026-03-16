@@ -1,5 +1,4 @@
 use crate::error::SerializationError;
-use pallas_crypto::hash::Hasher;
 use pallas_traverse::MultiEraBlock as PallasBlock;
 use pallas_traverse::MultiEraCert;
 use pallas_traverse::MultiEraInput as PallasInput;
@@ -142,15 +141,18 @@ fn decode_block_header(
     //   For Babbage/Conway this is the raw vrf_result bytes (before tag derivation).
     //   For Alonzo and earlier this is leader_vrf.0/1.
     //
-    // nonce_vrf_output: stores the pre-computed nonce contribution (eta) for the
-    //   Praos nonce state machine.  The exact derivation differs by era:
-    //   - Shelley/Allegra/Mary/Alonzo (TPraos): blake2b_256(nonce_vrf.0) — raw nonce cert, hashed once
-    //   - Babbage/Conway (Praos): blake2b_256("N" || vrf_result.0) — tag-prefixed hash
-    //   In both cases evolving_nonce = blake2b_256(evolving_nonce || nonce_vrf_output).
+    // nonce_vrf_output: pre-computed 32-byte eta for the Praos nonce state machine.
+    //   Both eras produce a 32-byte hash that is used directly as eta in the combine:
+    //     evolving' = blake2b_256(evolving || eta)
+    //
+    //   Per era:
+    //   - TPraos (Shelley-Alonzo): eta = blake2b_256(nonce_vrf.0) — hash raw 64-byte VRF output
+    //   - Praos (Babbage/Conway): eta = blake2b_256("N" || vrf_result.0) — hash "N"-prefixed output
+    //   In both cases exactly one hash is applied to produce the 32-byte eta.
     let (vrf_result, nonce_vrf_output, body_hash, op_cert, protocol_version, kes_signature) =
         if let Some(babbage) = pallas_header.as_babbage() {
             let hb = &babbage.header_body;
-            // Babbage/Conway Praos: nonce derivation = blake2b_256("N" || raw_vrf_result)
+            // Babbage/Conway Praos: eta = blake2b_256("N" || raw_vrf_result)
             let nonce_eta = hb.nonce_vrf_output();
             (
                 VrfOutput {
@@ -173,10 +175,13 @@ fn decode_block_header(
             )
         } else if let Some(alonzo) = pallas_header.as_alonzo() {
             let hb = &alonzo.header_body;
-            // Shelley/Allegra/Mary/Alonzo TPraos: nonce cert is separate from leader cert.
-            // eta = blake2b_256(nonce_vrf.0) — hash the raw nonce VRF output once, no prefix.
-            // This matches Haskell's vrfNonceValue for the TPraos era.
-            let nonce_eta = Hasher::<256>::hash(&hb.nonce_vrf.0).to_vec();
+            // Shelley/Allegra/Mary/Alonzo TPraos: compute eta = blake2b_256(nonce_vrf.0).
+            // The nonce_vrf.0 is the 64-byte raw VRF output. We pre-hash it here so that
+            // nonce_vrf_output is always a 32-byte eta across all eras:
+            //   TPraos: eta = blake2b_256(nonce_vrf_cert.0)
+            //   Praos:  eta = blake2b_256("N" || vrf_result.0)  (via nonce_vrf_output())
+            // The ledger's update_evolving_nonce then directly combines: evolving' = blake2b(evolving || eta)
+            let nonce_eta = pallas_crypto::hash::Hasher::<256>::hash(&hb.nonce_vrf.0).to_vec();
             (
                 VrfOutput {
                     output: hb.leader_vrf.0.to_vec(),

@@ -327,25 +327,57 @@ impl LedgerState {
             );
         }
 
-        // Compute new epoch nonce per Haskell tickChainDepState:
-        //   epoch_nonce = hash(candidate_nonce || last_epoch_block_nonce)
+        // Compute new epoch nonce per Haskell TICKN rule:
         //
-        // The candidate_nonce was frozen 4k/f slots before epoch end.
-        // The last_epoch_block_nonce is the lab_nonce snapshot from the previous epoch boundary.
+        //   TRC (TicknEnv extraEntropy ηc ηph, TicknState _ ηh, newEpoch)
+        //   epochNonce'    = ηc ⭒ ηh ⭒ extraEntropy   (uses OLD prevHashNonce)
+        //   prevHashNonce' = ηph                         (THEN updates to current labNonce)
+        //
+        // Critical: use the OLD last_epoch_block_nonce FIRST, then update it.
+        // In Haskell ηh = previous ticknStatePrevHashNonce (NOT the just-captured lab).
         let prev_epoch_nonce = self.epoch_nonce;
+        let candidate = self.candidate_nonce;
+        let prev_hash_nonce = self.last_epoch_block_nonce; // ηh = OLD value
+
+        info!(
+            epoch = new_epoch.0,
+            candidate = %candidate.to_hex(),
+            prev_hash_nonce = %prev_hash_nonce.to_hex(),
+            lab_nonce = %self.lab_nonce.to_hex(),
+            evolving = %self.evolving_nonce.to_hex(),
+            prev_epoch_nonce = %prev_epoch_nonce.to_hex(),
+            block_count = self.epoch_block_count,
+            "Epoch nonce inputs BEFORE computation"
+        );
+
+        // Step 1: Compute new epoch nonce using OLD prevHashNonce (ηh).
+        // Uses Haskell's Nonce combine (⭒) with NeutralNonce (ZERO) as identity:
+        //   epochNonce = candidate ⭒ prevHashNonce ⭒ extraEntropy
+        //   NeutralNonce ⭒ x = x;  x ⭒ NeutralNonce = x
+        //   Nonce(a) ⭒ Nonce(b) = Nonce(blake2b_256(a || b))
+        // extraEntropy is NeutralNonce on all real networks, so omitted.
+        let zero = torsten_primitives::hash::Hash32::ZERO;
+        self.epoch_nonce = if candidate == zero && prev_hash_nonce == zero {
+            zero
+        } else if candidate == zero {
+            prev_hash_nonce
+        } else if prev_hash_nonce == zero {
+            candidate // identity: candidate ⭒ NeutralNonce = candidate
+        } else {
+            let mut nonce_input = Vec::with_capacity(64);
+            nonce_input.extend_from_slice(candidate.as_bytes());
+            nonce_input.extend_from_slice(prev_hash_nonce.as_bytes());
+            torsten_primitives::hash::blake2b_256(&nonce_input)
+        };
+
+        // Step 2: NOW update prevHashNonce to current labNonce for NEXT epoch
         self.last_epoch_block_nonce = self.lab_nonce;
 
-        let mut nonce_input = Vec::with_capacity(64);
-        nonce_input.extend_from_slice(self.candidate_nonce.as_bytes());
-        nonce_input.extend_from_slice(self.last_epoch_block_nonce.as_bytes());
-        self.epoch_nonce = torsten_primitives::hash::blake2b_256(&nonce_input);
-
-        debug!(
-            "New epoch nonce: {} (candidate {} \u{22c4} lab {}), prev: {}",
-            self.epoch_nonce.to_hex(),
-            self.candidate_nonce.to_hex(),
-            self.last_epoch_block_nonce.to_hex(),
-            prev_epoch_nonce.to_hex(),
+        info!(
+            epoch = new_epoch.0,
+            new_epoch_nonce = %self.epoch_nonce.to_hex(),
+            prev_epoch_nonce = %prev_epoch_nonce.to_hex(),
+            "Epoch nonce computed"
         );
 
         // evolving_nonce and candidate_nonce carry forward unchanged
@@ -448,10 +480,50 @@ impl LedgerState {
     ///   evolving_nonce' = updateNonce evolving_nonce eta
     ///   where updateNonce n e = hash (n <> e)
     pub(crate) fn update_evolving_nonce(&mut self, nonce_eta: &[u8]) {
-        // evolving_nonce' = blake2b_256(evolving_nonce || eta)
+        // Combines evolving nonce with a pre-computed 32-byte eta:
+        //   evolving' = blake2b_256(evolving || eta)
+        //
+        // The caller (serialization/multi_era.rs) always provides a pre-computed 32-byte eta:
+        //   TPraos (Shelley-Alonzo): eta = blake2b_256(nonce_vrf.0)   — one hash of raw 64-byte VRF
+        //   Praos  (Babbage/Conway): eta = blake2b_256("N"||vrf.0)    — one hash of tagged VRF
+        //
+        // This function does NOT add any extra hashing — the input IS the eta.
+        // This matches Haskell's updateNonce: hash(evolving || eta)
+        // where eta was already computed as vrfNonceValue in reupdateChainDepState.
+        let prev = self.evolving_nonce;
+        // eta is already a 32-byte pre-computed hash; use it directly as the nonce contribution.
+        let eta_hash = if nonce_eta.len() == 32 {
+            // Expected path: 32-byte pre-computed eta from serialization
+            torsten_primitives::hash::Hash32::from_bytes(
+                nonce_eta.try_into().expect("nonce_eta is 32 bytes"),
+            )
+        } else {
+            // Fallback for any non-32-byte input (should not happen in production)
+            torsten_primitives::hash::blake2b_256(nonce_eta)
+        };
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(self.evolving_nonce.as_bytes());
-        data.extend_from_slice(nonce_eta);
+        data.extend_from_slice(eta_hash.as_bytes());
         self.evolving_nonce = torsten_primitives::hash::blake2b_256(&data);
+
+        // Log first 5 nonce updates per epoch for debugging
+        if self.epoch_block_count <= 5 {
+            // Manual hex for first 16 bytes of raw input
+            let raw_prefix: String = nonce_eta
+                .iter()
+                .take(16)
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            info!(
+                epoch = self.epoch.0,
+                block_count = self.epoch_block_count,
+                raw_len = nonce_eta.len(),
+                raw_prefix = %raw_prefix,
+                eta = %eta_hash.to_hex(),
+                prev_evolving = %prev.to_hex(),
+                new_evolving = %self.evolving_nonce.to_hex(),
+                "Nonce update detail"
+            );
+        }
     }
 }

@@ -16,3 +16,4 @@ Comprehensive deep-dive into https://github.com/cardano-scaling/cardano-blueprin
 | [blueprint-plutus.md](blueprint-plutus.md) | reference | Plutus/UPLC — syntax, de Bruijn, CEK machine full transition table, cost model overview |
 | [blueprint-storage.md](blueprint-storage.md) | reference | Storage — ChainDB directory structure (immutable/volatile/ledger), index formats, Mithril integration |
 | [blueprint-gaps.md](blueprint-gaps.md) | reference | All known gaps/stubs/TODOs with fallback authoritative sources for each topic |
+| [formal-spec-nonce.md](formal-spec-nonce.md) | reference | TICKN/UPDN/PRTCL STS rules, nonce derivation, stability windows (3k/f vs 4k/f), Conway erratum, prevHashToNonce, vrfNonceValue, initialChainDepState |

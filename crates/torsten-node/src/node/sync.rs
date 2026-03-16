@@ -467,6 +467,17 @@ impl Node {
             // Read ledger state once for the whole batch
             let ls = self.ledger_state.read().await;
             let epoch_nonce = ls.epoch_nonce;
+            if ls.epoch.0 > 0 {
+                tracing::warn!(
+                    epoch = ls.epoch.0,
+                    epoch_nonce = %epoch_nonce.to_hex(),
+                    evolving_nonce = %ls.evolving_nonce.to_hex(),
+                    candidate_nonce = %ls.candidate_nonce.to_hex(),
+                    lab_nonce = %ls.lab_nonce.to_hex(),
+                    last_epoch_block_nonce = %ls.last_epoch_block_nonce.to_hex(),
+                    "NONCE DEBUG: current ledger nonces"
+                );
+            }
 
             // Per Praos spec, leader eligibility uses the "set" snapshot
             // (stake distribution from the previous epoch boundary).
@@ -1900,8 +1911,10 @@ impl Node {
                     cbor, bel,
                 ) {
                     Ok(block) => {
-                        // Skip blocks at or before the ledger snapshot position
-                        if block.slot().0 <= ledger_tip_slot {
+                        // Skip blocks already applied (at or before the ledger tip).
+                        // Use strict < so that genesis block (slot 0) is NOT skipped
+                        // when the ledger starts fresh (tip slot = 0).
+                        if ledger_tip_slot > 0 && block.slot().0 <= ledger_tip_slot {
                             skipped += 1;
                             return Ok(());
                         }

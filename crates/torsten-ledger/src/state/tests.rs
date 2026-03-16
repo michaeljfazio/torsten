@@ -1022,58 +1022,122 @@ fn test_epoch_nonce_computation() {
     state.byron_epoch_length = 0;
     // randomness_stabilisation_window = 4k/f; use 40 for testing
     // (so slots 0-59 update candidate, slots 60-99 freeze candidate)
+    // Also set stability_window_3kf since test blocks use protocol_version.major=9 (Babbage).
     state.randomness_stabilisation_window = 40;
+    state.stability_window_3kf = 40;
 
-    // Set a genesis hash to initialize nonce state
+    // Set a genesis hash to initialize nonce state.
+    // Matches Haskell's initialChainDepState:
+    //   evolving/candidate/epoch = initNonce (genesis hash)
+    //   lab/lastEpochBlock = NeutralNonce (ZERO)
     let genesis_hash = Hash32::from_bytes([0xAB; 32]);
     state.set_genesis_hash(genesis_hash);
 
-    // Evolving nonce starts from genesis hash
+    // evolving, candidate, epoch all start from genesis hash
     assert_eq!(state.evolving_nonce, genesis_hash);
     assert_eq!(state.candidate_nonce, genesis_hash);
-    // Epoch nonce starts at ZERO
-    assert_eq!(state.epoch_nonce, Hash32::ZERO);
+    assert_eq!(state.epoch_nonce, genesis_hash);
+    // lab and lastEpochBlock start as NeutralNonce (ZERO)
+    assert_eq!(state.lab_nonce, Hash32::ZERO);
+    assert_eq!(state.last_epoch_block_nonce, Hash32::ZERO);
 
-    // Apply a block BEFORE the stabilisation window (slot 10 + 40 < 100)
+    // Apply a block BEFORE the stabilisation window (slot 10; epoch ends at slot 100;
+    // stabilisation starts at slot 60; so slot 10 < 60 means candidate tracks evolving).
+    // nonce_vrf_output is set — this is what drives the evolving/candidate nonce update.
+    // vrf_result.output is the VRF cert used for leader election (not nonce).
     let mut block = make_test_block(10, 1, Hash32::ZERO, vec![]);
-    block.header.vrf_result.output = vec![42u8; 32];
+    block.header.nonce_vrf_output = vec![0x42u8; 32]; // pre-computed eta
+    block.header.vrf_result.output = vec![0x42u8; 32];
     block.header.issuer_vkey = vec![1u8; 32];
     state
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    // Evolving nonce should have been updated
-    assert_ne!(state.evolving_nonce, genesis_hash);
-    // Candidate nonce should track evolving (not in stabilisation window)
+    // Evolving nonce: update_evolving_nonce uses nonce_vrf_output directly as a 32-byte pre-computed eta.
+    // Serialization (multi_era.rs) pre-hashes per era:
+    //   TPraos: eta = blake2b_256(nonce_vrf_cert.0)  [stored in nonce_vrf_output]
+    //   Praos:  eta = blake2b_256("N" || vrf_result.0)  [stored in nonce_vrf_output]
+    // In both cases, nonce_vrf_output is 32 bytes and is the direct eta.
+    // update_evolving_nonce then computes: evolving' = blake2b_256(evolving || eta)
+    //
+    // Here nonce_vrf_output = [0x42;32] (32-byte pre-computed eta).
+    // evolving' = blake2b_256(genesis_hash || [0x42;32])
+    let mut expected_evolving = Vec::new();
+    expected_evolving.extend_from_slice(genesis_hash.as_bytes());
+    expected_evolving.extend_from_slice(&[0x42u8; 32]); // eta = nonce_vrf_output used directly
+    assert_eq!(
+        state.evolving_nonce,
+        torsten_primitives::hash::blake2b_256(&expected_evolving)
+    );
+    // Candidate nonce tracks evolving (not in stabilisation window)
     assert_eq!(state.candidate_nonce, state.evolving_nonce);
-    // LAB nonce should be the block's prev_hash
+    // LAB nonce = prevHashToNonce(block.prevHash) = prev_hash of the applied block
     assert_eq!(state.lab_nonce, block.header.prev_hash);
 
     // Apply a block INSIDE the stabilisation window (slot 70 + 40 >= 100)
     let evolving_before = state.evolving_nonce;
     let candidate_before = state.candidate_nonce;
     let mut block2 = make_test_block(70, 2, *block.hash(), vec![]);
-    block2.header.vrf_result.output = vec![99u8; 32];
+    block2.header.nonce_vrf_output = vec![0x63u8; 32];
+    block2.header.vrf_result.output = vec![0x63u8; 32];
     block2.header.issuer_vkey = vec![1u8; 32];
     state
         .apply_block(&block2, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    // Evolving nonce should STILL update (always updates)
+    // Evolving nonce STILL updates (evolving_nonce advances for every block)
     assert_ne!(state.evolving_nonce, evolving_before);
-    // Candidate nonce should be FROZEN (in stabilisation window)
+    // Candidate nonce is FROZEN (in stabilisation window, slot >= epoch_end - rsw)
     assert_eq!(state.candidate_nonce, candidate_before);
+    // LAB nonce = prevHashToNonce(block2.prevHash) = prev_hash of block2 applied
+    assert_eq!(state.lab_nonce, block2.header.prev_hash);
 
-    // Trigger epoch transition
+    // Trigger epoch transition (epoch 0 → 1).
+    //
+    // Per Haskell's Praos tickChainDepState (Nonce ⭒ operator):
+    //   epochNonce' = candidateNonce ⭒ lastEpochBlockNonce
+    //   lastEpochBlockNonce' = labNonce   (snapshot for NEXT epoch)
+    //
+    // Haskell ⭒ operator:
+    //   Nonce(a) ⭒ Nonce(b) = Nonce(blake2b_256(a || b))
+    //   x ⭒ NeutralNonce = x  (identity)
+    //   NeutralNonce ⭒ x = x  (identity)
+    //
+    // At the FIRST epoch boundary (epoch 0 → 1):
+    //   - lastEpochBlockNonce = NeutralNonce (initialized in set_genesis_hash)
+    //   - epochNonce' = candidateNonce ⭒ NeutralNonce = candidateNonce  (identity)
+    //   - lastEpochBlockNonce' = labNonce (= block2.header.prev_hash)
     let nonce_before_transition = state.epoch_nonce;
+    let candidate_at_transition = state.candidate_nonce;
+    let lab_at_transition = state.lab_nonce;
+    let last_epoch_block_before = state.last_epoch_block_nonce; // ZERO at first transition
     state.process_epoch_transition(EpochNo(1));
 
-    // Epoch nonce should have been updated
+    // epoch_nonce should have been updated from genesis_hash
     assert_ne!(state.epoch_nonce, nonce_before_transition);
-    // Evolving nonce should carry forward (NOT reset)
-    assert_ne!(state.evolving_nonce, genesis_hash);
-    // last_epoch_block_nonce should be the lab_nonce at transition
-    assert_eq!(state.last_epoch_block_nonce, state.lab_nonce);
+    // evolving_nonce carries forward (NOT reset at epoch boundary)
+    assert_ne!(state.evolving_nonce, Hash32::ZERO);
+    // last_epoch_block_nonce is updated to lab_nonce AFTER epoch_nonce is computed
+    assert_eq!(state.last_epoch_block_nonce, lab_at_transition);
+
+    assert_eq!(
+        last_epoch_block_before,
+        Hash32::ZERO,
+        "First transition: lastEpochBlockNonce must be NeutralNonce (ZERO)"
+    );
+    // epoch_nonce = candidateNonce ⭒ lastEpochBlockNonce (Haskell ⭒ operator semantics)
+    // At epoch 0→1: lastEpochBlockNonce = NeutralNonce.
+    // Haskell ⭒ operator: x ⭒ NeutralNonce = x (identity, no hashing).
+    // So epochNonce' = candidateNonce (unmodified).
+    //
+    // Note: pallas generate_epoch_nonce unconditionally hashes, but that function is
+    // designed for normal epochs where lastEpochBlockNonce is always a real hash.
+    // At genesis, the Haskell type system gives NeutralNonce identity behavior.
+    assert_eq!(
+        state.epoch_nonce,
+        candidate_at_transition,
+        "At first epoch boundary (lastEpochBlockNonce=NeutralNonce), epoch_nonce = candidateNonce (⭒ identity)"
+    );
 }
 
 #[test]
@@ -5190,6 +5254,8 @@ fn test_governance_threshold_all_pvt_fields_validated() {
 #[test]
 fn test_randomness_stabilisation_window_mainnet() {
     // Mainnet: k=2160, f=0.05 → ceil(4*2160/0.05) = 172800
+    // This is the CANDIDATE NONCE FREEZE window (randomnessStabilisationWindow = 4k/f).
+    // Not to be confused with stabilityWindow (3k/f = 129600) used for chain selection.
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.set_epoch_length(432000, 2160);
@@ -5218,7 +5284,7 @@ fn test_randomness_stabilisation_window_exact_for_tenth() {
 
 #[test]
 fn test_randomness_stabilisation_window_ceil_rounds_up() {
-    // f=0.25 = 1/4, k=3 → ceil(4*3*4/1) = 48 (exact)
+    // f=0.25 = 1/4, k=3 → ceil(4*3/(1/4)) = ceil(48) = 48
     let mut params = ProtocolParameters::mainnet_defaults();
     params.active_slots_coeff = 0.25;
     let mut state = LedgerState::new(params);
@@ -5238,7 +5304,10 @@ fn test_slot_stabilisation_window_no_overflow() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
+    // Set both windows to 40. Test block uses protocol_version.major=9 (Babbage), so
+    // stability_window_3kf is what's used. randomness_stabilisation_window used for Conway+.
     state.randomness_stabilisation_window = 40;
+    state.stability_window_3kf = 40;
 
     let genesis_hash = Hash32::from_bytes([0xAB; 32]);
     state.set_genesis_hash(genesis_hash);
@@ -5252,7 +5321,8 @@ fn test_slot_stabilisation_window_no_overflow() {
     // Block at a slot near u64::MAX — the old code would panic here
     // because slot + stabilisation_window overflows u64.
     let mut block = make_test_block(extreme_slot, 1, Hash32::ZERO, vec![]);
-    block.header.vrf_result.output = vec![42u8; 32];
+    block.header.nonce_vrf_output = vec![0x42u8; 32]; // non-empty so evolving nonce updates
+    block.header.vrf_result.output = vec![0x42u8; 32];
     block.header.issuer_vkey = vec![1u8; 32];
 
     // This should NOT panic; the candidate nonce should be frozen
@@ -5261,9 +5331,13 @@ fn test_slot_stabilisation_window_no_overflow() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    // Evolving nonce updated (always updates)
+    // Evolving nonce updated: genesis_hash <> eta = blake2b(genesis_hash || eta)
+    // (genesis_hash is non-ZERO so the hash-combination path is taken, not identity)
     assert_ne!(state.evolving_nonce, genesis_hash);
-    // Candidate nonce should be FROZEN (extreme slot is in stabilisation window)
+    assert_ne!(state.evolving_nonce, Hash32::ZERO);
+    // Candidate nonce should be FROZEN at genesis_hash (extreme slot is in stabilisation window).
+    // set_genesis_hash initialises candidate to genesis_hash, and since the first block lands
+    // inside the stabilisation window, candidate stays frozen at genesis_hash.
     assert_eq!(state.candidate_nonce, genesis_hash);
 }
 
@@ -5295,7 +5369,10 @@ fn test_stabilisation_window_boundary_normal_values() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
+    // Set both windows to 40. Test block uses protocol_version.major=9 (Babbage), so
+    // stability_window_3kf drives the candidate freeze.
     state.randomness_stabilisation_window = 40;
+    state.stability_window_3kf = 40;
 
     let genesis_hash = Hash32::from_bytes([0xAB; 32]);
     state.set_genesis_hash(genesis_hash);
@@ -5303,23 +5380,29 @@ fn test_stabilisation_window_boundary_normal_values() {
     // Slot 59 is the LAST slot before the stabilisation window
     // (59 < 100 - 40 = 60, so candidate updates)
     let mut block = make_test_block(59, 1, Hash32::ZERO, vec![]);
-    block.header.vrf_result.output = vec![42u8; 32];
+    block.header.nonce_vrf_output = vec![0x42u8; 32]; // non-empty so evolving nonce updates
+    block.header.vrf_result.output = vec![0x42u8; 32];
     block.header.issuer_vkey = vec![1u8; 32];
     state
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
+    // After slot 59 (outside stabilisation window): candidate tracks evolving
     assert_eq!(state.candidate_nonce, state.evolving_nonce);
+    assert_ne!(state.evolving_nonce, genesis_hash); // nonce advanced
 
     // Slot 60 is the FIRST slot in the stabilisation window
     // (60 >= 100 - 40 = 60, so candidate freezes)
     let candidate_before = state.candidate_nonce;
     let mut block2 = make_test_block(60, 2, *block.hash(), vec![]);
-    block2.header.vrf_result.output = vec![99u8; 32];
+    block2.header.nonce_vrf_output = vec![0x63u8; 32]; // non-empty so evolving nonce updates
+    block2.header.vrf_result.output = vec![0x63u8; 32];
     block2.header.issuer_vkey = vec![1u8; 32];
     state
         .apply_block(&block2, BlockValidationMode::ApplyOnly)
         .unwrap();
+    // After slot 60 (inside stabilisation window): candidate frozen
     assert_eq!(state.candidate_nonce, candidate_before);
+    // Evolving nonce still advances
     assert_ne!(state.evolving_nonce, candidate_before);
 }
 

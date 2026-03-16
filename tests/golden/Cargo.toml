@@ -8,9 +8,18 @@ publish = false
 name = "golden_tests"
 path = "tests/golden_tests.rs"
 
+[[test]]
+name = "nonce_golden"
+path = "tests/nonce_golden.rs"
+
 [dependencies]
 torsten-crypto = { path = "../../crates/torsten-crypto" }
 torsten-network = { path = "../../crates/torsten-network" }
 torsten-primitives = { path = "../../crates/torsten-primitives" }
+torsten-serialization = { path = "../../crates/torsten-serialization" }
 hex = "0.4"
 minicbor = { workspace = true }
+pallas-crypto = { workspace = true }
+pallas-traverse = { workspace = true }
+pallas-primitives = { workspace = true }
+memmap2 = { workspace = true }

@@ -34,7 +34,7 @@ use torsten_primitives::transaction::{
     Relay, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 /// Total ADA supply (45 billion ADA = 45 * 10^15 lovelace)
 pub const MAX_LOVELACE_SUPPLY: u64 = 45_000_000_000_000_000;
@@ -126,10 +126,11 @@ pub struct LedgerState {
     /// Snapshot of lab_nonce at epoch boundary.
     /// Matches Haskell's `praosStateLastEpochBlockNonce`.
     pub last_epoch_block_nonce: Hash32,
-    /// Randomness stabilisation window: 4k/f slots (NOT 3k/f).
-    /// Blocks in the last randomness_stabilisation_window slots of an epoch
-    /// do NOT update the candidate nonce.
+    /// Randomness stabilisation window: ceiling(4k/f) for Conway+.
     pub randomness_stabilisation_window: u64,
+    /// Stability window: ceiling(3k/f) for Alonzo/Babbage (per Haskell erratum 17.3).
+    #[serde(default)]
+    pub stability_window_3kf: u64,
     /// Shelley genesis hash (used for initial nonce state)
     pub genesis_hash: Hash32,
     // Legacy fields kept for serde backwards compatibility with existing snapshots
@@ -373,7 +374,8 @@ impl LedgerState {
             epoch_nonce: Hash32::ZERO,
             lab_nonce: Hash32::ZERO,
             last_epoch_block_nonce: Hash32::ZERO,
-            randomness_stabilisation_window: 172800, // 4k/f on mainnet
+            randomness_stabilisation_window: 172800, // 4k/f on mainnet: ceil(4*2160/0.05)
+            stability_window_3kf: 129600,            // 3k/f on mainnet: ceil(3*2160/0.05)
             genesis_hash: Hash32::ZERO,
             // Legacy fields (serde compat)
             rolling_nonce: Hash32::ZERO,
@@ -402,8 +404,9 @@ impl LedgerState {
     /// Configure the epoch length (from Shelley genesis)
     pub fn set_epoch_length(&mut self, epoch_length: u64, security_param: u64) {
         self.epoch_length = epoch_length;
-        // randomness_stabilisation_window = ceiling(4k/f) per Haskell StabilityWindow.hs
-        // Use integer arithmetic to avoid f64 precision issues in this consensus-critical calc
+        // Compute BOTH stability windows:
+        //   randomness_stabilisation_window = ceiling(4k/f) — Conway+ candidate freeze
+        //   stability_window_3kf            = ceiling(3k/f) — Alonzo/Babbage candidate freeze
         let (f_num, f_den) = self.protocol_params.active_slot_coeff_rational();
         self.randomness_stabilisation_window =
             torsten_primitives::protocol_params::ceiling_div_by_rational(
@@ -412,9 +415,18 @@ impl LedgerState {
                 f_num,
                 f_den,
             );
+        self.stability_window_3kf = torsten_primitives::protocol_params::ceiling_div_by_rational(
+            3,
+            security_param,
+            f_num,
+            f_den,
+        );
         debug!(
-            "Ledger: epoch length={}, stabilisation_window={}, k={}",
-            epoch_length, self.randomness_stabilisation_window, security_param,
+            "Ledger: epoch length={}, rsw_4kf={}, sw_3kf={}, k={}",
+            epoch_length,
+            self.randomness_stabilisation_window,
+            self.stability_window_3kf,
+            security_param,
         );
     }
 
@@ -479,16 +491,37 @@ impl LedgerState {
 
     /// Set the Shelley genesis hash.
     ///
-    /// Initializes the Praos nonce state machine. In Haskell, the initial
-    /// evolving nonce and candidate nonce are derived from the genesis hash.
+    /// Initializes the Praos nonce state machine per Haskell's initialChainDepState
+    /// (cardano-protocol-tpraos/API.hs) and translateChainDepStateByronToShelley:
+    ///
+    ///   evolvingNonce       = initNonce  (= Blake2b_256 of genesis file)
+    ///   candidateNonce      = initNonce
+    ///   epochNonce          = initNonce
+    ///   labNonce            = NeutralNonce
+    ///   lastEpochBlockNonce = NeutralNonce
+    ///
+    /// At the first epoch boundary, the Nonce combine with NeutralNonce is identity:
+    ///   epochNonce' = candidateNonce ⭒ NeutralNonce = candidateNonce
+    /// This means the first epoch transition preserves the candidate nonce directly
+    /// rather than hashing it with a non-zero lastEpochBlockNonce.
     pub fn set_genesis_hash(&mut self, hash: Hash32) {
         self.genesis_hash = hash;
-        // Initialize nonce state from genesis hash
+        // evolving/candidate/epoch all start from the genesis file hash
         self.evolving_nonce = hash;
         self.candidate_nonce = hash;
-        debug!(
-            "Ledger: nonce initialized from genesis hash {}",
-            hash.to_hex()
+        self.epoch_nonce = hash;
+        // lab and lastEpochBlockNonce start as NeutralNonce (ZERO)
+        // This is critical: at the first epoch boundary, NeutralNonce identity
+        // means epochNonce = candidateNonce (not hash(candidate || genesisHash))
+        self.lab_nonce = Hash32::ZERO;
+        self.last_epoch_block_nonce = Hash32::ZERO;
+        info!(
+            epoch_nonce = %hash.to_hex(),
+            evolving = %hash.to_hex(),
+            candidate = %hash.to_hex(),
+            lab = "NeutralNonce (ZERO)",
+            last_epoch_block = "NeutralNonce (ZERO)",
+            "Ledger: Praos nonce state initialized from genesis hash"
         );
     }
 

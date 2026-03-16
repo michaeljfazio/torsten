@@ -3541,10 +3541,15 @@ name = "torsten-golden-tests"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "memmap2",
  "minicbor 0.25.1",
+ "pallas-crypto 1.0.0-alpha.5",
+ "pallas-primitives 1.0.0-alpha.5",
+ "pallas-traverse 1.0.0-alpha.5",
  "torsten-crypto",
  "torsten-network",
  "torsten-primitives",
+ "torsten-serialization",
 ]
 
 [[package]]

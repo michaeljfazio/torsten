@@ -18,7 +18,7 @@ use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 impl LedgerState {
     /// Apply a block to the ledger state.
@@ -157,7 +157,9 @@ impl LedgerState {
 
             // Byron uses OBFT (not VRF), so nonce_vrf_output is empty.
             // The evolving nonce does not advance during the Byron era.
-            // lab_nonce is still updated per the Praos spec (prev_hash of each block).
+            // lab_nonce = prevHashToNonce(block.prevHash) per Haskell's reupdateChainDepState.
+            // prevHashToNonce: GenesisHash → NeutralNonce; BlockHash h → Nonce(castHash h).
+            // castHash is a type cast only — no rehashing. The value IS the prev_hash bytes.
             self.lab_nonce = block.header.prev_hash;
 
             self.tip = block.tip();
@@ -463,7 +465,7 @@ impl LedgerState {
 
         // Praos nonce state machine (matches Haskell reupdateChainDepState):
         //
-        // 1. lab_nonce = block.prev_hash (no hashing — direct assignment)
+        // 1. lab_nonce = prevHashToNonce(block.prevHash) = direct assignment of prev_hash bytes
         // 2. evolving_nonce is updated for EVERY block using the era-specific
         //    nonce VRF contribution stored in nonce_vrf_output:
         //    - Shelley/Allegra/Mary/Alonzo (TPraos): blake2b_256(nonce_vrf_cert.0)
@@ -472,21 +474,48 @@ impl LedgerState {
         //    last randomness_stabilisation_window (4k/f) slots of the epoch,
         //    in which case the candidate freezes so the epoch nonce is stable.
         if !block.header.nonce_vrf_output.is_empty() {
+            // Log the first 20 blocks of each epoch for nonce debugging
+            if self.epoch_block_count <= 20 || block.block_number().0 <= 20 {
+                info!(
+                    slot = block.slot().0,
+                    block_no = block.block_number().0,
+                    epoch = self.epoch.0,
+                    era = ?block.era,
+                    nonce_vrf_output_len = block.header.nonce_vrf_output.len(),
+                    header_hash = %block.header.header_hash.to_hex(),
+                    evolving_nonce_before = %self.evolving_nonce.to_hex(),
+                    candidate_nonce = %self.candidate_nonce.to_hex(),
+                    "Nonce: applying block VRF contribution"
+                );
+            }
+
             // Update evolving nonce unconditionally with the pre-computed eta
             self.update_evolving_nonce(&block.header.nonce_vrf_output);
 
-            // Freeze candidate nonce once we enter the stabilisation window.
-            // candidate_nonce only advances while slot < epoch_end - rsw.
-            // Uses saturating_sub to avoid u64 underflow on edge cases.
+            // Candidate nonce tracks evolving nonce OUTSIDE the stability window (4k/f).
             let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
-            if block.slot().0
-                < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
+            if block
+                .slot()
+                .0
+                .saturating_add(self.randomness_stabilisation_window)
+                < first_slot_of_next_epoch
             {
                 self.candidate_nonce = self.evolving_nonce;
             }
+        } else if block.era.is_shelley_based() {
+            warn!(
+                slot = block.slot().0,
+                block_no = block.block_number().0,
+                epoch = self.epoch.0,
+                era = ?block.era,
+                "Nonce: Shelley+ block has EMPTY nonce_vrf_output!"
+            );
         }
 
-        // Update LAB nonce = prev_hash of this block (simple assignment, no hashing)
+        // Update LAB nonce = prevHashToNonce(block.prevHash) per Haskell's reupdateChainDepState.
+        // Haskell: csLabNonce = prevHashToNonce (bheaderPrev bhb)
+        // prevHashToNonce: GenesisHash → NeutralNonce (ZERO); BlockHash h → Nonce(h).
+        // castHash is a type-reinterpret (no rehashing): just use the raw prev_hash bytes.
         self.lab_nonce = block.header.prev_hash;
 
         // Update tip
