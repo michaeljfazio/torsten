@@ -3629,6 +3629,7 @@ dependencies = [
  "pallas-crypto 1.0.0-alpha.5",
  "pallas-network",
  "pallas-traverse 1.0.0-alpha.5",
+ "parking_lot",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",

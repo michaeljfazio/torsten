@@ -906,3 +906,639 @@ fn test_babbage_reference_inputs_roundtrip() {
         "Babbage: reference input tx hash mismatch after round-trip"
     );
 }
+
+// ── Plutus conformance test vectors ──────────────────────────────────────────
+//
+// All five vectors are Conway-era (era_id = 6) in the 4-element array format:
+//   [transaction_body, transaction_witness_set, is_valid, metadata/null]
+//
+// Redeemers use the Alonzo-compatible array format accepted by both Alonzo and
+// Conway decoders:
+//   redeemers = [* [tag, index, plutus_data, ex_units]]
+//
+// PlutusData: Constr(0, []) is encoded as tag(121) array(0) = d8 79 80
+//   - d8 79  tag (two-byte: major 6, additional 24 → next byte is tag number 121)
+//   - 80     array(0) — the empty fields list
+//
+// Script reference (CDDL key 3 in post-Alonzo output):
+//   script_ref = CborWrap(script)   ; CBOR: tag(24)(bstr(script_cbor))
+//   script     = [language_tag, script_bytes]
+//   PlutusV2   = [2, bstr(bytes)]
+//
+// PlutusV2 script bytes in every vector are a 4-byte placeholder `01 00 00 10`
+// chosen to be well-formed bstr payload.  Pallas stores raw bytes and does not
+// attempt to parse UPLC at deserialization time.
+//
+// Address: enterprise testnet = 0x60 followed by 28 zero bytes (29 bytes total).
+//   CBOR bstr(29) header = 58 1d; full: 581d60 + 00*28
+
+// ── CBOR vector: PlutusV2 witness script, redeemer, datum ─────────────────
+//
+// Structure (annotated bytes):
+//
+// 84                      -- array(4): [body, witnesses, is_valid, metadata]
+//
+// a4                      -- map(4): transaction_body
+//   00                    --   key 0 (inputs)
+//   81                    --   array(1)
+//     82 5820 00*32 00    --     [tx_hash_zero32, index=0]
+//   01                    --   key 1 (outputs)
+//   81                    --   array(1)
+//     82                  --     array(2): legacy [addr, value]
+//       581d 60 00*28     --       address (29 bytes: enterprise testnet)
+//       1a 000f4240       --       uint(1_000_000)
+//   02                    --   key 2 (fee)
+//   1a 00030d40           --   uint(200_000)
+//   0b                    --   key 11 (script_data_hash)
+//   5820 00*32            --   bstr(32): zero hash
+//
+// a4                      -- map(4): transaction_witness_set
+//   00                    --   key 0 (vkey_witnesses)
+//   81 82 5820 00*32      --   [vkey_32_zeros]
+//        5840 00*64       --   sig_64_zeros
+//   04                    --   key 4 (plutus_data)
+//   81 d87980             --   [Constr(0, [])]
+//   05                    --   key 5 (redeemers)
+//   81                    --   array(1) of redeemers
+//     84 00 00 d87980     --     [Spend, 0, Constr(0,[]), [100, 200]]
+//     82 1864 18c8
+//   06                    --   key 6 (plutus_v2_scripts)
+//   81 44 01000010        --   [bstr(4) = script bytes]
+//
+// f5                      -- is_valid = true
+// f6                      -- metadata = null
+const PLUTUS_V2_ALWAYS_SUCCEEDS_HEX: &str =
+    "84a40081825820000000000000000000000000000000000000000000000000000000000000000000018182581d60000000000000000000000000000000000000000000000000000000001a000f4240021a00030d400b58200000000000000000000000000000000000000000000000000000000000000000a4008182582000000000000000000000000000000000000000000000000000000000000000005840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000481d879800581840000d8798082186418c806814401000010f5f6";
+
+// ── CBOR vector: PlutusV2 script that evaluates to error (is_valid=false) ──
+//
+// Identical CBOR to ALWAYS_SUCCEEDS except the is_valid byte:
+//   f4  -- is_valid = false   (was f5)
+//
+// The error is a runtime concern (Plutus evaluator); serialization layer must
+// decode this identically to the succeeds vector.  Only is_valid differs.
+const PLUTUS_V2_ALWAYS_FAILS_HEX: &str =
+    "84a40081825820000000000000000000000000000000000000000000000000000000000000000000018182581d60000000000000000000000000000000000000000000000000000000001a000f4240021a00030d400b58200000000000000000000000000000000000000000000000000000000000000000a4008182582000000000000000000000000000000000000000000000000000000000000000005840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000481d879800581840000d8798082186418c806814401000010f4f6";
+
+// ── CBOR vector: spending via a reference script (no witness scripts) ───────
+//
+// The single output uses post-Alonzo map format and carries key 3 (script_ref).
+// Witness set has no plutus_v2_scripts key — the script lives in the ref UTxO.
+//
+// Reference script encoding (output map key 3):
+//   d8 18           -- tag(24)
+//   47              -- bstr(7)
+//     82 02         --   array(2)[2 (PlutusV2 language tag)]
+//     44 01000010   --   bstr(4) script bytes
+//
+// Output (post-Alonzo map format):
+//   a3              -- map(3)
+//   00  581d ...    --   key 0: address (29 bytes)
+//   01  1a001e8480  --   key 1: value = 2_000_000
+//   03  d818 47 ... --   key 3: script_ref
+//
+// Body additionally has key 18 (reference_inputs) pointing to the same zero UTxO.
+// Witness set: only vkeys (key 0) and one redeemer (key 5) — no scripts in witnesses.
+const PLUTUS_REFERENCE_SCRIPT_HEX: &str =
+    "84a500818258200000000000000000000000000000000000000000000000000000000000000000000181a300581d6000000000000000000000000000000000000000000000000000000000011a001e848003d8184782024401000010021a00030d400b582000000000000000000000000000000000000000000000000000000000000000001281825820000000000000000000000000000000000000000000000000000000000000000000a2008182582000000000000000000000000000000000000000000000000000000000000000005840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000581840000d8798082186418c8f5f6";
+
+// ── CBOR vector: is_valid=false with collateral and collateral_return ────────
+//
+// Body (map(7)):
+//   key 0  (inputs)           -- spending inputs (skipped by ledger when is_valid=false)
+//   key 1  (outputs)
+//   key 2  (fee = 200_000)
+//   key 11 (script_data_hash)
+//   key 13 (collateral)       -- array(1): [tx_hash_zero, index=1]
+//   key 16 (collateral_return)-- legacy output: [addr, 800_000]
+//   key 17 (total_collateral) -- uint(300_000)
+//
+// Collateral input uses the same tx hash as inputs (zero) but output index=1
+// to keep it distinguishable.
+// Collateral return value: 800_000 lovelace.
+// Total collateral: 300_000 (= collateral input value - collateral_return).
+const PLUTUS_COLLATERAL_RETURN_HEX: &str =
+    "84a70081825820000000000000000000000000000000000000000000000000000000000000000000018182581d60000000000000000000000000000000000000000000000000000000001a000f4240021a00030d400b582000000000000000000000000000000000000000000000000000000000000000000d818258200000000000000000000000000000000000000000000000000000000000000000011082581d60000000000000000000000000000000000000000000000000000000001a000c3500111a000493e0a3008182582000000000000000000000000000000000000000000000000000000000000000005840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000581840000d8798082186418c806814401000010f4f6";
+
+// ── CBOR vector: three redeemers — Spend[0], Spend[1], Mint[0] ───────────
+//
+// Body (map(5)):
+//   key 0  (inputs)  -- array(2): two spending inputs (different tx hashes)
+//     input0: [zero32, 0]
+//     input1: [00..01, 0]  -- 31 zero bytes + 0x01 so it is a distinct tx hash
+//   key 1  (outputs) -- array(1): legacy [addr, 1_000_000]
+//   key 2  (fee)     -- 200_000
+//   key 9  (mint)    -- {policy_cc*28 => {"TK" => 1}}
+//   key 11 (script_data_hash)
+//
+// Witness set (map(3)):
+//   key 0: vkeys
+//   key 5: redeemers = array(3) of array-format redeemers
+//     [0, 0, Constr(0,[]), [100, 200]]  -- Spend[0]  tags 0x0000
+//     [0, 1, Constr(0,[]), [150, 300]]  -- Spend[1]  tags 0x0001
+//     [1, 0, Constr(0,[]), [50, 100]]   -- Mint[0]   tags 0x0100
+//   key 6: plutus_v2_scripts
+//
+// RedeemerTag encoding: Spend=0, Mint=1 (matches pallas conway::RedeemerTag)
+// ExUnits: [mem, steps] as CBOR array of two uints
+const PLUTUS_MULTI_REDEEMER_HEX: &str =
+    "84a50082825820000000000000000000000000000000000000000000000000000000000000000000825820000000000000000000000000000000000000000000000000000000000000000100018182581d60000000000000000000000000000000000000000000000000000000001a000f4240021a00030d4009a1581ccccccccccccccccccccccccccccccccccccccccccccccccccccccccca142544b010b58200000000000000000000000000000000000000000000000000000000000000000a3008182582000000000000000000000000000000000000000000000000000000000000000005840000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000583840000d8798082186418c8840001d8798082189619012c840100d87980821832186406814401000010f5f6";
+
+// ── Plutus tests ──────────────────────────────────────────────────────────────
+
+/// Conway-era tx with a PlutusV2 witness script (always succeeds).
+///
+/// Witness set contains:
+///   - key 0: vkey witnesses (one zero-filled vkey+sig)
+///   - key 4: plutus_data — one datum, Constr(0, [])
+///   - key 5: redeemers — array-format, one Spend[0] redeemer
+///   - key 6: plutus_v2_scripts — one 4-byte placeholder script
+///
+/// Verifies:
+///   - `witness_set.plutus_v2_scripts` has length 1
+///   - `witness_set.plutus_data` has length 1, datum is Constr(0, [])
+///   - `witness_set.redeemers` has length 1 with tag=Spend, index=0,
+///     ex_units=(mem=100, steps=200)
+///   - `is_valid` is true
+///   - Round-trip preserves all witness fields
+#[test]
+fn test_plutus_v2_always_succeeds() {
+    let cbor = from_hex(PLUTUS_V2_ALWAYS_SUCCEEDS_HEX);
+    let tx = decode_transaction(ERA_CONWAY, &cbor)
+        .expect("PlutusV2 always-succeeds: decode must succeed");
+
+    // ── is_valid ──
+    assert!(
+        tx.is_valid,
+        "PlutusV2 always-succeeds: is_valid must be true"
+    );
+
+    // ── Witness scripts ──
+    assert_eq!(
+        tx.witness_set.plutus_v2_scripts.len(),
+        1,
+        "PlutusV2 always-succeeds: expected 1 plutus_v2_script in witness set"
+    );
+    assert!(
+        tx.witness_set.plutus_v1_scripts.is_empty(),
+        "PlutusV2 always-succeeds: no plutus_v1_scripts expected"
+    );
+
+    // ── Plutus data (datums in witness set, key 4) ──
+    assert_eq!(
+        tx.witness_set.plutus_data.len(),
+        1,
+        "PlutusV2 always-succeeds: expected 1 plutus_data datum"
+    );
+    assert_eq!(
+        tx.witness_set.plutus_data[0],
+        torsten_primitives::transaction::PlutusData::Constr(0, vec![]),
+        "PlutusV2 always-succeeds: datum must be Constr(0, [])"
+    );
+
+    // ── Redeemers ──
+    assert_eq!(
+        tx.witness_set.redeemers.len(),
+        1,
+        "PlutusV2 always-succeeds: expected 1 redeemer"
+    );
+    let r = &tx.witness_set.redeemers[0];
+    assert_eq!(
+        r.tag,
+        torsten_primitives::transaction::RedeemerTag::Spend,
+        "PlutusV2 always-succeeds: redeemer tag must be Spend"
+    );
+    assert_eq!(
+        r.index, 0,
+        "PlutusV2 always-succeeds: redeemer index must be 0"
+    );
+    assert_eq!(
+        r.data,
+        torsten_primitives::transaction::PlutusData::Constr(0, vec![]),
+        "PlutusV2 always-succeeds: redeemer data must be Constr(0, [])"
+    );
+    assert_eq!(
+        r.ex_units.mem, 100,
+        "PlutusV2 always-succeeds: redeemer mem units must be 100"
+    );
+    assert_eq!(
+        r.ex_units.steps, 200,
+        "PlutusV2 always-succeeds: redeemer steps units must be 200"
+    );
+
+    // ── Round-trip ──
+    let re_encoded = encode_transaction(&tx);
+    let re_decoded = decode_transaction(ERA_CONWAY, &re_encoded)
+        .expect("PlutusV2 always-succeeds: round-trip decode must succeed");
+
+    assert_eq!(
+        re_decoded.witness_set.plutus_v2_scripts.len(),
+        1,
+        "PlutusV2 always-succeeds: plutus_v2_scripts count must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.witness_set.redeemers.len(),
+        1,
+        "PlutusV2 always-succeeds: redeemer count must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.witness_set.redeemers[0].tag,
+        torsten_primitives::transaction::RedeemerTag::Spend,
+        "PlutusV2 always-succeeds: redeemer tag must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.witness_set.redeemers[0].ex_units.mem, 100,
+        "PlutusV2 always-succeeds: ex_units.mem must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.witness_set.redeemers[0].ex_units.steps, 200,
+        "PlutusV2 always-succeeds: ex_units.steps must survive round-trip"
+    );
+}
+
+/// Conway-era tx with a PlutusV2 script that evaluates to error at runtime.
+///
+/// Verifies that serialization decoding is agnostic to whether the script
+/// will succeed or fail at evaluation time.  The only difference from the
+/// always-succeeds vector is `is_valid = false`.  All witness set fields
+/// must decode identically; the error is a ledger/Plutus concern, not a
+/// wire-format concern.
+///
+/// This tests the invariant: decode(always_fails_cbor) must succeed and
+/// produce the same witness fields as decode(always_succeeds_cbor), with
+/// the sole distinction being is_valid=false.
+#[test]
+fn test_plutus_v2_always_fails() {
+    let cbor = from_hex(PLUTUS_V2_ALWAYS_FAILS_HEX);
+    let tx = decode_transaction(ERA_CONWAY, &cbor)
+        .expect("PlutusV2 always-fails: decode must succeed (error is a runtime concern)");
+
+    // ── is_valid = false ──
+    assert!(
+        !tx.is_valid,
+        "PlutusV2 always-fails: is_valid must be false"
+    );
+
+    // ── Witness structure identical to always-succeeds ──
+    assert_eq!(
+        tx.witness_set.plutus_v2_scripts.len(),
+        1,
+        "PlutusV2 always-fails: expected 1 plutus_v2_script in witness set"
+    );
+    assert_eq!(
+        tx.witness_set.redeemers.len(),
+        1,
+        "PlutusV2 always-fails: expected 1 redeemer"
+    );
+    assert_eq!(
+        tx.witness_set.redeemers[0].tag,
+        torsten_primitives::transaction::RedeemerTag::Spend,
+        "PlutusV2 always-fails: redeemer tag must be Spend"
+    );
+    assert_eq!(
+        tx.witness_set.plutus_data.len(),
+        1,
+        "PlutusV2 always-fails: expected 1 plutus_data datum"
+    );
+
+    // ── Script bytes identical to always-succeeds vector ──
+    let succeeds_cbor = from_hex(PLUTUS_V2_ALWAYS_SUCCEEDS_HEX);
+    let succeeds_tx = decode_transaction(ERA_CONWAY, &succeeds_cbor).unwrap();
+    assert_eq!(
+        tx.witness_set.plutus_v2_scripts, succeeds_tx.witness_set.plutus_v2_scripts,
+        "PlutusV2 always-fails: script bytes must equal those in always-succeeds vector"
+    );
+
+    // ── Round-trip preserves is_valid=false ──
+    let re_encoded = encode_transaction(&tx);
+    let re_decoded = decode_transaction(ERA_CONWAY, &re_encoded)
+        .expect("PlutusV2 always-fails: round-trip decode must succeed");
+    assert!(
+        !re_decoded.is_valid,
+        "PlutusV2 always-fails: is_valid=false must survive round-trip"
+    );
+}
+
+/// Conway-era tx spending via a reference script (no witness scripts).
+///
+/// The output carries the reference script in map key 3 (`script_ref`).
+/// The witness set has no `plutus_v2_scripts` key — the script is loaded from
+/// the referenced UTxO by the ledger, not embedded in the transaction.
+///
+/// CBOR encoding of `script_ref` (output map key 3):
+///   tag(24)(bstr([2, bstr(script_bytes)]))
+///   = d8 18  47  82 02  44 01 00 00 10
+///
+/// Verifies:
+///   - `script_ref` on the output is `ScriptRef::PlutusV2(bytes)`
+///   - The decoded script bytes equal `[0x01, 0x00, 0x00, 0x10]`
+///   - `witness_set.plutus_v2_scripts` is empty (reference script, not witness)
+///   - `body.reference_inputs` contains 1 entry
+///   - Round-trip preserves the script_ref bytes
+#[test]
+fn test_plutus_reference_script_spending() {
+    let cbor = from_hex(PLUTUS_REFERENCE_SCRIPT_HEX);
+    let tx = decode_transaction(ERA_CONWAY, &cbor).expect("reference script: decode must succeed");
+
+    assert!(tx.is_valid, "reference script: is_valid must be true");
+
+    // ── No witness scripts — script lives in the referenced UTxO ──
+    assert!(
+        tx.witness_set.plutus_v2_scripts.is_empty(),
+        "reference script: plutus_v2_scripts must be empty in witness set (script is referenced, not embedded)"
+    );
+
+    // ── Reference inputs ──
+    assert_eq!(
+        tx.body.reference_inputs.len(),
+        1,
+        "reference script: expected 1 reference input"
+    );
+
+    // ── Output carries script_ref ──
+    assert_eq!(
+        tx.body.outputs.len(),
+        1,
+        "reference script: expected 1 output"
+    );
+    let output = &tx.body.outputs[0];
+    assert!(
+        !output.is_legacy,
+        "reference script: output must use post-Alonzo map format (has script_ref)"
+    );
+    assert!(
+        output.script_ref.is_some(),
+        "reference script: output must have a script_ref"
+    );
+
+    // ── Script type and bytes ──
+    match output.script_ref.as_ref().unwrap() {
+        torsten_primitives::transaction::ScriptRef::PlutusV2(bytes) => {
+            assert_eq!(
+                bytes,
+                &vec![0x01u8, 0x00, 0x00, 0x10],
+                "reference script: PlutusV2 script bytes mismatch"
+            );
+        }
+        other => panic!("reference script: expected ScriptRef::PlutusV2, got {other:?}"),
+    }
+
+    // ── Round-trip ──
+    let re_encoded = encode_transaction(&tx);
+    let re_decoded = decode_transaction(ERA_CONWAY, &re_encoded)
+        .expect("reference script: round-trip decode must succeed");
+
+    assert!(
+        re_decoded.body.outputs[0].script_ref.is_some(),
+        "reference script: script_ref must survive round-trip"
+    );
+    match re_decoded.body.outputs[0].script_ref.as_ref().unwrap() {
+        torsten_primitives::transaction::ScriptRef::PlutusV2(bytes) => {
+            assert_eq!(
+                bytes,
+                &vec![0x01u8, 0x00, 0x00, 0x10],
+                "reference script: PlutusV2 script bytes mismatch after round-trip"
+            );
+        }
+        other => panic!("reference script: round-trip expected ScriptRef::PlutusV2, got {other:?}"),
+    }
+}
+
+/// Conway-era tx with `is_valid=false` carrying collateral inputs and return.
+///
+/// When a Plutus script fails (is_valid=false), the ledger consumes the
+/// collateral inputs and adds the collateral_return output instead of the
+/// regular outputs.  The transaction body must still encode and decode all
+/// three collateral fields correctly.
+///
+/// Body fields exercised:
+///   key 13 (collateral)         — one input at index=1 of the zero tx hash
+///   key 16 (collateral_return)  — legacy output: [addr, 800_000]
+///   key 17 (total_collateral)   — uint 300_000
+///
+/// Verifies:
+///   - `is_valid` is false
+///   - `body.collateral` has length 1, with the expected tx hash and index
+///   - `body.collateral_return` is Some with value 800_000
+///   - `body.total_collateral` is Some(300_000)
+///   - All three fields survive the round-trip
+#[test]
+fn test_plutus_collateral_return() {
+    let cbor = from_hex(PLUTUS_COLLATERAL_RETURN_HEX);
+    let tx = decode_transaction(ERA_CONWAY, &cbor).expect("collateral return: decode must succeed");
+
+    // ── is_valid = false (script failed) ──
+    assert!(
+        !tx.is_valid,
+        "collateral return: is_valid must be false (simulates script failure)"
+    );
+
+    // ── Collateral inputs (body key 13) ──
+    assert_eq!(
+        tx.body.collateral.len(),
+        1,
+        "collateral return: expected 1 collateral input"
+    );
+    assert_eq!(
+        tx.body.collateral[0].index,
+        1,
+        "collateral return: collateral input index must be 1 (distinct from spending input index=0)"
+    );
+
+    // ── Collateral return (body key 16) ──
+    assert!(
+        tx.body.collateral_return.is_some(),
+        "collateral return: collateral_return must be present (body key 16)"
+    );
+    assert_eq!(
+        tx.body.collateral_return.as_ref().unwrap().value.coin.0,
+        800_000,
+        "collateral return: collateral_return value must be 800_000 lovelace"
+    );
+    assert!(
+        tx.body
+            .collateral_return
+            .as_ref()
+            .unwrap()
+            .value
+            .multi_asset
+            .is_empty(),
+        "collateral return: collateral_return must be ADA-only"
+    );
+
+    // ── Total collateral (body key 17) ──
+    assert_eq!(
+        tx.body.total_collateral,
+        Some(torsten_primitives::value::Lovelace(300_000)),
+        "collateral return: total_collateral must be 300_000"
+    );
+
+    // ── Round-trip preserves all three collateral fields ──
+    let re_encoded = encode_transaction(&tx);
+    let re_decoded = decode_transaction(ERA_CONWAY, &re_encoded)
+        .expect("collateral return: round-trip decode must succeed");
+
+    assert!(
+        !re_decoded.is_valid,
+        "collateral return: is_valid=false must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.body.collateral.len(),
+        1,
+        "collateral return: collateral input count must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.body.collateral[0].index, 1,
+        "collateral return: collateral input index must survive round-trip"
+    );
+    assert!(
+        re_decoded.body.collateral_return.is_some(),
+        "collateral return: collateral_return must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded
+            .body
+            .collateral_return
+            .as_ref()
+            .unwrap()
+            .value
+            .coin
+            .0,
+        800_000,
+        "collateral return: collateral_return value must survive round-trip"
+    );
+    assert_eq!(
+        re_decoded.body.total_collateral,
+        Some(torsten_primitives::value::Lovelace(300_000)),
+        "collateral return: total_collateral must survive round-trip"
+    );
+}
+
+/// Conway-era tx with three redeemers: Spend[0], Spend[1], Mint[0].
+///
+/// Redeemers are in the Alonzo-compatible array format (array of 4-tuples),
+/// which is valid in both Alonzo/Babbage and Conway eras:
+///   redeemers = [* [tag, index, plutus_data, ex_units]]
+///
+/// The tx has two spending inputs (to match Spend[0] and Spend[1] indices)
+/// and a mint field (for the Mint[0] redeemer policy).
+///
+/// RedeemerTag mapping (from pallas conway::RedeemerTag):
+///   0 = Spend, 1 = Mint, 2 = Cert, 3 = Reward, 4 = Vote, 5 = Propose
+///
+/// ExUnits per redeemer:
+///   Spend[0]: mem=100,  steps=200
+///   Spend[1]: mem=150,  steps=300
+///   Mint[0]:  mem=50,   steps=100
+///
+/// Verifies:
+///   - `witness_set.redeemers` has length 3
+///   - Each redeemer has the correct tag, index, data (Constr(0,[])), and ex_units
+///   - Order is preserved through round-trip
+#[test]
+fn test_plutus_multi_redeemer() {
+    let cbor = from_hex(PLUTUS_MULTI_REDEEMER_HEX);
+    let tx = decode_transaction(ERA_CONWAY, &cbor).expect("multi-redeemer: decode must succeed");
+
+    assert!(tx.is_valid, "multi-redeemer: is_valid must be true");
+
+    // ── Redeemer count ──
+    assert_eq!(
+        tx.witness_set.redeemers.len(),
+        3,
+        "multi-redeemer: expected 3 redeemers"
+    );
+
+    // ── Helper: find a redeemer by tag and index ──
+    use torsten_primitives::transaction::RedeemerTag;
+    let find_redeemer = |tag: &RedeemerTag, idx: u32| {
+        tx.witness_set
+            .redeemers
+            .iter()
+            .find(|r| &r.tag == tag && r.index == idx)
+            .unwrap_or_else(|| panic!("multi-redeemer: redeemer {tag:?}[{idx}] not found"))
+    };
+
+    // ── Spend[0]: mem=100, steps=200 ──
+    let spend0 = find_redeemer(&RedeemerTag::Spend, 0);
+    assert_eq!(
+        spend0.data,
+        torsten_primitives::transaction::PlutusData::Constr(0, vec![]),
+        "multi-redeemer: Spend[0] data must be Constr(0, [])"
+    );
+    assert_eq!(
+        spend0.ex_units.mem, 100,
+        "multi-redeemer: Spend[0] mem must be 100"
+    );
+    assert_eq!(
+        spend0.ex_units.steps, 200,
+        "multi-redeemer: Spend[0] steps must be 200"
+    );
+
+    // ── Spend[1]: mem=150, steps=300 ──
+    let spend1 = find_redeemer(&RedeemerTag::Spend, 1);
+    assert_eq!(
+        spend1.ex_units.mem, 150,
+        "multi-redeemer: Spend[1] mem must be 150"
+    );
+    assert_eq!(
+        spend1.ex_units.steps, 300,
+        "multi-redeemer: Spend[1] steps must be 300"
+    );
+
+    // ── Mint[0]: mem=50, steps=100 ──
+    let mint0 = find_redeemer(&RedeemerTag::Mint, 0);
+    assert_eq!(
+        mint0.ex_units.mem, 50,
+        "multi-redeemer: Mint[0] mem must be 50"
+    );
+    assert_eq!(
+        mint0.ex_units.steps, 100,
+        "multi-redeemer: Mint[0] steps must be 100"
+    );
+
+    // ── Inputs match redeemer Spend indices ──
+    assert_eq!(
+        tx.body.inputs.len(),
+        2,
+        "multi-redeemer: expected 2 spending inputs (one per Spend redeemer index)"
+    );
+
+    // ── Mint field present for Mint[0] redeemer ──
+    assert!(
+        !tx.body.mint.is_empty(),
+        "multi-redeemer: mint field must be present (required for Mint[0] redeemer)"
+    );
+
+    // ── Round-trip preserves all 3 redeemers ──
+    let re_encoded = encode_transaction(&tx);
+    let re_decoded = decode_transaction(ERA_CONWAY, &re_encoded)
+        .expect("multi-redeemer: round-trip decode must succeed");
+
+    assert_eq!(
+        re_decoded.witness_set.redeemers.len(),
+        3,
+        "multi-redeemer: redeemer count must survive round-trip"
+    );
+
+    // All tags and indices must survive the round-trip.
+    let tags_and_indices: Vec<(RedeemerTag, u32)> = re_decoded
+        .witness_set
+        .redeemers
+        .iter()
+        .map(|r| (r.tag.clone(), r.index))
+        .collect();
+
+    assert!(
+        tags_and_indices.contains(&(RedeemerTag::Spend, 0)),
+        "multi-redeemer: Spend[0] must survive round-trip"
+    );
+    assert!(
+        tags_and_indices.contains(&(RedeemerTag::Spend, 1)),
+        "multi-redeemer: Spend[1] must survive round-trip"
+    );
+    assert!(
+        tags_and_indices.contains(&(RedeemerTag::Mint, 0)),
+        "multi-redeemer: Mint[0] must survive round-trip"
+    );
+}
