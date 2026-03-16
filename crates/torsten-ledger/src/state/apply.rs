@@ -18,7 +18,7 @@ use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 impl LedgerState {
     /// Apply a block to the ledger state.
@@ -474,21 +474,6 @@ impl LedgerState {
         //    last randomness_stabilisation_window (4k/f) slots of the epoch,
         //    in which case the candidate freezes so the epoch nonce is stable.
         if !block.header.nonce_vrf_output.is_empty() {
-            // Log the first 20 blocks of each epoch for nonce debugging
-            if self.epoch_block_count <= 20 || block.block_number().0 <= 20 {
-                info!(
-                    slot = block.slot().0,
-                    block_no = block.block_number().0,
-                    epoch = self.epoch.0,
-                    era = ?block.era,
-                    nonce_vrf_output_len = block.header.nonce_vrf_output.len(),
-                    header_hash = %block.header.header_hash.to_hex(),
-                    evolving_nonce_before = %self.evolving_nonce.to_hex(),
-                    candidate_nonce = %self.candidate_nonce.to_hex(),
-                    "Nonce: applying block VRF contribution"
-                );
-            }
-
             // Update evolving nonce unconditionally with the pre-computed eta
             self.update_evolving_nonce(&block.header.nonce_vrf_output);
 

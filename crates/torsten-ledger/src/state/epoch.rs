@@ -335,19 +335,16 @@ impl LedgerState {
         //
         // Critical: use the OLD last_epoch_block_nonce FIRST, then update it.
         // In Haskell ηh = previous ticknStatePrevHashNonce (NOT the just-captured lab).
-        let prev_epoch_nonce = self.epoch_nonce;
+        let _prev_epoch_nonce = self.epoch_nonce;
         let candidate = self.candidate_nonce;
         let prev_hash_nonce = self.last_epoch_block_nonce; // ηh = OLD value
 
-        info!(
+        debug!(
             epoch = new_epoch.0,
             candidate = %candidate.to_hex(),
             prev_hash_nonce = %prev_hash_nonce.to_hex(),
-            lab_nonce = %self.lab_nonce.to_hex(),
-            evolving = %self.evolving_nonce.to_hex(),
-            prev_epoch_nonce = %prev_epoch_nonce.to_hex(),
             block_count = self.epoch_block_count,
-            "Epoch nonce inputs BEFORE computation"
+            "Epoch nonce inputs"
         );
 
         // Step 1: Compute new epoch nonce using OLD prevHashNonce (ηh).
@@ -373,11 +370,10 @@ impl LedgerState {
         // Step 2: NOW update prevHashNonce to current labNonce for NEXT epoch
         self.last_epoch_block_nonce = self.lab_nonce;
 
-        info!(
+        debug!(
             epoch = new_epoch.0,
-            new_epoch_nonce = %self.epoch_nonce.to_hex(),
-            prev_epoch_nonce = %prev_epoch_nonce.to_hex(),
-            "Epoch nonce computed"
+            nonce = %self.epoch_nonce.to_hex(),
+            "Epoch nonce"
         );
 
         // evolving_nonce and candidate_nonce carry forward unchanged
@@ -506,24 +502,6 @@ impl LedgerState {
         data.extend_from_slice(eta_hash.as_bytes());
         self.evolving_nonce = torsten_primitives::hash::blake2b_256(&data);
 
-        // Log first 5 nonce updates per epoch for debugging
-        if self.epoch_block_count <= 5 {
-            // Manual hex for first 16 bytes of raw input
-            let raw_prefix: String = nonce_eta
-                .iter()
-                .take(16)
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            info!(
-                epoch = self.epoch.0,
-                block_count = self.epoch_block_count,
-                raw_len = nonce_eta.len(),
-                raw_prefix = %raw_prefix,
-                eta = %eta_hash.to_hex(),
-                prev_evolving = %prev.to_hex(),
-                new_evolving = %self.evolving_nonce.to_hex(),
-                "Nonce update detail"
-            );
-        }
+        let _ = prev; // suppress unused warning in release
     }
 }

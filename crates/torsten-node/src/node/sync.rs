@@ -467,17 +467,6 @@ impl Node {
             // Read ledger state once for the whole batch
             let ls = self.ledger_state.read().await;
             let epoch_nonce = ls.epoch_nonce;
-            if ls.epoch.0 > 0 {
-                tracing::warn!(
-                    epoch = ls.epoch.0,
-                    epoch_nonce = %epoch_nonce.to_hex(),
-                    evolving_nonce = %ls.evolving_nonce.to_hex(),
-                    candidate_nonce = %ls.candidate_nonce.to_hex(),
-                    lab_nonce = %ls.lab_nonce.to_hex(),
-                    last_epoch_block_nonce = %ls.last_epoch_block_nonce.to_hex(),
-                    "NONCE DEBUG: current ledger nonces"
-                );
-            }
 
             // Per Praos spec, leader eligibility uses the "set" snapshot
             // (stake distribution from the previous epoch boundary).
