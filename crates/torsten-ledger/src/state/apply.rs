@@ -111,7 +111,9 @@ impl LedgerState {
             // visibility without a single overlapping borrow.
             let mut total_byron_fees = Lovelace(0);
             // Duplicate-tx guard mirrors apply_byron_block's inner dedup logic.
-            let mut seen_hashes = std::collections::HashSet::new();
+            // Pre-size to the block's transaction count to avoid rehashing.
+            let mut seen_hashes =
+                std::collections::HashSet::with_capacity(block.transactions.len());
             for tx in &block.transactions {
                 if !seen_hashes.insert(tx.hash) {
                     warn!(

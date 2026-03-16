@@ -129,8 +129,12 @@ fn get_resident_memory_bytes_impl() -> u64 {
 #[derive(Debug, Clone)]
 struct CpuTracker {
     /// CPU time used by this process at the previous sample (jiffies).
+    /// Read on Linux via `/proc/self/stat`; unused on other platforms.
+    #[allow(dead_code)]
     prev_process_ticks: u64,
     /// Monotonic clock reading at the previous sample (nanoseconds).
+    /// Used on Linux for wall-time delta; unused on other platforms.
+    #[allow(dead_code)]
     prev_wall_ns: u64,
 }
 
@@ -813,6 +817,16 @@ impl NodeMetrics {
         let cpu_pct_scaled = (cpu_pct * 100.0) as u64;
         out.push_str(&format!(
             "# HELP torsten_cpu_percent CPU utilization (0-10000, divide by 100 for %)\n# TYPE torsten_cpu_percent gauge\ntorsten_cpu_percent {cpu_pct_scaled}\n"
+        ));
+
+        // Node identity gauges (set once at startup).
+        let net_magic = self.network_magic.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "# HELP torsten_network_magic Cardano network magic number\n# TYPE torsten_network_magic gauge\ntorsten_network_magic {net_magic}\n"
+        ));
+        let is_bp = self.is_block_producer.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "# HELP torsten_is_block_producer 1 if running as block producer, 0 for relay\n# TYPE torsten_is_block_producer gauge\ntorsten_is_block_producer {is_bp}\n"
         ));
 
         // Validation error breakdown

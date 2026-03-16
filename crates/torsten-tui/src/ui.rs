@@ -302,14 +302,14 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     }
 }
 
-/// Render the Peers panel (bordered).
+/// Render the Connections panel (bordered).
 ///
-/// Shows hot/warm/cold peer classification, outbound/inbound/duplex connection
-/// counts (replacing the old N2N/N2C active counts), chainsync idle duration,
-/// and average handshake RTT.
+/// Shows the full P2P connection breakdown: inbound/outbound/cold/warm/hot
+/// counts, uni-directional vs bi-directional vs duplex, chainsync idle,
+/// and average handshake RTT and block-fetch latency.
 fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let is_active = app.active_panel == ActivePanel::Peers;
-    let block = panel_block("Peers", is_active, theme);
+    let block = panel_block("Connections", is_active, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -322,9 +322,17 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let outbound = app.metrics.get_u64("torsten_peers_outbound");
     let inbound = app.metrics.get_u64("torsten_peers_inbound");
     let duplex = app.metrics.get_u64("torsten_peers_duplex");
+    // Uni-directional = outbound-only connections (not duplex, not inbound).
+    // Bi-directional = connections that can both send and receive N2N traffic.
+    // Duplex is the overlap (connections where both sides initiated).
+    let unidirectional = outbound.saturating_sub(duplex);
+    let bidirectional = inbound.saturating_add(duplex);
     let chainsync_idle = app.metrics.get_u64("torsten_chainsync_idle_seconds");
 
-    // Compute average handshake RTT if available
+    // P2P enabled if we have any connected peers or if we see outbound attempts.
+    let p2p_enabled = total > 0 || outbound > 0;
+
+    // Compute average handshake RTT if available.
     let rtt_sum = app.metrics.get("torsten_peer_handshake_rtt_ms_sum");
     let rtt_count = app.metrics.get("torsten_peer_handshake_rtt_ms_count");
     let avg_rtt = if rtt_count > 0.0 {
@@ -351,39 +359,29 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         theme.error
     };
 
-    let mut lines = vec![
+    let lines = vec![
         Line::default(),
-        metric_line_aligned("Connected: ", App::format_number(total), theme.fg, theme.muted, w),
+        metric_line_aligned(
+            "P2P:        ",
+            if p2p_enabled {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            if p2p_enabled { theme.success } else { theme.muted },
+            theme.muted,
+            w,
+        ),
+        metric_line_aligned("Incoming:   ", App::format_number(inbound), theme.info, theme.muted, w),
+        metric_line_aligned("Outgoing:   ", App::format_number(outbound), theme.info, theme.muted, w),
         Line::default(),
-        Line::from(vec![
-            Span::styled("  Hot:  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{}", hot),
-                Style::default()
-                    .fg(theme.success)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Warm: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{}", warm),
-                Style::default()
-                    .fg(theme.warning)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Cold: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{}", cold),
-                Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        metric_line_aligned("Cold Peers: ", App::format_number(cold), theme.muted, theme.muted, w),
+        metric_line_aligned("Warm Peers: ", App::format_number(warm), theme.warning, theme.muted, w),
+        metric_line_aligned("Hot Peers:  ", App::format_number(hot), theme.success, theme.muted, w),
         Line::default(),
-        // Outbound/inbound/duplex replace the old N2N/N2C active counts.
-        // These reflect actual connection directionality from the P2P manager.
-        metric_line_aligned("Outbound:   ", App::format_number(outbound), theme.info, theme.muted, w),
-        metric_line_aligned("Inbound:    ", App::format_number(inbound), theme.info, theme.muted, w),
-        metric_line_aligned("Duplex:     ", App::format_number(duplex), theme.muted, theme.muted, w),
+        metric_line_aligned("Uni-Dir:    ", App::format_number(unidirectional), theme.muted, theme.muted, w),
+        metric_line_aligned("Bi-Dir:     ", App::format_number(bidirectional), theme.muted, theme.muted, w),
+        metric_line_aligned("Duplex:     ", App::format_number(duplex), theme.info, theme.muted, w),
         Line::default(),
         metric_line_aligned(
             "Sync idle:  ",
@@ -419,18 +417,6 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             w,
         ),
     ];
-
-    // Show N2C connection count when non-zero (local clients attached).
-    let n2c_active = app.metrics.get_u64("torsten_n2c_connections_active");
-    if n2c_active > 0 {
-        lines.push(metric_line_aligned(
-            "N2C clients:",
-            App::format_number(n2c_active),
-            theme.muted,
-            theme.muted,
-            w,
-        ));
-    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }

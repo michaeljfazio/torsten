@@ -766,6 +766,15 @@ impl Node {
             return Ok(());
         }
 
+        // Publish node identity to Prometheus so the TUI can show role and network.
+        self.metrics
+            .network_magic
+            .store(self.network_magic, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.is_block_producer.store(
+            if self.block_producer.is_some() { 1 } else { 0 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // NOTE: epoch_transitions_observed is NOT initialized from snapshot state.
         // The epoch nonce is only reliable after observing live epoch transitions
         // where VRF contributions are accumulated. A Mithril-imported node must

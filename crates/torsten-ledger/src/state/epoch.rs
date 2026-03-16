@@ -44,7 +44,9 @@ impl LedgerState {
         }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
-        let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> = HashMap::new();
+        // Pre-size to the number of distinct pools (upper-bounded by delegations).
+        let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
+            HashMap::with_capacity(self.pool_params.len());
         for (cred_hash, pool_id) in self.delegations.iter() {
             let utxo_stake = self
                 .stake_distribution
@@ -61,7 +63,9 @@ impl LedgerState {
             *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
         }
 
-        // Build per-credential stake including reward balances
+        // Build per-credential stake including reward balances. Clone the
+        // stake_map as the base and fold in reward account balances. The clone
+        // already carries the correct capacity from the original map.
         let mut snapshot_stake = self.stake_distribution.stake_map.clone();
         for (cred_hash, reward) in self.reward_accounts.iter() {
             if reward.0 > 0 {
@@ -134,7 +138,7 @@ impl LedgerState {
         if let Some(proposals) = self.pending_pp_updates.remove(&self.epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
-                std::collections::HashSet::new();
+                std::collections::HashSet::with_capacity(proposals.len());
             for (genesis_hash, _) in &proposals {
                 proposer_set.insert(*genesis_hash);
             }
@@ -393,7 +397,9 @@ impl LedgerState {
     /// matching Haskell's behavior at epoch boundaries. This corrects any
     /// drift from incremental tracking (e.g., after snapshot load or Mithril import).
     pub fn rebuild_stake_distribution(&mut self) {
-        let mut new_map: HashMap<Hash32, Lovelace> = HashMap::new();
+        // Pre-size to the current credential count to minimise rehashing.
+        let mut new_map: HashMap<Hash32, Lovelace> =
+            HashMap::with_capacity(self.stake_distribution.stake_map.len());
         for (_, output) in self.utxo_set.iter() {
             if let Some(cred_hash) = stake_credential_hash(&output.address) {
                 *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
@@ -424,7 +430,7 @@ impl LedgerState {
                     .values()
                     .fold(0u64, |acc, s| acc.saturating_add(s.0));
                 let mut new_pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
-                    HashMap::new();
+                    HashMap::with_capacity(snap.pool_stake.len());
                 for (cred_hash, pool_id) in snap.delegations.iter() {
                     let utxo_stake = self
                         .stake_distribution
