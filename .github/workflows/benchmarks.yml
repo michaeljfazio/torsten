@@ -97,3 +97,40 @@ jobs:
           name: criterion-reports-${{ github.run_number }}
           path: target/criterion/
           retention-days: 30
+
+      - name: Publish Criterion HTML to GitHub Pages
+        run: |
+          if [ -d "target/criterion" ]; then
+            # Build mdBook docs first
+            mkdir -p mdbook && curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C mdbook
+            export PATH="$(pwd)/mdbook:$PATH"
+            mdbook build docs || true
+            # Copy Criterion HTML reports into the docs output
+            mkdir -p docs/book/benchmarks
+            cp -r target/criterion/* docs/book/benchmarks/ 2>/dev/null || true
+            # Add a redirect page
+            cat > docs/book/benchmarks/index.html <<'BENCHHTML'
+            <!DOCTYPE html>
+            <html><head><title>Torsten Benchmarks</title></head>
+            <body>
+            <h1>Torsten Criterion Benchmark Reports</h1>
+            <p>Interactive benchmark reports from the nightly CI run.</p>
+            <ul>
+            BENCHHTML
+            for dir in docs/book/benchmarks/*/; do
+              name=$(basename "$dir")
+              if [ -f "$dir/report/index.html" ]; then
+                echo "<li><a href=\"$name/report/index.html\">$name</a></li>" >> docs/book/benchmarks/index.html
+              fi
+            done
+            echo "</ul></body></html>" >> docs/book/benchmarks/index.html
+          fi
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/book
+          destination_dir: .
+          keep_files: false

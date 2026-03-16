@@ -1,3 +1,7 @@
+# Benchmarks
+
+> **Interactive Criterion HTML reports** are published nightly at [/benchmarks/](/benchmarks/) with detailed charts, statistical analysis, and regression detection.
+
 # Comprehensive Benchmark Results — 2026-03-14
 
 Machine: Apple M2 Max (32 GB), macOS Darwin 25.2.0
