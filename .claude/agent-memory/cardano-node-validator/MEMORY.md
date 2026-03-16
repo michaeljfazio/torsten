@@ -79,15 +79,33 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - `http://localhost:12798/ready` — returns `{"ready":true}`
 - Metrics server starts BEFORE ledger replay — confirmed working
 
-## Known Issues (Current — 2026-03-15, run #12 — Byron EBB fix validation on mainnet)
+## Known Issues (Current — 2026-03-16, run #14 — uplc budget swap fix + new script result bug)
 1. **ScriptDataHash ignores reference scripts** — CRITICAL (run #7, status unknown after recent changes)
-   - File: `crates/torsten-ledger/src/validation.rs:785-795`
+   - File: `crates/torsten-ledger/src/validation/` (formerly validation.rs:785-795)
 2. **CollateralHasTokens incorrect for txs with collateral_return** — CRITICAL (run #7, status unknown)
-   - File: `crates/torsten-ledger/src/validation.rs:650-687`
-3. **Plutus ExBudget mismatch: uplc evaluates scripts over declared budget** — CRITICAL (run #10, OPEN)
-   - Tx hash: `3c6d9cb477106657cf4d47dfd74f2aa2e0f5f7f73c23b2f4fa00a792f747a8be` (block 4109328)
-   - Error: `ScriptFailed("Plutus evaluation failed: ... Spend[0] execution went over budget CPU -28413")`
-   - File: `crates/torsten-ledger/src/plutus.rs` — eval_phase_two_raw call at line 132
+   - File: `crates/torsten-ledger/src/validation/collateral.rs`
+3. **FIXED: Plutus budget (mem, steps) swap — scripts got 14M CPU instead of 10B** (run #14, FIXED)
+   - Root cause: `validation/mod.rs:264` passed `(mem, steps)` instead of `(steps, mem)` to eval_phase_two_raw
+   - uplc::tx::eval_phase_two_raw signature: `initial_budget: (cpu, mem)` = `(steps, mem)` in our terminology
+   - Fix: Changed to `(params.max_tx_ex_units.steps, params.max_tx_ex_units.mem)` at both call sites:
+     - `crates/torsten-ledger/src/validation/mod.rs:264`
+     - `crates/torsten-ledger/src/state/apply.rs:292-295`
+   - Also confirmed: Cargo.toml already points to `michaeljfazio/aiken.git` branch `torsten-budget-tolerance`
+     (commit e77322cd) which adds 2% CPU tolerance — that tolerance is orthogonal to this fix
+   - The aiken commit 6806d52 in `aiken-lang/aiken.git` is irrelevant — it only fixes clippy unused fields;
+     the actual bigint fix is in parent b1b92f5d which fixes `Data::integer()` for large negative integers;
+     neither of these caused or fixes the budget divergence
+4. **Plutus script returns Data instead of Unit/Bool — "Unexpected result"** (run #14, OPEN)
+   - Script hash: `4faf61d99fe87d6f1c4ae346f804a6b9824808a04047bd846fb1ea5f` (7276 bytes, PlutusV2)
+   - Tx hashes affected: `9d581223...`, `e319798023...`, `1040d648...` (preview testnet, epoch 1238)
+   - Error: `Unexpected result: Constant(Data(Array(Indef([BigInt(0), BigInt(0), BigInt(0), BigInt(0), BigInt(0)]))))`
+   - The script ran to completion but returned its datum `[0,0,0,0,0]` as a raw Data value
+   - Correct behavior: script should return `()` (unit) or `True` to indicate success
+   - Likely root cause: script context construction error — uplc receives the wrong argument ordering
+     (datum [0,0,0,0,0] is being returned as the result of the script application, not consumed by the script)
+   - For PlutusV2 Spend scripts: uplc applies datum → redeemer → scriptContext as positional args
+   - File to investigate: `crates/torsten-ledger/src/plutus.rs` — `eval_phase_two_raw` call
+   - Note: the node correctly treats this as a divergence warning and trusts on-chain consensus
 4. **FIXED: Stale peer detection incorrect wall-clock slot for mainnet** (run #11, FIXED)
    - Fix: Updated `current_wall_clock_slot()` to account for Byron era before computing Shelley slots
    - File: `crates/torsten-node/src/node.rs` function `current_wall_clock_slot()`
@@ -99,21 +117,47 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
      node falls back to individual block fetches correctly
    - Files fixed: `crates/torsten-serialization/src/multi_era.rs`, `crates/torsten-ledger/src/state/mod.rs`
 
+## Mainnet Full Sync Baselines (run #13 — 2026-03-15, Mithril import + replay to tip)
+- Mithril import: epoch=618, immutable=8423, 52.8 GB, download ~72 min, extract 3.5 min, verify ~10 min
+- DB size after import: 211 GB (25,272 chunk files)
+- Ledger replay: 13,159,707 blocks in 7083s = 1,857 blk/s, 2 skipped (known ScriptDataHash bug)
+  - Speed profile: starts ~127K blk/s (Byron), peaks at 136K, falls to ~1.8K in Conway
+  - Speed slows substantially as UTxO set grows: 127K blk/s at start → 1.8K blk/s in Conway era
+  - UTxOs grow from 14,505 (genesis) to 11,164,412 at epoch 618
+  - Snapshots saved at epochs: 289 (3.19M UTxOs), 308 (4.56M), 319 (5.52M), 362 (8.49M), 411 (9.89M),
+    426 (10.28M), 459 (10.77M), 516 (11.22M), 617 (11.15M), 618 (11.16M)
+- ERA TRANSITIONS (ALL CLEAN, ZERO ERRORS):
+  - Shelley: epoch 208 (slot ~4.4M), Byron→Shelley, EBBs handled correctly
+  - Allegra: epoch 236, protocol v2.0→3.0
+  - Mary: epoch 251, protocol v3.0→4.0
+  - Alonzo: epoch 290, protocol v4.0→5.0
+  - Alonzo v2: epoch 298, protocol v5.0→6.0
+  - Babbage: epoch 365, protocol v6.0→7.0
+  - Conway: epoch 394, protocol v7.0→8.0
+- After replay: 4,026 blocks synced from network (slot 181,958,347 → 182,039,011), caught up in ~2 min
+- Memory at tip: ~19.7 GB RSS (high: 11M UTxOs in LSM + 1024MB memtable + 12GB cache)
+- Peers: 5 connected (first peer at 2989ms RTT)
+- At-tip errors (3 blocks skipped, diverging from canonical chain):
+  1. Block 13163558/slot 182038996: ScriptDataHashMismatch (tx 21636bfd...)
+  2. Block 13163561/slot 182039011: FeeTooSmall (min=168581, actual=168537, tx 9816fcc8...)
+  3. Multiple Plutus over-budget WARNs (handled gracefully — trusting on-chain, not skipping)
+- NOTE: syncProgress in CLI query tip shows 68.08% (wall-clock-based) not 100% — this is normal
+
+## NEW BUG #4: FeeTooSmall false positive (run #13, OPEN)
+- Tx hash: `9816fcc8efdd80f350a2cca600a268a0e65c2df1b28022f07b99c382112c0fe2`
+- Block: 13163561 / slot 182039011 — confirmed VALID on chain (node accepted it)
+- Error: `FeeTooSmall { minimum: 168581, actual: 168537 }`
+- The difference is only 44 lovelace (= 1 byte of txFeePerByte). Likely a reference script fee
+  calculation rounding error — our fee computation doesn't exactly match Haskell's.
+- File: `crates/torsten-ledger/src/validation.rs` — min_fee calculation
+
 ## Mainnet Sync Baselines (run #12 — 2026-03-15, Byron EBB fix validation)
 - Start: fresh DB, from genesis
 - Duration: ~22 minutes monitored (15:03 - 15:25)
 - Blocks applied: 115,493 (slot 115,524, epoch 5) in ~20 minutes of actual sync
 - Throughput: ~95-115 blk/s sustained (mainnet Byron era, small blocks)
-- Peers: 5 hot (backbone peers, all high-latency: 500ms - 40s handshake RTT)
-- Peer handshake delays: IOG backbone 36s, CF backbone 40s, others 500ms-30s
 - Memory: 127 MB RSS at epoch 5 (very low — Byron has no Plutus scripts, tiny UTxO growth)
-- UTxO count: 27,330 at epoch 5 (growing from 14,505 genesis)
-- Treasury at epoch 5: 41,656,759,300,310 lovelace (reward accumulation working)
-- Zero rollbacks, zero transaction rejections, zero errors
-- First peer connected: 51.161.86.220:3001 (WARN: 29s for raw TCP connect)
-  - This is NOT a "Peer connected" in the proper sense; handshake didn't complete until later
-  - Actual first hot peer: 135.148.7.9:3001 at 15:03:51 (36s into run)
-  - Sync only started after 4 fetchers connected (15:05:03, ~2 min after startup)
+- Zero rollbacks, zero errors (Byron only)
 - NOTE: mainnet bootstrap peers have HIGH latency, expect 2+ minutes before sync starts
 
 ## Mainnet Config Facts (run #11 — 2026-03-15)
@@ -128,27 +172,32 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - Mainnet bootstrap peers: backbone.cardano.iog.io:3001, backbone.mainnet.cardanofoundation.org:3001
 - First Byron epoch boundary is at slot 21600 (epoch 0→1 transition), block_no ~21587
 
-## Working Features Confirmed (2026-03-15, run #10 — deferred RUPD, LSM backend)
+## Working Features Confirmed (2026-03-15, run #13 — Full mainnet Mithril sync to tip)
 - Build: WORKS
-- Fresh Mithril import: WORKS — epoch=1237, immutable=24745, 2.7 GB archive, ~9 min total
-- Ledger replay (LSM backend): WORKS — 13,728 blk/s, 4,108,827 blocks in 299s, 1 skipped
-- No PageOverflow errors: CONFIRMED — 0 occurrences
-- UTxO count correct: CONFIRMED — 2,938,835 at snapshot, 2,939,027 at tip
-- Snapshot save at replay end: WORKS — epoch=1237, 80.0 MB
-- Peer connections: WORKS — 3.70.89.92:3001 rtt_ms=747, 5 hot peers
-- Catch-up to tip: WORKS — 501 blocks in ~21s after peer connect
-- Live block reception at tip: WORKS — 504 total blocks applied, 2 rejected (Plutus budget bug)
-- N2C query tip: WORKS — slot=106919624, block=4109330, epoch=1237, era=Conway, syncProgress=100.00
-- N2C protocol-parameters: WORKS — full Conway PParams with PlutusV1+V2+V3 cost models
-- N2C treasury: WORKS — Treasury=14065825286 ADA, Reserves=871897504 ADA
-- N2C stake-distribution: WORKS — 656 pools registered, multiple with stake fractions
-- N2C gov-state: WORKS — committee_members=1, active_proposals=2
-- Prometheus metrics: WORKS — utxo_count=2939027, blocks_applied=504, peers_connected=5, epoch=1237
-  treasury=14065825286441725 lovelace, drep_count=8791, proposal_count=2, sync_progress=10000 (100%)
-- Epoch transitions (RUPD deferred): WORKS — 1237 epochs traversed without panic
-  (Protocol version changes at epochs 3, 22, 646 logged correctly)
-- Governance ratifications during replay: 590 proposals ratified, no panics
-- Memory at tip: 5.79 GB RSS (stable, no growth observed after sync complete)
+- Mainnet Mithril import (52.8 GB): WORKS — epoch=618, immutable=8423, 211 GB on disk
+- Mainnet ledger replay (13.16M blocks): WORKS — all 7 era transitions clean, zero panics
+- All era transitions CLEAN (MAINNET CONFIRMED): Byron→Shelley(208)→Allegra(236)→Mary(251)
+  →Alonzo(290+298)→Babbage(365)→Conway(394) — all 7 transitions at protocol version boundaries
+- Byron EBB handling: CONFIRMED WORKING across all Byron epoch boundaries in full replay
+- UTxO growth to 11.16M entries: WORKS (LSM backend handles correctly)
+- Snapshot saves at each epoch: WORKS — snapshots at 10 checkpoints during mainnet replay
+- Peer connections (mainnet): WORKS — 5 peers, first at 2989ms RTT
+- Catch-up to tip: WORKS — 4,026 blocks applied after replay, caught up in ~2 min
+- N2C query tip (mainnet): WORKS — slot=182038979, block=13163557, epoch=618, era=Conway
+- N2C protocol-parameters (mainnet): WORKS — full Conway PParams with PlutusV1+V2+V3 cost models
+- N2C treasury (mainnet): WORKS — Treasury=9048603530 ADA, Reserves=1954715190 ADA
+- N2C stake-distribution (mainnet): WORKS — 2,949 pools returned
+- N2C gov-state (mainnet): WORKS — committee_members=6, active_proposals=5, constitution visible
+- Prometheus metrics (mainnet): WORKS — utxo_count=11164054, delegation_count=1687711,
+  treasury=9048603530883971 lovelace, peers_connected=5, sync_progress=10000 (100%)
+- Memory at tip: ~19.7 GB RSS (11M UTxOs + 1GB memtable + 12GB LSM cache)
+
+## Preview Testnet Baselines (2026-03-15, run #10 — deferred RUPD validation)
+- Fresh Mithril import: epoch=1237, immutable=24745, 2.7 GB archive, ~9 min total
+- Ledger replay: 4,108,827 blocks in 299s = 13,728 blk/s, 1 skipped
+- N2C treasury: Treasury=14065825286 ADA, Reserves=871897504 ADA
+- Prometheus: utxo_count=2939027, blocks_applied=504, peers_connected=5, epoch=1237
+- Memory at tip: 5.79 GB RSS (stable)
 
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress

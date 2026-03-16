@@ -289,9 +289,11 @@ impl LedgerState {
                 } else if has_redeemers {
                     // Producer claims tx is invalid (is_valid=false) with scripts present.
                     // Verify scripts actually fail; if they pass, producer is stealing collateral.
+                    // uplc expects (cpu_steps, mem_units); our ExUnits has { mem, steps } where
+                    // steps=cpu and mem=memory — swap to match uplc convention.
                     let max_ex = (
-                        self.protocol_params.max_tx_ex_units.mem,
                         self.protocol_params.max_tx_ex_units.steps,
+                        self.protocol_params.max_tx_ex_units.mem,
                     );
                     let eval_result = evaluate_plutus_scripts(
                         tx,

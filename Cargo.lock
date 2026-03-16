@@ -3979,7 +3979,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "uplc"
 version = "1.1.21"
-source = "git+https://github.com/michaeljfazio/aiken.git?branch=torsten-budget-tolerance#e77322cd353158b61a20b99709f9988a0387f3c9"
+source = "git+https://github.com/aiken-lang/aiken.git?rev=6806d52211fbb469ae13aa0e0290aeb6b9b3e8cf#6806d52211fbb469ae13aa0e0290aeb6b9b3e8cf"
 dependencies = [
  "bitvec",
  "blst",
