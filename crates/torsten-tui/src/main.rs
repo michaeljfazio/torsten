@@ -15,6 +15,7 @@
 mod app;
 mod layout;
 mod metrics;
+mod theme;
 mod ui;
 mod widgets;
 
@@ -32,6 +33,7 @@ use ratatui::prelude::*;
 
 use app::App;
 use metrics::fetch_metrics;
+use theme::find_theme_by_name;
 
 /// Default Prometheus metrics endpoint for the Torsten node.
 const DEFAULT_METRICS_URL: &str = "http://localhost:12798/metrics";
@@ -60,6 +62,13 @@ struct Args {
     /// or defaults to 432,000 slots (mainnet).
     #[arg(long)]
     network_magic: Option<u64>,
+
+    /// Starting color theme name (case-insensitive).
+    ///
+    /// Available themes: Default, Monokai, Nord, Dracula, Catppuccin Mocha,
+    /// Solarized Dark, Solarized Light. Press [t] at runtime to cycle themes.
+    #[arg(long, value_name = "THEME")]
+    theme: Option<String>,
 }
 
 /// Determine epoch length from network magic.
@@ -82,6 +91,13 @@ async fn main() -> Result<()> {
     // Apply network magic epoch length override if provided.
     if let Some(magic) = args.network_magic {
         app.epoch_length_override = epoch_length_from_magic(magic);
+    }
+
+    // Apply starting theme if provided; silently ignore unknown theme names.
+    if let Some(ref name) = args.theme {
+        if let Some(idx) = find_theme_by_name(name) {
+            app.theme_idx = idx;
+        }
     }
 
     // Setup terminal
@@ -149,6 +165,10 @@ async fn run_loop(
                         }
                         KeyCode::Char('m') => {
                             app.toggle_layout_mode();
+                        }
+                        KeyCode::Char('t') => {
+                            // Cycle through built-in color themes
+                            app.cycle_theme();
                         }
                         KeyCode::Char('r') => {
                             // Force immediate refresh

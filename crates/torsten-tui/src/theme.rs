@@ -269,8 +269,10 @@ mod tests {
 
     #[test]
     fn test_find_theme_by_name() {
-        assert_eq!(find_theme_by_name("Default"), Some(0));
-        assert_eq!(find_theme_by_name("monokai"), Some(1));
+        // THEMES order: [Monokai=0, Default=1, Solarized Dark=2,
+        //                Solarized Light=3, Nord=4, Dracula=5, Catppuccin Mocha=6]
+        assert_eq!(find_theme_by_name("Monokai"), Some(0));
+        assert_eq!(find_theme_by_name("default"), Some(1));
         assert_eq!(find_theme_by_name("NORD"), Some(4));
         assert_eq!(find_theme_by_name("nonexistent"), None);
     }

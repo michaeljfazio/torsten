@@ -575,14 +575,10 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 ///
 /// # Fix
 ///
-/// Access auxiliary data through era-specific transaction accessors (`as_alonzo()`,
-/// `as_babbage()`, `as_conway()`) and match directly on the raw pallas `AuxiliaryData`
-/// enum. `MultiEraTx::aux_data()` is `pub(crate)` and not accessible from external
-/// crates, so we go through the typed `Nullable<KeepRaw<'_, alonzo::AuxiliaryData>>`
-/// field on each era's transaction struct instead. We return `None` only when pallas
-/// genuinely finds no auxiliary data (`Nullable::Null` / `Nullable::Undefined`).
-/// If the field is `Nullable::Some(_)`, auxiliary data IS present on the wire —
-/// even when all of its inner fields happen to be empty.
+/// Call `tx.aux_data()` directly and match on the raw pallas `AuxiliaryData` enum.
+/// We return `None` only when pallas genuinely finds no auxiliary data (`Nullable::Null`
+/// / `Nullable::Undefined`). If `tx.aux_data()` returns `Some(...)`, auxiliary data
+/// IS present on the wire — even when all of its inner fields happen to be empty.
 ///
 /// # Babbage / Conway V2/V3 scripts in aux data
 ///
@@ -595,7 +591,6 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 /// variants to the enum.
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
     use pallas_codec::utils::Nullable;
-    use pallas_primitives::alonzo;
     use pallas_primitives::alonzo::AuxiliaryData as PallasAux;
 
     // Access auxiliary data via era-specific transaction accessors.
@@ -603,25 +598,22 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
     // accessible, so we reach the raw pallas structs through `as_alonzo()` /
     // `as_babbage()` / `as_conway()`.
     //
-    // All three have `auxiliary_data: Nullable<KeepRaw<'_, alonzo::AuxiliaryData>>`.
-    // `KeepRaw<T>` implements `Deref<Target = T>`, so auto-deref coerces the
-    // pattern binding `x: &KeepRaw<AuxiliaryData>` to `&AuxiliaryData` at the
-    // assignment to `raw_aux: &alonzo::AuxiliaryData`:
-    //   Nullable::Some(x)   → aux data IS present; `x` coerces to &AuxiliaryData
-    //   Nullable::Null       → aux data explicitly null in CBOR (`f6`)
-    //   Nullable::Undefined  → aux data absent (4th element not present)
-    let raw_aux: &alonzo::AuxiliaryData = if let Some(alonzo_tx) = tx.as_alonzo() {
-        match &alonzo_tx.auxiliary_data {
+    // All three return `Nullable<KeepRaw<'_, alonzo::AuxiliaryData>>`:
+    //   Nullable::Some(x)  → aux data IS present; decode x
+    //   Nullable::Null     → aux data explicitly null in CBOR (`f6`)
+    //   Nullable::Undefined → aux data absent (4th element not present)
+    let raw_aux: &PallasAux = if let Some(alonzo) = tx.as_alonzo() {
+        match &alonzo.auxiliary_data {
             Nullable::Some(x) => x,
             _ => return None,
         }
-    } else if let Some(babbage_tx) = tx.as_babbage() {
-        match &babbage_tx.auxiliary_data {
+    } else if let Some(babbage) = tx.as_babbage() {
+        match &babbage.auxiliary_data {
             Nullable::Some(x) => x,
             _ => return None,
         }
-    } else if let Some(conway_tx) = tx.as_conway() {
-        match &conway_tx.auxiliary_data {
+    } else if let Some(conway) = tx.as_conway() {
+        match &conway.auxiliary_data {
             Nullable::Some(x) => x,
             _ => return None,
         }
@@ -1750,10 +1742,8 @@ mod tests {
     /// `None` — even though the auxiliary data structure IS present on the wire. This caused
     /// phase-1 rule 1c to incorrectly reject transactions that cardano-node accepts.
     ///
-    /// The fix accesses auxiliary data through era-specific accessors (`as_alonzo()`, etc.)
-    /// and checks `Nullable::Some(_)` directly on the raw pallas field. If pallas decodes
-    /// a non-null auxiliary data value, the structure is present regardless of whether its
-    /// inner fields are empty.
+    /// The fix calls `tx.aux_data()` directly. If pallas decodes a non-null auxiliary data
+    /// value, the structure is present regardless of whether its inner fields are empty.
     ///
     /// Real preview testnet tx: 28c9bfc6b1579c800803c72676518e6bf55609fe8c77b31c474faa5b029c4b2f
     ///
@@ -1828,7 +1818,10 @@ mod tests {
 
         let aux = tx.auxiliary_data.as_ref().unwrap();
         // tag(259){} has no metadata labels, no scripts.
-        assert!(aux.metadata.is_empty(), "metadata must be empty for tag(259){{}}");
+        assert!(
+            aux.metadata.is_empty(),
+            "metadata must be empty for tag(259){{}}"
+        );
         assert!(aux.native_scripts.is_empty());
         assert!(aux.plutus_v1_scripts.is_empty());
     }

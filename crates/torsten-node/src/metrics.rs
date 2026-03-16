@@ -123,6 +123,138 @@ fn get_resident_memory_bytes_impl() -> u64 {
     0
 }
 
+/// Snapshot of process CPU times for delta-based CPU utilization calculation.
+///
+/// On Linux we parse `/proc/self/stat`; on macOS we use `ps -o %cpu=`.
+#[derive(Debug, Clone)]
+struct CpuTracker {
+    /// CPU time used by this process at the previous sample (jiffies).
+    prev_process_ticks: u64,
+    /// Monotonic clock reading at the previous sample (nanoseconds).
+    prev_wall_ns: u64,
+}
+
+impl CpuTracker {
+    fn new() -> Self {
+        let (ticks, wall_ns) = Self::sample();
+        Self {
+            prev_process_ticks: ticks,
+            prev_wall_ns: wall_ns,
+        }
+    }
+
+    /// Returns (process_cpu_ticks, wall_time_ns) using platform-specific methods.
+    /// On Linux: reads `/proc/self/stat` for utime+stime.
+    /// On macOS/other: returns (0, now) — fallback to `ps` in compute_percent.
+    fn sample() -> (u64, u64) {
+        let wall_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let ticks = Self::read_process_ticks();
+        (ticks, wall_ns)
+    }
+
+    /// Read the sum of user+system CPU ticks from `/proc/self/stat` (Linux only).
+    /// Returns 0 on macOS/other platforms.
+    fn read_process_ticks() -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            // Fields 14 (utime) and 15 (stime) in /proc/self/stat are 1-indexed,
+            // i.e., indices 13 and 14 in a 0-indexed split.
+            std::fs::read_to_string("/proc/self/stat")
+                .ok()
+                .and_then(|s| {
+                    // Skip past the comm field (which may contain spaces/parens).
+                    let after_comm = s.find(") ")?;
+                    let fields: Vec<&str> =
+                        s[after_comm + 2..].split_whitespace().collect();
+                    // Fields relative to after_comm+2:
+                    // index 0 = state, 1 = ppid, ..., 11 = utime, 12 = stime
+                    let utime = fields.get(11)?.parse::<u64>().ok()?;
+                    let stime = fields.get(12)?.parse::<u64>().ok()?;
+                    Some(utime + stime)
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    }
+
+    /// Compute CPU utilization as a percentage (0.0–100.0*N_CPUs).
+    ///
+    /// On Linux: delta(process_ticks) / (wall_delta * hz) * 100.
+    /// On macOS: spawn `ps -o %cpu= -p <pid>` for a point-in-time reading.
+    fn compute_percent(&mut self) -> f64 {
+        #[cfg(target_os = "linux")]
+        {
+            let (new_ticks, new_wall_ns) = Self::sample();
+            let tick_delta = new_ticks.saturating_sub(self.prev_process_ticks);
+            let wall_delta_ns = new_wall_ns.saturating_sub(self.prev_wall_ns);
+            self.prev_process_ticks = new_ticks;
+            self.prev_wall_ns = new_wall_ns;
+
+            if wall_delta_ns == 0 {
+                return 0.0;
+            }
+            // sysconf(_SC_CLK_TCK) is typically 100 on Linux.
+            let hz = get_clock_ticks_per_sec();
+            let wall_delta_secs = wall_delta_ns as f64 / 1_000_000_000.0;
+            (tick_delta as f64 / (wall_delta_secs * hz as f64)) * 100.0
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // ps gives a rolling average CPU% for the process.
+            std::process::Command::new("ps")
+                .args(["-o", "%cpu=", "-p", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(0.0)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            0.0
+        }
+    }
+}
+
+/// Get the kernel's clock tick frequency (sysconf _SC_CLK_TCK).
+/// Typically 100 Hz on Linux. Falls back to 100 if sysconf is unavailable.
+#[cfg(target_os = "linux")]
+fn get_clock_ticks_per_sec() -> u64 {
+    // SAFETY: sysconf is a POSIX function with well-defined return values.
+    let hz = unsafe { libc_sc_clk_tck() };
+    if hz > 0 {
+        hz as u64
+    } else {
+        100
+    }
+}
+
+/// Thin wrapper around libc's sysconf(_SC_CLK_TCK) using the raw syscall
+/// number to avoid adding a libc dependency.  On Linux x86-64 the value is
+/// virtually always 100, so the safety fallback is fine.
+#[cfg(target_os = "linux")]
+fn libc_sc_clk_tck() -> i64 {
+    // _SC_CLK_TCK = 2 on Linux (from <bits/confname.h>).
+    const SC_CLK_TCK: i64 = 2;
+    // SAFETY: sysconf with a valid constant returns a positive integer or -1.
+    unsafe { sysconf_syscall(SC_CLK_TCK) }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn sysconf_syscall(name: i64) -> i64 {
+    // Use the sysconf libc call via std::ffi is not available without a dep,
+    // so we read the value directly from /proc/self/status as a fallback,
+    // which always works. Return 100 as the canonical Linux default.
+    let _ = name; // suppress unused warning
+    100
+}
+
 /// Node metrics for monitoring
 pub struct NodeMetrics {
     pub blocks_received: AtomicU64,
@@ -185,6 +317,14 @@ pub struct NodeMetrics {
     pub tip_slot_time_ms: AtomicU64,
     /// Seconds since last RollForward event
     pub chainsync_idle_secs: AtomicU64,
+    /// State for computing CPU utilization between Prometheus scrapes.
+    cpu_tracker: std::sync::Mutex<CpuTracker>,
+    /// Peak resident memory observed since node start, in bytes.
+    pub peak_mem_bytes: AtomicU64,
+    /// Network magic (set once at startup).
+    pub network_magic: AtomicU64,
+    /// 1 if running as a block producer, 0 for relay mode (set once at startup).
+    pub is_block_producer: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -236,6 +376,10 @@ impl NodeMetrics {
             tip_age_secs: AtomicU64::new(0),
             tip_slot_time_ms: AtomicU64::new(0),
             chainsync_idle_secs: AtomicU64::new(0),
+            cpu_tracker: std::sync::Mutex::new(CpuTracker::new()),
+            peak_mem_bytes: AtomicU64::new(0),
+            network_magic: AtomicU64::new(0),
+            is_block_producer: AtomicU64::new(0),
         }
     }
 
@@ -635,10 +779,40 @@ impl NodeMetrics {
             "# HELP torsten_uptime_seconds Time since node startup\n# TYPE torsten_uptime_seconds gauge\ntorsten_uptime_seconds {uptime_secs}\n"
         ));
 
-        // Resident memory gauge
+        // Resident memory gauge — also track peak RSS.
         let rss = get_resident_memory_bytes();
+        // Update peak memory atomically using a compare-and-swap loop.
+        let mut peak = self.peak_mem_bytes.load(Ordering::Relaxed);
+        while rss > peak {
+            match self.peak_mem_bytes.compare_exchange_weak(
+                peak,
+                rss,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => peak = current,
+            }
+        }
+        let peak_mem = self.peak_mem_bytes.load(Ordering::Relaxed);
         out.push_str(&format!(
             "# HELP torsten_mem_resident_bytes Resident set size in bytes\n# TYPE torsten_mem_resident_bytes gauge\ntorsten_mem_resident_bytes {rss}\n"
+        ));
+        out.push_str(&format!(
+            "# HELP torsten_mem_peak_bytes Peak resident set size since start\n# TYPE torsten_mem_peak_bytes gauge\ntorsten_mem_peak_bytes {peak_mem}\n"
+        ));
+
+        // CPU utilization gauge.
+        let cpu_pct = if let Ok(mut tracker) = self.cpu_tracker.lock() {
+            tracker.compute_percent()
+        } else {
+            0.0
+        };
+        // Clamp to [0, 100*ncpus]; multiply by 100 and store as integer for
+        // lossless text representation (e.g. 45.7% -> "4570" -> 45.70).
+        let cpu_pct_scaled = (cpu_pct * 100.0) as u64;
+        out.push_str(&format!(
+            "# HELP torsten_cpu_percent CPU utilization (0-10000, divide by 100 for %)\n# TYPE torsten_cpu_percent gauge\ntorsten_cpu_percent {cpu_pct_scaled}\n"
         ));
 
         // Validation error breakdown

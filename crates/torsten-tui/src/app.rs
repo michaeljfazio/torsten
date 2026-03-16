@@ -6,6 +6,7 @@
 
 use crate::layout::LayoutMode;
 use crate::metrics::MetricsSnapshot;
+use crate::theme::{self, Theme, THEMES};
 use std::collections::VecDeque;
 
 /// Maximum number of sparkline samples to retain (one sample per poll interval).
@@ -99,6 +100,8 @@ pub struct App {
     pub slot_in_epoch: u64,
     /// Network-specific epoch length in slots. 0 = auto-detect from metrics.
     pub epoch_length_override: u64,
+    /// Index into [`THEMES`] for the currently active color theme.
+    pub theme_idx: usize,
 }
 
 impl App {
@@ -122,7 +125,18 @@ impl App {
             epoch_time_remaining_secs: 0,
             slot_in_epoch: 0,
             epoch_length_override: 0,
+            theme_idx: 0,
         }
+    }
+
+    /// Return the currently active [`Theme`].
+    pub fn theme(&self) -> Theme {
+        THEMES[self.theme_idx]
+    }
+
+    /// Advance to the next theme in the cycle, wrapping around.
+    pub fn cycle_theme(&mut self) {
+        self.theme_idx = theme::cycle_theme(self.theme_idx);
     }
 
     /// Update the app state with a new metrics snapshot.
