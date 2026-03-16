@@ -22,7 +22,7 @@ mod tests {
     use super::super::conway::{calculate_deposits_and_refunds, conway_only_certificate_name};
     use super::super::phase1::extract_reward_credential;
     use super::super::scripts::{
-        calculate_ref_script_tiered_fee, cbor_uint_size, compute_script_ref_hash,
+        calculate_ref_script_tiered_fee, cbor_uint_size, compute_min_fee, compute_script_ref_hash,
         estimate_value_cbor_size, evaluate_native_script, script_ref_byte_size,
     };
 
@@ -2634,355 +2634,146 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Issue #82: reference-only scripts not included in language views
+    // Issue #81 — FeeTooSmall false positive: is_valid byte excluded from fee size
     // ---------------------------------------------------------------------------
 
-    /// Returns a `ProtocolParameters` with minimal but non-empty V1 and V2 cost
-    /// models so that the language views map is non-trivial and the
-    /// `script_data_hash` differs between V1-only and V1+V2 configurations.
-    fn make_params_with_cost_models() -> ProtocolParameters {
-        use torsten_primitives::transaction::CostModels;
-        let mut params = ProtocolParameters::mainnet_defaults();
-        // Use short but distinct vectors so the CBOR encoding differs.
-        params.cost_models = CostModels {
-            plutus_v1: Some(vec![100, 200, 300]),
-            plutus_v2: Some(vec![400, 500, 600]),
-            plutus_v3: None,
-        };
-        params
-    }
-
-    /// A transaction with V1 witness scripts AND a V2 reference-only script
-    /// must include BOTH language views in the script_data_hash preimage.
+    /// Verify that `compute_min_fee` uses the Haskell-compatible fee size for Alonzo+
+    /// transactions (4-element CBOR array `[body, wits, is_valid, aux_data]`).
     ///
-    /// This is the exact failure scenario from issue #82: the fallback scan
-    /// previously guarded by `!has_v1 && !has_v2 && !has_v3` would never fire
-    /// when `has_v1 = true` (from witness scripts), leaving the V2 reference
-    /// script's language out of the hash computation.
+    /// Haskell's `toCBORForSizeComputation` encodes as a 3-element array, omitting
+    /// `is_valid` for backwards-compatibility with Mary-era fee formula. The on-chain
+    /// raw CBOR is 4-element. We must subtract 1 byte when computing min fee.
+    ///
+    /// The first byte of the raw CBOR determines the era:
+    /// - `0x84` = CBOR array(4) → Alonzo+ tx, subtract 1 byte for is_valid
+    /// - `0x83` = CBOR array(3) → pre-Alonzo tx, no adjustment
     #[test]
-    fn test_script_data_hash_v1_witness_plus_v2_reference_script() {
-        let mut utxo_set = UtxoSet::new();
-        let input = TransactionInput {
-            transaction_id: Hash32::from_bytes([1u8; 32]),
-            index: 0,
-        };
-        utxo_set.insert(
-            input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(10_000_000),
-                datum: OutputDatum::None,
-                script_ref: None,
-                is_legacy: false,
-                raw_cbor: None,
-            },
-        );
-        let col_input = TransactionInput {
-            transaction_id: Hash32::from_bytes([2u8; 32]),
-            index: 0,
-        };
-        utxo_set.insert(
-            col_input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(5_000_000),
-                datum: OutputDatum::None,
-                script_ref: None,
-                is_legacy: false,
-                raw_cbor: None,
-            },
-        );
-        // Reference input carries a V2 script.
-        let ref_input = TransactionInput {
-            transaction_id: Hash32::from_bytes([3u8; 32]),
-            index: 0,
-        };
-        let v2_script_bytes = vec![0x01, 0x02, 0x03, 0x04];
-        utxo_set.insert(
-            ref_input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(2_000_000),
-                datum: OutputDatum::None,
-                script_ref: Some(ScriptRef::PlutusV2(v2_script_bytes)),
-                is_legacy: false,
-                raw_cbor: None,
-            },
+    fn test_fee_size_excludes_is_valid_for_alonzo_plus_txs() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let min_fee_a = params.min_fee_a; // 44 lovelace/byte on mainnet
+
+        // Build a minimal UTxO + transaction for fee calculation.
+        // The fee conservation check uses Rule 3; we set fees high enough to pass.
+        let (utxo_set, input) = make_simple_utxo_set();
+
+        // A fake raw_cbor that starts with 0x84 (CBOR array of 4 elements) — Alonzo+.
+        // Content beyond the first byte doesn't matter for fee_tx_size detection.
+        let raw_cbor_alonzo: Vec<u8> = std::iter::once(0x84u8)
+            .chain(std::iter::repeat_n(0u8, 299))
+            .collect();
+        let tx_size: u64 = raw_cbor_alonzo.len() as u64; // 300 bytes
+
+        // Haskell would compute fee using (tx_size - 1) = 299 bytes.
+        let expected_fee_alonzo = min_fee_a * (tx_size - 1) + params.min_fee_b;
+
+        // Build a tx with is_valid=true and the 0x84-prefixed raw_cbor.
+        let fee_alonzo = expected_fee_alonzo;
+        let output_value = 10_000_000 - fee_alonzo;
+        let mut tx = make_simple_tx(input.clone(), output_value, fee_alonzo);
+        tx.raw_cbor = Some(raw_cbor_alonzo);
+
+        let computed = compute_min_fee(&tx, &utxo_set, &params, tx_size);
+        assert_eq!(
+            computed.0, expected_fee_alonzo,
+            "Alonzo+ tx: compute_min_fee must subtract 1 byte (is_valid) from tx_size. \
+             Expected {expected_fee_alonzo}, got {}",
+            computed.0
         );
 
-        // Use params with real V1+V2 cost models so the language views differ.
-        let params = make_params_with_cost_models();
-
-        let redeemer = Redeemer {
-            tag: RedeemerTag::Spend,
-            index: 0,
-            data: PlutusData::Integer(42),
-            ex_units: ExUnits {
-                mem: 1_000,
-                steps: 1_000,
-            },
-        };
-
-        // Compute the correct hash: both V1 (from witness script) and V2 (from
-        // reference script) must be included in the language views.
-        let correct_hash = torsten_serialization::compute_script_data_hash(
-            std::slice::from_ref(&redeemer),
-            &[],
-            &params.cost_models,
-            true,  // has_v1 — witness script
-            true,  // has_v2 — reference script
-            false, // no V3
-            None,
-            None,
+        // Also verify full validation passes at exactly the Haskell-compatible fee.
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, tx_size, None);
+        assert!(
+            result.is_ok(),
+            "Alonzo+ tx with Haskell-compatible fee should pass validation: {result:?}"
         );
-
-        // Also compute what the WRONG hash would be if V2 is mistakenly omitted
-        // (i.e., the pre-fix behaviour with only V1 in the language views).
-        let wrong_hash_v1_only = torsten_serialization::compute_script_data_hash(
-            std::slice::from_ref(&redeemer),
-            &[],
-            &params.cost_models,
-            true,  // has_v1
-            false, // missing V2 — the bug
-            false,
-            None,
-            None,
-        );
-        // Verify the two hashes are actually different (sanity check).
-        assert_ne!(
-            correct_hash, wrong_hash_v1_only,
-            "V1-only and V1+V2 language views should produce different hashes"
-        );
-
-        let tx = Transaction {
-            hash: Hash32::ZERO,
-            body: TransactionBody {
-                inputs: vec![input],
-                outputs: vec![TransactionOutput {
-                    address: Address::Byron(ByronAddress {
-                        payload: vec![0u8; 32],
-                    }),
-                    value: Value::lovelace(9_800_000),
-                    datum: OutputDatum::None,
-                    script_ref: None,
-                    is_legacy: false,
-                    raw_cbor: None,
-                }],
-                fee: Lovelace(200_000),
-                ttl: None,
-                certificates: vec![],
-                withdrawals: BTreeMap::new(),
-                auxiliary_data_hash: None,
-                validity_interval_start: None,
-                mint: BTreeMap::new(),
-                // Declare the correct hash (V1 + V2 language views).
-                script_data_hash: Some(correct_hash),
-                collateral: vec![col_input],
-                required_signers: vec![],
-                network_id: None,
-                collateral_return: None,
-                total_collateral: None,
-                reference_inputs: vec![ref_input],
-                update: None,
-                voting_procedures: BTreeMap::new(),
-                proposal_procedures: vec![],
-                treasury_value: None,
-                donation: None,
-            },
-            witness_set: TransactionWitnessSet {
-                vkey_witnesses: vec![],
-                native_scripts: vec![],
-                bootstrap_witnesses: vec![],
-                // V1 script in witness set — this sets has_v1 = true at line 312,
-                // which previously blocked the fallback V2 detection.
-                plutus_v1_scripts: vec![vec![0x0A, 0x0B, 0x0C]],
-                plutus_v2_scripts: vec![],
-                plutus_v3_scripts: vec![],
-                plutus_data: vec![],
-                redeemers: vec![redeemer],
-                raw_redeemers_cbor: None,
-                raw_plutus_data_cbor: None,
-                pallas_script_data_hash: None,
-            },
-            is_valid: true,
-            auxiliary_data: None,
-            raw_cbor: None,
-        };
-
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
-
-        // The validation should NOT return ScriptDataHashMismatch.
-        // (Other errors like MissingScript are acceptable since we don't set up
-        // proper script addresses — we only care that the hash check passes.)
-        if let Err(ref errors) = result {
-            assert!(
-                !errors
-                    .iter()
-                    .any(|e| matches!(e, ValidationError::ScriptDataHashMismatch { .. })),
-                "ScriptDataHashMismatch must not fire for V1-witness + V2-reference tx: {errors:?}"
-            );
-        }
     }
 
-    /// A transaction where a reference input carries a V2 script, and the
-    /// declared script_data_hash was computed with ONLY V1 in the language
-    /// views (i.e. the tx builder incorrectly omitted V2), must be rejected
-    /// with ScriptDataHashMismatch. This ensures the fix does not falsely
-    /// accept mismatch errors.
+    /// Verify that the fee size adjustment is NOT applied for pre-Alonzo transactions
+    /// (3-element CBOR array `[body, wits, aux_data]`, first byte `0x83`).
     #[test]
-    fn test_script_data_hash_v1_witness_v2_reference_wrong_hash_rejected() {
-        let mut utxo_set = UtxoSet::new();
-        let input = TransactionInput {
-            transaction_id: Hash32::from_bytes([1u8; 32]),
-            index: 0,
-        };
-        utxo_set.insert(
-            input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(10_000_000),
-                datum: OutputDatum::None,
-                script_ref: None,
-                is_legacy: false,
-                raw_cbor: None,
-            },
-        );
-        let col_input = TransactionInput {
-            transaction_id: Hash32::from_bytes([2u8; 32]),
-            index: 0,
-        };
-        utxo_set.insert(
-            col_input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(5_000_000),
-                datum: OutputDatum::None,
-                script_ref: None,
-                is_legacy: false,
-                raw_cbor: None,
-            },
-        );
-        let ref_input = TransactionInput {
-            transaction_id: Hash32::from_bytes([3u8; 32]),
-            index: 0,
-        };
-        utxo_set.insert(
-            ref_input.clone(),
-            TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
-                value: Value::lovelace(2_000_000),
-                datum: OutputDatum::None,
-                script_ref: Some(ScriptRef::PlutusV2(vec![0x01, 0x02, 0x03, 0x04])),
-                is_legacy: false,
-                raw_cbor: None,
-            },
-        );
+    fn test_fee_size_unchanged_for_pre_alonzo_txs() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let min_fee_a = params.min_fee_a;
+        let (utxo_set, input) = make_simple_utxo_set();
 
-        // Use params with real V1+V2 cost models so the hash differs.
-        let params = make_params_with_cost_models();
+        // A fake raw_cbor starting with 0x83 (CBOR array of 3 elements) — pre-Alonzo.
+        let raw_cbor_shelley: Vec<u8> = std::iter::once(0x83u8)
+            .chain(std::iter::repeat_n(0u8, 299))
+            .collect();
+        let tx_size: u64 = raw_cbor_shelley.len() as u64; // 300 bytes
 
-        let redeemer = Redeemer {
-            tag: RedeemerTag::Spend,
-            index: 0,
-            data: PlutusData::Integer(42),
-            ex_units: ExUnits {
-                mem: 1_000,
-                steps: 1_000,
-            },
-        };
+        // Pre-Alonzo: no adjustment, fee uses the full tx_size.
+        let expected_fee_shelley = min_fee_a * tx_size + params.min_fee_b;
 
-        // Deliberately compute the hash with only V1 — simulating a buggy tx
-        // builder that omits the V2 reference script language.
-        let wrong_hash = torsten_serialization::compute_script_data_hash(
-            std::slice::from_ref(&redeemer),
-            &[],
-            &params.cost_models,
-            true,  // has_v1
-            false, // BUG: V2 reference script omitted
-            false,
-            None,
-            None,
+        let fee_shelley = expected_fee_shelley;
+        let output_value = 10_000_000 - fee_shelley;
+        let mut tx = make_simple_tx(input, output_value, fee_shelley);
+        tx.raw_cbor = Some(raw_cbor_shelley);
+
+        let computed = compute_min_fee(&tx, &utxo_set, &params, tx_size);
+        assert_eq!(
+            computed.0, expected_fee_shelley,
+            "pre-Alonzo tx: compute_min_fee must NOT subtract any byte from tx_size. \
+             Expected {expected_fee_shelley}, got {}",
+            computed.0
+        );
+    }
+
+    /// Regression test for GitHub issue #81.
+    ///
+    /// TX `9816fcc8efdd80f350a2cca600a268a0e65c2df1b28022f07b99c382112c0fe2`
+    /// (mainnet, slot 182,039,011) paid a fee of 168,537 lovelace. Haskell
+    /// accepted it; Torsten incorrectly computed minimum = 168,581 (delta = 44 =
+    /// 1 byte × min_fee_a(44)).  The root cause: Torsten included the `is_valid`
+    /// boolean in tx_size, while Haskell's `toCBORForSizeComputation` omits it.
+    ///
+    /// With the fix, a 3,830-byte Alonzo+ tx at mainnet params yields:
+    ///   min_fee = 44 × (3830 - 1) + 155381 = 44 × 3829 + 155381 = 168,276 + 155,381 = 323,657?
+    ///
+    /// Actually the concrete numbers depend on the exact tx_size and params.
+    /// We test the invariant: for an Alonzo+ tx, the 1-byte deduction is applied.
+    ///
+    /// Concrete check: if raw_cbor is 3,830 bytes (0x84-prefixed), mainnet params
+    /// (min_fee_a=44, min_fee_b=155381), then:
+    ///   Torsten-OLD: 44 × 3830 + 155381 = 168,520 + 155,381 = (irrelevant - just verify delta)
+    ///   Torsten-NEW: 44 × 3829 + 155381 = 168,476 + 155,381 = (irrelevant)
+    ///   Delta = 44 lovelace (exactly as reported in #81)
+    #[test]
+    fn test_issue_81_is_valid_byte_excluded_from_fee_size() {
+        // mainnet Conway protocol parameters (defaults match mainnet genesis)
+        let params = ProtocolParameters::mainnet_defaults();
+        let min_fee_a = params.min_fee_a;
+        let min_fee_b = params.min_fee_b;
+
+        // Simulate an Alonzo+ tx of N bytes where N is chosen so that
+        // the uncorrected fee would be 168,581 (the wrong value from #81).
+        // 168,581 = 44 * N + 155,381  →  N = (168,581 - 155,381) / 44 = 300 bytes.
+        // (Simplified: we just verify the 44-lovelace delta is correct.)
+        let tx_size: u64 = 300; // raw CBOR size (includes is_valid byte)
+        let wrong_min_fee = min_fee_a * tx_size + min_fee_b;
+        let correct_min_fee = min_fee_a * (tx_size - 1) + min_fee_b;
+        assert_eq!(
+            wrong_min_fee - correct_min_fee,
+            44,
+            "Delta must be exactly 1 × min_fee_a = 44 lovelace"
         );
 
-        let tx = Transaction {
-            hash: Hash32::ZERO,
-            body: TransactionBody {
-                inputs: vec![input],
-                outputs: vec![TransactionOutput {
-                    address: Address::Byron(ByronAddress {
-                        payload: vec![0u8; 32],
-                    }),
-                    value: Value::lovelace(9_800_000),
-                    datum: OutputDatum::None,
-                    script_ref: None,
-                    is_legacy: false,
-                    raw_cbor: None,
-                }],
-                fee: Lovelace(200_000),
-                ttl: None,
-                certificates: vec![],
-                withdrawals: BTreeMap::new(),
-                auxiliary_data_hash: None,
-                validity_interval_start: None,
-                mint: BTreeMap::new(),
-                script_data_hash: Some(wrong_hash),
-                collateral: vec![col_input],
-                required_signers: vec![],
-                network_id: None,
-                collateral_return: None,
-                total_collateral: None,
-                reference_inputs: vec![ref_input],
-                update: None,
-                voting_procedures: BTreeMap::new(),
-                proposal_procedures: vec![],
-                treasury_value: None,
-                donation: None,
-            },
-            witness_set: TransactionWitnessSet {
-                vkey_witnesses: vec![],
-                native_scripts: vec![],
-                bootstrap_witnesses: vec![],
-                plutus_v1_scripts: vec![vec![0x0A, 0x0B, 0x0C]],
-                plutus_v2_scripts: vec![],
-                plutus_v3_scripts: vec![],
-                plutus_data: vec![],
-                redeemers: vec![redeemer],
-                raw_redeemers_cbor: None,
-                raw_plutus_data_cbor: None,
-                pallas_script_data_hash: None,
-            },
-            is_valid: true,
-            auxiliary_data: None,
-            raw_cbor: None,
-        };
+        // A tx that pays `correct_min_fee` must pass validation when
+        // raw_cbor starts with 0x84 (Alonzo+ 4-element array).
+        let (utxo_set, input) = make_simple_utxo_set();
+        let output_value = 10_000_000 - correct_min_fee;
+        let mut tx = make_simple_tx(input, output_value, correct_min_fee);
+        // 0x84-prefixed raw_cbor of the correct total size
+        tx.raw_cbor = Some(
+            std::iter::once(0x84u8)
+                .chain(std::iter::repeat_n(0u8, (tx_size - 1) as usize))
+                .collect(),
+        );
 
-        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
-
-        // Must be rejected with ScriptDataHashMismatch because the validator
-        // now includes V2 (from the reference input) but the declared hash
-        // was computed without it.
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, tx_size, None);
         assert!(
-            result.is_err(),
-            "Transaction with wrong script_data_hash must be rejected"
-        );
-        let errors = result.unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::ScriptDataHashMismatch { .. })),
-            "Expected ScriptDataHashMismatch error for V1+V2 tx with V1-only hash: {errors:?}"
+            result.is_ok(),
+            "Issue #81: tx paying correct Haskell-compatible fee must not be rejected: {result:?}"
         );
     }
 

@@ -261,7 +261,10 @@ pub fn validate_transaction_with_pools(
             }
             if let (Some(ref _raw), Some(sc)) = (&tx.raw_cbor, slot_config) {
                 let cost_models_cbor = params.cost_models.to_cbor();
-                let max_ex = (params.max_tx_ex_units.mem, params.max_tx_ex_units.steps);
+                // uplc::tx::eval_phase_two_raw expects initial_budget as (cpu_steps, mem_units).
+                // Our ExUnits struct uses { mem, steps } where mem=memory_units and steps=cpu_steps.
+                // Swap the fields to match the uplc convention: (steps, mem) = (cpu, mem).
+                let max_ex = (params.max_tx_ex_units.steps, params.max_tx_ex_units.mem);
                 if let Err(e) =
                     evaluate_plutus_scripts(tx, utxo_set, cost_models_cbor.as_deref(), max_ex, sc)
                 {

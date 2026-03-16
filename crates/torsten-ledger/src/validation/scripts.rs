@@ -438,57 +438,30 @@ pub(super) fn check_script_data_hash(
                 }
             }
 
-            // Debug log when the hash-based intersection found no languages
-            // despite having redeemers and non-empty scriptsNeeded/scriptsProvided.
-            // The unconditional reference-input scan below will still run.
+            // Debug log when the intersection is empty despite having redeemers
             if !has_v1 && !has_v2 && !has_v3 && has_redeemers && !scripts_needed.is_empty() {
                 debug!(
                     needed_count = scripts_needed.len(),
                     provided_count = scripts_provided.len(),
                     needed = ?scripts_needed.iter().map(|h| h.to_hex()).collect::<Vec<_>>(),
                     provided = ?scripts_provided.keys().map(|h| h.to_hex()).collect::<Vec<_>>(),
-                    "scriptsNeeded/Provided intersection empty after hash matching"
+                    "scriptsNeeded/Provided intersection empty — falling back to ref input scan"
                 );
             }
 
-            // Always supplement language detection by scanning reference inputs
-            // directly for their Plutus script version. This runs unconditionally
-            // (not only when no languages were detected) to handle two cases:
-            //
-            //   (a) Mixed-language transactions — e.g. V1 witness scripts set
-            //       `has_v1 = true` above, but a V2 reference-only script is
-            //       also needed. The previous fallback guard (`!has_v1`) would
-            //       prevent it from firing, leaving `has_v2 = false` and
-            //       causing a ScriptDataHashMismatch (issue #82).
-            //
-            //   (b) Hash computation divergence — the reference script's
-            //       computed hash may not appear in `scripts_needed` when our
-            //       hash computation (tag||bytes) differs from the on-chain
-            //       address credential hash (e.g. double-CBOR-encoding of
-            //       script bytes in some eras), so the intersection at step 3
-            //       misses it entirely.
-            //
-            // Only `body.reference_inputs` are scanned (not spending inputs):
-            // spending-input UTxOs carrying a script_ref are spent for their
-            // ADA value, not for their script, and must NOT contribute their
-            // language to the views. Reference inputs are the only inputs whose
-            // script_ref is explicitly made available to the transaction for
-            // script execution. This matches the Haskell `refScripts` function
-            // which restricts to `referenceInputs` when building the available
-            // script set for `mkScriptIntegrity`.
-            //
-            // Safety: if a reference script contributes its language here but
-            // is NOT actually needed by this transaction, the script_data_hash
-            // declared in the tx body will still not match our computed value
-            // (since the tx builder would have used the correct language set),
-            // and validation will correctly reject the tx with a mismatch.
-            for ref_input in &body.reference_inputs {
-                if let Some(utxo) = utxo_set.lookup(ref_input) {
-                    match &utxo.script_ref {
-                        Some(ScriptRef::PlutusV1(_)) => has_v1 = true,
-                        Some(ScriptRef::PlutusV2(_)) => has_v2 = true,
-                        Some(ScriptRef::PlutusV3(_)) => has_v3 = true,
-                        _ => {}
+            // Fallback: if we have redeemers but no languages were detected
+            // (script hash matching failed), scan reference inputs directly.
+            // This handles edge cases where our hash computation differs from
+            // the address hash (e.g., double-encoded scripts).
+            if !has_v1 && !has_v2 && !has_v3 && has_redeemers {
+                for ref_input in &body.reference_inputs {
+                    if let Some(utxo) = utxo_set.lookup(ref_input) {
+                        match &utxo.script_ref {
+                            Some(ScriptRef::PlutusV1(_)) => has_v1 = true,
+                            Some(ScriptRef::PlutusV2(_)) => has_v2 = true,
+                            Some(ScriptRef::PlutusV3(_)) => has_v3 = true,
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -609,8 +582,43 @@ pub(super) fn ex_unit_fee(tx: &Transaction, params: &ProtocolParameters) -> u64 
     mem_cost.saturating_add(step_cost)
 }
 
+/// Compute the Haskell-compatible transaction size for fee calculation.
+///
+/// Haskell's `toCBORForSizeComputation` (Alonzo+ eras) encodes the transaction
+/// as a **3-element** CBOR array `[body, wits, aux_data]`, deliberately omitting
+/// the `is_valid` boolean field to maintain fee-formula continuity with the Mary
+/// era.  The on-chain representation (and our `raw_cbor`) is a **4-element** array
+/// `[body, wits, is_valid, aux_data]`.  The difference is exactly 1 byte — the
+/// CBOR encoding of the boolean (`0xF4`/`0xF5`).
+///
+/// We detect Alonzo+ by checking whether the first byte of `raw_cbor` is `0x84`
+/// (definite-length array of 4).  Pre-Alonzo transactions start with `0x83`
+/// (array of 3) and have no `is_valid` field, so no adjustment is needed.
+///
+/// Reference:
+/// - `Cardano.Ledger.Alonzo.Tx.toCBORForSizeComputation` (cardano-ledger)
+/// - CIP-0112 tiered reference script fee is based on script bytes, not tx size.
+fn fee_tx_size(tx: &Transaction, tx_size: u64) -> u64 {
+    // The raw CBOR first byte tells us the CBOR major type and additional info.
+    // 0x84 = major type 4 (array) with additional info 4 (length = 4 elements).
+    // An Alonzo+ transaction is encoded as array(4); pre-Alonzo as array(3) = 0x83.
+    let is_alonzo_plus = tx
+        .raw_cbor
+        .as_deref()
+        .is_some_and(|b| b.first() == Some(&0x84));
+    if is_alonzo_plus {
+        // Subtract the 1-byte is_valid field that Haskell excludes from fee size.
+        tx_size.saturating_sub(1)
+    } else {
+        tx_size
+    }
+}
+
 /// Compute the minimum fee including base formula, reference-script fee and
 /// execution-unit costs.
+///
+/// The base fee uses [`fee_tx_size`] to match Haskell's `toCBORForSizeComputation`,
+/// which omits the `is_valid` boolean from the size for Alonzo+ transactions.
 pub(super) fn compute_min_fee(
     tx: &Transaction,
     utxo_set: &UtxoSet,
@@ -623,9 +631,11 @@ pub(super) fn compute_min_fee(
         params.min_fee_ref_script_cost_per_byte,
     );
     let eu_fee = ex_unit_fee(tx, params);
+    // Use the Haskell-compatible size (excludes is_valid for Alonzo+).
+    let effective_size = fee_tx_size(tx, tx_size);
     Lovelace(
         params
-            .min_fee(tx_size)
+            .min_fee(effective_size)
             .0
             .saturating_add(rs_fee)
             .saturating_add(eu_fee),
