@@ -965,14 +965,14 @@ fn build_smooth_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) ->
         s.push(SMOOTH_BLOCKS[0]);
     }
 
+    // Split by character count (not byte index) since block chars are multi-byte UTF-8
+    let filled_chars = full_blocks.min(width)
+        + if partial_eighths > 0 { 1 } else { 0 }.min(width.saturating_sub(full_blocks));
+    let filled: String = s.chars().take(filled_chars).collect();
+    let empty_str: String = s.chars().skip(filled_chars).collect();
     vec![
-        Span::styled(
-            s[..full_blocks.min(width)
-                + if partial_eighths > 0 { 1 } else { 0 }.min(width.saturating_sub(full_blocks))]
-                .to_string(),
-            Style::default().fg(fill),
-        ),
-        Span::styled(" ".repeat(empty), Style::default().fg(theme.gauge_empty)),
+        Span::styled(filled, Style::default().fg(fill)),
+        Span::styled(empty_str, Style::default().fg(theme.gauge_empty)),
     ]
 }
 
