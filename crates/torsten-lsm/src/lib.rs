@@ -28,23 +28,23 @@
 //! assert!(val.is_some());
 //! ```
 
-pub mod bloom;
-pub mod cache;
-pub mod compaction;
-pub mod config;
-pub mod error;
-pub mod fence;
-pub mod key;
-pub mod level;
-pub mod memtable;
-pub mod merge;
-pub mod run;
-pub mod session_lock;
-pub mod snapshot;
-pub mod sstable;
-pub mod tree;
-pub mod value;
-pub mod wal;
+pub(crate) mod bloom;
+pub(crate) mod cache;
+pub(crate) mod compaction;
+pub(crate) mod config;
+pub(crate) mod error;
+pub(crate) mod fence;
+pub(crate) mod key;
+pub(crate) mod level;
+pub(crate) mod memtable;
+pub(crate) mod merge;
+pub(crate) mod run;
+pub(crate) mod session_lock;
+pub(crate) mod snapshot;
+pub(crate) mod sstable;
+pub(crate) mod tree;
+pub(crate) mod value;
+pub(crate) mod wal;
 
 // Re-export public API types
 pub use config::LsmConfig;
