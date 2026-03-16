@@ -22,6 +22,9 @@ mod scripts;
 mod tests;
 
 pub use scripts::evaluate_native_script;
+// Re-exported for use by the block-application layer (block-level ref script
+// size check in state/apply.rs — Haskell's `conwayBbodyTransition`).
+pub(crate) use scripts::{calculate_ref_script_size, script_ref_byte_size};
 
 use std::collections::HashSet;
 

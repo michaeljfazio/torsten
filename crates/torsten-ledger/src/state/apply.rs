@@ -12,13 +12,36 @@
 use super::{stake_credential_hash, BlockValidationMode, LedgerError, LedgerState};
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
-use crate::validation::{validate_transaction, ValidationError};
+use crate::validation::{
+    calculate_ref_script_size, script_ref_byte_size, validate_transaction, ValidationError,
+};
 use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
+
+/// Maximum total reference script size allowed across all transactions in a single
+/// Conway+ block.
+///
+/// Source: Haskell `ppMaxRefScriptSizePerBlockG = L.to . const $ 1024 * 1024`
+/// (Conway PParams). This is not a protocol parameter that can be updated by
+/// governance — it is hardcoded in the implementation.
+///
+/// The corresponding per-transaction limit is [`MAX_REF_SCRIPT_SIZE_PER_TX`].
+const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = 1024 * 1024; // 1 MiB
+
+/// Maximum total reference script size allowed in a single transaction.
+///
+/// Source: Haskell `ppMaxRefScriptSizePerTxG = L.to . const $ 200 * 1024`
+/// (Conway PParams). Also hardcoded, not a governance-updateable protocol parameter.
+///
+/// This constant is defined here for documentation and cross-reference purposes.
+/// The per-tx size limit is enforced via the fee calculation (CIP-0112) where
+/// transactions with excessive ref scripts will fail the `feesOK` check.
+#[allow(dead_code)]
+const MAX_REF_SCRIPT_SIZE_PER_TX: u64 = 200 * 1024; // 200 KiB
 
 impl LedgerState {
     /// Apply a block to the ledger state.
@@ -201,6 +224,60 @@ impl LedgerState {
                 limit = self.protocol_params.max_block_ex_units.steps,
                 "Block exceeds max execution unit step budget (expected during replay before PP updates)"
             );
+        }
+
+        // Block-level totalRefScriptSize check (Conway+, protocol >= 9).
+        //
+        // Matches Haskell's `conwayBbodyTransition` which enforces:
+        //   totalRefScriptSize <= maxRefScriptSizePerBlock
+        //
+        // `totalRefScriptSize` is the sum of `txNonDistinctRefScriptsSize` for every
+        // transaction in the block. For valid transactions this counts ref scripts from
+        // both inputs and reference_inputs; for invalid (is_valid=false) transactions
+        // it counts collateral outputs (which we approximate as 0 for simplicity — the
+        // spec uses the UTxO after collateral substitution for invalid txs, but in
+        // practice no collateral outputs carry reference scripts).
+        //
+        // Per the Haskell implementation, this check fires for Conway era only
+        // (protocol version >= 9). Earlier eras have no such block-level limit.
+        if self.protocol_params.protocol_version_major >= 9
+            && mode == BlockValidationMode::ValidateAll
+        {
+            // We sum ref scripts from both regular inputs AND reference_inputs
+            // (Haskell uses `allInputsTxBodyF` which is the union of both sets).
+            let total_ref_script_size: u64 = block
+                .transactions
+                .iter()
+                .map(|tx| {
+                    // Count ref scripts from regular spending inputs
+                    let spending_size: u64 = tx
+                        .body
+                        .inputs
+                        .iter()
+                        .filter_map(|inp| {
+                            self.utxo_set
+                                .lookup(inp)
+                                .and_then(|utxo| utxo.script_ref.as_ref().map(script_ref_byte_size))
+                        })
+                        .sum();
+                    // Count ref scripts from reference inputs
+                    let reference_size =
+                        calculate_ref_script_size(&tx.body.reference_inputs, &self.utxo_set);
+                    spending_size.saturating_add(reference_size)
+                })
+                .fold(0u64, |acc, x| acc.saturating_add(x));
+
+            if total_ref_script_size > MAX_REF_SCRIPT_SIZE_PER_BLOCK {
+                return Err(LedgerError::BlockTxValidationFailed {
+                    slot: block.slot().0,
+                    tx_hash: String::from("(block-level check)"),
+                    errors: format!(
+                        "BodyRefScriptsSizeTooBig: totalRefScriptSize={} exceeds \
+                         maxRefScriptSizePerBlock={} (Conway Bbody rule)",
+                        total_ref_script_size, MAX_REF_SCRIPT_SIZE_PER_BLOCK
+                    ),
+                });
+            }
         }
 
         // Pre-compute cost_models CBOR once per block (doesn't change within a block)

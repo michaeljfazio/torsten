@@ -1072,7 +1072,8 @@ fn test_epoch_nonce_computation() {
     expected_evolving.extend_from_slice(eta_hash.as_bytes());
     assert_eq!(
         state.evolving_nonce,
-        torsten_primitives::hash::blake2b_256(&expected_evolving)
+        torsten_primitives::hash::blake2b_256(&expected_evolving),
+        "evolving_nonce should be blake2b_256(genesis || blake2b_256(nonce_vrf_output))"
     );
     // Candidate nonce tracks evolving (not in stabilisation window)
     assert_eq!(state.candidate_nonce, state.evolving_nonce);

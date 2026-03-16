@@ -159,7 +159,12 @@ pub(super) fn collect_available_script_hashes(
 // ---------------------------------------------------------------------------
 
 /// Calculate the total byte size of reference scripts used via reference inputs.
-pub(super) fn calculate_ref_script_size(
+///
+/// Matches Haskell's `txNonDistinctRefScriptsSize`, which sums the `originalBytesSize`
+/// of each reference script found in the transaction's inputs and reference inputs.
+/// Note: Haskell counts ALL reference scripts in the UTxO entries referenced, even if
+/// the same script appears multiple times — it is non-distinct (no deduplication).
+pub(crate) fn calculate_ref_script_size(
     reference_inputs: &[TransactionInput],
     utxo_set: &UtxoSet,
 ) -> u64 {
@@ -175,7 +180,7 @@ pub(super) fn calculate_ref_script_size(
 }
 
 /// Return the byte size of a single reference script.
-pub(super) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
+pub(crate) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
     match script_ref {
         ScriptRef::NativeScript(ns) => torsten_serialization::encode_native_script(ns).len() as u64,
         ScriptRef::PlutusV1(bytes) | ScriptRef::PlutusV2(bytes) | ScriptRef::PlutusV3(bytes) => {
@@ -188,11 +193,16 @@ pub(super) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
 ///
 /// Divides the total script size into 25 KiB tiers, applying a 1.2× multiplier
 /// per tier. The entire accumulation is kept as an exact rational value (using
-/// numerator/denominator pairs with GCD reduction) and floored only once at the
-/// end — matching Haskell's `tierRefScriptFee` which accumulates `Rational`
-/// values before a single `floor`.
+/// numerator/denominator pairs with GCD reduction) and ceiled only once at the
+/// end — matching the Cardano Blueprint spec which states "you should take the
+/// ceiling as a last step".
+///
+/// Haskell's `tierRefScriptFee` accumulates `Rational` values and then applies
+/// `ceiling` to produce the final integer lovelace amount. Using `floor` here
+/// would cause a 1-lovelace undercount on transactions where the fractional
+/// accumulation is non-zero.
 pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u64 {
-    const TIER_SIZE: u64 = 25_600; // 25 KiB
+    const TIER_SIZE: u64 = 25_600; // 25 KiB (= 25 * 1024)
     const MULT_NUM: u128 = 6; // 1.2 = 6/5
     const MULT_DEN: u128 = 5;
 
@@ -207,13 +217,13 @@ pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size
     while remaining > 0 {
         let chunk = remaining.min(TIER_SIZE);
         // acc += chunk * (price_num / price_den)
+        // Performed exactly: new_num = old_num * price_den + chunk * price_num * old_den
         acc_num = acc_num * price_den + chunk as u128 * price_num * acc_den;
         acc_den *= price_den;
         remaining -= chunk;
-        // price *= 6/5 (exact rational multiplication)
+        // price *= 6/5 (exact rational multiplication, reduce immediately to prevent overflow)
         price_num *= MULT_NUM;
         price_den *= MULT_DEN;
-        // Reduce to prevent overflow
         let g = gcd_u128(price_num, price_den);
         price_num /= g;
         price_den /= g;
@@ -221,8 +231,9 @@ pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size
         acc_num /= g2;
         acc_den /= g2;
     }
-    // floor(acc_num / acc_den) — single floor at the end, matching Haskell
-    (acc_num / acc_den) as u64
+    // ceiling(acc_num / acc_den) — single ceiling at the end per spec.
+    // div_ceil is equivalent to (acc_num + acc_den - 1) / acc_den but overflow-safe.
+    acc_num.div_ceil(acc_den) as u64
 }
 
 fn gcd_u128(mut a: u128, mut b: u128) -> u128 {

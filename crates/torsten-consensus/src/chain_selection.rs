@@ -1,6 +1,6 @@
-use torsten_primitives::block::{Point, Tip};
+use torsten_primitives::block::{BlockHeader, Point, Tip};
 use torsten_primitives::era::Era;
-use torsten_primitives::hash::BlockHeaderHash;
+use torsten_primitives::hash::{blake2b_224, BlockHeaderHash};
 
 /// Chain selection rule implementing Ouroboros chain preference.
 ///
@@ -11,12 +11,25 @@ use torsten_primitives::hash::BlockHeaderHash;
 ///   (OBFT) protocol where honest chains should fill most slots.
 ///
 /// - **Praos (Shelley+)**: Chains are compared by *length* (block number).
-///   Longer chains are always preferred because Praos is a longest-chain protocol.
+///   Longer chains are always preferred because Praos is a longest-chain
+///   protocol.
 ///
-/// In both modes, when the primary metric is equal, a deterministic tiebreaker
-/// is applied using the block header hash: the **lower** hash wins. This matches
-/// the Haskell cardano-node behavior and ensures all honest nodes converge on
-/// the same fork without relying on arrival order.
+/// ## Tiebreaker (Praos only)
+///
+/// When chains are equal length, the Cardano Blueprint specifies a structured
+/// tiebreaker to prevent geographic centralization incentives:
+///
+/// 1. **Same stake pool** (same issuer VRF key hash): the block with the
+///    **higher opcert sequence number** wins. Since valid opcerts can only
+///    increment by 1 per block, this is a deterministic and fair rule.
+///
+/// 2. **Different stake pools**: the block with the **lower VRF output value**
+///    wins. In Conway (protocol ≥ 9), this comparison is only applied when the
+///    two tip blocks are within `slot_window` slots of each other — this
+///    prevents very late blocks from winning against already-adopted chains.
+///
+/// For Byron, when density is equal, we fall back to comparing block header
+/// hashes (lower hash wins), since Byron has no VRF or opcert concept.
 pub struct ChainSelection {
     pub current_tip: Tip,
 }
@@ -31,8 +44,9 @@ impl ChainSelection {
     /// Compare two chain candidates by block number only (legacy Praos rule).
     ///
     /// Does NOT perform deterministic tie-breaking. Retained for backward
-    /// compatibility — callers that don't have hash/era context can still use
-    /// this, but should prefer [`prefer_chain`] for correctness.
+    /// compatibility — callers that don't have header context can still use
+    /// this, but should prefer [`prefer_chain_with_headers`] for spec
+    /// compliance.
     pub fn prefer(&self, candidate: &Tip) -> ChainPreference {
         match (&self.current_tip.point, &candidate.point) {
             (Point::Origin, Point::Origin) => ChainPreference::Equal,
@@ -51,12 +65,73 @@ impl ChainSelection {
     }
 
     /// Full chain preference with era-aware comparison and deterministic
+    /// tie-breaking using block header metadata.
+    ///
+    /// This is the authoritative comparison implementing the Cardano Blueprint
+    /// tiebreaker rules:
+    ///
+    /// - **Byron**: density comparison; equal-density falls back to lower
+    ///   block header hash.
+    /// - **Shelley–Babbage**: length comparison; equal-length tiebreaker is
+    ///   same-pool (higher opcert wins) or different-pool (lower VRF wins),
+    ///   with no slot-distance restriction.
+    /// - **Conway+**: same as Shelley–Babbage but the cross-pool VRF comparison
+    ///   is only applied when the two tip slots are within `slot_window` of
+    ///   each other. When the slot difference exceeds `slot_window`, the
+    ///   existing (already-selected) chain is preferred, preventing very late
+    ///   blocks from displacing the current selection.
+    ///
+    /// `slot_window` should be set to `3k/f` (the stability window). Pass `u64::MAX`
+    /// to disable the Conway slot-distance constraint (matches pre-Conway behavior).
+    pub fn prefer_chain_with_headers(
+        &self,
+        candidate: &Tip,
+        current_header: &BlockHeader,
+        candidate_header: &BlockHeader,
+        era: Era,
+        slot_window: u64,
+    ) -> ChainPreference {
+        match (&self.current_tip.point, &candidate.point) {
+            (Point::Origin, Point::Origin) => ChainPreference::Equal,
+            (Point::Origin, _) => ChainPreference::PreferCandidate,
+            (_, Point::Origin) => ChainPreference::PreferCurrent,
+            _ => {
+                let primary = if era == Era::Byron {
+                    self.compare_density(candidate)
+                } else {
+                    self.compare_length(candidate)
+                };
+
+                match primary {
+                    ChainPreference::Equal => {
+                        if era == Era::Byron {
+                            // Byron has no VRF/opcert — use header hash as a
+                            // deterministic tiebreaker.
+                            hash_tiebreak(
+                                &current_header.header_hash,
+                                &candidate_header.header_hash,
+                            )
+                        } else {
+                            praos_tiebreak(current_header, candidate_header, era, slot_window)
+                        }
+                    }
+                    other => other,
+                }
+            }
+        }
+    }
+
+    /// Full chain preference with era-aware comparison and deterministic
     /// tie-breaking.
     ///
     /// - In **Byron** era: compares chain density (blocks / slots). A chain
     ///   covering fewer slots with the same number of blocks is denser.
     /// - In **Praos** eras (Shelley+): compares chain length (block number).
     /// - **Tiebreaker** (both eras): lower block header hash wins.
+    ///
+    /// This method uses only header hashes for tiebreaking, which is a
+    /// simplified rule. For full spec compliance, use
+    /// [`prefer_chain_with_headers`] which applies the proper opcert/VRF rules.
     ///
     /// `current_hash` and `candidate_hash` are the header hashes of the tip
     /// blocks of the current and candidate chains respectively.
@@ -79,10 +154,7 @@ impl ChainSelection {
                 };
 
                 match primary {
-                    ChainPreference::Equal => {
-                        // Deterministic tiebreaker: lower header hash wins
-                        hash_tiebreak(current_hash, candidate_hash)
-                    }
+                    ChainPreference::Equal => hash_tiebreak(current_hash, candidate_hash),
                     other => other,
                 }
             }
@@ -105,6 +177,28 @@ impl ChainSelection {
     ) -> bool {
         matches!(
             self.prefer_chain(candidate, era, current_hash, candidate_hash),
+            ChainPreference::PreferCandidate
+        )
+    }
+
+    /// Check if a candidate chain would trigger a switch using the full
+    /// spec-compliant tiebreaker with opcert/VRF comparison.
+    pub fn should_switch_chain_with_headers(
+        &self,
+        candidate: &Tip,
+        current_header: &BlockHeader,
+        candidate_header: &BlockHeader,
+        era: Era,
+        slot_window: u64,
+    ) -> bool {
+        matches!(
+            self.prefer_chain_with_headers(
+                candidate,
+                current_header,
+                candidate_header,
+                era,
+                slot_window
+            ),
             ChainPreference::PreferCandidate
         )
     }
@@ -164,9 +258,113 @@ impl ChainSelection {
     }
 }
 
+/// Praos tiebreaker for equal-length chains.
+///
+/// Implements the Cardano Blueprint tiebreaker spec:
+///
+/// 1. If the tip is issued by the **same stake pool** (same blake2b-224 hash
+///    of the cold verification key):
+///    - The block with the **higher opcert sequence number** wins.
+///    - (Valid opcerts can only increment by 1, so this is deterministic.)
+///
+/// 2. If issued by **different stake pools**:
+///    - The block with the **lower VRF output value** (lexicographic byte
+///      comparison) wins.
+///    - In Conway era (protocol version ≥ 9): this comparison is only applied
+///      when the two tip slots are within `slot_window` of each other. When
+///      the slot gap exceeds `slot_window`, the current selection is preferred
+///      (we do not switch to a block that arrived much later).
+///    - In pre-Conway eras: the VRF comparison is applied unconditionally.
+///
+/// The slot-distance restriction in Conway prevents stake pools from gaming
+/// the selection rule by ignoring peers' blocks when they know they can win
+/// the VRF comparison — an attack that would incentivize geographic
+/// centralization.
+fn praos_tiebreak(
+    current: &BlockHeader,
+    candidate: &BlockHeader,
+    era: Era,
+    slot_window: u64,
+) -> ChainPreference {
+    // Compute pool IDs as blake2b-224 of the cold verification key (issuer_vkey).
+    let current_pool = blake2b_224(&current.issuer_vkey);
+    let candidate_pool = blake2b_224(&candidate.issuer_vkey);
+
+    if current_pool == candidate_pool {
+        // Same pool: higher opcert sequence number wins.
+        //
+        // Per the Haskell cardano-node implementation (Ouroboros.Consensus.Protocol.Praos),
+        // the block with the higher `ocertN` is preferred. Since valid opcerts can only
+        // increment by exactly 1, the difference will always be 0 or 1 in practice.
+        let current_seq = current.operational_cert.sequence_number;
+        let candidate_seq = candidate.operational_cert.sequence_number;
+
+        if candidate_seq > current_seq {
+            ChainPreference::PreferCandidate
+        } else if candidate_seq < current_seq {
+            ChainPreference::PreferCurrent
+        } else {
+            // Identical pools and identical opcert counters (same block seen twice
+            // from different paths) — treat as equal.
+            ChainPreference::Equal
+        }
+    } else {
+        // Different pools: lower VRF output value wins.
+        //
+        // In Conway (protocol ≥ 9) only apply the VRF comparison when the two
+        // tip slots are within `slot_window` of each other. This ensures that a
+        // block forged much later cannot displace an already-adopted chain by
+        // winning the VRF lottery — doing so would incentivize pools to ignore
+        // other pools' blocks, harming geographic decentralization.
+        let is_conway = era == Era::Conway || {
+            // Also treat any era that would map to protocol ≥ 9 as Conway-style.
+            // In practice we check the era enum directly.
+            false
+        };
+
+        let apply_vrf_comparison = if is_conway {
+            // Only compare VRF if slots are within the window.
+            let current_slot = current.slot.0;
+            let candidate_slot = candidate.slot.0;
+            let slot_diff = current_slot.abs_diff(candidate_slot);
+            slot_diff <= slot_window
+        } else {
+            // Pre-Conway: VRF comparison is unconditional.
+            true
+        };
+
+        if apply_vrf_comparison {
+            // Compare VRF output values lexicographically.
+            // Lower value = block had "luckier" VRF draw = preferred.
+            vrf_tiebreak(&current.vrf_result.output, &candidate.vrf_result.output)
+        } else {
+            // Slot distance exceeds window in Conway: keep current selection.
+            ChainPreference::PreferCurrent
+        }
+    }
+}
+
+/// Compare VRF output values as byte sequences (lower = preferred).
+///
+/// The VRF output is a 64-byte (or 32-byte for Praos) value. We compare
+/// lexicographically: the chain whose tip block has the smaller VRF output
+/// is preferred. This is a deterministic rule that all nodes compute
+/// identically from the block headers.
+fn vrf_tiebreak(current_vrf: &[u8], candidate_vrf: &[u8]) -> ChainPreference {
+    // Lexicographic byte comparison: lower VRF value wins.
+    match candidate_vrf.cmp(current_vrf) {
+        std::cmp::Ordering::Less => ChainPreference::PreferCandidate,
+        std::cmp::Ordering::Greater => ChainPreference::PreferCurrent,
+        std::cmp::Ordering::Equal => ChainPreference::Equal,
+    }
+}
+
 /// Deterministic fork tiebreaker: the chain with the **lower** block header
 /// hash is preferred. This matches the Haskell cardano-node behavior where
 /// `compare` on `HeaderHash` is used as the ultimate tiebreaker.
+///
+/// This is used for Byron chains (no VRF/opcert) and as a fallback in the
+/// hash-based `prefer_chain` API.
 fn hash_tiebreak(
     current_hash: &BlockHeaderHash,
     candidate_hash: &BlockHeaderHash,
@@ -197,6 +395,7 @@ impl Default for ChainSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use torsten_primitives::block::{OperationalCert, ProtocolVersion, VrfOutput};
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::time::{BlockNo, SlotNo};
 
@@ -211,6 +410,45 @@ mod tests {
         Tip {
             point: Point::Specific(SlotNo(slot), hash),
             block_number: BlockNo(block_no),
+        }
+    }
+
+    /// Build a minimal BlockHeader for tiebreaker testing.
+    ///
+    /// `issuer_vkey` determines the pool ID (blake2b-224 of these bytes).
+    /// `opcert_seq` is the operational certificate sequence number.
+    /// `vrf_output` is the VRF output bytes used for cross-pool comparison.
+    fn make_header(
+        block_no: u64,
+        slot: u64,
+        hash_bytes: [u8; 32],
+        issuer_vkey: Vec<u8>,
+        opcert_seq: u64,
+        vrf_output: Vec<u8>,
+    ) -> BlockHeader {
+        BlockHeader {
+            header_hash: Hash32::from_bytes(hash_bytes),
+            prev_hash: Hash32::ZERO,
+            issuer_vkey,
+            vrf_vkey: vec![],
+            vrf_result: VrfOutput {
+                output: vrf_output,
+                proof: vec![],
+            },
+            block_number: BlockNo(block_no),
+            slot: SlotNo(slot),
+            epoch_nonce: Hash32::ZERO,
+            body_size: 0,
+            body_hash: Hash32::ZERO,
+            operational_cert: OperationalCert {
+                hot_vkey: vec![],
+                sequence_number: opcert_seq,
+                kes_period: 0,
+                sigma: vec![],
+            },
+            protocol_version: ProtocolVersion { major: 9, minor: 0 },
+            kes_signature: vec![],
+            nonce_vrf_output: vec![],
         }
     }
 
@@ -446,7 +684,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Deterministic fork tie-breaking
+    // Deterministic fork tie-breaking (hash-based legacy API)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -556,7 +794,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Edge cases
+    // Edge cases (hash-based API)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -664,7 +902,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Chain Selection Edge Cases
+    // Chain Selection Edge Cases (hash-based API)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -749,5 +987,399 @@ mod tests {
         let result = cs.prefer_chain(&candidate, Era::Shelley, &hash_a, &hash_b);
         // Equal block numbers → tiebreak by hash: 0x33 < 0x55
         assert_eq!(result, ChainPreference::PreferCandidate);
+    }
+
+    // -----------------------------------------------------------------------
+    // Spec-compliant tiebreaker: prefer_chain_with_headers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_same_pool_higher_opcert_wins() {
+        // Two equal-length chains from the SAME pool.
+        // Candidate has a higher opcert sequence number → candidate preferred.
+        let pool_vkey = vec![0xAB; 32]; // same issuer for both
+        let current_header = make_header(
+            10,
+            200,
+            [0xCC; 32],
+            pool_vkey.clone(),
+            5,              // opcert sequence = 5
+            vec![0x80; 32], // VRF output
+        );
+        let candidate_header = make_header(
+            10,
+            205,
+            [0xDD; 32],
+            pool_vkey.clone(),
+            6,              // opcert sequence = 6 (higher)
+            vec![0x90; 32], // higher VRF — but irrelevant since same pool
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX, // no slot-distance constraint
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Same pool, higher opcert seq should prefer candidate"
+        );
+    }
+
+    #[test]
+    fn test_same_pool_lower_opcert_keeps_current() {
+        // Two equal-length chains from the SAME pool.
+        // Candidate has a lower opcert sequence number → current preferred.
+        let pool_vkey = vec![0xAB; 32];
+        let current_header = make_header(
+            10,
+            200,
+            [0xCC; 32],
+            pool_vkey.clone(),
+            6,              // opcert sequence = 6 (higher)
+            vec![0x40; 32], // lower VRF — irrelevant, same pool
+        );
+        let candidate_header = make_header(
+            10,
+            205,
+            [0xDD; 32],
+            pool_vkey.clone(),
+            5,              // opcert sequence = 5 (lower)
+            vec![0x10; 32], // even lower VRF — still irrelevant
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Same pool, lower opcert seq should keep current"
+        );
+    }
+
+    #[test]
+    fn test_different_pools_lower_vrf_wins() {
+        // Two equal-length chains from DIFFERENT pools.
+        // Candidate has a lower VRF output → candidate preferred.
+        let current_pool_vkey = vec![0x01; 32]; // pool A
+        let candidate_pool_vkey = vec![0x02; 32]; // pool B (different)
+
+        let current_header = make_header(
+            10,
+            200,
+            [0xCC; 32],
+            current_pool_vkey,
+            5,
+            vec![0x80; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            205,
+            [0xDD; 32],
+            candidate_pool_vkey,
+            5,
+            vec![0x10; 32], // lower VRF → wins
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Babbage, // pre-Conway: no slot window restriction
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Different pools, lower VRF should prefer candidate (Babbage)"
+        );
+    }
+
+    #[test]
+    fn test_different_pools_higher_vrf_keeps_current() {
+        // Two equal-length chains from DIFFERENT pools.
+        // Candidate has a higher VRF output → current preferred.
+        let current_pool_vkey = vec![0x01; 32];
+        let candidate_pool_vkey = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            200,
+            [0xCC; 32],
+            current_pool_vkey,
+            5,
+            vec![0x10; 32], // lower VRF → current wins
+        );
+        let candidate_header = make_header(
+            10,
+            205,
+            [0xDD; 32],
+            candidate_pool_vkey,
+            5,
+            vec![0x80; 32], // higher VRF → loses
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Shelley,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Different pools, higher VRF should keep current"
+        );
+    }
+
+    #[test]
+    fn test_conway_vrf_within_slot_window_applies_comparison() {
+        // Conway: VRF comparison applied when slots are within the window.
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            1000,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xAA; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            1050,
+            [0xDD; 32], // 50 slots later — within window of 100
+            pool_b,
+            5,
+            vec![0x11; 32], // lower VRF → should win
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 1000, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 1050, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            100, // slot window = 100
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Within window: lower VRF candidate should win in Conway"
+        );
+    }
+
+    #[test]
+    fn test_conway_vrf_outside_slot_window_keeps_current() {
+        // Conway: VRF comparison NOT applied when slots exceed the window.
+        // Even if candidate has lower VRF, current is preferred (arrived first).
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            1000,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xAA; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            1200,
+            [0xDD; 32], // 200 slots later — OUTSIDE window of 100
+            pool_b,
+            5,
+            vec![0x01; 32], // lowest possible VRF — but slot distance is too large
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 1000, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 1200, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            100, // slot window = 100; difference is 200 > 100
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Outside window: late block should NOT win in Conway even with lower VRF"
+        );
+    }
+
+    #[test]
+    fn test_babbage_vrf_no_slot_window_restriction() {
+        // Pre-Conway (Babbage): VRF comparison applies regardless of slot distance.
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            1000,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xAA; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            5000,
+            [0xDD; 32], // 4000 slots later — would be outside any window
+            pool_b,
+            5,
+            vec![0x01; 32], // lower VRF → wins in Babbage (no slot restriction)
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 1000, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 5000, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Babbage,
+            129_600, // standard 3k/f window — but Babbage ignores it
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Babbage: lower VRF should always win regardless of slot distance"
+        );
+    }
+
+    #[test]
+    fn test_longer_chain_wins_regardless_of_tiebreaker() {
+        // Length always takes priority over opcert/VRF tiebreaker.
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        // Current chain is longer (block 11 vs 10)
+        let current_header = make_header(
+            11,
+            200,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xFF; 32], // worst possible VRF — but length wins
+        );
+        let candidate_header = make_header(
+            10,
+            200,
+            [0xDD; 32],
+            pool_b,
+            99,             // much higher opcert — irrelevant, candidate is shorter
+            vec![0x00; 32], // best possible VRF — but chain is shorter
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(11, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 200, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Longer chain always wins even if candidate has better VRF and opcert"
+        );
+    }
+
+    #[test]
+    fn test_should_switch_chain_with_headers_uses_opcert() {
+        // Verify should_switch_chain_with_headers correctly delegates to praos_tiebreak.
+        let pool_vkey = vec![0xAB; 32]; // same pool
+        let current_header = make_header(
+            10,
+            200,
+            [0x00; 32],
+            pool_vkey.clone(),
+            3, // lower opcert
+            vec![0x80; 32],
+        );
+        let candidate_header = make_header(
+            10,
+            210,
+            [0x11; 32],
+            pool_vkey.clone(),
+            4, // higher opcert → should switch
+            vec![0x80; 32],
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0x00; 32])));
+        let candidate = make_tip_with_hash(10, 210, Hash32::from_bytes([0x11; 32]));
+
+        assert!(
+            cs.should_switch_chain_with_headers(
+                &candidate,
+                &current_header,
+                &candidate_header,
+                Era::Conway,
+                u64::MAX,
+            ),
+            "Should switch when same pool and candidate has higher opcert"
+        );
+    }
+
+    #[test]
+    fn test_vrf_tiebreak_equal_values() {
+        // Identical VRF values → equal (no preference)
+        assert_eq!(
+            vrf_tiebreak(&[0xAA; 32], &[0xAA; 32]),
+            ChainPreference::Equal
+        );
+    }
+
+    #[test]
+    fn test_vrf_tiebreak_first_byte_differs() {
+        // Candidate VRF first byte is lower → preferred
+        assert_eq!(
+            vrf_tiebreak(&[0x80; 32], &[0x01; 32]),
+            ChainPreference::PreferCandidate
+        );
+        // Candidate VRF first byte is higher → current preferred
+        assert_eq!(
+            vrf_tiebreak(&[0x01; 32], &[0x80; 32]),
+            ChainPreference::PreferCurrent
+        );
     }
 }
