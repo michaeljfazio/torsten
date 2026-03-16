@@ -120,17 +120,46 @@ impl RttBands {
             None
         };
 
-        // Min/max RTT are not available from a standard Prometheus histogram;
-        // we approximate min as the lowest populated bucket boundary and max
-        // from the _max gauge if published, otherwise leave as None.
+        // Prefer explicit _min / _max gauges if the node publishes them.
+        // Otherwise approximate:
+        //   min → midpoint of the lowest non-empty bucket
+        //   max → midpoint of the highest non-empty bucket
         let min_ms = snap
             .values
             .get("torsten_peer_handshake_rtt_ms_min")
-            .copied();
+            .copied()
+            .or_else(|| {
+                // Lowest populated bucket gives an upper bound; use midpoint.
+                if band_0_50 > 0 {
+                    Some(25.0) // midpoint of 0-50ms
+                } else if band_50_100 > 0 {
+                    Some(75.0)
+                } else if band_100_200 > 0 {
+                    Some(150.0)
+                } else if total > 0 {
+                    Some(200.0)
+                } else {
+                    None
+                }
+            });
         let max_ms = snap
             .values
             .get("torsten_peer_handshake_rtt_ms_max")
-            .copied();
+            .copied()
+            .or_else(|| {
+                // Highest populated bucket gives a lower bound; use midpoint.
+                if total > 0 && band_200_plus > 0 {
+                    Some(300.0) // representative for 200ms+
+                } else if band_100_200 > 0 {
+                    Some(150.0)
+                } else if band_50_100 > 0 {
+                    Some(75.0)
+                } else if band_0_50 > 0 {
+                    Some(25.0)
+                } else {
+                    None
+                }
+            });
 
         RttBands {
             band_0_50,
@@ -170,7 +199,13 @@ pub struct App {
 
 impl App {
     /// Create a new App with default (empty) state.
+    ///
+    /// The default theme is Monokai (index 1 in the `THEMES` array) — a warm,
+    /// high-contrast palette that reads well on most terminal emulators.
     pub fn new() -> Self {
+        // Locate the Monokai theme index dynamically so that reordering THEMES
+        // does not silently break the default.
+        let monokai_idx = THEMES.iter().position(|t| t.name == "Monokai").unwrap_or(0);
         Self {
             metrics: MetricsSnapshot::default(),
             network: Network::Unknown,
@@ -179,7 +214,7 @@ impl App {
             epoch_time_remaining_secs: 0,
             epoch_length_override: 0,
             rtt_bands: RttBands::default(),
-            theme_idx: 0,
+            theme_idx: monokai_idx,
             should_quit: false,
             show_help: false,
         }

@@ -441,8 +441,10 @@ impl NodeMetrics {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            self.tip_age_secs
-                .store(now_ms.saturating_sub(slot_time_ms) / 1000, Ordering::Relaxed);
+            self.tip_age_secs.store(
+                now_ms.saturating_sub(slot_time_ms) / 1000,
+                Ordering::Relaxed,
+            );
         }
         // Update CPU and peak memory
         if let Ok(mut tracker) = self.cpu_tracker.lock() {

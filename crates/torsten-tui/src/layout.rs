@@ -1,46 +1,68 @@
 //! Adaptive layout system for the Torsten TUI dashboard.
 //!
-//! The dashboard has five panels arranged in a fixed grid with a gap between
-//! the last panel row and the footer.  Panels do NOT expand vertically to fill
-//! the remaining space.
+//! Three layout modes auto-selected from terminal dimensions:
 //!
-//! Layout (standard, >= 80x28):
-//!
+//! **Wide** (>= 120 cols, >= 30 rows):
 //! ```text
-//! ┌────────────────────────────────────────────────────────────────────────────┐
-//! │ Header (1 line)                                                            │
-//! ├────────────────────────────────┬───────────────────────────────────────────┤
-//! │ Node (fixed height)            │ Chain (fixed height)                      │
-//! ├────────────────────────────────┼───────────────────────────────────────────┤
-//! │ Connections (fixed height)     │ Resources (fixed height)                  │
-//! ├────────────────────────────────┴───────────────────────────────────────────┤
-//! │ Peers (fixed height)                                                       │
-//! │                                                                            │
-//! │ (gap)                                                                      │
-//! ├────────────────────────────────────────────────────────────────────────────┤
-//! │ Footer (1 line)                                                            │
-//! └────────────────────────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────── Header (2 lines) ──────────────────────────────────────────────────┐
+//! ├────────── Node (38%) ──────────────┬──────────────────────────── Chain (62%) ────────────────────────────────────────┤
+//! ├────── Connections (38%) ───────────┼──────────────────────────── Resources (62%) ──────────────────────────────────── ┤
+//! ├─────────────────────────────────────────────── Peers (full width) ───────────────────────────────────────────────────┤
+//! │ (gap)                                                                                                                  │
+//! ├─────────────────────────────────────────────────── Footer (1 line) ──────────────────────────────────────────────────┘
 //! ```
 //!
-//! Compact layout (< 80 cols or < 28 rows): stacks all panels in a single
-//! column; still maintains a gap above the footer.
+//! **Standard** (>= 80 cols, >= 28 rows — same two-column grid, narrower):
+//! ```text
+//! ┌──────────────── Header (2 lines) ─────────────────┐
+//! ├── Node (38%) ──┬──────── Chain (62%) ──────────── ┤
+//! ├─ Connections ──┼──────── Resources ─────────────── ┤
+//! ├───────────────────── Peers (full width) ──────────┤
+//! │ (gap)                                             │
+//! ├──────────────── Footer (1 line) ──────────────────┘
+//! ```
+//!
+//! **Compact** (< 80 cols or < 28 rows — single-column stacked):
+//! ```text
+//! ┌── Header ──┐
+//! ├── Node ────┤
+//! ├── Chain ───┤
+//! ├── Conn ────┤
+//! ├── Resources┤
+//! ├── Peers ───┤
+//! │   (gap)    │
+//! └── Footer ──┘
+//! ```
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
-/// Fixed panel heights (in lines, including borders).
-///
-/// These values are tuned so the five panels and header/footer fit comfortably
-/// in an 80x28 terminal without expanding to fill the full height.
-pub const PANEL_NODE_H: u16 = 7;
-pub const PANEL_CHAIN_H: u16 = 11;
+// ---------------------------------------------------------------------------
+// Fixed panel heights (lines including borders)
+// ---------------------------------------------------------------------------
+
+/// Node info panel: Role + Network + Version + Era + Uptime = 5 rows + 2 borders + 1 padding = 8
+pub const PANEL_NODE_H: u16 = 9;
+/// Chain panel: epoch bar + 8 data rows + 2 borders + 1 padding = 12
+pub const PANEL_CHAIN_H: u16 = 13;
+/// Connections panel: P2P + In/Out + Cold/Warm/Hot + Uni/Bi/Duplex = 5 rows + 2 borders + 1 = 8
 pub const PANEL_CONNECTIONS_H: u16 = 8;
-pub const PANEL_RESOURCES_H: u16 = 6;
-pub const PANEL_PEERS_H: u16 = 7;
+/// Resources panel: CPU + Mem live + Mem RSS + CPU bar = 4 rows + 2 borders + 1 = 7
+pub const PANEL_RESOURCES_H: u16 = 7;
+/// Peers panel: RTT bands header + bar + min/avg/max + 1 row = 5 rows + 2 borders + 1 = 8
+pub const PANEL_PEERS_H: u16 = 8;
+/// Header area height: 2 lines (status line + epoch progress bar).
+pub const HEADER_H: u16 = 2;
+
+// ---------------------------------------------------------------------------
+// Layout mode
+// ---------------------------------------------------------------------------
 
 /// Layout mode (auto-detected or overridden).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
-    /// Two-column grid layout (>= 80 cols, >= 28 rows).
+    /// Two-column grid layout, wide terminal (>= 120 cols, >= 30 rows).
+    Wide,
+    /// Two-column grid layout, standard terminal (>= 80 cols, >= 28 rows).
     Standard,
     /// Single-column stacked layout (< 80 cols or < 28 rows).
     Compact,
@@ -49,7 +71,9 @@ pub enum LayoutMode {
 impl LayoutMode {
     /// Auto-detect layout mode from terminal dimensions.
     pub fn detect(width: u16, height: u16) -> Self {
-        if width >= 80 && height >= 28 {
+        if width >= 120 && height >= 30 {
+            LayoutMode::Wide
+        } else if width >= 80 && height >= 28 {
             LayoutMode::Standard
         } else {
             LayoutMode::Compact
@@ -57,12 +81,16 @@ impl LayoutMode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DashboardLayout
+// ---------------------------------------------------------------------------
+
 /// Pre-computed layout rectangles for each dashboard panel.
 pub struct DashboardLayout {
     /// Active layout mode (reserved for future use / tests).
     #[allow(dead_code)]
     pub mode: LayoutMode,
-    /// Single-line header area.
+    /// Two-line header area (status summary + epoch progress bar).
     pub header: Rect,
     /// Node info panel area.
     pub node: Rect,
@@ -84,24 +112,23 @@ pub struct DashboardLayout {
 pub fn compute_layout(area: Rect, override_mode: Option<LayoutMode>) -> DashboardLayout {
     let mode = override_mode.unwrap_or_else(|| LayoutMode::detect(area.width, area.height));
     match mode {
-        LayoutMode::Standard => compute_standard_layout(area),
+        LayoutMode::Wide | LayoutMode::Standard => compute_two_column_layout(area, mode),
         LayoutMode::Compact => compute_compact_layout(area),
     }
 }
 
-/// Standard (two-column) layout.
-///
-/// Row heights are fixed; any remaining space becomes a gap above the footer.
-fn compute_standard_layout(area: Rect) -> DashboardLayout {
-    // The top row uses max(NODE_H, CHAIN_H) to keep both panels aligned.
+// ---------------------------------------------------------------------------
+// Two-column layout (Wide and Standard share the same structure)
+// ---------------------------------------------------------------------------
+
+fn compute_two_column_layout(area: Rect, mode: LayoutMode) -> DashboardLayout {
+    // Row heights: use the taller of the two side-by-side panels.
     let top_h = PANEL_NODE_H.max(PANEL_CHAIN_H);
-    // The middle row uses max(CONNECTIONS_H, RESOURCES_H).
     let mid_h = PANEL_CONNECTIONS_H.max(PANEL_RESOURCES_H);
 
     // Vertical split: header | top row | mid row | peers | gap | footer.
-    // Use Min(0) for the gap so it absorbs any leftover space.
     let vertical = Layout::vertical([
-        Constraint::Length(1),             // header
+        Constraint::Length(HEADER_H),      // header (2 lines)
         Constraint::Length(top_h),         // row 1: Node + Chain
         Constraint::Length(mid_h),         // row 2: Connections + Resources
         Constraint::Length(PANEL_PEERS_H), // row 3: Peers
@@ -116,16 +143,26 @@ fn compute_standard_layout(area: Rect) -> DashboardLayout {
     let peers = vertical[3];
     let footer = vertical[5];
 
-    // Row 1: Node (38%) | Chain (62%)
-    let row1_cols =
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(row1);
+    // Column split: 38% left / 62% right.
+    // In Wide mode we allow slightly more room for Chain by keeping the same ratio
+    // but the wider terminal naturally gives both panels more absolute space.
+    let left_pct = if mode == LayoutMode::Wide { 36 } else { 38 };
+    let right_pct = 100 - left_pct;
 
-    // Row 2: Connections (38%) | Resources (62%)
-    let row2_cols =
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(row2);
+    let row1_cols = Layout::horizontal([
+        Constraint::Percentage(left_pct),
+        Constraint::Percentage(right_pct),
+    ])
+    .split(row1);
+
+    let row2_cols = Layout::horizontal([
+        Constraint::Percentage(left_pct),
+        Constraint::Percentage(right_pct),
+    ])
+    .split(row2);
 
     DashboardLayout {
-        mode: LayoutMode::Standard,
+        mode,
         header,
         node: row1_cols[0],
         chain: row1_cols[1],
@@ -136,13 +173,13 @@ fn compute_standard_layout(area: Rect) -> DashboardLayout {
     }
 }
 
-/// Compact (single-column) layout.
-///
-/// All panels are stacked vertically with fixed heights.  Any remaining space
-/// becomes a gap above the footer.
+// ---------------------------------------------------------------------------
+// Compact layout
+// ---------------------------------------------------------------------------
+
 fn compute_compact_layout(area: Rect) -> DashboardLayout {
     let vertical = Layout::vertical([
-        Constraint::Length(1), // header
+        Constraint::Length(HEADER_H), // header
         Constraint::Length(PANEL_NODE_H),
         Constraint::Length(PANEL_CHAIN_H),
         Constraint::Length(PANEL_CONNECTIONS_H),
@@ -165,14 +202,25 @@ fn compute_compact_layout(area: Rect) -> DashboardLayout {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn test_layout_mode_detect_wide() {
+        assert_eq!(LayoutMode::detect(120, 30), LayoutMode::Wide);
+        assert_eq!(LayoutMode::detect(200, 50), LayoutMode::Wide);
+    }
+
+    #[test]
     fn test_layout_mode_detect_standard() {
         assert_eq!(LayoutMode::detect(80, 28), LayoutMode::Standard);
-        assert_eq!(LayoutMode::detect(200, 50), LayoutMode::Standard);
+        assert_eq!(LayoutMode::detect(119, 30), LayoutMode::Standard);
+        assert_eq!(LayoutMode::detect(120, 29), LayoutMode::Standard);
     }
 
     #[test]
@@ -183,10 +231,23 @@ mod tests {
     }
 
     #[test]
+    fn test_wide_layout_non_zero_rects() {
+        let area = Rect::new(0, 0, 160, 50);
+        let layout = compute_layout(area, Some(LayoutMode::Wide));
+        assert_eq!(layout.header.height, HEADER_H);
+        assert!(layout.node.width > 0 && layout.node.height > 0);
+        assert!(layout.chain.width > 0 && layout.chain.height > 0);
+        assert!(layout.connections.width > 0 && layout.connections.height > 0);
+        assert!(layout.resources.width > 0 && layout.resources.height > 0);
+        assert!(layout.peers.width > 0 && layout.peers.height > 0);
+        assert_eq!(layout.footer.height, 1);
+    }
+
+    #[test]
     fn test_standard_layout_non_zero_rects() {
-        let area = Rect::new(0, 0, 120, 40);
+        let area = Rect::new(0, 0, 100, 40);
         let layout = compute_layout(area, Some(LayoutMode::Standard));
-        assert!(layout.header.width > 0 && layout.header.height == 1);
+        assert_eq!(layout.header.height, HEADER_H);
         assert!(layout.node.width > 0 && layout.node.height > 0);
         assert!(layout.chain.width > 0 && layout.chain.height > 0);
         assert!(layout.connections.width > 0 && layout.connections.height > 0);
@@ -208,8 +269,8 @@ mod tests {
 
     #[test]
     fn test_footer_is_one_line() {
-        for mode in [LayoutMode::Standard, LayoutMode::Compact] {
-            let area = Rect::new(0, 0, 120, 50);
+        for mode in [LayoutMode::Wide, LayoutMode::Standard, LayoutMode::Compact] {
+            let area = Rect::new(0, 0, 160, 60);
             let layout = compute_layout(area, Some(mode));
             assert_eq!(layout.footer.height, 1, "footer must be 1 line in {mode:?}");
         }
@@ -217,13 +278,12 @@ mod tests {
 
     #[test]
     fn test_panels_do_not_fill_space() {
-        // With plenty of vertical space, the gap should absorb leftover rows.
+        // With plenty of vertical space the gap should absorb leftover rows.
         let area = Rect::new(0, 0, 120, 60);
         let layout = compute_layout(area, Some(LayoutMode::Standard));
         let top_h = PANEL_NODE_H.max(PANEL_CHAIN_H);
         let mid_h = PANEL_CONNECTIONS_H.max(PANEL_RESOURCES_H);
-        let used = 1 + top_h + mid_h + PANEL_PEERS_H + 1; // header + rows + footer
-                                                          // Total used < total area — there must be a gap.
+        let used = HEADER_H + top_h + mid_h + PANEL_PEERS_H + 1; // header + rows + footer
         assert!(
             used < area.height,
             "gap should exist between panels and footer"
@@ -234,6 +294,30 @@ mod tests {
             peers_bottom < layout.footer.y,
             "peers bottom ({peers_bottom}) should be above footer ({})",
             layout.footer.y
+        );
+    }
+
+    #[test]
+    fn test_header_is_two_lines() {
+        for mode in [LayoutMode::Wide, LayoutMode::Standard] {
+            let area = Rect::new(0, 0, 160, 60);
+            let layout = compute_layout(area, Some(mode));
+            assert_eq!(
+                layout.header.height, HEADER_H,
+                "header must be {HEADER_H} lines in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_two_column_panels_same_y() {
+        // Node/Chain must start at the same y; Connections/Resources must start at the same y.
+        let area = Rect::new(0, 0, 160, 60);
+        let layout = compute_layout(area, Some(LayoutMode::Wide));
+        assert_eq!(layout.node.y, layout.chain.y, "Node and Chain y must match");
+        assert_eq!(
+            layout.connections.y, layout.resources.y,
+            "Connections and Resources y must match"
         );
     }
 }
