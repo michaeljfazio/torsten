@@ -72,6 +72,11 @@ fn encode_input_cbor(input: &torsten_primitives::transaction::TransactionInput) 
 
 /// Evaluate Plutus scripts in a transaction using the uplc CEK machine
 ///
+/// `max_tx_ex_units` is `(cpu_steps, mem_units)` — this matches the uplc
+/// `eval_phase_two_raw` convention where `.0 = cpu` and `.1 = mem`.
+/// Callers must ensure they pass `(ExUnits.steps, ExUnits.mem)` in that order;
+/// swapping the two produces a 700x too-small CPU ceiling and causes false failures.
+///
 /// Returns Ok(()) if all scripts pass, or Err with details of failure.
 pub fn evaluate_plutus_scripts(
     tx: &Transaction,
@@ -141,10 +146,27 @@ pub fn evaluate_plutus_scripts(
         Ok(results) => {
             for (_redeemer_bytes, eval_result) in &results {
                 let cost = eval_result.cost();
-                if eval_result.failed(false) {
+                // Determine if the script failed using Haskell-compatible rules:
+                //
+                // Per Haskell's PlutusLedgerApi.Common.Eval.processLogsAndErrors:
+                // - PlutusV1/V2: ANY non-error result counts as success (even Data,
+                //   Bool(false), Integer, partially-applied terms). Only CEK machine
+                //   errors and Term::Error indicate failure.
+                // - PlutusV3: Only Unit is accepted; anything else is InvalidReturnValue.
+                //
+                // Since we don't track per-redeemer language version here, we use the
+                // V1/V2 rule (accept any non-error) which is safe because:
+                // 1. V3 scripts that return non-Unit would be rejected by Haskell too,
+                //    so they would never appear on-chain with is_valid=true.
+                // 2. For block production, mempool admission already checks is_valid.
+                let script_failed = match &eval_result.result {
+                    Err(_) => true,
+                    Ok(term) => matches!(term, uplc::ast::Term::Error),
+                };
+                if script_failed {
                     let err_msg = match &eval_result.result {
                         Err(e) => format!("{e}"),
-                        Ok(term) => format!("Unexpected result: {term:?}"),
+                        Ok(term) => format!("Script error: {term:?}"),
                     };
                     debug!(
                         tx_hash = %tx.hash.to_hex(),

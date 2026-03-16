@@ -12,11 +12,11 @@ pub struct MetricsSnapshot {
     /// Raw metric name -> value mapping for all simple (non-histogram) metrics.
     pub values: HashMap<String, f64>,
     /// Labeled metrics: "metric_name:label_value" -> count.
-    pub labeled: HashMap<String, f64>,
+    pub _labeled: HashMap<String, f64>,
     /// Whether the last scrape succeeded.
     pub connected: bool,
     /// Error message from the last failed scrape, if any.
-    pub error: Option<String>,
+    pub _error: Option<String>,
 }
 
 impl MetricsSnapshot {
@@ -64,22 +64,22 @@ pub async fn fetch_metrics(url: &str) -> MetricsSnapshot {
         Ok(resp) => match resp.text().await {
             Ok(body) => MetricsSnapshot {
                 values: parse_prometheus(&body),
-                labeled: HashMap::new(),
+                _labeled: HashMap::new(),
                 connected: true,
-                error: None,
+                _error: None,
             },
             Err(e) => MetricsSnapshot {
                 values: HashMap::new(),
-                labeled: HashMap::new(),
+                _labeled: HashMap::new(),
                 connected: false,
-                error: Some(format!("Failed to read response: {e}")),
+                _error: Some(format!("Failed to read response: {e}")),
             },
         },
         Err(e) => MetricsSnapshot {
             values: HashMap::new(),
-            labeled: HashMap::new(),
+            _labeled: HashMap::new(),
             connected: false,
-            error: Some(format!("Connection failed: {e}")),
+            _error: Some(format!("Connection failed: {e}")),
         },
     }
 }
