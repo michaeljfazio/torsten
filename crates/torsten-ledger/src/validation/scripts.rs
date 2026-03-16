@@ -155,7 +155,7 @@ pub(super) fn collect_available_script_hashes(
 }
 
 // ---------------------------------------------------------------------------
-// Reference script size + tiered fee (CIP-0112)
+// Reference script size + tiered fee (Conway ledger spec)
 // ---------------------------------------------------------------------------
 
 /// Calculate the total byte size of reference scripts used via reference inputs.
@@ -189,7 +189,7 @@ pub(crate) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
     }
 }
 
-/// CIP-0112 tiered reference script fee calculation.
+/// Conway ledger tiered reference script fee calculation.
 ///
 /// Divides the total script size into 25 KiB tiers, applying a 1.2× multiplier
 /// per tier. The entire accumulation is kept as an exact rational value (using
@@ -608,7 +608,7 @@ pub(super) fn ex_unit_fee(tx: &Transaction, params: &ProtocolParameters) -> u64 
 ///
 /// Reference:
 /// - `Cardano.Ledger.Alonzo.Tx.toCBORForSizeComputation` (cardano-ledger)
-/// - CIP-0112 tiered reference script fee is based on script bytes, not tx size.
+/// - Conway tiered reference script fee is based on script bytes, not tx size.
 fn fee_tx_size(tx: &Transaction, tx_size: u64) -> u64 {
     // The raw CBOR first byte tells us the CBOR major type and additional info.
     // 0x84 = major type 4 (array) with additional info 4 (length = 4 elements).

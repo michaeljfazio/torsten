@@ -247,16 +247,16 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         kv_aligned("Network", network, theme.accent, theme, col_w),
         kv_aligned(
             "Version",
-            &format!("v{}", version),
+            format!("v{}", version),
             theme.muted,
             theme,
             col_w,
         ),
         kv_aligned("Era", era, theme.info, theme, col_w),
-        kv_aligned("Uptime", &uptime, theme.fg, theme, col_w),
+        kv_aligned("Uptime", uptime, theme.fg, theme, col_w),
         kv_aligned(
             "Peers",
-            &App::format_number(peers_total),
+            App::format_number(peers_total),
             if peers_total > 0 {
                 theme.success
             } else {
@@ -267,7 +267,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
         kv_aligned(
             "Forged",
-            &App::format_number(blocks_forged),
+            App::format_number(blocks_forged),
             if blocks_forged > 0 {
                 theme.warning
             } else {
@@ -355,7 +355,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         kv_aligned("Slot", &slot_num, theme.fg, theme, col_w),
         kv_aligned(
             "Slot/Epoch",
-            &App::format_number(app.slot_in_epoch),
+            App::format_number(app.slot_in_epoch),
             theme.muted,
             theme,
             col_w,
@@ -364,7 +364,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         kv_aligned("Density", &density_str, theme.info, theme, col_w),
         kv_aligned(
             "Forks",
-            &App::format_number(forks),
+            App::format_number(forks),
             if forks > 0 {
                 theme.warning
             } else {
@@ -376,7 +376,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         kv_aligned("Total Tx", &total_tx, theme.muted, theme, col_w),
         kv_aligned(
             "Pending Tx",
-            &App::format_number(pending_tx),
+            App::format_number(pending_tx),
             if pending_tx > 0 {
                 theme.warning
             } else {
@@ -446,14 +446,14 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         kv_aligned("P2P", p2p_label, p2p_color, theme, col_w),
         kv_aligned(
             "Inbound",
-            &App::format_number(inbound),
+            App::format_number(inbound),
             theme.info,
             theme,
             col_w,
         ),
         kv_aligned(
             "Outbound",
-            &App::format_number(outbound),
+            App::format_number(outbound),
             theme.info,
             theme,
             col_w,
@@ -537,7 +537,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     // Memory (live) row.
     lines.push(kv_aligned(
         "Mem (live)",
-        &App::format_bytes(mem_live),
+        App::format_bytes(mem_live),
         mem_color,
         theme,
         col_w,
@@ -546,7 +546,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     // Memory (RSS) row.
     lines.push(kv_aligned(
         "Mem (RSS)",
-        &App::format_bytes(mem_rss),
+        App::format_bytes(mem_rss),
         theme.muted,
         theme,
         col_w,
@@ -828,25 +828,23 @@ fn panel_block<'a>(title: &'a str, theme: &'a Theme) -> Block<'a> {
 /// The label is left-aligned in a `LABEL_W`-wide column; the value is
 /// right-aligned in a `VALUE_W`-wide column.  Total line width = 1 (indent)
 /// + LABEL_W + VALUE_W.  If `col_w` is wider, any slack goes to the label.
-fn kv_aligned<'a>(
-    label: &'a str,
-    value: &'a str,
+fn kv_aligned(
+    label: &str,
+    value: impl Into<String>,
     value_color: Color,
     theme: &Theme,
     col_w: usize,
-) -> Line<'a> {
-    // Allocate at least LABEL_W to label; extra space widens the label column.
+) -> Line<'static> {
     let label_w = col_w.saturating_sub(VALUE_W).max(LABEL_W);
-    let value_w = col_w.saturating_sub(label_w);
+    let value_w = col_w.saturating_sub(label_w).max(1);
+    let label_s = format!("{:<label_w$}", label);
+    let value_s = format!("{:>value_w$}", value.into());
 
     Line::from(vec![
         Span::raw(" "),
+        Span::styled(label_s, Style::default().fg(theme.muted)),
         Span::styled(
-            format!("{:<label_w$}", label, label_w = label_w),
-            Style::default().fg(theme.muted),
-        ),
-        Span::styled(
-            format!("{:>value_w$}", value, value_w = value_w.max(1)),
+            value_s,
             Style::default()
                 .fg(value_color)
                 .add_modifier(Modifier::BOLD),
@@ -855,14 +853,18 @@ fn kv_aligned<'a>(
 }
 
 /// Compact two-column peer-state row for Cold/Warm/Hot or Uni/Bi/Duplex.
-fn peer_state_row<'a>(items: &[(&'a str, u64, Color)], theme: &Theme) -> Line<'a> {
-    let mut spans: Vec<Span<'a>> = vec![Span::raw("  ")];
+fn peer_state_row(items: &[(&str, u64, Color)], theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
     for (i, (label, value, color)) in items.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
+            spans.push(Span::styled("   ", Style::default().fg(theme.muted)));
         }
-        spans.push(Span::styled(*label, Style::default().fg(theme.muted)));
-        spans.push(Span::styled(" ", Style::default()));
+        // Convert label to owned String so the span is 'static.
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default().fg(theme.muted),
+        ));
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!("{:>4}", App::format_number(*value)),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),

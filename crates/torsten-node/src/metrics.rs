@@ -208,7 +208,8 @@ pub struct NodeMetrics {
     /// CPU tracker for process CPU utilization measurement.
     cpu_tracker: std::sync::Mutex<CpuTracker>,
     /// Peak resident memory observed since node start, in bytes.
-    pub peak_mem_bytes: AtomicU64,
+    /// Exposed as `torsten_mem_peak_bytes` Prometheus gauge.
+    peak_mem_bytes: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -409,11 +410,6 @@ impl NodeMetrics {
         self.tip_age_secs.store(age, Ordering::Relaxed);
     }
 
-    /// Set the tip age in seconds (legacy, prefer set_tip_slot_time_ms).
-    pub fn set_tip_age_secs(&self, secs: u64) {
-        self.tip_age_secs.store(secs, Ordering::Relaxed);
-    }
-
     /// Set the replay duration in seconds.
     pub fn set_replay_duration_secs(&self, secs: u64) {
         self.replay_duration_secs.store(secs, Ordering::Relaxed);
@@ -446,11 +442,10 @@ impl NodeMetrics {
                 Ordering::Relaxed,
             );
         }
-        // Update CPU and peak memory
+        // Sample CPU tracker to keep measurement window fresh (CPU metric
+        // will be emitted once platform-specific sampling is implemented).
         if let Ok(mut tracker) = self.cpu_tracker.lock() {
-            let cpu = tracker.sample();
-            self.tip_age_secs.load(Ordering::Relaxed); // just touch to avoid unused warning
-            let _ = cpu; // CPU is emitted separately below
+            let _cpu = tracker.sample();
         }
 
         let mut out = String::with_capacity(2048);
@@ -677,6 +672,13 @@ impl NodeMetrics {
         let rss = get_resident_memory_bytes();
         out.push_str(&format!(
             "# HELP torsten_mem_resident_bytes Resident set size in bytes\n# TYPE torsten_mem_resident_bytes gauge\ntorsten_mem_resident_bytes {rss}\n"
+        ));
+
+        // Track peak RSS (monotonically increasing high-water mark).
+        let _ = self.peak_mem_bytes.fetch_max(rss, Ordering::Relaxed);
+        let peak = self.peak_mem_bytes.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "# HELP torsten_mem_peak_bytes Peak resident set size in bytes\n# TYPE torsten_mem_peak_bytes gauge\ntorsten_mem_peak_bytes {peak}\n"
         ));
 
         // Validation error breakdown

@@ -50,7 +50,6 @@ impl EpochProgress {
     }
 
     /// Override the fill colour.
-    #[allow(dead_code)]
     pub fn with_fill_color(mut self, color: Color) -> Self {
         self.fill_color = color;
         self

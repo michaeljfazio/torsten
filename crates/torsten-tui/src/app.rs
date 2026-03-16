@@ -517,14 +517,20 @@ mod tests {
     #[test]
     fn test_theme_cycling() {
         let mut app = App::new();
-        assert_eq!(app.theme_idx, 0);
+        // Default theme is Monokai (looked up by name, not hardcoded index).
+        assert_eq!(app.theme().name, "Monokai");
+        let start_idx = app.theme_idx;
         app.cycle_theme();
-        assert_eq!(app.theme_idx, 1);
-        // Cycle through all and back to 0.
-        for _ in 0..6 {
+        assert_ne!(app.theme_idx, start_idx);
+        // Cycle through all themes and verify we return to the starting theme.
+        let steps_remaining = crate::theme::THEMES.len() - 1;
+        for _ in 0..steps_remaining {
             app.cycle_theme();
         }
-        assert_eq!(app.theme_idx, 0);
+        assert_eq!(
+            app.theme_idx, start_idx,
+            "cycling all themes should return to start"
+        );
     }
 
     #[test]
