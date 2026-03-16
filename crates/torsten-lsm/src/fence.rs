@@ -33,6 +33,7 @@ pub struct FenceIndex {
     entries: Vec<FenceEntry>,
 }
 
+#[allow(dead_code)]
 impl FenceIndex {
     /// Create a new empty fence index.
     pub fn new() -> Self {
@@ -142,6 +143,7 @@ impl FenceIndex {
     }
 }
 
+#[allow(dead_code)]
 impl Default for FenceIndex {
     fn default() -> Self {
         Self::new()

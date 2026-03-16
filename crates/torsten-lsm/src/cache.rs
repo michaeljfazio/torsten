@@ -33,6 +33,7 @@ pub struct BlockCache {
     capacity: usize,
 }
 
+#[allow(dead_code)]
 impl BlockCache {
     /// Create a new cache with the given capacity (number of pages).
     pub fn new(capacity: usize) -> Self {

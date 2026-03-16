@@ -124,6 +124,7 @@ fn make_block_header() -> BlockHeader {
             output: vec![0x03; 64],
             proof: vec![0x04; 80],
         },
+        nonce_vrf_output: vec![],
         block_number: BlockNo(10_000_000),
         slot: SlotNo(130_000_000),
         epoch_nonce: Hash32::from_bytes([0xDD; 32]),

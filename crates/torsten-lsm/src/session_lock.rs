@@ -19,6 +19,7 @@ pub struct SessionLock {
     path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl SessionLock {
     /// Acquire an exclusive lock on the database at the given path.
     ///

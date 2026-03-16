@@ -1805,6 +1805,7 @@ mod tests {
                     output: vec![],
                     proof: vec![],
                 },
+                nonce_vrf_output: vec![],
                 block_number: BlockNo(block_no),
                 slot: SlotNo(slot),
                 epoch_nonce: Hash32::ZERO,

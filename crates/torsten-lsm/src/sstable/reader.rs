@@ -18,6 +18,7 @@ pub struct SsTableReader {
     page_size: usize,
 }
 
+#[allow(dead_code)]
 impl SsTableReader {
     /// Open an SSTable data file for reading.
     pub fn open(path: &Path, page_size: usize) -> Self {

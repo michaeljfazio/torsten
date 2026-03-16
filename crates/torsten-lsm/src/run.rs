@@ -34,6 +34,7 @@ pub struct Run {
     page_size: usize,
 }
 
+#[allow(dead_code)]
 impl Run {
     /// Write a new sorted run from the given entries.
     ///

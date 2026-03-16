@@ -21,6 +21,7 @@ pub struct MemTable {
     approx_bytes: usize,
 }
 
+#[allow(dead_code)]
 impl MemTable {
     /// Create a new empty memtable.
     pub fn new() -> Self {
@@ -100,6 +101,7 @@ impl MemTable {
     }
 }
 
+#[allow(dead_code)]
 impl Default for MemTable {
     fn default() -> Self {
         Self::new()

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // Internal crate — methods may be used by future features
 //! `torsten-lsm` — A pure Rust LSM-tree engine.
 //!
 //! Drop-in replacement for `cardano-lsm` with additional features:

@@ -1118,6 +1118,7 @@ mod tests {
                 output: vec![0u8; 32],
                 proof: vec![0u8; 80],
             },
+            nonce_vrf_output: vec![],
             block_number: BlockNo(1),
             slot: SlotNo(slot),
             epoch_nonce: Hash32::ZERO,
