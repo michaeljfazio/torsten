@@ -175,13 +175,10 @@ fn decode_block_header(
             )
         } else if let Some(alonzo) = pallas_header.as_alonzo() {
             let hb = &alonzo.header_body;
-            // Shelley/Allegra/Mary/Alonzo TPraos: compute eta = blake2b_256(nonce_vrf.0).
-            // The nonce_vrf.0 is the 64-byte raw VRF output. We pre-hash it here so that
-            // nonce_vrf_output is always a 32-byte eta across all eras:
-            //   TPraos: eta = blake2b_256(nonce_vrf_cert.0)
-            //   Praos:  eta = blake2b_256("N" || vrf_result.0)  (via nonce_vrf_output())
-            // The ledger's update_evolving_nonce then directly combines: evolving' = blake2b(evolving || eta)
-            let nonce_eta = pallas_crypto::hash::Hasher::<256>::hash(&hb.nonce_vrf.0).to_vec();
+            // Shelley/Allegra/Mary/Alonzo TPraos: provide raw 64-byte nonce_vrf.0.
+            // The ledger's update_evolving_nonce ALWAYS hashes: eta = blake2b_256(raw).
+            // This matches pallas's generate_rolling_nonce which always hashes its input.
+            let nonce_eta = hb.nonce_vrf.0.to_vec();
             (
                 VrfOutput {
                     output: hb.leader_vrf.0.to_vec(),
@@ -593,32 +590,102 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 /// becomes necessary, a pallas issue should be filed to add per-era PostAlonzoAuxiliaryData
 /// variants to the enum.
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
-    use pallas_traverse::MultiEraMeta;
+    use pallas_primitives::alonzo::AuxiliaryData as PallasAux;
+    use pallas_codec::utils::Nullable;
 
-    // Extract metadata labels via pallas's public metadata() API.
-    let metadata = match tx.metadata() {
-        MultiEraMeta::AlonzoCompatible(m) => m
-            .iter()
-            .map(|(label, value)| (*label, convert_metadatum(value)))
-            .collect(),
-        _ => BTreeMap::new(),
+    // Access auxiliary data via era-specific transaction accessors.
+    // `pallas_traverse::MultiEraTx::aux_data()` is `pub(crate)` and not externally
+    // accessible, so we reach the raw pallas structs through `as_alonzo()` /
+    // `as_babbage()` / `as_conway()`.
+    //
+    // All three return `Nullable<KeepRaw<'_, alonzo::AuxiliaryData>>`:
+    //   Nullable::Some(x)  → aux data IS present; decode x
+    //   Nullable::Null     → aux data explicitly null in CBOR (`f6`)
+    //   Nullable::Undefined → aux data absent (4th element not present)
+    let raw_aux: &alonzo::AuxiliaryData = if let Some(alonzo) = tx.as_alonzo() {
+        match &alonzo.auxiliary_data {
+            Nullable::Some(x) => x.as_ref(),
+            _ => return None,
+        }
+    } else if let Some(babbage) = tx.as_babbage() {
+        match &babbage.auxiliary_data {
+            Nullable::Some(x) => x.as_ref(),
+            _ => return None,
+        }
+    } else if let Some(conway) = tx.as_conway() {
+        match &conway.auxiliary_data {
+            Nullable::Some(x) => x.as_ref(),
+            _ => return None,
+        }
+    } else {
+        // Byron — no auxiliary data
+        return None;
     };
 
-    // If the tx body declares an auxiliary_data_hash, the aux data IS present
-    // on the wire — even if it contains only scripts and no metadata labels.
-    // Return Some(AuxiliaryData) so phase-1 rule 1c doesn't falsely reject.
-    let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
-
-    if has_aux_data_hash || !metadata.is_empty() {
-        Some(AuxiliaryData {
-            metadata,
+    match raw_aux {
+        // Plain CBOR map of metadata labels (Shelley era).
+        PallasAux::Shelley(metadata) => Some(AuxiliaryData {
+            metadata: metadata
+                .iter()
+                .map(|(label, value)| (*label, convert_metadatum(value)))
+                .collect(),
             native_scripts: Vec::new(),
             plutus_v1_scripts: Vec::new(),
             plutus_v2_scripts: Vec::new(),
             plutus_v3_scripts: Vec::new(),
-        })
-    } else {
-        None
+        }),
+
+        // CBOR array `[metadata_map, [native_scripts...]]` (Allegra/Mary eras).
+        PallasAux::ShelleyMa(shelley_ma) => Some(AuxiliaryData {
+            metadata: shelley_ma
+                .transaction_metadata
+                .iter()
+                .map(|(label, value)| (*label, convert_metadatum(value)))
+                .collect(),
+            native_scripts: shelley_ma
+                .auxiliary_scripts
+                .as_ref()
+                .map(|scripts| scripts.iter().map(convert_native_script_inner).collect())
+                .unwrap_or_default(),
+            plutus_v1_scripts: Vec::new(),
+            plutus_v2_scripts: Vec::new(),
+            plutus_v3_scripts: Vec::new(),
+        }),
+
+        // tag(259) wrapped CBOR map (Alonzo+).
+        //
+        // CRITICAL: we produce Some(AuxiliaryData{...}) even when ALL inner
+        // optional fields are None.  The `tag(259){}` pattern — an empty map
+        // that carries a valid blake2b-256 hash in the tx body — is the exact
+        // case that triggered the original bug.  Phase-1 rule 1c requires
+        // auxiliary_data = Some(_) whenever auxiliary_data_hash = Some(_),
+        // regardless of the content of the auxiliary data itself.
+        PallasAux::PostAlonzo(post_alonzo) => Some(AuxiliaryData {
+            metadata: post_alonzo
+                .metadata
+                .as_ref()
+                .map(|m| {
+                    m.iter()
+                        .map(|(label, value)| (*label, convert_metadatum(value)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            native_scripts: post_alonzo
+                .native_scripts
+                .as_ref()
+                .map(|scripts| scripts.iter().map(convert_native_script_inner).collect())
+                .unwrap_or_default(),
+            // alonzo::PostAlonzoAuxiliaryData.plutus_scripts is CBOR key 2 = Plutus V1.
+            // Babbage key 3 (V2) and Conway key 4 (V3) are not reachable through the
+            // shared alonzo struct — see the function doc comment for details.
+            plutus_v1_scripts: post_alonzo
+                .plutus_scripts
+                .as_ref()
+                .map(|scripts| scripts.iter().map(|s| s.0.to_vec()).collect())
+                .unwrap_or_default(),
+            plutus_v2_scripts: Vec::new(),
+            plutus_v3_scripts: Vec::new(),
+        }),
     }
 }
 
@@ -1666,86 +1733,93 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Regression test: Conway transactions with PostAlonzoAuxiliaryData = tag(259){}
-    /// (empty map, no metadata labels) must deserialize with auxiliary_data = Some(_).
+    /// Regression test for preview testnet blocks rejected with:
+    /// "Transaction validation failed: Auxiliary data hash declared but no auxiliary data present"
     ///
-    /// These transactions appear on preview testnet (e.g., minting txs with a Plutus
-    /// script in the auxiliary data section but no metadata labels). The tx body
-    /// declares an auxiliary_data_hash over the empty tag(259){} structure.
+    /// Root cause: the original `convert_auxiliary_data` used `tx.metadata()` to check
+    /// whether auxiliary data is present. `pallas_traverse::MultiEraTx::metadata()` returns
+    /// `MultiEraMeta::Empty` for any `PostAlonzoAuxiliaryData` whose metadata field is
+    /// `None` — even though the auxiliary data structure IS present on the wire. This caused
+    /// phase-1 rule 1c to incorrectly reject transactions that cardano-node accepts.
     ///
-    /// Failure mode: auxiliary_data is None → phase-1 rule 1c fires
-    /// "AuxiliaryDataHashWithoutData" even though the Haskell node accepts the tx.
+    /// The fix calls `tx.aux_data()` directly. If pallas decodes a non-null auxiliary data
+    /// value, the structure is present regardless of whether its inner fields are empty.
+    ///
+    /// Real preview testnet tx: 28c9bfc6b1579c800803c72676518e6bf55609fe8c77b31c474faa5b029c4b2f
+    ///
+    /// The transaction's fourth CBOR element (auxiliary data) decodes as:
+    ///   d90103 a0   →   tag(259) {}   →   PostAlonzoAuxiliaryData with all fields absent
+    ///
+    /// The tx body key 7 holds `blake2b-256(d9 01 03 a0)` as the auxiliary_data_hash.
     #[test]
     fn test_decode_conway_tx_with_empty_post_alonzo_aux_data() {
-        // Real preview testnet tx 28c9bfc6b1579c800803c72676518e6bf55609fe8c77b31c474faa5b029c4b2f
-        // The transaction ends with: f5 d90103 a0
-        //   f5      = is_valid: true
-        //   d90103  = tag(259) — PostAlonzoAuxiliaryData
-        //   a0      = empty map {}
-        // The tx body key 7 declares auxiliary_data_hash = blake2b-256(d90103a0).
-        let tx_cbor_hex = concat!(
-            "84a700d901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef89",
-            "5ccdd909010182a300581d706ea76075243b9994fe41fdbea2572ebea26d8341193e689260d",
-            "7dbb401821a0017ce9ca1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192",
-            "bf68579a156434f434f5f42415443485f42415443484d414e41474501028201d8185863d879",
-            "9f01583b6261666b726569646d7571796874756f78736f79753761686d33747234346a72676",
-            "2326a616c6a6872323637696d773232377773323337727a7565409f581c5afc8364f8733c89",
-            "5f54b5cf261b5efe71d3669f59ccad7439ccf289ffff825839005afc8364f8733c895f54b5",
-            "cf261b5efe71d3669f59ccad7439ccf289a4f5d0b5b8976f1ee13e61c1edb2acbed7d394ea",
-            "de0e8c924c8f61471b000000021981fc3d021a000ce089075820bdaa99eb158414dea0a91d6",
-            "c727e2268574b23efe6e08ab3b841abe8059a030c09a1581c6bd2f1aad5e4d65652eada5ab",
-            "a2d0929381bd695f2f744192bf68579a156434f434f5f42415443485f42415443484d414e4",
-            "14745010b5820303e130d2fc177979b4e998501fae17630aa6ab425e61080612e24eb822a22",
-            "230dd901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef89",
-            "5ccdd90901a300d90102818258206da802c0bf16fc704d5b92b34e7a323f508a9258753b910",
-            "11379238c6598a3635840bb4f351370d0f763b39eec9eeb0ad716354211c3e87779381559e",
-            "2d7664460be22e6b4aa36ddeb5e4f9ad80e59cb8792797fa5497c055b30b6c77a6cac54400",
-            "c05a182010082d87980821a006acfc01ab2d05e00",
-            "06d901028159039759039401000033323232323232323232323223222323232322533300c",
-            "323232533300f3007301137540022646464a66602c0022a660260202c264a66602e60340042",
-            "6464a66602a601a602e6ea803854ccc054c8cc004004018894ccc06c004528099299980c19",
-            "baf301e301b3754603c00402629444cc00c00c004c07800454ccc054c0300044cdc7801008",
-            "8a501533016491536578706563740a202020202020202020206c6973742e616e7928696e70",
-            "7574732c20666e28696e70757429207b20696e7075742e6f75747075745f7265666572656e",
-            "6365203d3d207574786f5f726566207d290016153330153370e0029000899b8f00201114a0",
-            "6eb4c05c008dd7180a8008a9980a0088b180c000999119299980a1805980b1baa00114bd6f",
-            "7b63009bab301a30173754002646600200200644a666032002298103d87a80001323232533",
-            "30183371e00c6eb8c06800c4cdd2a40006603a6e980052f5c026600a00a0046eacc068008c",
-            "074008c06c004c8cc004004dd5980c180c980c980c980c80191299980b8008a5eb7bdb1804",
-            "c8c8c8c94ccc05ccdc7a4500002100313301c337606ea4008dd3000998030030019bab30190",
-            "03375c602e004603600460320026eb8c05cc050dd50019bac3016001301237540042a660209",
-            "21236578706563742074782e4d696e7428706f6c6963795f696429203d20707572706f7365",
-            "0016301430150023013001300f37540022930a99806a491856616c696461746f722072657475",
-            "726e65642066616c7365001365632533300b30030011533300f300e37540082930a998060050",
-            "b0a99980598010008a99980798071baa004149854cc0300285854cc03002858c030dd50019b",
-            "8748008dc3a4000a66666601e00220022a6601000c2c2a6601000c2c2a6601000c2c2a66010",
-            "00c2c6eb800524018a6578706563745b2861737365745f6e616d652c20616d6f756e74295d",
-            "203d0a2020202020206d696e740a20202020202020207c3e2076616c75652e66726f6d5f6d",
-            "696e7465645f76616c75650a20202020202020207c3e2076616c75652e746f6b656e7328706",
-            "f6c6963795f6964290a20202020202020207c3e20646963742e746f5f6c69737428290049",
-            "010c72646d723a20416374696f6e005734ae7155ceaab9e5573eae815d0aba2574898117564",
-            "34f434f5f42415443485f42415443484d414e414745004c012bd8799fd8799f582035a33197",
-            "7b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd909ff01ff0001f5d90103a0"
-        );
-        // Use the original hex directly to avoid line-break issues in the concat! macro
-        let original_hex = "84a700d901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd909010182a300581d706ea76075243b9994fe41fdbea2572ebea26d8341193e689260d7dbb401821a0017ce9ca1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579a156434f434f5f42415443485f42415443484d414e41474501028201d8185863d8799f01583b6261666b726569646d7571796874756f78736f79753761686d33747234346a726762326a616c6a6872323637696d773232377773323337727a7565409f581c5afc8364f8733c895f54b5cf261b5efe71d3669f59ccad7439ccf289ffff825839005afc8364f8733c895f54b5cf261b5efe71d3669f59ccad7439ccf289a4f5d0b5b8976f1ee13e61c1edb2acbed7d394eade0e8c924c8f61471b000000021981fc3d021a000ce089075820bdaa99eb158414dea0a91d6c727e2268574b23efe6e08ab3b841abe8059a030c09a1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579a156434f434f5f42415443485f42415443484d414e414745010b5820303e130d2fc177979b4e998501fae17630aa6ab425e61080612e24eb822a22230dd901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd90901a300d90102818258206da802c0bf16fc704d5b92b34e7a323f508a9258753b91011379238c6598a3635840bb4f351370d0f763b39eec9eeb0ad716354211c3e87779381559e2d7664460be22e6b4aa36ddeb5e4f9ad80e59cb8792797fa5497c055b30b6c77a6cac54400c05a182010082d87980821a006acfc01ab2d05e0006d901028159039759039401000033323232323232323232323223222323232322533300c323232533300f3007301137540022646464a66602c0022a660260202c264a66602e603400426464a66602a601a602e6ea803854ccc054c8cc004004018894ccc06c004528099299980c19baf301e301b3754603c00402629444cc00c00c004c07800454ccc054c0300044cdc78010088a501533016491536578706563740a202020202020202020206c6973742e616e7928696e707574732c20666e28696e70757429207b20696e7075742e6f75747075745f7265666572656e6365203d3d207574786f5f726566207d290016153330153370e0029000899b8f00201114a06eb4c05c008dd7180a8008a9980a0088b180c000999119299980a1805980b1baa00114bd6f7b63009bab301a30173754002646600200200644a666032002298103d87a8000132323253330183371e00c6eb8c06800c4cdd2a40006603a6e980052f5c026600a00a0046eacc068008c074008c06c004c8cc004004dd5980c180c980c980c980c80191299980b8008a5eb7bdb1804c8c8c8c94ccc05ccdc7a4500002100313301c337606ea4008dd3000998030030019bab3019003375c602e004603600460320026eb8c05cc050dd50019bac3016001301237540042a66020921236578706563742074782e4d696e7428706f6c6963795f696429203d20707572706f73650016301430150023013001300f37540022930a99806a491856616c696461746f722072657475726e65642066616c7365001365632533300b30030011533300f300e37540082930a998060050b0a99980598010008a99980798071baa004149854cc0300285854cc03002858c030dd50019b8748008dc3a4000a66666601e00220022a6601000c2c2a6601000c2c2a6601000c2c2a6601000c2c6eb800524018a657870656374205b2861737365745f6e616d652c20616d6f756e74295d203d0a2020202020206d696e740a20202020202020207c3e2076616c75652e66726f6d5f6d696e7465645f76616c75650a20202020202020207c3e2076616c75652e746f6b656e7328706f6c6963795f6964290a20202020202020207c3e20646963742e746f5f6c69737428290049010c72646d723a20416374696f6e005734ae7155ceaab9e5573eae815d0aba257489811756434f434f5f42415443485f42415443484d414e414745004c012bd8799fd8799f582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd909ff01ff0001f5d90103a0";
-        let _ = tx_cbor_hex; // suppress unused warning from concat! version
-        let tx_cbor = hex::decode(original_hex).expect("valid hex");
+        // Real preview testnet tx with tag(259){} auxiliary data (empty PostAlonzoAuxiliaryData).
+        // blake2b-256("d90103a0") = bdaa99eb158414dea0a91d6c727e2268574b23efe6e08ab3b841abe8059a030c
+        // which matches the auxiliary_data_hash field in the tx body (key 7).
+        let tx_cbor = hex::decode(concat!(
+            "84a700d901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895c",
+            "cdd909010182a300581d706ea76075243b9994fe41fdbea2572ebea26d8341193e689260d7dbb",
+            "401821a0017ce9ca1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e41474501028201d8185863d8799f01583b62",
+            "61666b726569646d7571796874756f78736f79753761686d33747234346a726762326a616c6a68",
+            "72323637696d773232377773323337727a7565409f581c5afc8364f8733c895f54b5cf261b5efe",
+            "71d3669f59ccad7439ccf289ffff825839005afc8364f8733c895f54b5cf261b5efe71d3669f59",
+            "ccad7439ccf289a4f5d0b5b8976f1ee13e61c1edb2acbed7d394eade0e8c924c8f61471b000000",
+            "021981fc3d021a000ce089075820bdaa99eb158414dea0a91d6c727e2268574b23efe6e08ab3b8",
+            "41abe8059a030c09a1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e414745010b5820303e130d2fc177979b4e998",
+            "501fae17630aa6ab425e61080612e24eb822a22230dd901028182582035a331977b975e2debbf986",
+            "c99626df33ec4c12bf434008eefdbef895ccdd90901a300d90102818258206da802c0bf16fc704d5b",
+            "92b34e7a323f508a9258753b91011379238c6598a3635840bb4f351370d0f763b39eec9eeb0ad716",
+            "354211c3e87779381559e2d7664460be22e6b4aa36ddeb5e4f9ad80e59cb8792797fa5497c055b30",
+            "b6c77a6cac54400c05a182010082d87980821a006acfc01ab2d05e0006d901028159039759039401",
+            "000033323232323232323232323223222323232322533300c323232533300f30073011375400226464",
+            "64a66602c0022a660260202c264a66602e603400426464a66602a601a602e6ea803854ccc054c8cc",
+            "004004018894ccc06c004528099299980c19baf301e301b3754603c00402629444cc00c00c004c07",
+            "800454ccc054c0300044cdc78010088a501533016491536578706563740a20202020202020202020",
+            "6c6973742e616e7928696e707574732c20666e28696e70757429207b20696e7075742e6f7574707",
+            "5745f7265666572656e6365203d3d207574786f5f726566207d290016153330153370e002900089",
+            "9b8f00201114a06eb4c05c008dd7180a8008a9980a0088b180c000999119299980a1805980b1baa",
+            "00114bd6f7b63009bab301a30173754002646600200200644a666032002298103d87a80001323232",
+            "53330183371e00c6eb8c06800c4cdd2a40006603a6e980052f5c026600a00a0046eacc068008c07",
+            "4008c06c004c8cc004004dd5980c180c980c980c980c80191299980b8008a5eb7bdb1804c8c8c8c",
+            "94ccc05ccdc7a4500002100313301c337606ea4008dd3000998030030019bab3019003375c602e00",
+            "4603600460320026eb8c05cc050dd50019bac3016001301237540042a66020921236578706563742",
+            "074782e4d696e7428706f6c6963795f696429203d20707572706f73650016301430150023013001",
+            "300f37540022930a99806a491856616c696461746f722072657475726e65642066616c73650013656",
+            "32533300b30030011533300f300e37540082930a998060050b0a99980598010008a99980798071baa",
+            "004149854cc0300285854cc03002858c030dd50019b8748008dc3a4000a66666601e00220022a6601",
+            "000c2c2a6601000c2c2a6601000c2c2a6601000c2c6eb800524018a657870656374205b286173736",
+            "5745f6e616d652c20616d6f756e74295d203d0a2020202020206d696e740a20202020202020207c3",
+            "e2076616c75652e66726f6d5f6d696e7465645f76616c75650a20202020202020207c3e2076616c7",
+            "5652e746f6b656e7328706f6c6963795f6964290a20202020202020207c3e20646963742e746f5f6",
+            "c69737428290049010c72646d723a20416374696f6e005734ae7155ceaab9e5573eae815d0aba257",
+            "489811756434f434f5f42415443485f42415443484d414e414745004c012bd8799fd8799f582035a3",
+            "31977b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd909ff01ff0001f5d90103a0"
+        ))
+        .expect("valid hex");
 
         let tx = decode_transaction(6, &tx_cbor).expect("decode must succeed");
 
-        // The tx body must declare an auxiliary_data_hash.
+        // The tx body must carry an auxiliary_data_hash (map key 7).
         assert!(
             tx.body.auxiliary_data_hash.is_some(),
             "tx body must have auxiliary_data_hash"
         );
 
-        // The auxiliary_data field must NOT be None — the empty tag(259){} structure IS
-        // present, even though it contains no metadata labels or scripts.
+        // auxiliary_data MUST be Some(_).  The wire carries tag(259){} — an empty
+        // PostAlonzoAuxiliaryData.  Phase-1 rule 1c only allows both present or both
+        // absent; a declared hash with None aux data would be an incorrect rejection.
         assert!(
             tx.auxiliary_data.is_some(),
-            "auxiliary_data must be Some(_) for a tx with an auxiliary_data_hash; \
+            "auxiliary_data must be Some(_) for a tx with auxiliary_data_hash; \
              got None — phase-1 rule 1c would incorrectly reject this transaction"
         );
+
+        let aux = tx.auxiliary_data.as_ref().unwrap();
+        // tag(259){} has no metadata labels, no scripts.
+        assert!(aux.metadata.is_empty(), "metadata must be empty for tag(259){{}}");
+        assert!(aux.native_scripts.is_empty());
+        assert!(aux.plutus_v1_scripts.is_empty());
     }
 }

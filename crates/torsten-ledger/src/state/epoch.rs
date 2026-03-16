@@ -487,16 +487,12 @@ impl LedgerState {
         // This matches Haskell's updateNonce: hash(evolving || eta)
         // where eta was already computed as vrfNonceValue in reupdateChainDepState.
         let prev = self.evolving_nonce;
-        // eta is already a 32-byte pre-computed hash; use it directly as the nonce contribution.
-        let eta_hash = if nonce_eta.len() == 32 {
-            // Expected path: 32-byte pre-computed eta from serialization
-            torsten_primitives::hash::Hash32::from_bytes(
-                nonce_eta.try_into().expect("nonce_eta is 32 bytes"),
-            )
-        } else {
-            // Fallback for any non-32-byte input (should not happen in production)
-            torsten_primitives::hash::blake2b_256(nonce_eta)
-        };
+        // ALWAYS hash the input — matching pallas's generate_rolling_nonce exactly.
+        // DO NOT use a pass-through for 32-byte inputs — this was verified to produce
+        // wrong nonces. The hash step is required for both TPraos and Praos:
+        //   TPraos (64-byte raw nonce_vrf.0): eta = blake2b_256(raw) — 1 hash total
+        //   Praos  (32-byte nonce_vrf_output): eta = blake2b_256(tagged_hash) — 2nd hash
+        let eta_hash = torsten_primitives::hash::blake2b_256(nonce_eta);
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(self.evolving_nonce.as_bytes());
         data.extend_from_slice(eta_hash.as_bytes());
