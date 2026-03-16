@@ -438,30 +438,57 @@ pub(super) fn check_script_data_hash(
                 }
             }
 
-            // Debug log when the intersection is empty despite having redeemers
+            // Debug log when the hash-based intersection found no languages
+            // despite having redeemers and non-empty scriptsNeeded/scriptsProvided.
+            // The unconditional reference-input scan below will still run.
             if !has_v1 && !has_v2 && !has_v3 && has_redeemers && !scripts_needed.is_empty() {
                 debug!(
                     needed_count = scripts_needed.len(),
                     provided_count = scripts_provided.len(),
                     needed = ?scripts_needed.iter().map(|h| h.to_hex()).collect::<Vec<_>>(),
                     provided = ?scripts_provided.keys().map(|h| h.to_hex()).collect::<Vec<_>>(),
-                    "scriptsNeeded/Provided intersection empty — falling back to ref input scan"
+                    "scriptsNeeded/Provided intersection empty after hash matching"
                 );
             }
 
-            // Fallback: if we have redeemers but no languages were detected
-            // (script hash matching failed), scan reference inputs directly.
-            // This handles edge cases where our hash computation differs from
-            // the address hash (e.g., double-encoded scripts).
-            if !has_v1 && !has_v2 && !has_v3 && has_redeemers {
-                for ref_input in &body.reference_inputs {
-                    if let Some(utxo) = utxo_set.lookup(ref_input) {
-                        match &utxo.script_ref {
-                            Some(ScriptRef::PlutusV1(_)) => has_v1 = true,
-                            Some(ScriptRef::PlutusV2(_)) => has_v2 = true,
-                            Some(ScriptRef::PlutusV3(_)) => has_v3 = true,
-                            _ => {}
-                        }
+            // Always supplement language detection by scanning reference inputs
+            // directly for their Plutus script version. This runs unconditionally
+            // (not only when no languages were detected) to handle two cases:
+            //
+            //   (a) Mixed-language transactions — e.g. V1 witness scripts set
+            //       `has_v1 = true` above, but a V2 reference-only script is
+            //       also needed. The previous fallback guard (`!has_v1`) would
+            //       prevent it from firing, leaving `has_v2 = false` and
+            //       causing a ScriptDataHashMismatch (issue #82).
+            //
+            //   (b) Hash computation divergence — the reference script's
+            //       computed hash may not appear in `scripts_needed` when our
+            //       hash computation (tag||bytes) differs from the on-chain
+            //       address credential hash (e.g. double-CBOR-encoding of
+            //       script bytes in some eras), so the intersection at step 3
+            //       misses it entirely.
+            //
+            // Only `body.reference_inputs` are scanned (not spending inputs):
+            // spending-input UTxOs carrying a script_ref are spent for their
+            // ADA value, not for their script, and must NOT contribute their
+            // language to the views. Reference inputs are the only inputs whose
+            // script_ref is explicitly made available to the transaction for
+            // script execution. This matches the Haskell `refScripts` function
+            // which restricts to `referenceInputs` when building the available
+            // script set for `mkScriptIntegrity`.
+            //
+            // Safety: if a reference script contributes its language here but
+            // is NOT actually needed by this transaction, the script_data_hash
+            // declared in the tx body will still not match our computed value
+            // (since the tx builder would have used the correct language set),
+            // and validation will correctly reject the tx with a mismatch.
+            for ref_input in &body.reference_inputs {
+                if let Some(utxo) = utxo_set.lookup(ref_input) {
+                    match &utxo.script_ref {
+                        Some(ScriptRef::PlutusV1(_)) => has_v1 = true,
+                        Some(ScriptRef::PlutusV2(_)) => has_v2 = true,
+                        Some(ScriptRef::PlutusV3(_)) => has_v3 = true,
+                        _ => {}
                     }
                 }
             }

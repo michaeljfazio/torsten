@@ -2633,6 +2633,359 @@ mod tests {
             .any(|e| matches!(e, ValidationError::MissingRequiredSigner(_))));
     }
 
+    // ---------------------------------------------------------------------------
+    // Issue #82: reference-only scripts not included in language views
+    // ---------------------------------------------------------------------------
+
+    /// Returns a `ProtocolParameters` with minimal but non-empty V1 and V2 cost
+    /// models so that the language views map is non-trivial and the
+    /// `script_data_hash` differs between V1-only and V1+V2 configurations.
+    fn make_params_with_cost_models() -> ProtocolParameters {
+        use torsten_primitives::transaction::CostModels;
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Use short but distinct vectors so the CBOR encoding differs.
+        params.cost_models = CostModels {
+            plutus_v1: Some(vec![100, 200, 300]),
+            plutus_v2: Some(vec![400, 500, 600]),
+            plutus_v3: None,
+        };
+        params
+    }
+
+    /// A transaction with V1 witness scripts AND a V2 reference-only script
+    /// must include BOTH language views in the script_data_hash preimage.
+    ///
+    /// This is the exact failure scenario from issue #82: the fallback scan
+    /// previously guarded by `!has_v1 && !has_v2 && !has_v3` would never fire
+    /// when `has_v1 = true` (from witness scripts), leaving the V2 reference
+    /// script's language out of the hash computation.
+    #[test]
+    fn test_script_data_hash_v1_witness_plus_v2_reference_script() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        // Reference input carries a V2 script.
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        let v2_script_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(v2_script_bytes)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Use params with real V1+V2 cost models so the language views differ.
+        let params = make_params_with_cost_models();
+
+        let redeemer = Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(42),
+            ex_units: ExUnits {
+                mem: 1_000,
+                steps: 1_000,
+            },
+        };
+
+        // Compute the correct hash: both V1 (from witness script) and V2 (from
+        // reference script) must be included in the language views.
+        let correct_hash = torsten_serialization::compute_script_data_hash(
+            std::slice::from_ref(&redeemer),
+            &[],
+            &params.cost_models,
+            true,  // has_v1 — witness script
+            true,  // has_v2 — reference script
+            false, // no V3
+            None,
+            None,
+        );
+
+        // Also compute what the WRONG hash would be if V2 is mistakenly omitted
+        // (i.e., the pre-fix behaviour with only V1 in the language views).
+        let wrong_hash_v1_only = torsten_serialization::compute_script_data_hash(
+            std::slice::from_ref(&redeemer),
+            &[],
+            &params.cost_models,
+            true,  // has_v1
+            false, // missing V2 — the bug
+            false,
+            None,
+            None,
+        );
+        // Verify the two hashes are actually different (sanity check).
+        assert_ne!(
+            correct_hash, wrong_hash_v1_only,
+            "V1-only and V1+V2 language views should produce different hashes"
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                // Declare the correct hash (V1 + V2 language views).
+                script_data_hash: Some(correct_hash),
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![ref_input],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                // V1 script in witness set — this sets has_v1 = true at line 312,
+                // which previously blocked the fallback V2 detection.
+                plutus_v1_scripts: vec![vec![0x0A, 0x0B, 0x0C]],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![redeemer],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+
+        // The validation should NOT return ScriptDataHashMismatch.
+        // (Other errors like MissingScript are acceptable since we don't set up
+        // proper script addresses — we only care that the hash check passes.)
+        if let Err(ref errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::ScriptDataHashMismatch { .. })),
+                "ScriptDataHashMismatch must not fire for V1-witness + V2-reference tx: {errors:?}"
+            );
+        }
+    }
+
+    /// A transaction where a reference input carries a V2 script, and the
+    /// declared script_data_hash was computed with ONLY V1 in the language
+    /// views (i.e. the tx builder incorrectly omitted V2), must be rejected
+    /// with ScriptDataHashMismatch. This ensures the fix does not falsely
+    /// accept mismatch errors.
+    #[test]
+    fn test_script_data_hash_v1_witness_v2_reference_wrong_hash_rejected() {
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([3u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(vec![0x01, 0x02, 0x03, 0x04])),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Use params with real V1+V2 cost models so the hash differs.
+        let params = make_params_with_cost_models();
+
+        let redeemer = Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(42),
+            ex_units: ExUnits {
+                mem: 1_000,
+                steps: 1_000,
+            },
+        };
+
+        // Deliberately compute the hash with only V1 — simulating a buggy tx
+        // builder that omits the V2 reference script language.
+        let wrong_hash = torsten_serialization::compute_script_data_hash(
+            std::slice::from_ref(&redeemer),
+            &[],
+            &params.cost_models,
+            true,  // has_v1
+            false, // BUG: V2 reference script omitted
+            false,
+            None,
+            None,
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: Some(wrong_hash),
+                collateral: vec![col_input],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![ref_input],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![vec![0x0A, 0x0B, 0x0C]],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![redeemer],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+
+        // Must be rejected with ScriptDataHashMismatch because the validator
+        // now includes V2 (from the reference input) but the declared hash
+        // was computed without it.
+        assert!(
+            result.is_err(),
+            "Transaction with wrong script_data_hash must be rejected"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ScriptDataHashMismatch { .. })),
+            "Expected ScriptDataHashMismatch error for V1+V2 tx with V1-only hash: {errors:?}"
+        );
+    }
+
     #[test]
     fn test_script_data_hash_allowed_with_reference_scripts() {
         let mut utxo_set = UtxoSet::new();
