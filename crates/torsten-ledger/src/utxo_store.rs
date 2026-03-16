@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use tempfile::TempDir;
 
 use torsten_lsm::{Key, LsmConfig, LsmTree, Value};
@@ -39,6 +40,7 @@ pub struct UtxoStore {
     /// Owned temporary directory for test-only stores created via `new_temp()`.
     /// Holding this here ensures the directory is cleaned up when the store is
     /// dropped, rather than being leaked via `std::mem::forget`.
+    #[cfg(test)]
     _temp_dir: Option<TempDir>,
 }
 
@@ -87,19 +89,29 @@ fn utxo_lsm_config() -> LsmConfig {
 }
 
 impl UtxoStore {
-    /// Open or create a UTxO store at the given path.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, UtxoStoreError> {
-        let path = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&path)?;
-        let tree = LsmTree::open(&path, utxo_lsm_config())?;
-        Ok(UtxoStore {
+    /// Private constructor used by `open`, `open_with_config`, and
+    /// `open_from_snapshot` to build a `UtxoStore` from an already-opened
+    /// `LsmTree`.  Centralises the cfg(test) guard on `_temp_dir` so that
+    /// individual struct literals do not need to be duplicated across
+    /// compilation configurations.
+    fn from_tree(tree: LsmTree, path: PathBuf) -> Self {
+        UtxoStore {
             tree,
             path,
             count: 0,
             address_index: HashMap::new(),
             indexing_enabled: true,
+            #[cfg(test)]
             _temp_dir: None,
-        })
+        }
+    }
+
+    /// Open or create a UTxO store at the given path.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, UtxoStoreError> {
+        let path = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&path)?;
+        let tree = LsmTree::open(&path, utxo_lsm_config())?;
+        Ok(Self::from_tree(tree, path))
     }
 
     /// Open or create a UTxO store with custom LSM configuration.
@@ -121,14 +133,7 @@ impl UtxoStore {
             ..LsmConfig::default()
         };
         let tree = LsmTree::open(&path, config)?;
-        Ok(UtxoStore {
-            tree,
-            path,
-            count: 0,
-            address_index: HashMap::new(),
-            indexing_enabled: true,
-            _temp_dir: None,
-        })
+        Ok(Self::from_tree(tree, path))
     }
 
     /// Open a UTxO store from a persistent snapshot.
@@ -138,14 +143,9 @@ impl UtxoStore {
     ) -> Result<Self, UtxoStoreError> {
         let path = path.as_ref().to_path_buf();
         let tree = LsmTree::open_snapshot(&path, snapshot_name)?;
-        Ok(UtxoStore {
-            tree,
-            path,
-            count: 0, // Will be set by count_entries() or caller
-            address_index: HashMap::new(),
-            indexing_enabled: true,
-            _temp_dir: None,
-        })
+        // count and address_index will be populated by the caller via
+        // count_entries() / rebuild_address_index().
+        Ok(Self::from_tree(tree, path))
     }
 
     /// Create an in-memory UTxO store backed by a temporary directory.
@@ -155,6 +155,7 @@ impl UtxoStore {
     /// automatically when the store is dropped. Previously this used
     /// `std::mem::forget`, which leaked the directory and its contents on the
     /// host filesystem for the lifetime of the process.
+    #[cfg(test)]
     pub fn new_temp() -> Result<Self, UtxoStoreError> {
         let dir = tempfile::tempdir().map_err(UtxoStoreError::Io)?;
         let path = dir.path().to_path_buf();

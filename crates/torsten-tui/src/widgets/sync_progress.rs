@@ -48,29 +48,25 @@ impl SyncProgressBar {
     }
 
     /// Set the fill color used when the node is synced.
-    #[allow(dead_code)]
-    pub fn fill_color_synced(mut self, color: Color) -> Self {
+    pub fn _fill_color_synced(mut self, color: Color) -> Self {
         self.color_synced = color;
         self
     }
 
     /// Set the fill color used when the node is actively syncing.
-    #[allow(dead_code)]
-    pub fn fill_color_syncing(mut self, color: Color) -> Self {
+    pub fn _fill_color_syncing(mut self, color: Color) -> Self {
         self.color_syncing = color;
         self
     }
 
     /// Set the fill color used when the node is stalled.
-    #[allow(dead_code)]
-    pub fn fill_color_stalled(mut self, color: Color) -> Self {
+    pub fn _fill_color_stalled(mut self, color: Color) -> Self {
         self.color_stalled = color;
         self
     }
 
     /// Set the color for the unfilled (empty) portion of the bar.
-    #[allow(dead_code)]
-    pub fn empty_color(mut self, color: Color) -> Self {
+    pub fn _empty_color(mut self, color: Color) -> Self {
         self.color_empty = color;
         self
     }

@@ -775,8 +775,8 @@ mod tests {
         ));
 
         let perf_approx = {
-            let n: i128 = (&perf.n).try_into().unwrap();
-            let d: i128 = (&perf.d).try_into().unwrap();
+            let n: i128 = (&perf.n).try_into().unwrap_or(i128::MAX);
+            let d: i128 = (&perf.d).try_into().unwrap_or(i128::MAX);
             n as f64 / d as f64
         };
         assert!(
@@ -852,8 +852,8 @@ mod tests {
         // sigma (for maxPool') = pool_stake / circulation ~ 0.000129 < z0 = 0.002
         let sigma = Rat::from_i128(pool_stake as i128, circulation as i128);
         let sigma_f64 = {
-            let n: i128 = (&sigma.n).try_into().unwrap();
-            let d: i128 = (&sigma.d).try_into().unwrap();
+            let n: i128 = (&sigma.n).try_into().unwrap_or(i128::MAX);
+            let d: i128 = (&sigma.d).try_into().unwrap_or(i128::MAX);
             n as f64 / d as f64
         };
         assert!(
@@ -864,8 +864,8 @@ mod tests {
         // sigmaA (for performance only) = pool_stake / total_active_stake ~ 0.004
         let sigma_a = Rat::from_i128(pool_stake as i128, total_active_stake as i128);
         let sigma_a_f64 = {
-            let n: i128 = (&sigma_a.n).try_into().unwrap();
-            let d: i128 = (&sigma_a.d).try_into().unwrap();
+            let n: i128 = (&sigma_a.n).try_into().unwrap_or(i128::MAX);
+            let d: i128 = (&sigma_a.d).try_into().unwrap_or(i128::MAX);
             n as f64 / d as f64
         };
         assert!(

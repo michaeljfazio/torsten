@@ -1979,11 +1979,16 @@ impl Node {
                 let mut ls = ledger_state.blocking_write();
                 ls.utxo_set.set_indexing_enabled(true);
                 ls.utxo_set.rebuild_address_index();
-                // Rebuild stake distribution from UTxO set and recompute snapshot pool_stakes
-                // to ensure the saved snapshot has correct values.
+                // Rebuild the live stake distribution from the UTxO set so that
+                // live queries and the next epoch transition have correct values.
+                // Do NOT call recompute_snapshot_pool_stakes() here: snapshot
+                // pool_stake values are computed at epoch boundaries during replay
+                // using the full stake state (UTxO stake + reward accounts) at
+                // that boundary. Recomputing post-replay overwrites those correct
+                // values with UTxO-only stake that ignores reward account balances,
+                // zeroing out pools whose delegators have moved stake to rewards.
                 ls.needs_stake_rebuild = true;
                 ls.rebuild_stake_distribution();
-                ls.recompute_snapshot_pool_stakes();
                 debug!("Rebuilt address index and stake distribution after chunk replay");
             }
 
@@ -2123,11 +2128,10 @@ impl Node {
             let mut ls = self.ledger_state.write().await;
             ls.utxo_set.set_indexing_enabled(true);
             ls.utxo_set.rebuild_address_index();
-            // Rebuild stake distribution from UTxO set and recompute snapshot pool_stakes
-            // to ensure the saved snapshot has correct values.
+            // Rebuild the live stake distribution only — do NOT recompute snapshot
+            // pool_stake values. See chunk replay path above for the rationale.
             ls.needs_stake_rebuild = true;
             ls.rebuild_stake_distribution();
-            ls.recompute_snapshot_pool_stakes();
             debug!("Rebuilt address index and stake distribution after LSM replay");
         }
 

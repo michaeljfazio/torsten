@@ -717,6 +717,7 @@ where
 {
     let secondary_data = fs::read(secondary_path).context("Failed to read secondary index")?;
     let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
     let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     let mut entries = Vec::new();
@@ -759,6 +760,7 @@ where
     if chunk_len == 0 {
         return Ok(0);
     }
+    // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
     let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     let mut count = 0u64;
@@ -798,6 +800,7 @@ fn parse_chunk_with_index(
 
     // Memory-map the chunk file instead of reading it entirely into memory
     let chunk_file = fs::File::open(chunk_path).context("Failed to open chunk file")?;
+    // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
     let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     // Parse secondary index entries (56 bytes each, no header)
@@ -889,6 +892,7 @@ fn parse_chunk_sequential(chunk_path: &Path) -> Result<Vec<ParsedBlock>> {
         return Ok(Vec::new());
     }
 
+    // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
     let chunk_data = unsafe { Mmap::map(&chunk_file).context("Failed to mmap chunk file")? };
 
     let mut blocks = Vec::new();

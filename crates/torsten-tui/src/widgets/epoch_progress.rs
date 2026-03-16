@@ -39,8 +39,7 @@ impl EpochProgress {
     }
 
     /// Set a custom fill color.
-    #[allow(dead_code)]
-    pub fn fill_color(mut self, color: Color) -> Self {
+    pub fn _fill_color(mut self, color: Color) -> Self {
         self.fill_color = color;
         self
     }

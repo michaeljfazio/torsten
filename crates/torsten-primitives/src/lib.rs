@@ -1,3 +1,5 @@
+//! Core types for the Torsten Cardano node: hashes, blocks, transactions, addresses, values, protocol parameters.
+
 pub mod address;
 pub mod block;
 pub mod credentials;

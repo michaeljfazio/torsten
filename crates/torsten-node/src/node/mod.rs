@@ -402,14 +402,18 @@ impl Node {
                 utxo_cfg.bloom_filter_bits_per_key,
             ) {
                 Ok(store) => {
-                    let store_count = store.len();
                     info!(
                         path = %utxo_path.display(),
                         memtable_mb = utxo_cfg.memtable_size_mb,
                         cache_mb = utxo_cfg.block_cache_size_mb,
                         "UTxO store attached (LSM)"
                     );
+                    // attach_utxo_store calls rebuild_address_index() which populates
+                    // the in-memory count from the LSM. Read the count AFTER attach
+                    // to avoid a false-zero from the freshly-opened store (count starts
+                    // at 0 and is only set correctly once rebuild_address_index runs).
                     ledger.attach_utxo_store(store);
+                    let store_count = ledger.utxo_set.len();
 
                     // If the ledger has a non-origin tip but the UTxO store has
                     // significantly fewer entries than expected, the store data
@@ -710,6 +714,75 @@ impl Node {
         if *shutdown_rx.borrow() {
             info!("Shutdown requested during replay, exiting");
             return Ok(());
+        }
+
+        // After replay, initialize epoch_transitions_observed from the restored
+        // ledger's snapshot state. During replay, epoch transitions are applied
+        // but epoch_transitions_observed is not incremented (it's only incremented
+        // in the live sync path). A Mithril-imported + replayed node will have all
+        // three snapshots (mark, set, go) populated — treating that as 3+ epoch
+        // transitions allows the block producer's nonce_established and
+        // snapshots_established checks to pass immediately without waiting for
+        // 2–3 more live epoch boundaries.
+        {
+            let ls = self.ledger_state.read().await;
+            let transitions = if ls.snapshots.go.is_some() {
+                3u32
+            } else if ls.snapshots.set.is_some() {
+                2
+            } else if ls.snapshots.mark.is_some() {
+                1
+            } else {
+                0
+            };
+            if transitions > self.epoch_transitions_observed {
+                info!(
+                    transitions,
+                    "Initializing epoch_transitions_observed from restored ledger snapshots",
+                );
+                self.epoch_transitions_observed = transitions;
+            }
+        }
+
+        // If running as block producer, log the pool's stake in the set snapshot
+        // so operators can immediately diagnose eligibility issues.
+        if let Some(ref creds) = self.block_producer {
+            let ls = self.ledger_state.read().await;
+            if let Some(ref set_snap) = ls.snapshots.set {
+                let total_stake: u64 = set_snap.pool_stake.values().map(|s| s.0).sum();
+                let pool_stake = set_snap
+                    .pool_stake
+                    .get(&creds.pool_id)
+                    .map(|s| s.0)
+                    .unwrap_or(0);
+                let relative_stake = if total_stake > 0 {
+                    pool_stake as f64 / total_stake as f64
+                } else {
+                    0.0
+                };
+                info!(
+                    pool_id = %creds.pool_id,
+                    snapshot_epoch = set_snap.epoch.0,
+                    pool_stake_lovelace = pool_stake,
+                    total_active_stake_lovelace = total_stake,
+                    relative_stake = format_args!("{relative_stake:.8}"),
+                    "Block producer: pool stake in 'set' snapshot (used for leader election)",
+                );
+                if pool_stake == 0 {
+                    warn!(
+                        pool_id = %creds.pool_id,
+                        snapshot_epoch = set_snap.epoch.0,
+                        total_pools_in_snapshot = set_snap.pool_stake.len(),
+                        "Block producer has ZERO stake in 'set' snapshot — will not be elected slot leader. \
+                         Pool may not be in snapshot or stake distribution may need rebuilding.",
+                    );
+                }
+            } else {
+                warn!(
+                    pool_id = %creds.pool_id,
+                    "Block producer: no 'set' snapshot available — leader election disabled until epoch transition"
+                );
+            }
         }
 
         // Initialize query state from current ledger so N2C queries

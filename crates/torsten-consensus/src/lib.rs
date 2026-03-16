@@ -1,3 +1,5 @@
+//! Ouroboros Praos consensus: chain selection, epoch transitions, VRF leader checks.
+
 pub mod chain_selection;
 pub mod epoch;
 pub mod praos;

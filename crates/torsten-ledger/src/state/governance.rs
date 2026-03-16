@@ -728,6 +728,7 @@ impl LedgerState {
             }
         }
         // Fallback: compute from current delegations (UTxO + rewards)
+        warn!("SPO voting power: falling back to O(n) delegation scan — snapshot not available");
         let mut total = 0u64;
         for (stake_cred, delegated_pool) in self.delegations.iter() {
             if delegated_pool == pool_id {

@@ -547,7 +547,7 @@ mod tests {
     use crate::query_handler::QueryResult;
     use state_query::encode_query_result;
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::hash::TransactionHash;
     use torsten_primitives::mempool::{MempoolAddError, MempoolAddResult, MempoolSnapshot};
@@ -607,7 +607,7 @@ mod tests {
             size_bytes: usize,
             fee: Lovelace,
         ) -> Result<MempoolAddResult, MempoolAddError> {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             if inner.txs.iter().any(|(h, _, _, _)| *h == tx_hash) {
                 return Ok(MempoolAddResult::AlreadyExists);
             }
@@ -624,12 +624,12 @@ mod tests {
         }
 
         fn contains(&self, tx_hash: &TransactionHash) -> bool {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.txs.iter().any(|(h, _, _, _)| h == tx_hash)
         }
 
         fn get_tx(&self, tx_hash: &TransactionHash) -> Option<Transaction> {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner
                 .txs
                 .iter()
@@ -638,7 +638,7 @@ mod tests {
         }
 
         fn get_tx_size(&self, tx_hash: &TransactionHash) -> Option<usize> {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner
                 .txs
                 .iter()
@@ -647,7 +647,7 @@ mod tests {
         }
 
         fn get_tx_cbor(&self, tx_hash: &TransactionHash) -> Option<Vec<u8>> {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner
                 .txs
                 .iter()
@@ -656,17 +656,17 @@ mod tests {
         }
 
         fn tx_hashes_ordered(&self) -> Vec<TransactionHash> {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.order.iter().copied().collect()
         }
 
         fn len(&self) -> usize {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.txs.len()
         }
 
         fn total_bytes(&self) -> usize {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             inner.total_bytes
         }
 
@@ -675,7 +675,7 @@ mod tests {
         }
 
         fn snapshot(&self) -> MempoolSnapshot {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             MempoolSnapshot {
                 tx_count: inner.txs.len(),
                 total_bytes: inner.total_bytes,

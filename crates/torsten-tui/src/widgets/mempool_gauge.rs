@@ -38,8 +38,7 @@ impl MempoolGauge {
     }
 
     /// Set a custom max capacity for the gauge.
-    #[allow(dead_code)]
-    pub fn with_max(mut self, max: u64) -> Self {
+    pub fn _with_max(mut self, max: u64) -> Self {
         self.max = max.max(1);
         self
     }
@@ -160,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_mempool_gauge_custom_max() {
-        let gauge = MempoolGauge::new(100).with_max(200);
+        let gauge = MempoolGauge::new(100)._with_max(200);
         assert_eq!(gauge.max, 200);
         assert!((gauge.fill_ratio() - 0.5).abs() < 0.01);
     }

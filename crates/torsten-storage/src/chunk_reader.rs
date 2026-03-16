@@ -53,6 +53,7 @@ mod backend {
     impl ChunkReader for MmapChunkReader {
         fn read_range(&self, path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
             let file = fs::File::open(path).ok()?;
+            // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
             let mmap = unsafe { Mmap::map(&file).ok()? };
 
             let start = offset as usize;
@@ -70,6 +71,7 @@ mod backend {
                 Ok(f) => f,
                 Err(_) => return ranges.iter().map(|_| None).collect(),
             };
+            // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
             let mmap = match unsafe { Mmap::map(&file) } {
                 Ok(m) => m,
                 Err(_) => return ranges.iter().map(|_| None).collect(),

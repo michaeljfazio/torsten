@@ -240,6 +240,7 @@ impl MmapBlockIndex {
             return Err(std::io::Error::other("hash_index.dat too small"));
         }
 
+        // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
         // Validate header
@@ -283,6 +284,7 @@ impl MmapBlockIndex {
             .open(path)?;
         file.set_len(file_size)?;
 
+        // SAFETY: File is opened read-only and not modified externally during the lifetime of this Mmap.
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
         // Write header

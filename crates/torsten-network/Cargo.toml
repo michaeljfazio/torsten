@@ -26,5 +26,6 @@ num-bigint = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
