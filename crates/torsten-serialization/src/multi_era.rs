@@ -550,26 +550,33 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
     use pallas_traverse::MultiEraMeta;
-    match tx.metadata() {
-        MultiEraMeta::Empty | MultiEraMeta::NotApplicable => None,
-        MultiEraMeta::AlonzoCompatible(metadata) => {
-            let converted: BTreeMap<u64, TransactionMetadatum> = metadata
-                .iter()
+
+    // Check if the transaction declares an auxiliary data hash — if so, auxiliary
+    // data MUST be present (even if it contains only scripts, not metadata labels).
+    // pallas's metadata() only returns the metadata LABELS portion; it returns
+    // Empty for PostAlonzo aux data that has scripts but no labels. We use the
+    // hash presence as a proxy for aux data existence.
+    let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
+
+    let metadata = match tx.metadata() {
+        MultiEraMeta::AlonzoCompatible(m) => {
+            m.iter()
                 .map(|(label, value)| (*label, convert_metadatum(value)))
-                .collect();
-            if converted.is_empty() {
-                None
-            } else {
-                Some(AuxiliaryData {
-                    metadata: converted,
-                    native_scripts: Vec::new(),
-                    plutus_v1_scripts: Vec::new(),
-                    plutus_v2_scripts: Vec::new(),
-                    plutus_v3_scripts: Vec::new(),
-                })
-            }
+                .collect()
         }
-        _ => None,
+        _ => BTreeMap::new(),
+    };
+
+    if has_aux_data_hash || !metadata.is_empty() {
+        Some(AuxiliaryData {
+            metadata,
+            native_scripts: Vec::new(),
+            plutus_v1_scripts: Vec::new(),
+            plutus_v2_scripts: Vec::new(),
+            plutus_v3_scripts: Vec::new(),
+        })
+    } else {
+        None
     }
 }
 
