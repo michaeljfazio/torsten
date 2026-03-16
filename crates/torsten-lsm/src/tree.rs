@@ -319,6 +319,18 @@ impl LsmTree {
         snapshot::delete_snapshot(&snapshots_dir, name)
     }
 
+    /// Enable or disable the write-ahead log at runtime.
+    ///
+    /// Disabling the WAL during bulk replay (e.g., from Mithril import or
+    /// ImmutableDB chunk replay) provides a significant speedup because every
+    /// insert/delete no longer requires a WAL disk write + flush. Crash
+    /// recovery during replay is handled by the ledger snapshot, not the WAL.
+    ///
+    /// **Must be re-enabled** before switching to at-tip operation.
+    pub fn set_wal_enabled(&mut self, enabled: bool) {
+        self.wal.set_enabled(enabled);
+    }
+
     /// Flush the memtable to disk as a new sorted run.
     pub fn flush(&mut self) -> Result<()> {
         if !self.memtable.is_empty() {

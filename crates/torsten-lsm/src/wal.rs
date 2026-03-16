@@ -91,6 +91,11 @@ impl WalWriter {
         })
     }
 
+    /// Enable or disable the WAL at runtime.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     /// Append an insert operation to the WAL.
     pub fn log_insert(&mut self, key: &Key, value: &Value) -> Result<()> {
         if !self.enabled {

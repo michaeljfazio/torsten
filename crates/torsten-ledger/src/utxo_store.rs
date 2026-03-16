@@ -190,6 +190,14 @@ impl UtxoStore {
         self.indexing_enabled = enabled;
     }
 
+    /// Enable or disable the WAL on the underlying LSM tree.
+    ///
+    /// Disabling during bulk replay avoids per-write disk flushes, providing
+    /// a significant speedup. Must be re-enabled before at-tip operation.
+    pub fn set_wal_enabled(&mut self, enabled: bool) {
+        self.tree.set_wal_enabled(enabled);
+    }
+
     /// Look up a UTxO by input reference.
     pub fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput> {
         let key = encode_key(input);

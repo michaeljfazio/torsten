@@ -1886,6 +1886,7 @@ impl Node {
             {
                 let mut ls = ledger_state.blocking_write();
                 ls.utxo_set.set_indexing_enabled(false);
+                ls.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
                 ls.needs_stake_rebuild = false;
             }
 
@@ -1980,6 +1981,7 @@ impl Node {
             // Re-enable address indexing and rebuild the index
             {
                 let mut ls = ledger_state.blocking_write();
+                ls.utxo_set.set_wal_enabled(true); // Re-enable WAL after replay
                 ls.utxo_set.set_indexing_enabled(true);
                 ls.utxo_set.rebuild_address_index();
                 // Rebuild the live stake distribution from the UTxO set so that
@@ -2029,6 +2031,7 @@ impl Node {
         let start_block_no = {
             let mut ls = self.ledger_state.write().await;
             ls.utxo_set.set_indexing_enabled(false);
+            ls.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
             ls.needs_stake_rebuild = false;
             ls.tip.block_number.0 + 1
         };
@@ -2126,9 +2129,10 @@ impl Node {
             "Replay complete",
         );
 
-        // Re-enable address indexing and rebuild after replay
+        // Re-enable WAL and address indexing after replay
         {
             let mut ls = self.ledger_state.write().await;
+            ls.utxo_set.set_wal_enabled(true);
             ls.utxo_set.set_indexing_enabled(true);
             ls.utxo_set.rebuild_address_index();
             // Rebuild the live stake distribution only — do NOT recompute snapshot

@@ -90,6 +90,13 @@ impl UtxoSet {
         }
     }
 
+    /// Enable or disable the WAL on the underlying LSM store.
+    pub fn set_wal_enabled(&mut self, enabled: bool) {
+        if let Some(ref mut store) = self.store {
+            store.set_wal_enabled(enabled);
+        }
+    }
+
     /// Rebuild the address index from the UTxO map.
     /// Must be called after deserialization since the index is not serialized.
     pub fn rebuild_address_index(&mut self) {
