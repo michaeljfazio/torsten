@@ -6,7 +6,6 @@
 
 use crate::layout::LayoutMode;
 use crate::metrics::MetricsSnapshot;
-use crate::theme::{self, Theme, THEMES};
 use std::collections::VecDeque;
 
 /// Maximum number of sparkline samples to retain (one sample per poll interval).
@@ -100,8 +99,6 @@ pub struct App {
     pub slot_in_epoch: u64,
     /// Network-specific epoch length in slots. 0 = auto-detect from metrics.
     pub epoch_length_override: u64,
-    /// Index into [`THEMES`] for the currently active color theme.
-    pub theme_idx: usize,
 }
 
 impl App {
@@ -125,18 +122,7 @@ impl App {
             epoch_time_remaining_secs: 0,
             slot_in_epoch: 0,
             epoch_length_override: 0,
-            theme_idx: 0,
         }
-    }
-
-    /// Return the currently active [`Theme`].
-    pub fn theme(&self) -> Theme {
-        THEMES[self.theme_idx]
-    }
-
-    /// Advance to the next theme in the cycle, wrapping around.
-    pub fn cycle_theme(&mut self) {
-        self.theme_idx = theme::cycle_theme(self.theme_idx);
     }
 
     /// Update the app state with a new metrics snapshot.
@@ -294,37 +280,6 @@ impl App {
             format!("{:.2}K", ada / 1_000.0)
         } else {
             format!("{:.2}", ada)
-        }
-    }
-
-    /// Get CPU utilization as a float percentage (0.0 – 100.0+).
-    ///
-    /// The node emits `torsten_cpu_percent` as an integer scaled by 100
-    /// (e.g. 4570 means 45.70%). Returns 0.0 if the metric is absent.
-    pub fn cpu_percent(&self) -> f64 {
-        self.metrics.get("torsten_cpu_percent") / 100.0
-    }
-
-    /// Return the network name string from the network magic metric.
-    ///
-    /// Falls back to the magic number itself if it is not a known value.
-    pub fn network_name(&self) -> String {
-        match self.metrics.get_u64("torsten_network_magic") {
-            764_824_073 => "Mainnet".to_string(),
-            1 => "Preprod".to_string(),
-            2 => "Preview".to_string(),
-            141 => "Guild".to_string(),
-            0 => "Unknown".to_string(),
-            m => format!("magic:{}", m),
-        }
-    }
-
-    /// Return "Block Producer" or "Relay" based on the `torsten_is_block_producer` metric.
-    pub fn node_role(&self) -> &'static str {
-        if self.metrics.get_u64("torsten_is_block_producer") == 1 {
-            "Block Producer"
-        } else {
-            "Relay"
         }
     }
 

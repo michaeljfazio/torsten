@@ -590,102 +590,33 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 /// becomes necessary, a pallas issue should be filed to add per-era PostAlonzoAuxiliaryData
 /// variants to the enum.
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
-    use pallas_codec::utils::Nullable;
-    use pallas_primitives::alonzo::AuxiliaryData as PallasAux;
+    use pallas_traverse::MultiEraMeta;
 
-    // Access auxiliary data via era-specific transaction accessors.
-    // `pallas_traverse::MultiEraTx::aux_data()` is `pub(crate)` and not externally
-    // accessible, so we reach the raw pallas structs through `as_alonzo()` /
-    // `as_babbage()` / `as_conway()`.
-    //
-    // All three return `Nullable<KeepRaw<'_, alonzo::AuxiliaryData>>`:
-    //   Nullable::Some(x)  → aux data IS present; decode x
-    //   Nullable::Null     → aux data explicitly null in CBOR (`f6`)
-    //   Nullable::Undefined → aux data absent (4th element not present)
-    let raw_aux: &PallasAux = if let Some(alonzo) = tx.as_alonzo() {
-        match &alonzo.auxiliary_data {
-            Nullable::Some(x) => x,
-            _ => return None,
-        }
-    } else if let Some(babbage) = tx.as_babbage() {
-        match &babbage.auxiliary_data {
-            Nullable::Some(x) => x,
-            _ => return None,
-        }
-    } else if let Some(conway) = tx.as_conway() {
-        match &conway.auxiliary_data {
-            Nullable::Some(x) => x,
-            _ => return None,
-        }
-    } else {
-        // Byron — no auxiliary data
-        return None;
+    // Extract metadata labels via pallas's public metadata() API.
+    let metadata = match tx.metadata() {
+        MultiEraMeta::AlonzoCompatible(m) => m
+            .iter()
+            .map(|(label, value)| (*label, convert_metadatum(value)))
+            .collect(),
+        _ => BTreeMap::new(),
     };
 
-    match raw_aux {
-        // Plain CBOR map of metadata labels (Shelley era).
-        PallasAux::Shelley(metadata) => Some(AuxiliaryData {
-            metadata: metadata
-                .iter()
-                .map(|(label, value)| (*label, convert_metadatum(value)))
-                .collect(),
+    // If the tx body declares an auxiliary_data_hash, the aux data IS present
+    // on the wire — even if it contains only scripts and no metadata labels
+    // (e.g. PostAlonzo tag(259){} with an empty map). Return Some so that
+    // phase-1 rule 1c doesn't falsely reject.
+    let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
+
+    if has_aux_data_hash || !metadata.is_empty() {
+        Some(AuxiliaryData {
+            metadata,
             native_scripts: Vec::new(),
             plutus_v1_scripts: Vec::new(),
             plutus_v2_scripts: Vec::new(),
             plutus_v3_scripts: Vec::new(),
-        }),
-
-        // CBOR array `[metadata_map, [native_scripts...]]` (Allegra/Mary eras).
-        PallasAux::ShelleyMa(shelley_ma) => Some(AuxiliaryData {
-            metadata: shelley_ma
-                .transaction_metadata
-                .iter()
-                .map(|(label, value)| (*label, convert_metadatum(value)))
-                .collect(),
-            native_scripts: shelley_ma
-                .auxiliary_scripts
-                .as_ref()
-                .map(|scripts| scripts.iter().map(convert_native_script_inner).collect())
-                .unwrap_or_default(),
-            plutus_v1_scripts: Vec::new(),
-            plutus_v2_scripts: Vec::new(),
-            plutus_v3_scripts: Vec::new(),
-        }),
-
-        // tag(259) wrapped CBOR map (Alonzo+).
-        //
-        // CRITICAL: we produce Some(AuxiliaryData{...}) even when ALL inner
-        // optional fields are None.  The `tag(259){}` pattern — an empty map
-        // that carries a valid blake2b-256 hash in the tx body — is the exact
-        // case that triggered the original bug.  Phase-1 rule 1c requires
-        // auxiliary_data = Some(_) whenever auxiliary_data_hash = Some(_),
-        // regardless of the content of the auxiliary data itself.
-        PallasAux::PostAlonzo(post_alonzo) => Some(AuxiliaryData {
-            metadata: post_alonzo
-                .metadata
-                .as_ref()
-                .map(|m| {
-                    m.iter()
-                        .map(|(label, value)| (*label, convert_metadatum(value)))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            native_scripts: post_alonzo
-                .native_scripts
-                .as_ref()
-                .map(|scripts| scripts.iter().map(convert_native_script_inner).collect())
-                .unwrap_or_default(),
-            // alonzo::PostAlonzoAuxiliaryData.plutus_scripts is CBOR key 2 = Plutus V1.
-            // Babbage key 3 (V2) and Conway key 4 (V3) are not reachable through the
-            // shared alonzo struct — see the function doc comment for details.
-            plutus_v1_scripts: post_alonzo
-                .plutus_scripts
-                .as_ref()
-                .map(|scripts| scripts.iter().map(|s| s.0.to_vec()).collect())
-                .unwrap_or_default(),
-            plutus_v2_scripts: Vec::new(),
-            plutus_v3_scripts: Vec::new(),
-        }),
+        })
+    } else {
+        None
     }
 }
 

@@ -8,7 +8,6 @@
 
 use crate::app::{ActivePanel, App};
 use crate::layout::{compute_layout, LayoutMode};
-use crate::theme::Theme;
 use crate::widgets::epoch_progress::EpochProgress;
 use crate::widgets::header_bar::HeaderBar;
 use crate::widgets::mempool_gauge::MempoolGauge;
@@ -22,6 +21,18 @@ use ratatui::{
     Frame,
 };
 
+/// Color palette constants for a cohesive dark-theme look.
+const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237); // Cornflower blue
+const ACCENT_CYAN: Color = Color::Rgb(0, 210, 210);
+const ACCENT_GREEN: Color = Color::Rgb(80, 220, 100);
+const ACCENT_YELLOW: Color = Color::Rgb(255, 215, 0);
+const ACCENT_RED: Color = Color::Rgb(255, 80, 80);
+const DIM_WHITE: Color = Color::Rgb(160, 160, 170);
+const BRIGHT_WHITE: Color = Color::Rgb(230, 230, 240);
+const BORDER_NORMAL: Color = Color::Rgb(70, 70, 85);
+const BORDER_ACTIVE: Color = ACCENT_BLUE;
+const TITLE_COLOR: Color = Color::Rgb(180, 180, 200);
+
 /// The poll interval in seconds (must match the actual interval in main.rs).
 const POLL_INTERVAL_SECS: f64 = 2.0;
 
@@ -29,47 +40,39 @@ const POLL_INTERVAL_SECS: f64 = 2.0;
 pub fn draw(frame: &mut Frame, app: &App) {
     let size = frame.area();
     let layout = compute_layout(size, app.layout_mode);
-    let theme = app.theme();
-
-    // Fill the entire terminal with the theme background.
-    frame.render_widget(
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(theme.bg).fg(theme.fg)),
-        size,
-    );
 
     // Render header bar
-    render_header(frame, app, layout.header, theme);
+    render_header(frame, app, layout.header);
 
     // Render panels based on layout mode
     match layout.mode {
         LayoutMode::Compact => {
             // Compact mode: no borders, minimal rendering
-            render_chain_status_compact(frame, app, layout.chain_status, theme);
-            render_peers_compact(frame, app, layout.peers, theme);
-            render_performance_compact(frame, app, layout.performance, theme);
-            render_governance_compact(frame, app, layout.governance, theme);
+            render_chain_status_compact(frame, app, layout.chain_status);
+            render_peers_compact(frame, app, layout.peers);
+            render_performance_compact(frame, app, layout.performance);
+            render_governance_compact(frame, app, layout.governance);
         }
         _ => {
             // Full and Standard modes use bordered panels
-            render_chain_status(frame, app, layout.chain_status, theme);
-            render_peers(frame, app, layout.peers, theme);
-            render_performance(frame, app, layout.performance, theme);
-            render_governance(frame, app, layout.governance, theme);
+            render_chain_status(frame, app, layout.chain_status);
+            render_peers(frame, app, layout.peers);
+            render_performance(frame, app, layout.performance);
+            render_governance(frame, app, layout.governance);
         }
     }
 
-    render_footer(frame, app, layout.footer, theme);
+    render_footer(frame, app, layout.footer);
 
     // Help overlay (rendered last, on top)
     if app.show_help {
-        render_help_overlay(frame, size, theme);
+        render_help_overlay(frame, size);
     }
 }
 
 /// Render the header bar widget. Uses line 1 for status summary and line 2
 /// for the epoch countdown progress bar showing slot position and time remaining.
-fn render_header(frame: &mut Frame, app: &App, area: Rect, _theme: Theme) {
+fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let (_, is_synced, is_stalled) = app.sync_status();
     let pct = app.sync_progress_pct();
     let uptime = App::format_uptime(app.metrics.get_u64("torsten_uptime_seconds"));
@@ -107,19 +110,19 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, _theme: Theme) {
     }
 }
 
-/// Create a styled block with optional active-panel highlight, using theme colors.
-fn panel_block<'a>(title: &'a str, is_active: bool, theme: Theme) -> Block<'a> {
+/// Create a styled block with optional active-panel highlight.
+fn panel_block(title: &str, is_active: bool) -> Block<'_> {
     let border_color = if is_active {
-        theme.border_active
+        BORDER_ACTIVE
     } else {
-        theme.border
+        BORDER_NORMAL
     };
     let title_style = if is_active {
         Style::default()
-            .fg(theme.accent)
+            .fg(ACCENT_BLUE)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.title)
+        Style::default().fg(TITLE_COLOR)
     };
 
     Block::default()
@@ -141,11 +144,10 @@ fn metric_line_aligned<'a>(
     label: &'a str,
     value: String,
     value_color: Color,
-    label_color: Color,
     width: u16,
 ) -> Line<'a> {
     if width == 0 {
-        return metric_line(label, value, value_color, label_color);
+        return metric_line(label, value, value_color);
     }
 
     // Compute padding needed to right-align the value within the available width.
@@ -158,7 +160,7 @@ fn metric_line_aligned<'a>(
 
     Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(label, Style::default().fg(label_color)),
+        Span::styled(label, Style::default().fg(DIM_WHITE)),
         Span::styled(" ".repeat(padding), Style::default()),
         Span::styled(
             value,
@@ -170,10 +172,10 @@ fn metric_line_aligned<'a>(
 }
 
 /// Helper to create a metric line: "  Label:  Value"
-fn metric_line<'a>(label: &'a str, value: String, value_color: Color, label_color: Color) -> Line<'a> {
+fn metric_line<'a>(label: &'a str, value: String, value_color: Color) -> Line<'a> {
     Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(label, Style::default().fg(label_color)),
+        Span::styled(label, Style::default().fg(DIM_WHITE)),
         Span::styled(
             value,
             Style::default()
@@ -184,9 +186,9 @@ fn metric_line<'a>(label: &'a str, value: String, value_color: Color, label_colo
 }
 
 /// Render the Chain Status panel (bordered).
-fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_chain_status(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Chain;
-    let block = panel_block("Chain Status", is_active, theme);
+    let block = panel_block("Chain Status", is_active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -199,11 +201,11 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     // Sync status indicator
     let (status_label, is_synced, is_stalled) = app.sync_status();
     let status_color = if is_synced {
-        theme.success
+        ACCENT_GREEN
     } else if is_stalled {
-        theme.error
+        ACCENT_RED
     } else {
-        theme.warning
+        ACCENT_YELLOW
     };
     let pct = app.sync_progress_pct();
 
@@ -225,7 +227,7 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     } else {
         Span::styled(
             "  \u{25CB} Disconnected",
-            Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD),
         )
     };
 
@@ -233,21 +235,11 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let block_num = App::format_number(app.metrics.get_u64("torsten_block_number"));
     let slot_num = App::format_number(app.metrics.get_u64("torsten_slot_number"));
     let epoch = app.metrics.get_u64("torsten_epoch_number");
-    // tip_age is already computed by the node dynamically as
-    // current_time - slot_time, so `torsten_tip_age_seconds` is accurate.
     let tip_age = app.metrics.get_u64("torsten_tip_age_seconds");
     let uptime = App::format_uptime(app.metrics.get_u64("torsten_uptime_seconds"));
     let rollbacks = app.metrics.get_u64("torsten_rollback_count_total");
 
     let era_label = if epoch > 0 { "Conway" } else { "Unknown" };
-
-    let tip_color = if tip_age < 30 {
-        theme.success
-    } else if tip_age < 120 {
-        theme.warning
-    } else {
-        theme.error
-    };
 
     let mut lines = vec![
         Line::from(vec![connection_status]),
@@ -258,31 +250,34 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     lines.push(Line::default());
 
     lines.extend([
-        metric_line_aligned("Block:    ", block_num, theme.fg, theme.muted, w),
-        metric_line_aligned("Slot:     ", slot_num, theme.fg, theme.muted, w),
+        metric_line_aligned("Block:    ", block_num, BRIGHT_WHITE, w),
+        metric_line_aligned("Slot:     ", slot_num, BRIGHT_WHITE, w),
         metric_line_aligned(
             "Epoch:    ",
             format!("{} ({})", App::format_number(epoch), era_label),
-            theme.fg,
-            theme.muted,
+            BRIGHT_WHITE,
             w,
         ),
         metric_line_aligned(
             "Tip age:  ",
             format!("{}s", tip_age),
-            tip_color,
-            theme.muted,
+            if tip_age < 30 {
+                ACCENT_GREEN
+            } else if tip_age < 120 {
+                ACCENT_YELLOW
+            } else {
+                ACCENT_RED
+            },
             w,
         ),
-        metric_line_aligned("Uptime:   ", uptime, theme.muted, theme.muted, w),
+        metric_line_aligned("Uptime:   ", uptime, DIM_WHITE, w),
     ]);
 
     if rollbacks > 0 {
         lines.push(metric_line_aligned(
             "Rollbacks: ",
             App::format_number(rollbacks),
-            theme.warning,
-            theme.muted,
+            ACCENT_YELLOW,
             w,
         ));
     }
@@ -302,14 +297,10 @@ fn render_chain_status(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     }
 }
 
-/// Render the Connections panel (bordered).
-///
-/// Shows the full P2P connection breakdown: inbound/outbound/cold/warm/hot
-/// counts, uni-directional vs bi-directional vs duplex, chainsync idle,
-/// and average handshake RTT and block-fetch latency.
-fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+/// Render the Peers panel (bordered).
+fn render_peers(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Peers;
-    let block = panel_block("Connections", is_active, theme);
+    let block = panel_block("Peers", is_active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -319,20 +310,10 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let warm = app.metrics.get_u64("torsten_peers_warm");
     let cold = app.metrics.get_u64("torsten_peers_cold");
     let total = app.metrics.get_u64("torsten_peers_connected");
-    let outbound = app.metrics.get_u64("torsten_peers_outbound");
-    let inbound = app.metrics.get_u64("torsten_peers_inbound");
-    let duplex = app.metrics.get_u64("torsten_peers_duplex");
-    // Uni-directional = outbound-only connections (not duplex, not inbound).
-    // Bi-directional = connections that can both send and receive N2N traffic.
-    // Duplex is the overlap (connections where both sides initiated).
-    let unidirectional = outbound.saturating_sub(duplex);
-    let bidirectional = inbound.saturating_add(duplex);
-    let chainsync_idle = app.metrics.get_u64("torsten_chainsync_idle_seconds");
+    let n2n_active = app.metrics.get_u64("torsten_n2n_connections_active");
+    let n2c_active = app.metrics.get_u64("torsten_n2c_connections_active");
 
-    // P2P enabled if we have any connected peers or if we see outbound attempts.
-    let p2p_enabled = total > 0 || outbound > 0;
-
-    // Compute average handshake RTT if available.
+    // Compute average handshake RTT if available
     let rtt_sum = app.metrics.get("torsten_peer_handshake_rtt_ms_sum");
     let rtt_count = app.metrics.get("torsten_peer_handshake_rtt_ms_count");
     let avg_rtt = if rtt_count > 0.0 {
@@ -341,79 +322,45 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         0.0
     };
 
-    // Compute average block-fetch latency (histogram sum / count).
-    let fetch_sum = app.metrics.get("torsten_peer_block_fetch_ms_sum");
-    let fetch_count = app.metrics.get("torsten_peer_block_fetch_ms_count");
-    let avg_fetch_ms = if fetch_count > 0.0 {
-        fetch_sum / fetch_count
-    } else {
-        0.0
-    };
-
-    // Chainsync idle color: green < 5s, yellow < 30s, red >= 30s.
-    let idle_color = if chainsync_idle < 5 {
-        theme.success
-    } else if chainsync_idle < 30 {
-        theme.warning
-    } else {
-        theme.error
-    };
-
     let lines = vec![
         Line::default(),
-        metric_line_aligned(
-            "P2P:        ",
-            if p2p_enabled {
-                "enabled".to_string()
-            } else {
-                "disabled".to_string()
-            },
-            if p2p_enabled { theme.success } else { theme.muted },
-            theme.muted,
-            w,
-        ),
-        metric_line_aligned("Incoming:   ", App::format_number(inbound), theme.info, theme.muted, w),
-        metric_line_aligned("Outgoing:   ", App::format_number(outbound), theme.info, theme.muted, w),
+        metric_line_aligned("Connected: ", App::format_number(total), BRIGHT_WHITE, w),
         Line::default(),
-        metric_line_aligned("Cold Peers: ", App::format_number(cold), theme.muted, theme.muted, w),
-        metric_line_aligned("Warm Peers: ", App::format_number(warm), theme.warning, theme.muted, w),
-        metric_line_aligned("Hot Peers:  ", App::format_number(hot), theme.success, theme.muted, w),
+        Line::from(vec![
+            Span::styled("  Hot:  ", Style::default().fg(DIM_WHITE)),
+            Span::styled(
+                format!("{}", hot),
+                Style::default()
+                    .fg(ACCENT_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Warm: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(
+                format!("{}", warm),
+                Style::default()
+                    .fg(ACCENT_YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Cold: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(
+                format!("{}", cold),
+                Style::default()
+                    .fg(Color::Rgb(120, 120, 140))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::default(),
-        metric_line_aligned("Uni-Dir:    ", App::format_number(unidirectional), theme.muted, theme.muted, w),
-        metric_line_aligned("Bi-Dir:     ", App::format_number(bidirectional), theme.muted, theme.muted, w),
-        metric_line_aligned("Duplex:     ", App::format_number(duplex), theme.info, theme.muted, w),
+        metric_line_aligned("N2N active: ", App::format_number(n2n_active), DIM_WHITE, w),
+        metric_line_aligned("N2C active: ", App::format_number(n2c_active), DIM_WHITE, w),
         Line::default(),
         metric_line_aligned(
-            "Sync idle:  ",
-            if chainsync_idle == 0 {
-                "active".to_string()
-            } else {
-                format!("{}s", chainsync_idle)
-            },
-            idle_color,
-            theme.muted,
-            w,
-        ),
-        metric_line_aligned(
-            "RTT avg:    ",
+            "Latency:    ",
             if avg_rtt > 0.0 {
-                format!("{:.0}ms", avg_rtt)
+                format!("{:.0}ms avg", avg_rtt)
             } else {
                 "--".to_string()
             },
-            theme.info,
-            theme.muted,
-            w,
-        ),
-        metric_line_aligned(
-            "Fetch avg:  ",
-            if avg_fetch_ms > 0.0 {
-                format!("{:.1}ms/blk", avg_fetch_ms)
-            } else {
-                "--".to_string()
-            },
-            theme.info,
-            theme.muted,
+            ACCENT_CYAN,
             w,
         ),
     ];
@@ -423,22 +370,16 @@ fn render_peers(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 
 /// Render the Performance panel (bordered).
 ///
-/// Layout (row indices within inner area):
-/// - Row 0: blank spacer
-/// - Row 1: Blocks/s label
-/// - Row 2: block-rate sparkline
-/// - Row 3: TX/s label
-/// - Row 4: tx-rate sparkline
-/// - Row 5: blank spacer
-/// - Row 6: UTxOs
-/// - Row 7: Memory label
-/// - Row 8: memory sparkline
-/// - Row 9: Mempool label
-/// - Row 10: mempool gauge + depth sparkline
-/// - Rows 11+: block production (forged, leader checks, missed) when producing
-fn render_performance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+/// Layout:
+/// - Blocks/s with sparkline
+/// - TX/s with sparkline
+/// - UTxOs, Memory
+/// - Mempool gauge
+/// - Block production (only when forging)
+/// - Applied/Received counts
+fn render_performance(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Performance;
-    let block = panel_block("Performance", is_active, theme);
+    let block = panel_block("Performance", is_active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -459,69 +400,62 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let blocks_received = App::format_number(app.metrics.get_u64("torsten_blocks_received_total"));
     let blocks_forged = app.metrics.get_u64("torsten_blocks_forged_total");
 
-    let mem_color = if mem_bytes > 8_000_000_000 {
-        theme.error
-    } else if mem_bytes > 4_000_000_000 {
-        theme.warning
-    } else {
-        theme.success
-    };
-
-    // Sparkline width: up to 30 columns, anchored to the right of the inner area.
+    // Sparkline dimensions.
     let sparkline_width = inner.width.saturating_sub(2).min(30) as usize;
 
-    // Build the text rows. Rows 2, 4, 8, and 10 are placeholder lines that will
-    // be overlaid with sparklines/gauges after the Paragraph is rendered.
     let mut lines = vec![
-        Line::default(),                                                                  // row 0
-        metric_line_aligned("Blocks/s:    ", format!("{}", bps as u64), theme.info, theme.muted, w), // row 1
-        Line::default(),                                                                  // row 2: block sparkline
-        metric_line_aligned("TX/s:        ", format!("{}", tps as u64), theme.success, theme.muted, w), // row 3
-        Line::default(),                                                                  // row 4: tx sparkline
-        Line::default(),                                                                  // row 5
-        metric_line_aligned("UTxOs:       ", utxo_count, theme.fg, theme.muted, w),     // row 6
-        metric_line_aligned("Memory:      ", mem_str, mem_color, theme.muted, w),        // row 7
-        Line::default(),                                                                  // row 8: memory sparkline
+        Line::default(),
+        metric_line_aligned("Blocks/s:    ", format!("{}", bps as u64), ACCENT_CYAN, w),
+        Line::default(), // block rate sparkline row placeholder
+        metric_line_aligned("TX/s:        ", format!("{}", tps as u64), ACCENT_GREEN, w),
+        Line::default(), // tx rate sparkline row placeholder
+        Line::default(),
+        metric_line_aligned("UTxOs:       ", utxo_count, BRIGHT_WHITE, w),
+        metric_line_aligned(
+            "Memory:      ",
+            mem_str,
+            if mem_bytes > 8_000_000_000 {
+                ACCENT_RED
+            } else if mem_bytes > 4_000_000_000 {
+                ACCENT_YELLOW
+            } else {
+                ACCENT_GREEN
+            },
+            w,
+        ),
         metric_line_aligned(
             "Mempool:     ",
             format!("{} txs ({})", mempool_txs, App::format_bytes(mempool_bytes)),
-            theme.fg,
-            theme.muted,
+            BRIGHT_WHITE,
             w,
-        ),                                                                                // row 9
-        Line::default(),                                                                  // row 10: mempool gauge
+        ),
+        Line::default(), // mempool gauge row placeholder
     ];
 
     // Block production section (only when blocks_forged > 0).
-    // Uses `torsten_leader_checks_total` — the correct metric name for VRF checks.
     if blocks_forged > 0 {
-        let leader_checks = app.metrics.get_u64("torsten_leader_checks_total");
-        let leader_checks_not_elected =
-            app.metrics.get_u64("torsten_leader_checks_not_elected_total");
-        // Missed slots: leader checks where we were elected but didn't forge.
-        // elected = leader_checks - leader_checks_not_elected
-        let elected = leader_checks.saturating_sub(leader_checks_not_elected);
-        let missed = elected.saturating_sub(blocks_forged);
+        let slots_checked = App::format_number(app.metrics.get_u64("torsten_slots_checked_total"));
+        let missed = app
+            .metrics
+            .get_u64("torsten_slots_checked_total")
+            .saturating_sub(blocks_forged);
         lines.push(Line::default());
         lines.push(metric_line_aligned(
             "Forged:      ",
             App::format_number(blocks_forged),
-            theme.success,
-            theme.muted,
+            ACCENT_GREEN,
             w,
         ));
         lines.push(metric_line_aligned(
-            "VRF checks:  ",
-            App::format_number(leader_checks),
-            theme.muted,
-            theme.muted,
+            "Slots check: ",
+            slots_checked,
+            DIM_WHITE,
             w,
         ));
         lines.push(metric_line_aligned(
             "Missed:      ",
             App::format_number(missed),
-            if missed > 0 { theme.warning } else { theme.muted },
-            theme.muted,
+            if missed > 0 { ACCENT_YELLOW } else { DIM_WHITE },
             w,
         ));
     }
@@ -530,23 +464,19 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     lines.push(metric_line_aligned(
         "Applied:     ",
         blocks_applied,
-        theme.muted,
-        theme.muted,
+        DIM_WHITE,
         w,
     ));
     lines.push(metric_line_aligned(
         "Received:    ",
         blocks_received,
-        theme.muted,
-        theme.muted,
+        DIM_WHITE,
         w,
     ));
 
     frame.render_widget(Paragraph::new(lines), inner);
 
-    // --- Sparkline overlays ---
-
-    // Block rate sparkline (row 2).
+    // Render block rate sparkline (row index 2 within inner).
     if inner.height > 2 && !app.block_rate_history.is_empty() {
         let spark_area = Rect {
             x: inner.right().saturating_sub(sparkline_width as u16 + 1),
@@ -555,12 +485,12 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             height: 1,
         };
         frame.render_widget(
-            SparklineHistory::with_color(&app.block_rate_history, theme.info),
+            SparklineHistory::with_color(&app.block_rate_history, ACCENT_CYAN),
             spark_area,
         );
     }
 
-    // TX rate sparkline (row 4).
+    // Render TX rate sparkline (row index 4 within inner).
     if inner.height > 4 && !app.tx_rate_history.is_empty() {
         let spark_area = Rect {
             x: inner.right().saturating_sub(sparkline_width as u16 + 1),
@@ -569,58 +499,29 @@ fn render_performance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             height: 1,
         };
         frame.render_widget(
-            SparklineHistory::with_color(&app.tx_rate_history, theme.success),
+            SparklineHistory::with_color(&app.tx_rate_history, ACCENT_GREEN),
             spark_area,
         );
     }
 
-    // Memory sparkline (row 8): shows RSS trend over the last ~2 minutes.
-    if inner.height > 8 && !app.memory_history.is_empty() {
-        let spark_area = Rect {
-            x: inner.right().saturating_sub(sparkline_width as u16 + 1),
-            y: inner.y + 8,
-            width: sparkline_width as u16,
-            height: 1,
-        };
-        frame.render_widget(
-            SparklineHistory::with_color(&app.memory_history, mem_color),
-            spark_area,
-        );
-    }
-
-    // Mempool gauge (row 10).
-    if inner.height > 10 && inner.width > 8 {
+    // Render mempool gauge (row index 9 within inner).
+    if inner.height > 9 && inner.width > 8 {
         let gauge_area = Rect {
             x: inner.x + 2,
-            y: inner.y + 10,
+            y: inner.y + 9,
             width: inner.width.saturating_sub(4),
             height: 1,
         };
         frame.render_widget(MempoolGauge::new(mempool_txs), gauge_area);
-
-        // Mempool depth sparkline overlaid on the right half of the gauge row.
-        if !app.mempool_depth_history.is_empty() {
-            let spark_w = (inner.width / 3).min(sparkline_width as u16);
-            let spark_area = Rect {
-                x: gauge_area.right().saturating_sub(spark_w),
-                y: inner.y + 10,
-                width: spark_w,
-                height: 1,
-            };
-            frame.render_widget(
-                SparklineHistory::with_color(&app.mempool_depth_history, theme.warning),
-                spark_area,
-            );
-        }
     }
 }
 
 /// Render the Governance panel (bordered).
 ///
 /// Includes treasury, DRep/proposal counts, pool stats, and disk info.
-fn render_governance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_governance(frame: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_panel == ActivePanel::Governance;
-    let block = panel_block("Governance", is_active, theme);
+    let block = panel_block("Governance", is_active);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -638,33 +539,31 @@ fn render_governance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         metric_line_aligned(
             "Treasury:    ",
             format!("{} ADA", App::format_ada(treasury)),
-            theme.success,
-            theme.muted,
+            ACCENT_GREEN,
             w,
         ),
         Line::default(),
-        metric_line_aligned("DReps:       ", dreps, theme.fg, theme.muted, w),
-        metric_line_aligned("Proposals:   ", proposals, theme.fg, theme.muted, w),
+        metric_line_aligned("DReps:       ", dreps, BRIGHT_WHITE, w),
+        metric_line_aligned("Proposals:   ", proposals, BRIGHT_WHITE, w),
         Line::default(),
-        metric_line_aligned("Pools:       ", pools, theme.info, theme.muted, w),
-        metric_line_aligned("Delegations: ", delegations, theme.muted, theme.muted, w),
+        metric_line_aligned("Pools:       ", pools, ACCENT_CYAN, w),
+        metric_line_aligned("Delegations: ", delegations, DIM_WHITE, w),
     ];
 
     // Disk info: show when available (> 0 means the metric is being emitted).
     if disk_avail > 0 {
         let disk_color = if disk_avail > 50_000_000_000 {
-            theme.success // > 50 GB
+            ACCENT_GREEN // > 50 GB
         } else if disk_avail > 10_000_000_000 {
-            theme.warning // > 10 GB
+            ACCENT_YELLOW // > 10 GB
         } else {
-            theme.error // < 10 GB
+            ACCENT_RED // < 10 GB
         };
         lines.push(Line::default());
         lines.push(metric_line_aligned(
             "Disk avail:  ",
             App::format_bytes(disk_avail),
             disk_color,
-            theme.muted,
             w,
         ));
     }
@@ -675,18 +574,18 @@ fn render_governance(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 // ---- Compact mode renderers (no borders, minimal output) ----
 
 /// Render chain status in compact mode (no borders, minimal 2-line output).
-fn render_chain_status_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_chain_status_compact(frame: &mut Frame, app: &App, area: Rect) {
     if area.height < 1 || area.width < 10 {
         return;
     }
 
     let (status_label, is_synced, is_stalled) = app.sync_status();
     let status_color = if is_synced {
-        theme.success
+        ACCENT_GREEN
     } else if is_stalled {
-        theme.error
+        ACCENT_RED
     } else {
-        theme.warning
+        ACCENT_YELLOW
     };
     let pct = app.sync_progress_pct();
     let block_num = App::format_number(app.metrics.get_u64("torsten_block_number"));
@@ -699,7 +598,7 @@ fn render_chain_status_compact(frame: &mut Frame, app: &App, area: Rect, theme: 
             Span::styled(
                 "CHAIN ",
                 Style::default()
-                    .fg(theme.title)
+                    .fg(TITLE_COLOR)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -710,26 +609,28 @@ fn render_chain_status_compact(frame: &mut Frame, app: &App, area: Rect, theme: 
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Blk: ", Style::default().fg(theme.muted)),
-            Span::styled(block_num, Style::default().fg(theme.fg)),
-            Span::styled("  Slot: ", Style::default().fg(theme.muted)),
-            Span::styled(slot_num, Style::default().fg(theme.fg)),
+            Span::styled("  Blk: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(block_num, Style::default().fg(BRIGHT_WHITE)),
+            Span::styled("  Slot: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(slot_num, Style::default().fg(BRIGHT_WHITE)),
         ]),
     ];
 
     if area.height >= 3 {
-        let tip_color = if tip_age < 30 {
-            theme.success
-        } else if tip_age < 120 {
-            theme.warning
-        } else {
-            theme.error
-        };
         lines.push(Line::from(vec![
-            Span::styled("  Epoch: ", Style::default().fg(theme.muted)),
-            Span::styled(App::format_number(epoch), Style::default().fg(theme.fg)),
-            Span::styled("  Tip: ", Style::default().fg(theme.muted)),
-            Span::styled(format!("{}s", tip_age), Style::default().fg(tip_color)),
+            Span::styled("  Epoch: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(App::format_number(epoch), Style::default().fg(BRIGHT_WHITE)),
+            Span::styled("  Tip: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(
+                format!("{}s", tip_age),
+                Style::default().fg(if tip_age < 30 {
+                    ACCENT_GREEN
+                } else if tip_age < 120 {
+                    ACCENT_YELLOW
+                } else {
+                    ACCENT_RED
+                }),
+            ),
         ]));
     }
 
@@ -737,7 +638,7 @@ fn render_chain_status_compact(frame: &mut Frame, app: &App, area: Rect, theme: 
 }
 
 /// Render peers in compact mode (no borders).
-fn render_peers_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_peers_compact(frame: &mut Frame, app: &App, area: Rect) {
     if area.height < 1 || area.width < 10 {
         return;
     }
@@ -750,18 +651,18 @@ fn render_peers_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) 
         Span::styled(
             "PEERS ",
             Style::default()
-                .fg(theme.title)
+                .fg(TITLE_COLOR)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{}", total),
             Style::default()
-                .fg(theme.fg)
+                .fg(BRIGHT_WHITE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  H:{} W:{}", hot, warm),
-            Style::default().fg(theme.muted),
+            Style::default().fg(DIM_WHITE),
         ),
     ])];
 
@@ -769,7 +670,7 @@ fn render_peers_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) 
 }
 
 /// Render performance in compact mode (no borders).
-fn render_performance_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_performance_compact(frame: &mut Frame, app: &App, area: Rect) {
     if area.height < 1 || area.width < 10 {
         return;
     }
@@ -778,37 +679,35 @@ fn render_performance_compact(frame: &mut Frame, app: &App, area: Rect, theme: T
     let utxo_count = App::format_number(app.metrics.get_u64("torsten_utxo_count"));
     let mem_bytes = app.metrics.get_u64("torsten_mem_resident_bytes");
 
-    let mem_color = if mem_bytes > 8_000_000_000 {
-        theme.error
-    } else if mem_bytes > 4_000_000_000 {
-        theme.warning
-    } else {
-        theme.success
-    };
-
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "PERF  ",
             Style::default()
-                .fg(theme.title)
+                .fg(TITLE_COLOR)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:.0} blk/s", bps),
             Style::default()
-                .fg(theme.info)
+                .fg(ACCENT_CYAN)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  Mem: {}", App::format_bytes(mem_bytes)),
-            Style::default().fg(mem_color),
+            Style::default().fg(if mem_bytes > 8_000_000_000 {
+                ACCENT_RED
+            } else if mem_bytes > 4_000_000_000 {
+                ACCENT_YELLOW
+            } else {
+                ACCENT_GREEN
+            }),
         ),
     ])];
 
     if area.height >= 2 {
         lines.push(Line::from(vec![
-            Span::styled("  UTxOs: ", Style::default().fg(theme.muted)),
-            Span::styled(utxo_count, Style::default().fg(theme.fg)),
+            Span::styled("  UTxOs: ", Style::default().fg(DIM_WHITE)),
+            Span::styled(utxo_count, Style::default().fg(BRIGHT_WHITE)),
         ]));
     }
 
@@ -816,7 +715,7 @@ fn render_performance_compact(frame: &mut Frame, app: &App, area: Rect, theme: T
 }
 
 /// Render governance in compact mode (no borders).
-fn render_governance_compact(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+fn render_governance_compact(frame: &mut Frame, app: &App, area: Rect) {
     if area.height < 1 || area.width < 10 {
         return;
     }
@@ -828,26 +727,26 @@ fn render_governance_compact(frame: &mut Frame, app: &App, area: Rect, theme: Th
         Span::styled(
             "GOV   ",
             Style::default()
-                .fg(theme.title)
+                .fg(TITLE_COLOR)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{} ADA", App::format_ada(treasury)),
             Style::default()
-                .fg(theme.success)
+                .fg(ACCENT_GREEN)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  Pools: {}", pools),
-            Style::default().fg(theme.muted),
+            Style::default().fg(DIM_WHITE),
         ),
     ])];
 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Render the footer with keyboard shortcuts and current theme name.
-fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+/// Render the footer with keyboard shortcuts.
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     // Show the current layout mode indicator
     let mode_label = match app.layout_mode {
         None => "Auto",
@@ -856,62 +755,51 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         Some(LayoutMode::Compact) => "Cpt",
     };
 
-    let theme_name = app.theme().name;
-
     let shortcuts = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(
             "[q]",
             Style::default()
-                .fg(theme.accent)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("uit  ", Style::default().fg(theme.muted)),
+        Span::styled("uit  ", Style::default().fg(DIM_WHITE)),
         Span::styled(
             "[Tab/S-Tab]",
             Style::default()
-                .fg(theme.accent)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" cycle  ", Style::default().fg(theme.muted)),
+        Span::styled(" cycle  ", Style::default().fg(DIM_WHITE)),
         Span::styled(
             "[1-4]",
             Style::default()
-                .fg(theme.accent)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" panel  ", Style::default().fg(theme.muted)),
+        Span::styled(" panel  ", Style::default().fg(DIM_WHITE)),
         Span::styled(
             "[m]",
             Style::default()
-                .fg(theme.accent)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("ode:{}  ", mode_label),
-            Style::default().fg(theme.muted),
+            format!("ode:{}", mode_label),
+            Style::default().fg(DIM_WHITE),
         ),
-        Span::styled(
-            "[t]",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("heme:{}  ", theme_name),
-            Style::default().fg(theme.muted),
-        ),
+        Span::styled("  ", Style::default()),
         Span::styled(
             "[?]",
             Style::default()
-                .fg(theme.accent)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("help  ", Style::default().fg(theme.muted)),
-        Span::styled("  \u{2502}  ", Style::default().fg(theme.border)),
+        Span::styled("help  ", Style::default().fg(DIM_WHITE)),
+        Span::styled("  \u{2502}  ", Style::default().fg(BORDER_NORMAL)),
         Span::styled(
             "torsten-tui",
-            Style::default().fg(theme.muted),
+            Style::default().fg(Color::Rgb(100, 100, 120)),
         ),
     ]);
 
@@ -919,9 +807,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 /// Render a centered help overlay on top of everything.
-fn render_help_overlay(frame: &mut Frame, area: Rect, theme: Theme) {
-    let overlay_width = 52u16;
-    let overlay_height = 22u16;
+fn render_help_overlay(frame: &mut Frame, area: Rect) {
+    let overlay_width = 48u16;
+    let overlay_height = 20u16;
 
     let x = area.x + area.width.saturating_sub(overlay_width) / 2;
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
@@ -937,13 +825,13 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, theme: Theme) {
 
     let help_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
+        .border_style(Style::default().fg(ACCENT_BLUE))
         .title(Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(
                 "Help",
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(ACCENT_BLUE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" ", Style::default()),
@@ -954,26 +842,25 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, theme: Theme) {
         Line::from(Span::styled(
             "Torsten Node Dashboard",
             Style::default()
-                .fg(theme.fg)
+                .fg(BRIGHT_WHITE)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::default(),
-        help_key_line("q / Esc", "Quit", theme),
-        help_key_line("Tab", "Cycle panels forward", theme),
-        help_key_line("Shift+Tab", "Cycle panels backward", theme),
-        help_key_line("1-4", "Jump to panel (1=Chain, etc.)", theme),
-        help_key_line("m", "Toggle layout mode", theme),
-        help_key_line("t", "Cycle color theme", theme),
-        help_key_line("h / ?", "Toggle this help", theme),
-        help_key_line("r", "Force refresh metrics", theme),
+        help_key_line("q / Esc", "Quit"),
+        help_key_line("Tab", "Cycle panels forward"),
+        help_key_line("Shift+Tab", "Cycle panels backward"),
+        help_key_line("1-4", "Jump to panel (1=Chain, etc.)"),
+        help_key_line("m", "Toggle layout mode"),
+        help_key_line("h / ?", "Toggle this help"),
+        help_key_line("r", "Force refresh metrics"),
         Line::default(),
         Line::from(Span::styled(
             "Layout: Auto/Full/Standard/Compact",
-            Style::default().fg(theme.muted),
+            Style::default().fg(DIM_WHITE),
         )),
         Line::from(Span::styled(
             "Polls metrics every 2 seconds.",
-            Style::default().fg(theme.muted),
+            Style::default().fg(DIM_WHITE),
         )),
         Line::default(),
         Line::from(Span::styled(
@@ -988,15 +875,15 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, theme: Theme) {
 }
 
 /// Helper for a help dialog key binding line.
-fn help_key_line<'a>(key: &'a str, desc: &'a str, theme: Theme) -> Line<'a> {
+fn help_key_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!("{:>10}", key),
             Style::default()
-                .fg(theme.info)
+                .fg(ACCENT_CYAN)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(desc, Style::default().fg(theme.muted)),
+        Span::styled(desc, Style::default().fg(DIM_WHITE)),
     ])
 }
