@@ -4,7 +4,7 @@ use torsten_crypto::keys::PaymentVerificationKey;
 use torsten_primitives::block::{BlockHeader, Tip};
 use torsten_primitives::hash::{blake2b_256, Hash28, Hash32};
 use torsten_primitives::time::{EpochLength, EpochNo, SlotNo};
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 /// KES period length in slots (each period is 129600 slots = 36 hours on mainnet)
 pub const KES_PERIOD_SLOTS: u64 = 129600;
@@ -639,6 +639,12 @@ impl OuroborosPraos {
             }
             Err(e) => {
                 if vrf_is_fatal {
+                    error!(
+                        slot = header.slot.0,
+                        epoch_nonce = %header.epoch_nonce.to_hex(),
+                        error = %e,
+                        "VRF verification failed (fatal)"
+                    );
                     return Err(ConsensusError::VrfVerification(format!("{e}")));
                 }
                 // Use debug level when nonce isn't established (expected after Mithril import)

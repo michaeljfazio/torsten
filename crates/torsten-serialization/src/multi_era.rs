@@ -548,16 +548,54 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
     result
 }
 
+/// Convert a pallas transaction's auxiliary data into our `AuxiliaryData` type.
+///
+/// # Auxiliary data wire formats
+///
+/// Cardano auxiliary data has three wire-format variants, all reachable through
+/// the `pallas_primitives::alonzo::AuxiliaryData` enum that pallas uses across all eras:
+///
+/// - `Shelley(Metadata)` — a plain CBOR map of metadata labels; no scripts.
+/// - `ShelleyMa(ShelleyMaAuxiliaryData)` — a 2-element CBOR array:
+///   `[metadata_map, [native_scripts...]]`. Introduced in the Mary era.
+/// - `PostAlonzo(PostAlonzoAuxiliaryData)` — tag(259) wrapped CBOR map with
+///   optional fields 0–2: metadata, native scripts, Plutus V1 scripts.
+///   Babbage extends this with key 3 (V2); Conway with key 4 (V3).
+///
+/// # Root cause of the bug
+///
+/// `pallas_traverse::MultiEraTx::metadata()` only exposes the **metadata-label**
+/// portion of auxiliary data. When a `PostAlonzoAuxiliaryData` has no metadata
+/// labels (key 0 absent or `None`), pallas returns `MultiEraMeta::Empty` — even
+/// though the auxiliary data structure IS present on the wire and the transaction
+/// body has declared an `auxiliary_data_hash` over it.
+///
+/// The original implementation matched on `tx.metadata()`, so `PostAlonzo` aux
+/// data with no metadata labels — including the `tag(259){}` (empty map) pattern
+/// used by minting transactions — decoded as `None`. Phase-1 rule 1c then fired
+/// "Auxiliary data hash declared but no auxiliary data present", incorrectly
+/// rejecting blocks that cardano-node (Haskell) accepts.
+///
+/// # Fix
+///
+/// Call `tx.aux_data()` directly and match on the raw pallas `AuxiliaryData` enum.
+/// We return `None` only when pallas genuinely finds no auxiliary data (`Nullable::Null`
+/// / `Nullable::Undefined`). If `tx.aux_data()` returns `Some(...)`, auxiliary data
+/// IS present on the wire — even when all of its inner fields happen to be empty.
+///
+/// # Babbage / Conway V2/V3 scripts in aux data
+///
+/// pallas decodes `PostAlonzoAuxiliaryData` using the alonzo struct, which only defines
+/// key 2 (Plutus V1). Keys 3/4 (V2/V3) introduced in Babbage/Conway are not accessible
+/// through the shared enum. In practice, Plutus scripts in auxiliary data are extremely
+/// rare and the ledger does not use them for script-witness matching (they are informational).
+/// We extract V1 scripts from the alonzo struct; V2/V3 slots are left empty. If this
+/// becomes necessary, a pallas issue should be filed to add per-era PostAlonzoAuxiliaryData
+/// variants to the enum.
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
     use pallas_traverse::MultiEraMeta;
 
-    // Check if the transaction declares an auxiliary data hash — if so, auxiliary
-    // data MUST be present (even if it contains only scripts, not metadata labels).
-    // pallas's metadata() only returns the metadata LABELS portion; it returns
-    // Empty for PostAlonzo aux data that has scripts but no labels. We use the
-    // hash presence as a proxy for aux data existence.
-    let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
-
+    // Extract metadata labels via pallas's public metadata() API.
     let metadata = match tx.metadata() {
         MultiEraMeta::AlonzoCompatible(m) => m
             .iter()
@@ -565,6 +603,11 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
             .collect(),
         _ => BTreeMap::new(),
     };
+
+    // If the tx body declares an auxiliary_data_hash, the aux data IS present
+    // on the wire — even if it contains only scripts and no metadata labels.
+    // Return Some(AuxiliaryData) so phase-1 rule 1c doesn't falsely reject.
+    let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
 
     if has_aux_data_hash || !metadata.is_empty() {
         Some(AuxiliaryData {

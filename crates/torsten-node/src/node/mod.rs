@@ -1701,15 +1701,12 @@ impl Node {
             self.metrics
                 .leader_checks_not_elected
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Log periodically so operators can confirm the VRF check is running
-            if next_slot.0 % 20 == 0 {
-                info!(
-                    slot = next_slot.0,
-                    pool_id = %creds.pool_id,
-                    stake = format_args!("{relative_stake:.6}"),
-                    "Slot leader check: not elected"
-                );
-            }
+            debug!(
+                slot = next_slot.0,
+                pool_id = %creds.pool_id,
+                stake = format_args!("{relative_stake:.6}"),
+                "Slot leader check: not elected"
+            );
             return;
         }
 
