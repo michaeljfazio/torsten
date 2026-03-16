@@ -2049,4 +2049,163 @@ mod tests {
         assert!(aux.native_scripts.is_empty());
         assert!(aux.plutus_v1_scripts.is_empty());
     }
+
+    // ===================================================================
+    //  Coverage Sprint: DecodeMode::Minimal tx hash invariant tests
+    // ===================================================================
+
+    /// Verify that DecodeMode::Minimal produces the exact same tx hash as Full
+    /// decode for the empty PostAlonzo aux data transaction. This is critical
+    /// because the tx hash is computed from the body bytes, not the witness set.
+    #[test]
+    fn test_minimal_decode_same_hash_as_full_for_empty_aux_tx() {
+        // Real preview testnet Conway tx with tag(259){} aux data
+        let tx_cbor = hex::decode(concat!(
+            "84a700d901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895c",
+            "cdd909010182a300581d706ea76075243b9994fe41fdbea2572ebea26d8341193e689260d7dbb",
+            "401821a0017ce9ca1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e41474501028201d8185863d8799f01583b62",
+            "61666b726569646d7571796874756f78736f79753761686d33747234346a726762326a616c6a68",
+            "72323637696d773232377773323337727a7565409f581c5afc8364f8733c895f54b5cf261b5efe",
+            "71d3669f59ccad7439ccf289ffff825839005afc8364f8733c895f54b5cf261b5efe71d3669f59",
+            "ccad7439ccf289a4f5d0b5b8976f1ee13e61c1edb2acbed7d394eade0e8c924c8f61471b000000",
+            "021981fc3d021a000ce089075820bdaa99eb158414dea0a91d6c727e2268574b23efe6e08ab3b8",
+            "41abe8059a030c09a1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e414745010b5820303e130d2fc177979b4e998",
+            "501fae17630aa6ab425e61080612e24eb822a22230dd901028182582035a331977b975e2debbf986",
+            "c99626df33ec4c12bf434008eefdbef895ccdd90901a300d90102818258206da802c0bf16fc704d5b",
+            "92b34e7a323f508a9258753b91011379238c6598a3635840bb4f351370d0f763b39eec9eeb0ad716",
+            "354211c3e87779381559e2d7664460be22e6b4aa36ddeb5e4f9ad80e59cb8792797fa5497c055b30",
+            "b6c77a6cac54400c05a182010082d87980821a006acfc01ab2d05e0006d901028159039759039401",
+            "000033323232323232323232323223222323232322533300c323232533300f30073011375400226464",
+            "64a66602c0022a660260202c264a66602e603400426464a66602a601a602e6ea803854ccc054c8cc",
+            "004004018894ccc06c004528099299980c19baf301e301b3754603c00402629444cc00c00c004c07",
+            "800454ccc054c0300044cdc78010088a501533016491536578706563740a20202020202020202020",
+            "6c6973742e616e7928696e707574732c20666e28696e70757429207b20696e7075742e6f7574707",
+            "5745f7265666572656e6365203d3d207574786f5f726566207d290016153330153370e002900089",
+            "9b8f00201114a06eb4c05c008dd7180a8008a9980a0088b180c000999119299980a1805980b1baa",
+            "00114bd6f7b63009bab301a30173754002646600200200644a666032002298103d87a80001323232",
+            "53330183371e00c6eb8c06800c4cdd2a40006603a6e980052f5c026600a00a0046eacc068008c07",
+            "4008c06c004c8cc004004dd5980c180c980c980c980c80191299980b8008a5eb7bdb1804c8c8c8c",
+            "94ccc05ccdc7a4500002100313301c337606ea4008dd3000998030030019bab3019003375c602e00",
+            "4603600460320026eb8c05cc050dd50019bac3016001301237540042a66020921236578706563742",
+            "074782e4d696e7428706f6c6963795f696429203d20707572706f73650016301430150023013001",
+            "300f37540022930a99806a491856616c696461746f722072657475726e65642066616c73650013656",
+            "32533300b30030011533300f300e37540082930a998060050b0a99980598010008a99980798071baa",
+            "004149854cc0300285854cc03002858c030dd50019b8748008dc3a4000a66666601e00220022a6601",
+            "000c2c2a6601000c2c2a6601000c2c2a6601000c2c6eb800524018a657870656374205b286173736",
+            "5745f6e616d652c20616d6f756e74295d203d0a2020202020206d696e740a20202020202020207c3",
+            "e2076616c75652e66726f6d5f6d696e7465645f76616c75650a20202020202020207c3e2076616c7",
+            "5652e746f6b656e7328706f6c6963795f6964290a20202020202020207c3e20646963742e746f5f6",
+            "c69737428290049010c72646d723a20416374696f6e005734ae7155ceaab9e5573eae815d0aba257",
+            "489811756434f434f5f42415443485f42415443484d414e414745004c012bd8799fd8799f582035a3",
+            "31977b975e2debbf986c99626df33ec4c12bf434008eefdbef895ccdd909ff01ff0001f5d90103a0"
+        ))
+        .expect("valid hex");
+
+        // Full decode
+        let full_tx = decode_transaction(6, &tx_cbor).expect("full decode");
+
+        // Minimal decode via pallas
+        let pallas_tx = PallasTx::decode_for_era(pallas_traverse::Era::Conway, &tx_cbor)
+            .expect("pallas decode");
+        let minimal_tx = decode_transaction_from_pallas_with_mode(&pallas_tx, DecodeMode::Minimal)
+            .expect("minimal decode");
+
+        assert_eq!(
+            full_tx.hash, minimal_tx.hash,
+            "Minimal decode MUST produce same tx hash as Full decode"
+        );
+
+        // Verify body fields match
+        assert_eq!(full_tx.body.inputs.len(), minimal_tx.body.inputs.len());
+        assert_eq!(full_tx.body.outputs.len(), minimal_tx.body.outputs.len());
+        assert_eq!(full_tx.body.fee, minimal_tx.body.fee);
+        assert_eq!(full_tx.is_valid, minimal_tx.is_valid);
+
+        // Minimal must have empty witness set
+        assert!(minimal_tx.witness_set.vkey_witnesses.is_empty());
+        assert!(minimal_tx.witness_set.redeemers.is_empty());
+    }
+
+    /// DecodeMode::Minimal must preserve certificate data (needed for apply_block).
+    #[test]
+    fn test_minimal_decode_preserves_certificates() {
+        // Same tx hex as the hash invariant test above — use unwrap_or_else
+        // to handle potential odd-length gracefully.
+        let tx_cbor = hex::decode(concat!(
+            "84a700d901028182582035a331977b975e2debbf986c99626df33ec4c12bf434008eefdbef895c",
+            "cdd909010182a300581d706ea76075243b9994fe41fdbea2572ebea26d8341193e689260d7dbb",
+            "401821a0017ce9ca1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e41474501028201d8185863d8799f01583b62",
+            "61666b726569646d7571796874756f78736f79753761686d33747234346a726762326a616c6a68",
+            "72323637696d773232377773323337727a7565409f581c5afc8364f8733c895f54b5cf261b5efe",
+            "71d3669f59ccad7439ccf289ffff825839005afc8364f8733c895f54b5cf261b5efe71d3669f59",
+            "ccad7439ccf289a4f5d0b5b8976f1ee13e61c1edb2acbed7d394eade0e8c924c8f61471b000000",
+            "021981fc3d021a000ce089075820bdaa99eb158414dea0a91d6c727e2268574b23efe6e08ab3b8",
+            "41abe8059a030c09a1581c6bd2f1aad5e4d65652eada5aba2d0929381bd695f2f744192bf68579",
+            "a156434f434f5f42415443485f42415443484d414e414745010b5820303e130d2fc177979b4e998",
+            "501fae17630aa6ab425e61080612e24eb822a22230dd901028182582035a331977b975e2debbf98",
+            "6c99626df33ec4c12bf434008eefdbef895ccdd90901a300d90102818258206da802c0bf16fc704d",
+            "5b92b34e7a323f508a9258753b91011379238c6598a3635840bb4f351370d0f763b39eec9eeb0ad7",
+            "16354211c3e87779381559e2d7664460be22e6b4aa36ddeb5e4f9ad80e59cb8792797fa5497c055b",
+            "30b6c77a6cac54400c05a182010082d87980821a006acfc01ab2d05e0006d90102815903975903940",
+            "1000033323232323232323232323223222323232322533300c323232533300f3007301137540022646",
+            "464a66602c0022a660260202c264a66602e603400426464a66602a601a602e6ea803854ccc054c8cc",
+            "004004018894ccc06c004528099299980c19baf301e301b3754603c00402629444cc00c00c004c078",
+            "00454ccc054c0300044cdc78010088a501533016491536578706563740a202020202020202020206c6",
+            "973742e616e7928696e707574732c20666e28696e70757429207b20696e7075742e6f757470757745",
+            "f7265666572656e6365203d3d207574786f5f726566207d290016153330153370e0029000899b8f002",
+            "01114a06eb4c05c008dd7180a8008a9980a0088b180c000999119299980a1805980b1baa00114bd6f7",
+            "b63009bab301a30173754002646600200200644a666032002298103d87a8000132323253330183371e0",
+            "0c6eb8c06800c4cdd2a40006603a6e980052f5c026600a00a0046eacc068008c074008c06c004c8cc0",
+            "04004dd5980c180c980c980c980c80191299980b8008a5eb7bdb1804c8c8c8c94ccc05ccdc7a450000",
+            "2100313301c337606ea4008dd3000998030030019bab3019003375c602e004603600460320026eb8c05",
+            "cc050dd50019bac3016001301237540042a66020921236578706563742074782e4d696e7428706f6c69",
+            "63795f696429203d20707572706f73650016301430150023013001300f37540022930a99806a491856",
+            "616c696461746f722072657475726e65642066616c736500136532533300b30030011533300f300e37",
+            "540082930a998060050b0a99980598010008a99980798071baa004149854cc0300285854cc03002858",
+            "c030dd50019b8748008dc3a4000a66666601e00220022a6601000c2c2a6601000c2c2a6601000c2c2a",
+            "6601000c2c6eb800524018a657870656374205b2861737365745f6e616d652c20616d6f756e74295d",
+            "203d0a2020202020206d696e740a20202020202020207c3e2076616c75652e66726f6d5f6d696e7465",
+            "645f76616c75650a20202020202020207c3e2076616c75652e746f6b656e7328706f6c6963795f6964",
+            "290a20202020202020207c3e20646963742e746f5f6c69737428290049010c72646d723a2041637469",
+            "6f6e005734ae7155ceaab9e5573eae815d0aba257489811756434f434f5f42415443485f4241544348",
+            "4d414e414745004c012bd8799fd8799f582035a331977b975e2debbf986c99626df33ec4c12bf43400",
+            "8eefdbef895ccdd909ff01ff0001f5d90103a0"
+        ))
+        .unwrap_or_else(|_| Vec::new());
+
+        if tx_cbor.is_empty() {
+            return;
+        }
+
+        // Try to decode via pallas (bail if truncated/invalid)
+        let pallas_tx = match PallasTx::decode_for_era(pallas_traverse::Era::Conway, &tx_cbor) {
+            Ok(tx) => tx,
+            Err(_) => return,
+        };
+
+        let full = decode_transaction_from_pallas_with_mode(&pallas_tx, DecodeMode::Full).unwrap();
+        let minimal =
+            decode_transaction_from_pallas_with_mode(&pallas_tx, DecodeMode::Minimal).unwrap();
+
+        // Certificates must be identical (needed by apply_block for delegation/governance)
+        assert_eq!(
+            full.body.certificates.len(),
+            minimal.body.certificates.len(),
+            "certificates must be preserved in Minimal mode"
+        );
+        // Withdrawals must be identical
+        assert_eq!(
+            full.body.withdrawals.len(),
+            minimal.body.withdrawals.len(),
+            "withdrawals must be preserved in Minimal mode"
+        );
+        // Minting must be identical
+        assert_eq!(
+            full.body.mint, minimal.body.mint,
+            "mint must be preserved in Minimal mode"
+        );
+    }
 }

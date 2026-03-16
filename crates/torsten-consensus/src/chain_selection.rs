@@ -1382,4 +1382,246 @@ mod tests {
             ChainPreference::PreferCurrent
         );
     }
+
+    // ===================================================================
+    //  Coverage Sprint: Chain selection tiebreaker tests
+    // ===================================================================
+
+    /// Conway slot window boundary: slots differ by EXACTLY the window size.
+    /// The comparison should include the boundary (slot_diff <= slot_window).
+    #[test]
+    fn test_conway_vrf_exactly_at_slot_window_boundary() {
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            1000,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xAA; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            1100, // exactly 100 slots apart = exactly at window boundary
+            [0xDD; 32],
+            pool_b,
+            5,
+            vec![0x11; 32], // lower VRF → should win
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 1000, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 1100, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            100, // slot_window = 100; difference = 100 = exactly at boundary
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "At exact window boundary (diff == window), VRF comparison should apply"
+        );
+    }
+
+    /// Conway slot window: 1 slot past the boundary rejects VRF comparison.
+    #[test]
+    fn test_conway_vrf_one_past_slot_window() {
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            1000,
+            [0xCC; 32],
+            pool_a,
+            5,
+            vec![0xAA; 32], // higher VRF
+        );
+        let candidate_header = make_header(
+            10,
+            1101, // 101 slots apart = 1 past window
+            [0xDD; 32],
+            pool_b,
+            5,
+            vec![0x01; 32], // lower VRF — but outside window
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 1000, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 1101, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            100, // window = 100; diff = 101 > 100
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "One past window: VRF comparison must NOT apply"
+        );
+    }
+
+    /// Same pool, identical opcert counters → Equal (no preference).
+    #[test]
+    fn test_same_pool_equal_opcert_is_equal() {
+        let pool_vkey = vec![0x42; 32];
+        let current_header = make_header(
+            10,
+            200,
+            [0xCC; 32],
+            pool_vkey.clone(),
+            5,              // same opcert
+            vec![0x10; 32], // different VRF — but irrelevant for same pool
+        );
+        let candidate_header = make_header(
+            10,
+            205,
+            [0xDD; 32],
+            pool_vkey,
+            5,              // same opcert
+            vec![0x80; 32], // different VRF — irrelevant
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::Equal,
+            "Same pool + same opcert = Equal"
+        );
+    }
+
+    /// Different pools, equal VRF → Equal.
+    #[test]
+    fn test_different_pools_equal_vrf_is_equal() {
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+        let same_vrf = vec![0x50; 32];
+
+        let current_header = make_header(10, 200, [0xCC; 32], pool_a, 5, same_vrf.clone());
+        let candidate_header = make_header(10, 205, [0xDD; 32], pool_b, 5, same_vrf);
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Babbage,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::Equal,
+            "Different pools + equal VRF = Equal"
+        );
+    }
+
+    /// Verify VRF comparison uses lexicographic byte order (not numeric).
+    #[test]
+    fn test_vrf_tiebreak_lexicographic_last_byte() {
+        // Same prefix, differ only in last byte
+        let mut vrf_a = vec![0x50; 32];
+        let mut vrf_b = vec![0x50; 32];
+        vrf_a[31] = 0x01;
+        vrf_b[31] = 0x02;
+
+        // vrf_a < vrf_b lexicographically
+        assert_eq!(
+            vrf_tiebreak(&vrf_b, &vrf_a),
+            ChainPreference::PreferCandidate,
+            "Lower last-byte VRF candidate should win"
+        );
+    }
+
+    /// Conway + slot_window = 0: only identical slots get VRF comparison.
+    #[test]
+    fn test_conway_zero_slot_window() {
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        // Same slot: VRF should apply
+        let h1 = make_header(10, 500, [0xCC; 32], pool_a.clone(), 5, vec![0x80; 32]);
+        let h2 = make_header(10, 500, [0xDD; 32], pool_b.clone(), 5, vec![0x10; 32]);
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 500, Hash32::from_bytes([0xCC; 32])));
+        let candidate = make_tip_with_hash(10, 500, Hash32::from_bytes([0xDD; 32]));
+
+        assert_eq!(
+            cs.prefer_chain_with_headers(&candidate, &h1, &h2, Era::Conway, 0),
+            ChainPreference::PreferCandidate,
+            "slot_window=0, same slot: VRF comparison should apply"
+        );
+
+        // 1 slot apart with window=0: VRF should NOT apply
+        let h3 = make_header(10, 500, [0xCC; 32], pool_a, 5, vec![0x80; 32]);
+        let h4 = make_header(10, 501, [0xDD; 32], pool_b, 5, vec![0x10; 32]);
+
+        let mut cs2 = ChainSelection::new();
+        cs2.set_tip(make_tip_with_hash(10, 500, Hash32::from_bytes([0xCC; 32])));
+        let candidate2 = make_tip_with_hash(10, 501, Hash32::from_bytes([0xDD; 32]));
+
+        assert_eq!(
+            cs2.prefer_chain_with_headers(&candidate2, &h3, &h4, Era::Conway, 0),
+            ChainPreference::PreferCurrent,
+            "slot_window=0, 1 slot apart: VRF must NOT apply in Conway"
+        );
+    }
+
+    /// Pre-Conway eras (Shelley through Babbage) all use VRF unconditionally.
+    #[test]
+    fn test_all_pre_conway_eras_unconditional_vrf() {
+        for era in [
+            Era::Shelley,
+            Era::Allegra,
+            Era::Mary,
+            Era::Alonzo,
+            Era::Babbage,
+        ] {
+            let pool_a = vec![0x01; 32];
+            let pool_b = vec![0x02; 32];
+
+            let current_header = make_header(10, 100, [0xCC; 32], pool_a, 5, vec![0xFF; 32]);
+            let candidate_header = make_header(10, 99999, [0xDD; 32], pool_b, 5, vec![0x01; 32]);
+
+            let mut cs = ChainSelection::new();
+            cs.set_tip(make_tip_with_hash(10, 100, Hash32::from_bytes([0xCC; 32])));
+            let candidate = make_tip_with_hash(10, 99999, Hash32::from_bytes([0xDD; 32]));
+
+            let result = cs.prefer_chain_with_headers(
+                &candidate,
+                &current_header,
+                &candidate_header,
+                era,
+                1, // tiny window — but pre-Conway ignores it
+            );
+            assert_eq!(
+                result,
+                ChainPreference::PreferCandidate,
+                "Era {:?}: pre-Conway must apply VRF unconditionally regardless of slot distance",
+                era
+            );
+        }
+    }
 }

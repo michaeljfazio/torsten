@@ -8111,3 +8111,819 @@ fn test_committee_hot_auth_elected_cold_credential_not_rejected_by_cc_check() {
         );
     }
 }
+
+// =========================================================================
+//  Coverage Sprint Tests
+// =========================================================================
+
+// -----------------------------------------------------------------------
+// 1. Nonce computation edge cases — update_evolving_nonce
+// -----------------------------------------------------------------------
+
+/// update_evolving_nonce always hashes the input regardless of length.
+/// Verify the "always-hash" invariant: even a 32-byte input is hashed once
+/// before being combined with evolving_nonce.
+#[test]
+fn test_evolving_nonce_always_hash_invariant() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::ZERO;
+
+    // Feed a known 32-byte input
+    let input = [0xABu8; 32];
+    state.update_evolving_nonce(&input);
+
+    // The function should compute: blake2b_256(evolving || blake2b_256(input))
+    // NOT blake2b_256(evolving || input) directly.
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(Hash32::ZERO.as_bytes());
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(
+        state.evolving_nonce, expected,
+        "32-byte input must be hashed before combining with evolving_nonce"
+    );
+}
+
+/// update_evolving_nonce with a 64-byte input (TPraos raw VRF output).
+#[test]
+fn test_evolving_nonce_64_byte_input() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::from_bytes([0x11; 32]);
+
+    let input = [0xCDu8; 64];
+    state.update_evolving_nonce(&input);
+
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(&[0x11; 32]);
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(state.evolving_nonce, expected);
+}
+
+/// update_evolving_nonce with a 0-byte input.
+#[test]
+fn test_evolving_nonce_zero_byte_input() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::from_bytes([0x22; 32]);
+
+    let input: [u8; 0] = [];
+    state.update_evolving_nonce(&input);
+
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(&[0x22; 32]);
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(state.evolving_nonce, expected);
+}
+
+/// update_evolving_nonce with a 1-byte input.
+#[test]
+fn test_evolving_nonce_single_byte_input() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::from_bytes([0x33; 32]);
+
+    let input = [0x42u8];
+    state.update_evolving_nonce(&input);
+
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(&[0x33; 32]);
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(state.evolving_nonce, expected);
+}
+
+/// update_evolving_nonce with a 128-byte input.
+#[test]
+fn test_evolving_nonce_128_byte_input() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::from_bytes([0x44; 32]);
+
+    let input = [0xEFu8; 128];
+    state.update_evolving_nonce(&input);
+
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(&[0x44; 32]);
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(state.evolving_nonce, expected);
+}
+
+/// update_evolving_nonce with all-zero input (32 bytes of 0x00).
+#[test]
+fn test_evolving_nonce_all_zeros_input() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.evolving_nonce = Hash32::from_bytes([0x55; 32]);
+
+    let input = [0u8; 32];
+    state.update_evolving_nonce(&input);
+
+    // All-zeros is still hashed — should NOT be treated as NeutralNonce.
+    let eta_hash = torsten_primitives::hash::blake2b_256(&input);
+    let mut expected_data = Vec::with_capacity(64);
+    expected_data.extend_from_slice(&[0x55; 32]);
+    expected_data.extend_from_slice(eta_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&expected_data);
+
+    assert_eq!(
+        state.evolving_nonce, expected,
+        "All-zero input must be hashed normally (no NeutralNonce shortcut)"
+    );
+}
+
+/// NeutralNonce identity in epoch nonce combine: when prevHashNonce is zero
+/// (NeutralNonce), epoch_nonce = candidate_nonce (identity element).
+#[test]
+fn test_epoch_nonce_neutral_prev_hash_nonce() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params.clone());
+    state.epoch = EpochNo(5);
+    state.epoch_length = 100;
+    state.needs_stake_rebuild = false;
+
+    // Set candidate to a non-zero value, prevHashNonce to zero (NeutralNonce)
+    let candidate = Hash32::from_bytes([0xAA; 32]);
+    state.candidate_nonce = candidate;
+    state.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
+    state.lab_nonce = Hash32::from_bytes([0xBB; 32]);
+
+    state.process_epoch_transition(EpochNo(6));
+
+    // Per Haskell TICKN: NeutralNonce is identity, so epoch_nonce = candidate
+    assert_eq!(
+        state.epoch_nonce, candidate,
+        "epoch_nonce = candidate when prevHashNonce is NeutralNonce (ZERO)"
+    );
+}
+
+/// NeutralNonce identity: when candidate is zero (NeutralNonce),
+/// epoch_nonce = prevHashNonce.
+#[test]
+fn test_epoch_nonce_neutral_candidate_nonce() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params.clone());
+    state.epoch = EpochNo(5);
+    state.epoch_length = 100;
+    state.needs_stake_rebuild = false;
+
+    let prev_hash = Hash32::from_bytes([0xCC; 32]);
+    state.candidate_nonce = Hash32::ZERO; // NeutralNonce
+    state.last_epoch_block_nonce = prev_hash;
+    state.lab_nonce = Hash32::from_bytes([0xDD; 32]);
+
+    state.process_epoch_transition(EpochNo(6));
+
+    assert_eq!(
+        state.epoch_nonce, prev_hash,
+        "epoch_nonce = prevHashNonce when candidate is NeutralNonce (ZERO)"
+    );
+}
+
+/// When both candidate and prevHashNonce are non-zero, epoch_nonce =
+/// blake2b_256(candidate || prevHashNonce).
+#[test]
+fn test_epoch_nonce_both_non_zero() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params.clone());
+    state.epoch = EpochNo(5);
+    state.epoch_length = 100;
+    state.needs_stake_rebuild = false;
+
+    let candidate = Hash32::from_bytes([0x11; 32]);
+    let prev_hash = Hash32::from_bytes([0x22; 32]);
+    state.candidate_nonce = candidate;
+    state.last_epoch_block_nonce = prev_hash;
+    state.lab_nonce = Hash32::from_bytes([0x33; 32]);
+
+    state.process_epoch_transition(EpochNo(6));
+
+    let mut nonce_input = Vec::with_capacity(64);
+    nonce_input.extend_from_slice(candidate.as_bytes());
+    nonce_input.extend_from_slice(prev_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&nonce_input);
+
+    assert_eq!(
+        state.epoch_nonce, expected,
+        "epoch_nonce = blake2b_256(candidate || prevHashNonce) when both non-zero"
+    );
+}
+
+/// When both candidate and prevHashNonce are zero, epoch_nonce = ZERO.
+#[test]
+fn test_epoch_nonce_both_zero() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params.clone());
+    state.epoch = EpochNo(5);
+    state.epoch_length = 100;
+    state.needs_stake_rebuild = false;
+
+    state.candidate_nonce = Hash32::ZERO;
+    state.last_epoch_block_nonce = Hash32::ZERO;
+    state.lab_nonce = Hash32::from_bytes([0x44; 32]);
+
+    state.process_epoch_transition(EpochNo(6));
+
+    assert_eq!(
+        state.epoch_nonce,
+        Hash32::ZERO,
+        "epoch_nonce = ZERO when both candidate and prevHashNonce are ZERO (NeutralNonce identity)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 2. Block 0 skip fix — genesis block at slot 0 IS processed
+// -----------------------------------------------------------------------
+
+/// When ledger_tip_slot is 0 (genesis state), a block at slot 0 must be
+/// processed. This verifies the genesis block is not accidentally skipped
+/// by an off-by-one in the epoch transition logic.
+#[test]
+fn test_genesis_block_slot_0_is_processed() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Create a valid Conway block at slot 0 with no transactions
+    let block = make_test_block(0, 0, Hash32::ZERO, vec![]);
+
+    // The block should be applied without error (tip moves from Origin to slot 0)
+    let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
+    assert!(
+        result.is_ok(),
+        "Genesis block at slot 0 must be processed; got: {result:?}"
+    );
+
+    // Verify tip was actually updated
+    assert_eq!(state.tip.block_number, BlockNo(0));
+}
+
+/// Verify that a block at slot 1 following genesis (slot 0) also applies correctly.
+#[test]
+fn test_block_after_genesis_slot_0() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    let block0 = make_test_block(0, 0, Hash32::ZERO, vec![]);
+    state
+        .apply_block(&block0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Block 1 at slot 1, prev_hash = block0's header_hash
+    let block1 = make_test_block(1, 1, block0.header.header_hash, vec![]);
+    let result = state.apply_block(&block1, BlockValidationMode::ApplyOnly);
+    assert!(
+        result.is_ok(),
+        "Block after genesis must apply; got: {result:?}"
+    );
+    assert_eq!(state.tip.block_number, BlockNo(1));
+}
+
+// -----------------------------------------------------------------------
+// 3. Epoch transition ordering — epoch nonce uses OLD prevHashNonce
+// -----------------------------------------------------------------------
+
+/// Verify that epoch nonce computation uses the OLD prevHashNonce before
+/// updating it with lab_nonce. This is the critical TICKN rule ordering.
+#[test]
+fn test_epoch_transition_uses_old_prev_hash_nonce() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params.clone());
+    state.epoch = EpochNo(10);
+    state.epoch_length = 100;
+    state.needs_stake_rebuild = false;
+
+    let old_prev_hash = Hash32::from_bytes([0xAA; 32]);
+    let candidate = Hash32::from_bytes([0xBB; 32]);
+    let lab = Hash32::from_bytes([0xCC; 32]);
+
+    state.candidate_nonce = candidate;
+    state.last_epoch_block_nonce = old_prev_hash;
+    state.lab_nonce = lab;
+
+    state.process_epoch_transition(EpochNo(11));
+
+    // epoch_nonce should use OLD prevHashNonce (0xAA), not the lab_nonce (0xCC)
+    let mut nonce_input = Vec::with_capacity(64);
+    nonce_input.extend_from_slice(candidate.as_bytes());
+    nonce_input.extend_from_slice(old_prev_hash.as_bytes()); // OLD value
+    let expected = torsten_primitives::hash::blake2b_256(&nonce_input);
+
+    assert_eq!(
+        state.epoch_nonce, expected,
+        "epoch_nonce must use OLD prevHashNonce, not the new lab_nonce"
+    );
+
+    // AFTER the transition, last_epoch_block_nonce should be updated to lab_nonce
+    assert_eq!(
+        state.last_epoch_block_nonce, lab,
+        "prevHashNonce must be updated to lab_nonce AFTER nonce computation"
+    );
+}
+
+// (Reference script fee ceiling tests are in validation/tests.rs)
+
+// -----------------------------------------------------------------------
+// 7. Block-level totalRefScriptSize exceeds 1 MiB rejection
+// -----------------------------------------------------------------------
+
+/// Verify that a block with aggregate reference script size exceeding 1 MiB
+/// is rejected during ValidateAll mode (Conway, protocol >= 9).
+#[test]
+fn test_block_ref_script_size_exceeds_1mib_rejected() {
+    use torsten_primitives::transaction::ScriptRef;
+
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9; // Conway
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Create a reference input with a huge reference script (>1 MiB)
+    let ref_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x99u8; 32]),
+        index: 0,
+    };
+    let large_script = vec![0u8; 1_048_577]; // 1 MiB + 1 byte
+    let ref_output = TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(10_000_000),
+        datum: OutputDatum::None,
+        script_ref: Some(ScriptRef::PlutusV2(large_script)),
+        is_legacy: false,
+        raw_cbor: None,
+    };
+    state.utxo_set.insert(ref_input.clone(), ref_output);
+
+    // Create a spending input in the UTxO set
+    let spend_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    let spend_output = TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(20_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    };
+    state.utxo_set.insert(spend_input.clone(), spend_output);
+
+    // Build a transaction that references the large script
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
+    tx.is_valid = true;
+    tx.body.inputs = vec![spend_input];
+    tx.body.reference_inputs = vec![ref_input];
+    tx.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+    tx.body.fee = Lovelace(1_000_000);
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert!(
+        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
+            if errors.contains("BodyRefScriptsSizeTooBig")),
+        "Block with >1MiB ref scripts must be rejected; got: {result:?}"
+    );
+}
+
+/// Verify that a block with ref scripts well under 1 MiB is NOT rejected.
+#[test]
+fn test_block_ref_script_size_under_1mib_accepted() {
+    use torsten_primitives::transaction::ScriptRef;
+
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Reference script of 100 KiB — well under the 1 MiB limit
+    let ref_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x99u8; 32]),
+        index: 0,
+    };
+    let script_under_limit = vec![0u8; 102_400]; // 100 KiB
+    let ref_output = TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(10_000_000),
+        datum: OutputDatum::None,
+        script_ref: Some(ScriptRef::PlutusV2(script_under_limit)),
+        is_legacy: false,
+        raw_cbor: None,
+    };
+    state.utxo_set.insert(ref_input.clone(), ref_output);
+
+    let spend_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spend_input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(20_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
+    tx.is_valid = true;
+    tx.body.inputs = vec![spend_input];
+    tx.body.reference_inputs = vec![ref_input];
+    tx.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+    tx.body.fee = Lovelace(1_000_000);
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // Should not fail with BodyRefScriptsSizeTooBig (may fail for other validation reasons)
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("BodyRefScriptsSizeTooBig"),
+            "100 KiB ref scripts (under limit) must not be rejected; got: {errors}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// 8. Treasury value check — match and mismatch
+// -----------------------------------------------------------------------
+
+/// Verify that a Conway transaction with matching treasury_value passes.
+#[test]
+fn test_treasury_value_match_passes() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+    state.treasury = Lovelace(500_000_000_000);
+
+    // Add UTxO for the transaction to consume
+    let input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = Some(Lovelace(500_000_000_000)); // matches
+    tx.body.inputs = vec![input];
+    tx.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(9_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+    tx.body.fee = Lovelace(1_000_000);
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // Should NOT fail with TreasuryValueMismatch (may fail for other reasons)
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("TreasuryValueMismatch"),
+            "Matching treasury value must not trigger mismatch; got: {errors}"
+        );
+    }
+}
+
+/// Verify that a Conway transaction with mismatched treasury_value is rejected.
+#[test]
+fn test_treasury_value_mismatch_rejected() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+    state.treasury = Lovelace(500_000_000_000);
+
+    let input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = Some(Lovelace(999_999_999_999)); // MISMATCH
+    tx.body.inputs = vec![input];
+    tx.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(9_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+    tx.body.fee = Lovelace(1_000_000);
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert!(
+        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
+            if errors.contains("TreasuryValueMismatch")),
+        "Mismatched treasury value must be rejected; got: {result:?}"
+    );
+}
+
+/// Treasury value check is only enforced in Conway (protocol >= 9).
+/// Pre-Conway blocks should not check treasury_value at all.
+#[test]
+fn test_treasury_value_not_checked_pre_conway() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 8; // Babbage
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+    state.treasury = Lovelace(500_000_000_000);
+
+    let input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
+    tx.is_valid = true;
+    tx.body.treasury_value = Some(Lovelace(999_999_999)); // wrong, but pre-Conway
+    tx.body.inputs = vec![input];
+    tx.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(9_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+    tx.body.fee = Lovelace(1_000_000);
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // Pre-Conway: treasury check should not fire
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("TreasuryValueMismatch"),
+            "Pre-Conway must not check treasury_value; got: {errors}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// 9. SPO voting power uses mark snapshot (not set)
+// -----------------------------------------------------------------------
+
+/// Verify that compute_spo_voting_power reads from the mark snapshot,
+/// not the set snapshot. If both mark and set have different values for
+/// the same pool, the mark value must be used.
+#[test]
+fn test_spo_voting_power_prefers_mark_over_set() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.needs_stake_rebuild = false;
+
+    let pool_id = Hash28::from_bytes([0x42u8; 28]);
+
+    // Set mark with 100 ADA stake
+    let mut mark_pool_stake = std::collections::HashMap::new();
+    mark_pool_stake.insert(pool_id, Lovelace(100_000_000));
+    state.snapshots.mark = Some(StakeSnapshot {
+        epoch: EpochNo(10),
+        delegations: Arc::new(HashMap::new()),
+        pool_stake: mark_pool_stake,
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(HashMap::new()),
+    });
+
+    // Set set snapshot with 200 ADA stake (should NOT be used)
+    let mut set_pool_stake = std::collections::HashMap::new();
+    set_pool_stake.insert(pool_id, Lovelace(200_000_000));
+    state.snapshots.set = Some(StakeSnapshot {
+        epoch: EpochNo(9),
+        delegations: Arc::new(HashMap::new()),
+        pool_stake: set_pool_stake,
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(HashMap::new()),
+    });
+
+    let power = state.compute_spo_voting_power(&pool_id);
+    assert_eq!(
+        power, 100_000_000,
+        "compute_spo_voting_power must use mark snapshot (100 ADA), not set (200 ADA)"
+    );
+}
+
+/// Verify that when mark snapshot has no entry for a pool but set does,
+/// the fallback scan is used instead of reading from set.
+#[test]
+fn test_spo_voting_power_no_mark_entry_falls_back_not_to_set() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.needs_stake_rebuild = false;
+
+    let pool_id = Hash28::from_bytes([0x42u8; 28]);
+
+    // Mark snapshot exists but does NOT contain this pool
+    state.snapshots.mark = Some(StakeSnapshot {
+        epoch: EpochNo(10),
+        delegations: Arc::new(HashMap::new()),
+        pool_stake: std::collections::HashMap::new(), // no pool_id entry
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(HashMap::new()),
+    });
+
+    // Set snapshot has 200 ADA for this pool (should NOT be used)
+    let mut set_pool_stake = std::collections::HashMap::new();
+    set_pool_stake.insert(pool_id, Lovelace(200_000_000));
+    state.snapshots.set = Some(StakeSnapshot {
+        epoch: EpochNo(9),
+        delegations: Arc::new(HashMap::new()),
+        pool_stake: set_pool_stake,
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(HashMap::new()),
+    });
+
+    let power = state.compute_spo_voting_power(&pool_id);
+    // Should return 0 (from mark, where pool is absent), NOT 200M (from set)
+    assert_eq!(
+        power, 0,
+        "When mark has no entry, compute_spo_voting_power must return 0 (not fall back to set)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 12. Snapshot save/load roundtrip — nonce fields survive serialization
+// -----------------------------------------------------------------------
+
+/// Verify that all nonce fields survive a save/load roundtrip.
+#[test]
+fn test_snapshot_roundtrip_nonce_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("ledger-snapshot.bin");
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Set distinctive values for all nonce-related fields
+    state.evolving_nonce = Hash32::from_bytes([0x11; 32]);
+    state.candidate_nonce = Hash32::from_bytes([0x22; 32]);
+    state.epoch_nonce = Hash32::from_bytes([0x33; 32]);
+    state.lab_nonce = Hash32::from_bytes([0x44; 32]);
+    state.last_epoch_block_nonce = Hash32::from_bytes([0x55; 32]);
+    state.genesis_hash = Hash32::from_bytes([0x66; 32]);
+    state.epoch = EpochNo(42);
+    state.treasury = Lovelace(1_234_567_890);
+    state.reserves = Lovelace(9_876_543_210);
+
+    state.save_snapshot(&snap_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snap_path).unwrap();
+
+    assert_eq!(
+        loaded.evolving_nonce,
+        Hash32::from_bytes([0x11; 32]),
+        "evolving_nonce must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.candidate_nonce,
+        Hash32::from_bytes([0x22; 32]),
+        "candidate_nonce must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.epoch_nonce,
+        Hash32::from_bytes([0x33; 32]),
+        "epoch_nonce must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.lab_nonce,
+        Hash32::from_bytes([0x44; 32]),
+        "lab_nonce must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.last_epoch_block_nonce,
+        Hash32::from_bytes([0x55; 32]),
+        "last_epoch_block_nonce must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.genesis_hash,
+        Hash32::from_bytes([0x66; 32]),
+        "genesis_hash must survive roundtrip"
+    );
+    assert_eq!(loaded.epoch, EpochNo(42), "epoch must survive roundtrip");
+    assert_eq!(
+        loaded.treasury,
+        Lovelace(1_234_567_890),
+        "treasury must survive roundtrip"
+    );
+    assert_eq!(
+        loaded.reserves,
+        Lovelace(9_876_543_210),
+        "reserves must survive roundtrip"
+    );
+}
+
+/// Verify that snapshot checksum catches corruption.
+#[test]
+fn test_snapshot_checksum_detects_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("ledger-snapshot-corrupt.bin");
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let state = LedgerState::new(params);
+    state.save_snapshot(&snap_path).unwrap();
+
+    // Corrupt a byte in the payload (after the 37-byte header)
+    let mut data = std::fs::read(&snap_path).unwrap();
+    if data.len() > 40 {
+        data[40] ^= 0xFF; // flip bits
+    }
+    std::fs::write(&snap_path, &data).unwrap();
+
+    let result = LedgerState::load_snapshot(&snap_path);
+    assert!(result.is_err(), "Corrupted snapshot must fail to load");
+}

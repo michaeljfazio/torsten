@@ -2829,4 +2829,232 @@ mod tests {
             }
         }
     }
+
+    // ===================================================================
+    //  Coverage Sprint: Reference script fee ceiling division tests
+    // ===================================================================
+
+    /// Verify that ceiling division is used for ref script fees, producing
+    /// values that differ from floor division for fractional accumulations.
+    #[test]
+    fn test_ref_script_fee_ceiling_vs_floor() {
+        // base_fee=1, size=25601: tier 1 = 25600*1 = 25600, tier 2 = 1 * 6/5 = 1.2
+        // total = 25601.2 -> ceiling = 25602, floor would be 25601
+        let fee = calculate_ref_script_tiered_fee(1, 25_601);
+        assert_eq!(
+            fee, 25_602,
+            "Ceiling division must round up (25600 + 6/5 = 25601.2 -> 25602)"
+        );
+    }
+
+    /// Exact division should produce the same result for ceiling and floor.
+    #[test]
+    fn test_ref_script_fee_exact_no_rounding() {
+        // Single tier, exact: 15 * 1 = 15 (no fraction)
+        assert_eq!(calculate_ref_script_tiered_fee(15, 1), 15);
+        // Full first tier: 15 * 25600 = 384000 (exact)
+        assert_eq!(calculate_ref_script_tiered_fee(15, 25_600), 384_000);
+    }
+
+    /// Verify ceiling on multiple partial tiers.
+    #[test]
+    fn test_ref_script_fee_ceiling_multiple_partial_tiers() {
+        // base_fee=1, size=51201 (two full tiers + 1 byte in third tier)
+        // tier 1: 25600*1 = 25600
+        // tier 2: 25600*6/5 = 30720
+        // tier 3: 1*36/25 = 1.44
+        // total = 56321.44 -> ceiling = 56322
+        let fee = calculate_ref_script_tiered_fee(1, 51_201);
+        assert_eq!(
+            fee, 56_322,
+            "Ceiling must handle partial third tier (25600 + 30720 + 1.44 = 56321.44 -> 56322)"
+        );
+    }
+
+    /// Verify that base_fee=0 always returns 0 regardless of size.
+    #[test]
+    fn test_ref_script_fee_zero_base_fee() {
+        assert_eq!(calculate_ref_script_tiered_fee(0, 100_000), 0);
+        assert_eq!(calculate_ref_script_tiered_fee(0, 0), 0);
+        assert_eq!(calculate_ref_script_tiered_fee(0, 1), 0);
+    }
+
+    /// Large script size spanning many tiers should not overflow.
+    #[test]
+    fn test_ref_script_fee_large_size_no_overflow() {
+        // 200 KiB = 204800 bytes = 8 full tiers
+        // Should not panic from u128 overflow
+        let fee = calculate_ref_script_tiered_fee(15, 204_800);
+        assert!(fee > 0, "Large script fee must be positive");
+        // Verify monotonicity: larger scripts cost more
+        let fee_smaller = calculate_ref_script_tiered_fee(15, 204_799);
+        assert!(
+            fee > fee_smaller,
+            "Fee must increase with size: {} vs {}",
+            fee,
+            fee_smaller
+        );
+    }
+
+    // ===================================================================
+    //  Coverage Sprint: Auxiliary data hash tests
+    // ===================================================================
+
+    /// Auxiliary data hash present without auxiliary data → error type check.
+    #[test]
+    fn test_aux_data_hash_without_data_error_variant() {
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([1u8; 32]));
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        tx.auxiliary_data = None;
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        assert!(result.is_err(), "Hash without data must be rejected");
+        if let Err(errors) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::AuxiliaryDataHashWithoutData)),
+                "Expected AuxiliaryDataHashWithoutData error"
+            );
+        }
+    }
+
+    /// Auxiliary data present without hash → error variant check.
+    #[test]
+    fn test_aux_data_without_hash_error_variant() {
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([2u8; 32]));
+        tx.body.auxiliary_data_hash = None;
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: std::collections::BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+        });
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        assert!(result.is_err(), "Data without hash must be rejected");
+        if let Err(errors) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::AuxiliaryDataWithoutHash)),
+                "Expected AuxiliaryDataWithoutHash error"
+            );
+        }
+    }
+
+    /// Both auxiliary data and hash absent → valid (no error from this rule).
+    #[test]
+    fn test_auxiliary_data_both_absent_ok() {
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([3u8; 32]));
+        tx.body.auxiliary_data_hash = None;
+        tx.auxiliary_data = None;
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        // May fail for other reasons (no inputs), but should NOT have aux data errors
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::AuxiliaryDataHashWithoutData
+                        | ValidationError::AuxiliaryDataWithoutHash
+                )),
+                "No auxiliary data errors expected when both absent"
+            );
+        }
+    }
+
+    /// Empty PostAlonzo aux data (empty metadata map + no scripts) with hash → valid.
+    #[test]
+    fn test_auxiliary_data_empty_post_alonzo() {
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([4u8; 32]));
+        // Empty aux data (like tag(259){})
+        let empty_aux = AuxiliaryData {
+            metadata: std::collections::BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+        };
+        tx.auxiliary_data = Some(empty_aux);
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xCD; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        // Should NOT have AuxiliaryDataHashWithoutData or AuxiliaryDataWithoutHash
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::AuxiliaryDataHashWithoutData
+                        | ValidationError::AuxiliaryDataWithoutHash
+                )),
+                "Empty PostAlonzo aux data with hash should pass consistency check"
+            );
+        }
+    }
+
+    /// Script-only aux data (no metadata, only scripts) with hash → valid consistency.
+    #[test]
+    fn test_auxiliary_data_script_only() {
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([5u8; 32]));
+        let script_only_aux = AuxiliaryData {
+            metadata: std::collections::BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![vec![0x01, 0x02, 0x03]],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+        };
+        tx.auxiliary_data = Some(script_only_aux);
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xEF; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::AuxiliaryDataHashWithoutData
+                        | ValidationError::AuxiliaryDataWithoutHash
+                )),
+                "Script-only aux data with hash should pass consistency check"
+            );
+        }
+    }
+
+    /// Mixed metadata + script aux data with hash → valid consistency.
+    #[test]
+    fn test_auxiliary_data_mixed_metadata_and_scripts() {
+        use torsten_primitives::transaction::TransactionMetadatum;
+
+        let utxo_set = UtxoSet::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([6u8; 32]));
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert(674, TransactionMetadatum::Text("test".to_string()));
+        let mixed_aux = AuxiliaryData {
+            metadata,
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![vec![0xAA, 0xBB]],
+            plutus_v3_scripts: vec![],
+        };
+        tx.auxiliary_data = Some(mixed_aux);
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::AuxiliaryDataHashWithoutData
+                        | ValidationError::AuxiliaryDataWithoutHash
+                )),
+                "Mixed metadata+script aux data with hash should pass consistency check"
+            );
+        }
+    }
 }

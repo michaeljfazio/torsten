@@ -976,4 +976,225 @@ mod tests {
             .unwrap();
         assert_eq!(out0.value.coin.0, 7_000_000);
     }
+
+    // ===================================================================
+    //  Coverage Sprint: UTxO store stress tests
+    // ===================================================================
+
+    /// Stress test apply_block_batch with many transactions in a single batch.
+    /// Simulates a full block with 50 transactions, each spending 1 input and
+    /// producing 2 outputs. Verifies correctness of the final UTxO set.
+    #[test]
+    fn test_apply_block_batch_stress_50_txs() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        let num_txs = 50u8;
+
+        // Seed the store with one UTxO per transaction
+        for i in 0..num_txs {
+            store.insert(make_input(i, 0), make_output(10_000_000));
+        }
+        assert_eq!(store.len(), num_txs as usize);
+
+        // Build batch inputs and outputs
+        let mut all_inputs: Vec<Vec<TransactionInput>> = Vec::new();
+        let mut all_tx_hashes: Vec<Hash32> = Vec::new();
+        let mut all_outputs: Vec<Vec<TransactionOutput>> = Vec::new();
+
+        for i in 0..num_txs {
+            all_inputs.push(vec![make_input(i, 0)]);
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0] = i;
+            hash_bytes[1] = 0xFF; // distinguish from inputs
+            all_tx_hashes.push(Hash32::from_bytes(hash_bytes));
+            all_outputs.push(vec![make_output(6_000_000), make_output(4_000_000)]);
+        }
+
+        let input_slices: Vec<&[TransactionInput]> =
+            all_inputs.iter().map(|v| v.as_slice()).collect();
+        let output_refs: Vec<(&Hash32, &[TransactionOutput])> = all_tx_hashes
+            .iter()
+            .zip(all_outputs.iter())
+            .map(|(h, o)| (h, o.as_slice()))
+            .collect();
+
+        store
+            .apply_block_batch(&input_slices, &output_refs)
+            .unwrap();
+
+        // 50 inputs removed, 100 outputs added (50 * 2)
+        assert_eq!(store.len(), num_txs as usize * 2);
+        assert_eq!(
+            store.total_lovelace(),
+            Lovelace(num_txs as u64 * 10_000_000)
+        );
+
+        // Verify all old inputs are gone
+        for i in 0..num_txs {
+            assert!(!store.contains(&make_input(i, 0)));
+        }
+
+        // Verify all new outputs exist
+        for (i, hash) in all_tx_hashes.iter().enumerate() {
+            assert!(
+                store.contains(&TransactionInput {
+                    transaction_id: *hash,
+                    index: 0,
+                }),
+                "Output 0 for tx {} missing",
+                i
+            );
+            assert!(
+                store.contains(&TransactionInput {
+                    transaction_id: *hash,
+                    index: 1,
+                }),
+                "Output 1 for tx {} missing",
+                i
+            );
+        }
+    }
+
+    /// Test remove_fast: directly writes tombstone without reading value.
+    /// Requires indexing_enabled = false.
+    #[test]
+    fn test_remove_fast_basic() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        let input = make_input(0xAA, 0);
+        store.insert(input.clone(), make_output(5_000_000));
+        assert_eq!(store.len(), 1);
+
+        // remove_fast should succeed
+        store.remove_fast(&input);
+        assert_eq!(store.len(), 0);
+        assert!(!store.contains(&input));
+    }
+
+    /// Test remove_fast with multiple entries.
+    #[test]
+    fn test_remove_fast_multiple() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        for i in 0u8..10 {
+            store.insert(make_input(i, 0), make_output(1_000_000 * (i as u64 + 1)));
+        }
+        assert_eq!(store.len(), 10);
+
+        // Remove half using remove_fast
+        for i in 0u8..5 {
+            store.remove_fast(&make_input(i, 0));
+        }
+        assert_eq!(store.len(), 5);
+
+        // Verify removed entries are gone
+        for i in 0u8..5 {
+            assert!(!store.contains(&make_input(i, 0)));
+        }
+
+        // Verify remaining entries still exist
+        for i in 5u8..10 {
+            assert!(store.contains(&make_input(i, 0)));
+        }
+    }
+
+    /// Test apply_block_batch with an empty block (zero transactions).
+    #[test]
+    fn test_apply_block_batch_empty_block() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        store.insert(make_input(1, 0), make_output(5_000_000));
+        let initial_count = store.len();
+
+        // Empty batch
+        store.apply_block_batch(&[], &[]).unwrap();
+
+        assert_eq!(
+            store.len(),
+            initial_count,
+            "Empty batch should not change store"
+        );
+        assert!(store.contains(&make_input(1, 0)));
+    }
+
+    /// Test that apply_block_batch with a transaction that has no inputs (only outputs)
+    /// works correctly. This simulates a "creation-only" scenario.
+    #[test]
+    fn test_apply_block_batch_no_inputs() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        let tx_hash = Hash32::from_bytes([0x01; 32]);
+        let outputs = [make_output(5_000_000)];
+        let empty_inputs: [TransactionInput; 0] = [];
+
+        store
+            .apply_block_batch(
+                &[empty_inputs.as_slice()],
+                &[(&tx_hash, outputs.as_slice())],
+            )
+            .unwrap();
+
+        assert_eq!(store.len(), 1);
+        assert!(store.contains(&TransactionInput {
+            transaction_id: tx_hash,
+            index: 0,
+        }));
+    }
+
+    /// Stress test: apply_block_batch followed by another batch that spends
+    /// outputs created by the first batch. Verifies multi-batch correctness.
+    #[test]
+    fn test_apply_block_batch_chained_batches() {
+        let mut store = UtxoStore::new_temp().unwrap();
+        store.set_indexing_enabled(false);
+
+        // Seed initial UTxO
+        store.insert(make_input(0xAA, 0), make_output(100_000_000));
+
+        // Batch 1: spend seed, create 2 outputs
+        let tx1_hash = Hash32::from_bytes([0x01; 32]);
+        let batch1_inputs = [make_input(0xAA, 0)];
+        let batch1_outputs = [make_output(60_000_000), make_output(40_000_000)];
+
+        store
+            .apply_block_batch(
+                &[batch1_inputs.as_slice()],
+                &[(&tx1_hash, batch1_outputs.as_slice())],
+            )
+            .unwrap();
+        assert_eq!(store.len(), 2);
+
+        // Batch 2: spend both outputs from batch 1
+        let tx2_hash = Hash32::from_bytes([0x02; 32]);
+        let batch2_inputs = [
+            TransactionInput {
+                transaction_id: tx1_hash,
+                index: 0,
+            },
+            TransactionInput {
+                transaction_id: tx1_hash,
+                index: 1,
+            },
+        ];
+        let batch2_outputs = [make_output(99_000_000)]; // 1M fee
+
+        store
+            .apply_block_batch(
+                &[batch2_inputs.as_slice()],
+                &[(&tx2_hash, batch2_outputs.as_slice())],
+            )
+            .unwrap();
+
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.total_lovelace(), Lovelace(99_000_000));
+        assert!(store.contains(&TransactionInput {
+            transaction_id: tx2_hash,
+            index: 0,
+        }));
+    }
 }
