@@ -199,6 +199,45 @@ NOTE: No `--storage-profile` or `--utxo-backend` flags needed — defaults work 
 - Prometheus: utxo_count=2939027, blocks_applied=504, peers_connected=5, epoch=1237
 - Memory at tip: 5.79 GB RSS (stable)
 
+## Preview Testnet Run #15 (2026-03-16 — Plutus fixes validation, commit 6aa8719)
+- Binary at commit 6aa8719 includes: budget swap fix (#80), is_valid fee fix (#81), ScriptDataHash fix (#82), V1/V2 success fix
+- Database: db-preview-lsm-test (epoch 1237, snapshot version 2 → incompatible with current v3 → forced full replay)
+- Replay: 4,109,485 blocks in 460s = 8,915 blk/s, 1 skipped (known old ScriptDataHash/CollateralToken bug)
+- Network catchup: 1,729 blocks applied (epochs 1237→1238, ~40K slots), 0 errors
+- PLUTUS FIX VALIDATION: ZERO Plutus evaluation divergence, ZERO FeeTooSmall, ZERO ScriptDataHash, ZERO over-budget
+- BLOCKING BUG #5: VRF verification fails for ALL live blocks after reaching tip (see Known Issues)
+  - Blocks stuck at 4,111,213 — cannot advance; 15+ VRF errors per monitoring window
+- Protocol param discrepancy: our node reports max_tx_ex_mem=14M but chain has 16.5M (Conway governance not applied?)
+- Metrics at tip: block=4111213, epoch=1238, utxo_count=2939312, peers=5, sync=100%, treasury=14067470197 ADA
+- Memory at tip: 8955019264 bytes = 8.55 GB RSS (higher than expected — full replay used more memory)
+- Log: /tmp/torsten-validation-run15.log
+
+## CRITICAL NEW BUG #5: VRF Verification Fails for ALL Live Blocks (2026-03-16, run #15)
+- Symptom: `Consensus validation failed (strict): VRF verification error: VRF verification failed`
+- Also: `VRF leader eligibility check failed: sigma=X, proto=10`
+- Affects: EVERY new block from the network after reaching tip at epoch 1238
+- Root cause: `epoch_transitions_observed` is initialized from snapshot mark/set/go presence (=3),
+  triggering `nonce_established=true` and `snapshots_established=true` immediately after replay.
+  This enables strict VRF checking. BUT the epoch nonce for epoch 1238 computed during replay
+  may not match the actual on-chain nonce (Koios says nonce=b1d2f1fa...).
+- The code correctly injects `ls.epoch_nonce` into `header.epoch_nonce` before verify (sync.rs:468,492).
+  So the VRF seed uses our computed epoch nonce. If our nonce differs from canonical, ALL verifications fail.
+- The `epoch_transitions_observed=3` init was added in commit `24b23d4` (by another agent, 2026-03-16 11:58)
+  and was present in the binary compiled at 11:38 from uncommitted code.
+- Files: `crates/torsten-node/src/node/mod.rs:729-744` (init from snapshots),
+         `crates/torsten-node/src/node/sync.rs:121` (nonce_established threshold),
+         `crates/torsten-consensus/src/praos.rs:596-643` (VRF verification)
+- Potential fix: disable `epoch_transitions_observed` init from snapshots until live epoch transition
+  OR verify the epoch nonce computation during replay is correct
+
+## NEW BUG #6: Protocol Parameter Mismatch (run #15, 2026-03-16)
+- Our node: max_tx_ex_mem=14,000,000, max_block_ex_mem=62,000,000
+- Chain (Koios epoch 1238): max_tx_ex_mem=16,500,000, max_block_ex_mem=72,000,000
+- All epochs checked have 16.5M/72M since at least epoch 1235
+- Our node returns 14M/62M suggesting a governance parameter update was not applied
+- This could cause scripts using 14-16.5M memory to fail budget checks (false positives)
+- Impact: would cause additional "over budget" divergences on scripts near the memory limit
+
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress
 - CLI subcommand is `query treasury` (not `query account-state`)

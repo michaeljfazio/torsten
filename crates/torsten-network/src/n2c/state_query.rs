@@ -1498,13 +1498,13 @@ fn encode_query_result_value(enc: &mut minicbor::Encoder<&mut Vec<u8>>, result: 
             enc.array(2).ok();
             // UTxOState = array(5): utxo_map, deposited, fees, gov_state, donation
             enc.array(5).ok();
-            enc.map(0).ok();  // empty UTxO map
-            enc.u64(0).ok();  // deposited = 0
-            enc.u64(0).ok();  // fees = 0
-            // GovState placeholder (array(0))
+            enc.map(0).ok(); // empty UTxO map
+            enc.u64(0).ok(); // deposited = 0
+            enc.u64(0).ok(); // fees = 0
+                             // GovState placeholder (array(0))
             enc.array(0).ok();
-            enc.u64(0).ok();  // donation = 0
-            // CertState = array(3): VState, PState, DState (all empty)
+            enc.u64(0).ok(); // donation = 0
+                             // CertState = array(3): VState, PState, DState (all empty)
             enc.array(3).ok();
             enc.array(0).ok(); // VState placeholder
             enc.array(0).ok(); // PState placeholder

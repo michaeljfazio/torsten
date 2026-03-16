@@ -96,22 +96,19 @@ fn build_snapshot_stake_data(
                 .relays
                 .iter()
                 .map(|r| match r {
-                    torsten_primitives::transaction::Relay::SingleHostAddr {
-                        port,
-                        ipv4,
-                        ipv6,
-                    } => RelaySnapshot::SingleHostAddr {
-                        port: *port,
-                        ipv4: *ipv4,
-                        ipv6: *ipv6,
-                    },
-                    torsten_primitives::transaction::Relay::SingleHostName {
-                        port,
-                        dns_name,
-                    } => RelaySnapshot::SingleHostName {
-                        port: *port,
-                        dns_name: dns_name.clone(),
-                    },
+                    torsten_primitives::transaction::Relay::SingleHostAddr { port, ipv4, ipv6 } => {
+                        RelaySnapshot::SingleHostAddr {
+                            port: *port,
+                            ipv4: *ipv4,
+                            ipv6: *ipv6,
+                        }
+                    }
+                    torsten_primitives::transaction::Relay::SingleHostName { port, dns_name } => {
+                        RelaySnapshot::SingleHostName {
+                            port: *port,
+                            dns_name: dns_name.clone(),
+                        }
+                    }
                     torsten_primitives::transaction::Relay::MultiHostName { dns_name } => {
                         RelaySnapshot::MultiHostName {
                             dns_name: dns_name.clone(),

@@ -535,7 +535,12 @@ mod tests {
         let state = make_state();
         let result = handle_debug_new_epoch_state(&state);
         match result {
-            QueryResult::DebugNewEpochState { epoch, treasury, reserves, .. } => {
+            QueryResult::DebugNewEpochState {
+                epoch,
+                treasury,
+                reserves,
+                ..
+            } => {
                 assert_eq!(epoch, 42);
                 assert_eq!(treasury, 1_000_000_000);
                 assert_eq!(reserves, 10_000_000_000);
