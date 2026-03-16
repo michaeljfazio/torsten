@@ -1,4 +1,5 @@
 use crate::error::SerializationError;
+use pallas_crypto::hash::Hasher;
 use pallas_traverse::MultiEraBlock as PallasBlock;
 use pallas_traverse::MultiEraCert;
 use pallas_traverse::MultiEraInput as PallasInput;
@@ -135,15 +136,28 @@ fn decode_block_header(
 
     let body_size = block.body_size().unwrap_or(0) as u64;
 
-    // Extract era-specific header body fields
-    let (vrf_result, body_hash, op_cert, protocol_version, kes_signature) =
+    // Extract era-specific header body fields.
+    //
+    // vrf_result: stores the LEADER VRF cert output + proof for consensus leader checks.
+    //   For Babbage/Conway this is the raw vrf_result bytes (before tag derivation).
+    //   For Alonzo and earlier this is leader_vrf.0/1.
+    //
+    // nonce_vrf_output: stores the pre-computed nonce contribution (eta) for the
+    //   Praos nonce state machine.  The exact derivation differs by era:
+    //   - Shelley/Allegra/Mary/Alonzo (TPraos): blake2b_256(nonce_vrf.0) — raw nonce cert, hashed once
+    //   - Babbage/Conway (Praos): blake2b_256("N" || vrf_result.0) — tag-prefixed hash
+    //   In both cases evolving_nonce = blake2b_256(evolving_nonce || nonce_vrf_output).
+    let (vrf_result, nonce_vrf_output, body_hash, op_cert, protocol_version, kes_signature) =
         if let Some(babbage) = pallas_header.as_babbage() {
             let hb = &babbage.header_body;
+            // Babbage/Conway Praos: nonce derivation = blake2b_256("N" || raw_vrf_result)
+            let nonce_eta = hb.nonce_vrf_output();
             (
                 VrfOutput {
                     output: hb.vrf_result.0.to_vec(),
                     proof: hb.vrf_result.1.to_vec(),
                 },
+                nonce_eta,
                 pallas_hash_to_torsten32(&hb.block_body_hash),
                 OperationalCert {
                     hot_vkey: hb.operational_cert.operational_cert_hot_vkey.to_vec(),
@@ -159,11 +173,16 @@ fn decode_block_header(
             )
         } else if let Some(alonzo) = pallas_header.as_alonzo() {
             let hb = &alonzo.header_body;
+            // Shelley/Allegra/Mary/Alonzo TPraos: nonce cert is separate from leader cert.
+            // eta = blake2b_256(nonce_vrf.0) — hash the raw nonce VRF output once, no prefix.
+            // This matches Haskell's vrfNonceValue for the TPraos era.
+            let nonce_eta = Hasher::<256>::hash(&hb.nonce_vrf.0).to_vec();
             (
                 VrfOutput {
                     output: hb.leader_vrf.0.to_vec(),
                     proof: hb.leader_vrf.1.to_vec(),
                 },
+                nonce_eta,
                 pallas_hash_to_torsten32(&hb.block_body_hash),
                 OperationalCert {
                     hot_vkey: hb.operational_cert_hot_vkey.to_vec(),
@@ -178,15 +197,13 @@ fn decode_block_header(
                 alonzo.body_signature.to_vec(),
             )
         } else {
-            // Byron
+            // Byron (OBFT) — no VRF, no nonce contribution from blocks
             (
                 VrfOutput {
-                    output: pallas_header
-                        .nonce_vrf_output()
-                        .map(|o| o.to_vec())
-                        .unwrap_or_default(),
+                    output: Vec::new(),
                     proof: Vec::new(),
                 },
+                Vec::new(),
                 Hash32::ZERO,
                 OperationalCert {
                     hot_vkey: Vec::new(),
@@ -213,6 +230,7 @@ fn decode_block_header(
         operational_cert: op_cert,
         protocol_version,
         kes_signature,
+        nonce_vrf_output,
     })
 }
 

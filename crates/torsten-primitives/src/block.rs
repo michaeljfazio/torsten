@@ -73,6 +73,26 @@ pub struct BlockHeader {
     /// KES signature over the header body (448 bytes for Sum6Kes)
     #[serde(default)]
     pub kes_signature: Vec<u8>,
+    /// Pre-computed nonce VRF contribution (eta) for the nonce state machine.
+    ///
+    /// This is the era-specific, single-step-hashed nonce value fed into
+    /// `evolving_nonce = blake2b_256(evolving_nonce || nonce_vrf_output)`:
+    ///
+    /// - Shelley / Allegra / Mary / Alonzo (TPraos, proto < 7):
+    ///   `nonce_vrf_output = blake2b_256(nonce_vrf_cert.output)`
+    ///   Uses the *nonce* VRF certificate (separate from the leader certificate),
+    ///   hashed once without prefix.  This matches Haskell's `vrfNonceValue`
+    ///   in the TPraos era where `hashRaw id (certifiedOutput vrf)`.
+    ///
+    /// - Babbage / Conway (Praos, proto >= 7):
+    ///   `nonce_vrf_output = blake2b_256("N" || vrf_result.output)`
+    ///   The single `vrf_result` field replaces both nonce_vrf and leader_vrf.
+    ///   The nonce contribution is derived with the "N" tag.  Matches pallas's
+    ///   `HeaderBody::nonce_vrf_output()` and Haskell's `vrfNonceValue` in Praos.
+    ///
+    /// Empty for Byron blocks (OBFT — no VRF).
+    #[serde(default)]
+    pub nonce_vrf_output: Vec<u8>,
 }
 
 /// VRF output

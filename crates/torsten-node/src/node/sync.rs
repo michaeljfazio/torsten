@@ -112,23 +112,24 @@ impl Node {
         )
     }
 
-    /// Enable strict verification mode and update nonce_established based on
-    /// whether enough epoch transitions have been observed since node startup
-    /// for the epoch nonce to be reliably computed from accumulated VRF outputs.
-    /// After Mithril import, needs at least 2 epoch transitions.
+    /// Enable strict verification mode.
+    ///
+    /// The epoch nonce is immediately valid after replay because the nonce
+    /// computation correctly accumulates VRF contributions from every block
+    /// during replay (using the era-correct nonce_vrf_output field).  There is
+    /// no "warming up" period — `nonce_established` is always `true`.
+    ///
+    /// Stake snapshots still need 3 epoch transitions to fully rotate through
+    /// mark→set→go with correctly rebuilt stake distributions, so VRF leader
+    /// eligibility failures remain non-fatal until `snapshots_established`.
     pub async fn enable_strict_verification(&mut self) {
         self.consensus.set_strict_verification(true);
-        self.consensus.nonce_established = self.epoch_transitions_observed >= 2;
+        // Nonce is always valid immediately after replay — no deferral needed.
+        self.consensus.nonce_established = true;
         // Stake snapshots need 3 epoch transitions to fully rotate with correct
         // rebuilt data (mark→set→go). Until then, VRF leader eligibility failures
         // are non-fatal to avoid rejecting valid blocks with approximate sigma values.
         self.consensus.snapshots_established = self.epoch_transitions_observed >= 3;
-        if !self.consensus.nonce_established {
-            debug!(
-                transitions = self.epoch_transitions_observed,
-                "VRF proof verification deferred: epoch nonce not yet established (need 2 epoch transitions)"
-            );
-        }
         if !self.consensus.snapshots_established {
             debug!(
                 transitions = self.epoch_transitions_observed,

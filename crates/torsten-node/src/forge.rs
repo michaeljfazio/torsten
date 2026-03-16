@@ -216,6 +216,19 @@ pub fn forge_block(
     let body_hash = torsten_serialization::compute_block_body_hash(&transactions);
     let body_size = compute_body_size(&transactions);
 
+    // Compute the nonce VRF contribution for Babbage/Conway (Praos era).
+    // nonce_vrf_output = blake2b_256("N" || vrf_output.0)
+    // This matches pallas's HeaderBody::nonce_vrf_output() derivation and
+    // Haskell's vrfNonceValue for the Praos era.  When this forged block is
+    // applied to the ledger, update_evolving_nonce() will incorporate it into
+    // the evolving nonce without any additional hashing.
+    let nonce_vrf_output = {
+        let mut tagged = Vec::with_capacity(1 + vrf_output.len());
+        tagged.push(b'N');
+        tagged.extend_from_slice(&vrf_output);
+        blake2b_256(&tagged).to_vec()
+    };
+
     // Build the block header
     let header = BlockHeader {
         header_hash: Hash32::ZERO, // Will be set after encoding
@@ -239,6 +252,7 @@ pub fn forge_block(
         },
         protocol_version: config.protocol_version,
         kes_signature: vec![], // Set after signing below
+        nonce_vrf_output,
     };
 
     // Encode the header body for hashing and KES signing

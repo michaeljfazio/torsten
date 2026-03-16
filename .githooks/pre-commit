@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# Pre-commit hook: prevents broken code from being committed.
-# Install: git config core.hooksPath .githooks
-
 set -e
-
 echo "Pre-commit: checking formatting..."
-if ! cargo fmt --all -- --check 2>/dev/null; then
-    echo "ERROR: Code is not formatted. Run 'cargo fmt --all' first."
-    exit 1
-fi
-
+cargo fmt --all -- --check || { echo "ERROR: Run 'cargo fmt --all'"; exit 1; }
 echo "Pre-commit: building..."
-if ! cargo build --all-targets 2>&1 | tail -1 | grep -q "Finished"; then
-    echo "ERROR: Build failed."
-    exit 1
-fi
-
-echo "Pre-commit: all checks passed."
+cargo build --all-targets || { echo "ERROR: Build failed."; exit 1; }
+echo "Pre-commit: passed."

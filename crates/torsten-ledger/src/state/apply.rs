@@ -155,18 +155,9 @@ impl LedgerState {
             }
             self.epoch_block_count += 1;
 
-            // Byron uses OBFT so there is no VRF output, but update the nonces
-            // defensively in case a future encoding change adds one.
-            if !block.header.vrf_result.output.is_empty() {
-                self.update_evolving_nonce(&block.header.vrf_result.output);
-                let first_slot_of_next_epoch =
-                    self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
-                if block.slot().0
-                    < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
-                {
-                    self.candidate_nonce = self.evolving_nonce;
-                }
-            }
+            // Byron uses OBFT (not VRF), so nonce_vrf_output is empty.
+            // The evolving nonce does not advance during the Byron era.
+            // lab_nonce is still updated per the Praos spec (prev_hash of each block).
             self.lab_nonce = block.header.prev_hash;
 
             self.tip = block.tip();
@@ -472,17 +463,21 @@ impl LedgerState {
 
         // Praos nonce state machine (matches Haskell reupdateChainDepState):
         //
-        // 1. lab_nonce = block.prev_hash (type cast, no hashing)
-        // 2. evolving_nonce is ALWAYS updated with every block's VRF output
-        // 3. candidate_nonce copies evolving_nonce UNLESS we're in the last
-        //    randomness_stabilisation_window (4k/f) slots of the epoch
-        if !block.header.vrf_result.output.is_empty() {
-            // Update evolving nonce unconditionally
-            self.update_evolving_nonce(&block.header.vrf_result.output);
+        // 1. lab_nonce = block.prev_hash (no hashing — direct assignment)
+        // 2. evolving_nonce is updated for EVERY block using the era-specific
+        //    nonce VRF contribution stored in nonce_vrf_output:
+        //    - Shelley/Allegra/Mary/Alonzo (TPraos): blake2b_256(nonce_vrf_cert.0)
+        //    - Babbage/Conway (Praos): blake2b_256("N" || vrf_result.0)
+        // 3. candidate_nonce tracks evolving_nonce UNLESS the block is within the
+        //    last randomness_stabilisation_window (4k/f) slots of the epoch,
+        //    in which case the candidate freezes so the epoch nonce is stable.
+        if !block.header.nonce_vrf_output.is_empty() {
+            // Update evolving nonce unconditionally with the pre-computed eta
+            self.update_evolving_nonce(&block.header.nonce_vrf_output);
 
-            // Update candidate nonce only if NOT in the stabilisation window
-            // (i.e., if slot < first_slot_of_next_epoch - rsw)
-            // Uses saturating_sub to avoid u64 overflow when slot values are extreme
+            // Freeze candidate nonce once we enter the stabilisation window.
+            // candidate_nonce only advances while slot < epoch_end - rsw.
+            // Uses saturating_sub to avoid u64 underflow on edge cases.
             let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
             if block.slot().0
                 < first_slot_of_next_epoch.saturating_sub(self.randomness_stabilisation_window)
@@ -491,7 +486,7 @@ impl LedgerState {
             }
         }
 
-        // Update LAB nonce = prev_hash of this block (simple assignment)
+        // Update LAB nonce = prev_hash of this block (simple assignment, no hashing)
         self.lab_nonce = block.header.prev_hash;
 
         // Update tip

@@ -430,22 +430,28 @@ impl LedgerState {
         }
     }
 
-    /// Update the evolving nonce with a new VRF output.
+    /// Update the evolving nonce with a pre-computed nonce VRF contribution (eta).
     ///
-    /// evolving_nonce = hash(evolving_nonce || hash(hash("N" || vrf_output)))
+    /// evolving_nonce = blake2b_256(evolving_nonce || eta)
     ///
-    /// Matches Haskell's reupdateChainDepState -> hashVRF -> vrfNonceValue pipeline.
-    pub(crate) fn update_evolving_nonce(&mut self, vrf_output: &[u8]) {
-        // eta = blake2b_256(blake2b_256("N" || raw_vrf_output))
-        let mut prefixed = Vec::with_capacity(1 + vrf_output.len());
-        prefixed.push(b'N');
-        prefixed.extend_from_slice(vrf_output);
-        let first_hash = torsten_primitives::hash::blake2b_256(&prefixed);
-        let eta = torsten_primitives::hash::blake2b_256(first_hash.as_ref());
+    /// The `nonce_eta` argument is the era-specific nonce contribution stored in
+    /// `BlockHeader::nonce_vrf_output`:
+    ///
+    /// - Shelley/Allegra/Mary/Alonzo (TPraos): eta = blake2b_256(nonce_vrf_cert.0)
+    /// - Babbage/Conway (Praos): eta = blake2b_256("N" || vrf_result.0)
+    ///
+    /// This function does NOT do any additional hashing of the input — the caller
+    /// (serialization) is responsible for computing eta correctly per era.  This
+    /// exactly matches Haskell's reupdateChainDepState:
+    ///
+    ///   eta = vrfNonceValue block
+    ///   evolving_nonce' = updateNonce evolving_nonce eta
+    ///   where updateNonce n e = hash (n <> e)
+    pub(crate) fn update_evolving_nonce(&mut self, nonce_eta: &[u8]) {
         // evolving_nonce' = blake2b_256(evolving_nonce || eta)
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(self.evolving_nonce.as_bytes());
-        data.extend_from_slice(eta.as_bytes());
+        data.extend_from_slice(nonce_eta);
         self.evolving_nonce = torsten_primitives::hash::blake2b_256(&data);
     }
 }
