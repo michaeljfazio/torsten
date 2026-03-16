@@ -276,56 +276,46 @@ impl Node {
                     if let Some(hash) = shelley_genesis_hash {
                         state.genesis_hash = hash;
                     }
-                    // Validate snapshot tip exists in ChainDB. If the tip hash
-                    // is not in storage (e.g., DB was wiped, different chain, or
-                    // volatile blocks were lost), the snapshot is stale and must
-                    // be discarded to prevent "block does not connect" errors.
-                    let snapshot_valid = match state.tip.point {
-                        Point::Origin => true,
-                        Point::Specific(snapshot_slot, ref hash) => {
-                            // Use try_read() since we're in a sync context within tokio.
-                            // The lock was just created so this will always succeed.
-                            match chain_db.try_read() {
-                                Ok(db) => {
-                                    let exists = db.has_block(hash);
-                                    if !exists {
-                                        let db_tip = db.get_tip();
-                                        let db_tip_slot =
-                                            db_tip.point.slot().map(|s| s.0).unwrap_or(0);
-                                        if snapshot_slot.0 > db_tip_slot {
-                                            warn!(
-                                                "Ledger snapshot is ahead of ChainDB (snapshot={}, chaindb={}); \
-                                                 node may have crashed before ChainDB persist — discarding snapshot, \
-                                                 will replay from storage",
-                                                state.tip, db_tip,
-                                            );
-                                        } else {
-                                            warn!(
-                                                "Ledger snapshot is stale (snapshot={}, chaindb={})",
-                                                state.tip, db_tip,
-                                            );
-                                        }
-                                    }
-                                    exists
-                                }
-                                Err(_) => {
-                                    warn!("Could not acquire ChainDB lock for snapshot validation, assuming valid");
-                                    true
-                                }
-                            }
-                        }
-                    };
 
-                    if snapshot_valid {
-                        info!(
-                            epoch = state.epoch.0,
-                            utxos = state.utxo_set.len(),
-                            tip = %state.tip,
-                            "Ledger restored from snapshot",
+                    // Detect stale snapshots whose protocol_params were captured before
+                    // Alonzo/Conway genesis files were applied. The canonical signal is
+                    // max_tx_ex_units.mem == 14_000_000, which is the hardcoded
+                    // mainnet_defaults() value. No live Cardano network (mainnet, preview,
+                    // preprod) has ever used 14_000_000 as a settled governance value:
+                    //   - Preview/Preprod Alonzo genesis: 10_000_000
+                    //   - Mainnet Alonzo genesis: 14_000_000 (initial, but mainnet has
+                    //     since been updated to 16_500_000 via governance action)
+                    //
+                    // For all testnets this value unambiguously indicates a broken baseline.
+                    // For mainnet, governance may have updated it past 14_000_000 — but
+                    // the snapshot would already carry the post-governance value in that case.
+                    // If it still says 14_000_000 on a mainnet snapshot, that means it was
+                    // captured before governance ran, and will be corrected by replay anyway.
+                    //
+                    // Additionally check committee_min_size: a value of 7 is the mainnet
+                    // default but never the correct value for preview (genesis says 0) or
+                    // preprod. If the snapshot was taken with wrong committee_min_size,
+                    // ALL governance actions requiring CC approval would fail to ratify.
+                    let genesis_mem = protocol_params.max_tx_ex_units.mem;
+                    let snapshot_mem = state.protocol_params.max_tx_ex_units.mem;
+                    let defaults_mem =
+                        torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults()
+                            .max_tx_ex_units
+                            .mem;
+                    let snapshot_appears_stale = snapshot_mem == defaults_mem
+                        && genesis_mem != defaults_mem
+                        && genesis_mem > 0;
+
+                    if snapshot_appears_stale {
+                        warn!(
+                            snapshot_max_tx_ex_mem = snapshot_mem,
+                            genesis_max_tx_ex_mem = genesis_mem,
+                            "Ledger snapshot protocol params appear to predate genesis \
+                             initialization (max_tx_ex_units.mem={} matches mainnet_defaults, \
+                             but genesis says {}); discarding snapshot for fresh replay",
+                            snapshot_mem,
+                            genesis_mem,
                         );
-                        state
-                    } else {
-                        warn!("Discarding stale ledger snapshot, will replay from ChainDB");
                         Self::init_fresh_ledger(
                             &protocol_params,
                             shelley_genesis.as_ref(),
@@ -334,7 +324,67 @@ impl Node {
                             network_magic,
                             byron_epoch_length,
                         )
-                    }
+                    } else {
+                        // Validate snapshot tip exists in ChainDB. If the tip hash
+                        // is not in storage (e.g., DB was wiped, different chain, or
+                        // volatile blocks were lost), the snapshot is stale and must
+                        // be discarded to prevent "block does not connect" errors.
+                        let snapshot_valid = match state.tip.point {
+                            Point::Origin => true,
+                            Point::Specific(snapshot_slot, ref hash) => {
+                                // Use try_read() since we're in a sync context within tokio.
+                                // The lock was just created so this will always succeed.
+                                match chain_db.try_read() {
+                                    Ok(db) => {
+                                        let exists = db.has_block(hash);
+                                        if !exists {
+                                            let db_tip = db.get_tip();
+                                            let db_tip_slot =
+                                                db_tip.point.slot().map(|s| s.0).unwrap_or(0);
+                                            if snapshot_slot.0 > db_tip_slot {
+                                                warn!(
+                                                    "Ledger snapshot is ahead of ChainDB (snapshot={}, chaindb={}); \
+                                                     node may have crashed before ChainDB persist — discarding snapshot, \
+                                                     will replay from storage",
+                                                    state.tip, db_tip,
+                                                );
+                                            } else {
+                                                warn!(
+                                                    "Ledger snapshot is stale (snapshot={}, chaindb={})",
+                                                    state.tip, db_tip,
+                                                );
+                                            }
+                                        }
+                                        exists
+                                    }
+                                    Err(_) => {
+                                        warn!("Could not acquire ChainDB lock for snapshot validation, assuming valid");
+                                        true
+                                    }
+                                }
+                            }
+                        };
+
+                        if snapshot_valid {
+                            info!(
+                                epoch = state.epoch.0,
+                                utxos = state.utxo_set.len(),
+                                tip = %state.tip,
+                                "Ledger restored from snapshot",
+                            );
+                            state
+                        } else {
+                            warn!("Discarding stale ledger snapshot, will replay from ChainDB");
+                            Self::init_fresh_ledger(
+                                &protocol_params,
+                                shelley_genesis.as_ref(),
+                                shelley_genesis_hash,
+                                &byron_genesis_utxos,
+                                network_magic,
+                                byron_epoch_length,
+                            )
+                        }
+                    } // end else (snapshot not stale)
                 }
                 Err(e) => {
                     warn!("Failed to load ledger snapshot, starting fresh: {e}");

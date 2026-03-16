@@ -1320,8 +1320,8 @@ mod tests {
     use torsten_primitives::protocol_params::ProtocolParameters;
     use torsten_primitives::time::EpochNo;
     use torsten_primitives::transaction::{
-        Anchor, Certificate, Constitution, DRep, GovAction, GovActionId, ProposalProcedure,
-        ProtocolParamUpdate, Rational, Vote, Voter, VotingProcedure,
+        Anchor, Certificate, Constitution, DRep, ExUnits, GovAction, GovActionId,
+        ProposalProcedure, ProtocolParamUpdate, Rational, Vote, Voter, VotingProcedure,
     };
     use torsten_primitives::value::Lovelace;
 
@@ -2806,6 +2806,175 @@ mod tests {
         assert_eq!(
             state.protocol_params.protocol_version_major,
             before.protocol_version_major
+        );
+    }
+
+    // ========================================================================
+    // Regression tests — Issue #94: ParameterChange ex-unit updates
+    // ========================================================================
+
+    /// Regression test for issue #94.
+    ///
+    /// A Conway ParameterChange governance action that updates `max_tx_ex_units`
+    /// and `max_block_ex_units` must be fully enacted when it receives sufficient
+    /// DRep (network group), SPO (security group), and CC approval.
+    ///
+    /// Prior to the fix, nodes loaded from stale snapshots (saved before
+    /// Alonzo/Conway genesis was wired in) carried `mainnet_defaults()` values
+    /// for these fields. Because `committee_min_size` was also stale (7 instead
+    /// of 0 for preview), `check_cc_approval` always returned false and no
+    /// ParameterChange action ever ratified — leaving the node permanently
+    /// reporting `max_tx_ex_mem=14,000,000` instead of the chain value of
+    /// `16,500,000`.
+    #[test]
+    fn test_parameter_change_ex_units_ratified_and_enacted() {
+        // 10 DReps + 10 SPOs covers both dvt_pp_network_group (67%) and
+        // pvt_pp_security_group (51%) thresholds. committee_min_size is set to
+        // 0 by gov_test_state so CC approval only requires the threshold ratio.
+        let mut state = gov_test_state(10, 10);
+
+        // Record the baseline values so we can assert they changed.
+        let old_tx_mem = state.protocol_params.max_tx_ex_units.mem;
+        let old_block_mem = state.protocol_params.max_block_ex_units.mem;
+
+        // Propose a ParameterChange that updates both ex-unit limits.
+        // These are the preview testnet values from on-chain governance epoch 1094.
+        let new_tx_ex_units = ExUnits {
+            mem: 16_500_000,
+            steps: 10_000_000_000,
+        };
+        let new_block_ex_units = ExUnits {
+            mem: 72_000_000,
+            steps: 40_000_000_000,
+        };
+        let tx_hash = Hash32::from_bytes([50u8; 32]);
+        state.process_proposal(
+            &tx_hash,
+            0,
+            &ProposalProcedure {
+                deposit: Lovelace(100_000_000_000),
+                return_addr: vec![0u8; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::new(ProtocolParamUpdate {
+                        // max_tx_ex_units is in the Network group (no SPO vote required).
+                        // max_block_ex_units is in the Network + Security groups
+                        // (requires pvt_pp_security_group SPO threshold).
+                        max_tx_ex_units: Some(new_tx_ex_units),
+                        max_block_ex_units: Some(new_block_ex_units),
+                        ..Default::default()
+                    }),
+                    policy_hash: None,
+                },
+                anchor: make_anchor(),
+            },
+        );
+        let action_id = make_action_id(50, 0);
+
+        // Cast DRep yes votes: 7 out of 10 = 70% >= dvt_pp_network_group (67%).
+        for i in 0..7 {
+            drep_vote(&mut state, i, &action_id, Vote::Yes);
+        }
+        // Cast SPO yes votes: 6 out of 10 = 60% >= pvt_pp_security_group (51%).
+        for i in 0..6 {
+            spo_vote(&mut state, i, &action_id, Vote::Yes);
+        }
+        // CC yes vote — the single CC member votes yes (threshold is 1/2).
+        cc_vote_yes(&mut state, &action_id);
+
+        // Trigger the epoch boundary where ratification and enactment occur.
+        state.process_epoch_transition(EpochNo(1));
+
+        // The proposal must have been consumed (ratified and enacted).
+        assert!(
+            state.governance.proposals.is_empty(),
+            "Proposal should have been ratified and removed from pending proposals"
+        );
+
+        // The protocol params must reflect the new ex-unit values.
+        assert_ne!(
+            state.protocol_params.max_tx_ex_units.mem, old_tx_mem,
+            "max_tx_ex_units.mem must have changed from the baseline"
+        );
+        assert_eq!(
+            state.protocol_params.max_tx_ex_units.mem, new_tx_ex_units.mem,
+            "max_tx_ex_units.mem must equal the enacted value (16_500_000)"
+        );
+        assert_eq!(
+            state.protocol_params.max_tx_ex_units.steps, new_tx_ex_units.steps,
+            "max_tx_ex_units.steps must equal the enacted value"
+        );
+
+        assert_ne!(
+            state.protocol_params.max_block_ex_units.mem, old_block_mem,
+            "max_block_ex_units.mem must have changed from the baseline"
+        );
+        assert_eq!(
+            state.protocol_params.max_block_ex_units.mem, new_block_ex_units.mem,
+            "max_block_ex_units.mem must equal the enacted value (72_000_000)"
+        );
+        assert_eq!(
+            state.protocol_params.max_block_ex_units.steps, new_block_ex_units.steps,
+            "max_block_ex_units.steps must equal the enacted value"
+        );
+    }
+
+    /// Confirms that a ParameterChange ex-unit update does NOT ratify when the
+    /// CC vote is missing, even if DRep and SPO thresholds are met. This
+    /// ensures the CC approval gate is functioning correctly.
+    #[test]
+    fn test_parameter_change_ex_units_not_ratified_without_cc() {
+        let mut state = gov_test_state(10, 10);
+        // Use a non-trivial CC threshold so missing the CC vote actually blocks ratification.
+        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+            numerator: 1,
+            denominator: 2,
+        });
+
+        let tx_hash = Hash32::from_bytes([51u8; 32]);
+        state.process_proposal(
+            &tx_hash,
+            0,
+            &ProposalProcedure {
+                deposit: Lovelace(100_000_000_000),
+                return_addr: vec![0u8; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::new(ProtocolParamUpdate {
+                        max_tx_ex_units: Some(ExUnits {
+                            mem: 16_500_000,
+                            steps: 10_000_000_000,
+                        }),
+                        ..Default::default()
+                    }),
+                    policy_hash: None,
+                },
+                anchor: make_anchor(),
+            },
+        );
+        let action_id = make_action_id(51, 0);
+
+        // DRep and SPO thresholds are met, but NO CC vote.
+        for i in 0..7 {
+            drep_vote(&mut state, i, &action_id, Vote::Yes);
+        }
+        for i in 0..6 {
+            spo_vote(&mut state, i, &action_id, Vote::Yes);
+        }
+        // Deliberately omit cc_vote_yes.
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // Proposal must still be pending (not ratified — CC threshold not met).
+        assert!(
+            !state.governance.proposals.is_empty(),
+            "Proposal should NOT have been ratified without CC approval"
+        );
+        // ex-unit value must be unchanged.
+        assert_eq!(
+            state.protocol_params.max_tx_ex_units.mem,
+            ProtocolParameters::mainnet_defaults().max_tx_ex_units.mem,
+            "max_tx_ex_units.mem must be unchanged when CC approval is missing"
         );
     }
 
