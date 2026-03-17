@@ -34,14 +34,18 @@
 //! ```
 
 use crate::app::App;
-use crate::layout::compute_layout;
+use crate::layout::{compute_layout, LayoutMode};
 use crate::theme::Theme;
 use crate::widgets::epoch_progress::EpochProgress;
+use crate::widgets::header_bar::HeaderBar;
+use crate::widgets::mempool_gauge::MempoolGauge;
+use crate::widgets::sparkline_history::SparklineHistory;
+use crate::widgets::sync_progress::SyncProgressBar;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget},
     Frame,
 };
 
@@ -70,7 +74,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let theme = app.theme();
     let layout = compute_layout(area, None);
 
-    render_header(frame, app, theme, layout.header);
+    if layout.mode == LayoutMode::Compact {
+        // Compact mode uses the 2-line HeaderBar widget (status + epoch progress bar).
+        render_compact_header(frame, app, theme, layout.header);
+    } else {
+        // Standard/Wide modes use the single-line inline header.
+        render_header(frame, app, theme, layout.header);
+    }
     render_node_panel(frame, app, theme, layout.node);
     render_chain_panel(frame, app, theme, layout.chain);
     render_connections_panel(frame, app, theme, layout.connections);
@@ -197,6 +207,39 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Compact header (2 lines — used for terminals narrower than 80 cols)
+// ---------------------------------------------------------------------------
+
+/// Compact 2-line header for narrow terminals.
+///
+/// Line 1: logo | sync status | epoch | tip age | uptime
+/// Line 2: epoch progress bar
+///
+/// Uses the [`HeaderBar`] widget so the same rendering logic is shared and
+/// all three widget types (HeaderBar, MempoolGauge, SparklineHistory) are
+/// exercised in the main rendering path.
+fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let (_, is_synced, is_stalled) = app.sync_status();
+    let pct = app.sync_progress_pct();
+    let epoch = app.metrics.get_u64("torsten_epoch_number");
+    let tip_age = app.metrics.get_u64("torsten_tip_age_seconds");
+    let uptime_secs = app.metrics.get_u64("torsten_uptime_seconds");
+
+    let header = HeaderBar {
+        sync_pct: pct,
+        is_synced,
+        is_stalled,
+        epoch,
+        tip_age,
+        uptime: App::format_uptime(uptime_secs),
+        epoch_progress: app.epoch_progress_pct / 100.0,
+        connected: app.metrics.connected,
+        theme,
+    };
+    header.render(area, frame.buffer_mut());
+}
+
+// ---------------------------------------------------------------------------
 // Panel: Node
 // ---------------------------------------------------------------------------
 
@@ -233,7 +276,11 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let col_w = inner.width.saturating_sub(2) as usize; // subtract 1-char side padding each side
 
-    let lines = vec![
+    // Reserve the last row for the sync progress bar (SyncProgressBar widget).
+    // The text rows occupy everything above it.
+    let text_row_count = (inner.height as usize).saturating_sub(1);
+
+    let mut lines = vec![
         kv_aligned("Role", role, role_color, theme, col_w),
         kv_aligned("Network", network, theme.accent, theme, col_w),
         kv_aligned(
@@ -269,7 +316,34 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
     ];
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    lines.truncate(text_row_count);
+    let text_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: text_row_count as u16,
+    };
+    frame.render_widget(Paragraph::new(lines), text_area);
+
+    // Sync progress bar — rendered on the last row inside the Node panel.
+    // Provides a visual glance at sync state; color matches the header pill.
+    let (_, is_synced, is_stalled) = app.sync_status();
+    let sync_pct = app.sync_progress_pct();
+    let bar_y = inner.y + text_row_count as u16;
+    if bar_y < inner.y + inner.height && inner.width >= 6 {
+        let bar_area = Rect {
+            x: inner.x + 1,
+            y: bar_y,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        };
+        SyncProgressBar::new(sync_pct, is_synced, is_stalled)
+            .fill_color_synced(theme.success)
+            .fill_color_syncing(theme.warning)
+            .fill_color_stalled(theme.error)
+            .empty_color(theme.gauge_empty)
+            .render(bar_area, frame.buffer_mut());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +401,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let tip_age = app.metrics.get_u64("torsten_tip_age_seconds");
     let total_tx = App::format_number(app.metrics.get_u64("torsten_transactions_received_total"));
     let pending_tx = app.metrics.get_u64("torsten_mempool_tx_count");
+    let utxo_count = app.metrics.get_u64("torsten_utxo_count");
     let density = app.metrics.get("torsten_chain_density");
     let forks = app.metrics.get_u64("torsten_rollback_count_total");
 
@@ -346,7 +421,11 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         format!("{} {}s", tip_icon, App::format_number(tip_age))
     };
 
-    let lines = vec![
+    // Compute how many text rows we can fit before the mempool gauge row.
+    // The gauge needs 1 row; the remaining height goes to text rows.
+    let text_row_height = rest.height.saturating_sub(1) as usize;
+
+    let mut lines = vec![
         kv_aligned("Block", &block_num, theme.fg, theme, col_w),
         kv_aligned("Slot", &slot_num, theme.fg, theme, col_w),
         kv_aligned(
@@ -378,19 +457,48 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
         kv_aligned("Total Tx", &total_tx, theme.muted, theme, col_w),
         kv_aligned(
-            "Pending Tx",
-            App::format_number(pending_tx),
-            if pending_tx > 0 {
-                theme.warning
-            } else {
-                theme.muted
-            },
+            "UTxO Set",
+            App::format_number(utxo_count),
+            theme.info,
             theme,
             col_w,
         ),
     ];
 
-    frame.render_widget(Paragraph::new(lines), rest);
+    // Truncate text rows to the height available above the gauge row.
+    lines.truncate(text_row_height);
+
+    // Render text rows.
+    let text_area = Rect {
+        x: rest.x,
+        y: rest.y,
+        width: rest.width,
+        height: text_row_height as u16,
+    };
+    frame.render_widget(Paragraph::new(lines), text_area);
+
+    // Mempool gauge — full-width bar on the last row inside the chain panel.
+    // Shows pending tx count relative to the configurable cap (default 4,000 txs).
+    // If the node publishes a `torsten_mempool_tx_max` gauge, use it for scaling.
+    if rest.height >= 1 {
+        let gauge_y = rest.y + text_row_height as u16;
+        if gauge_y < rest.y + rest.height {
+            let gauge_area = Rect {
+                x: rest.x,
+                y: gauge_y,
+                width: rest.width,
+                height: 1,
+            };
+            let mempool_max = app.metrics.get_u64("torsten_mempool_tx_max");
+            let gauge = MempoolGauge::new(pending_tx, theme);
+            let gauge = if mempool_max > 0 {
+                gauge.with_max(mempool_max)
+            } else {
+                gauge
+            };
+            gauge.render(gauge_area, frame.buffer_mut());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -570,8 +678,26 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         lines.push(Line::from([vec![Span::raw(" ")], mem_bar].concat()));
     }
 
+    // Block rate sparkline — occupies the last available row in the Resources panel.
+    // Rendered directly to the buffer so it overlays the correct row without
+    // interfering with Paragraph layout.
+    let text_rows = lines.len();
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
+
+    // Only draw the sparkline if there is at least one row left after the text rows.
+    let spark_y = inner.y + text_rows as u16;
+    if !app.block_rate_history.is_empty() && spark_y < inner.y + inner.height && inner.width > 2 {
+        let spark_area = Rect {
+            x: inner.x + 1, // 1-char left indent
+            y: spark_y,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        };
+        // Uniform accent color — all bars the same hue; height carries the meaning.
+        SparklineHistory::with_color(&app.block_rate_history, theme.accent)
+            .render(spark_area, frame.buffer_mut());
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -4,8 +4,13 @@
 //! including the latest metrics snapshot, computed epoch progress values,
 //! RTT histogram buckets, and UI navigation state (active theme, etc).
 
+use std::collections::VecDeque;
+
 use crate::metrics::MetricsSnapshot;
 use crate::theme::{cycle_theme, THEMES};
+
+/// Maximum number of blocks-applied samples retained for the sparkline history.
+const BLOCK_HISTORY_LEN: usize = 60;
 
 /// Network name derived from the `torsten_network_magic` metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +188,13 @@ pub struct App {
     pub epoch_length_override: u64,
     /// RTT histogram bands from the last scrape.
     pub rtt_bands: RttBands,
+    /// Ring-buffer of `torsten_blocks_applied` counter samples (one per poll).
+    ///
+    /// Each entry is the delta (blocks applied since last poll), used to build
+    /// a block-rate sparkline in the Resources panel.
+    pub block_rate_history: VecDeque<u64>,
+    /// Last `torsten_blocks_applied` value, used to compute per-poll deltas.
+    prev_blocks_applied: u64,
     /// Index into `THEMES` for the active theme.
     pub theme_idx: usize,
     /// Whether the application should exit.
@@ -208,6 +220,8 @@ impl App {
             epoch_time_remaining_secs: 0,
             epoch_length_override: 0,
             rtt_bands: RttBands::default(),
+            block_rate_history: VecDeque::with_capacity(BLOCK_HISTORY_LEN),
+            prev_blocks_applied: 0,
             theme_idx: monokai_idx,
             should_quit: false,
             show_help: false,
@@ -231,6 +245,23 @@ impl App {
 
         // Parse RTT histogram bands.
         self.rtt_bands = RttBands::from_snapshot(&snapshot);
+
+        // Update block-rate sparkline history.
+        //
+        // Track the delta (blocks applied since last poll) so the sparkline shows
+        // activity rate rather than a monotonically rising counter.
+        let blocks_applied = snapshot.get_u64("torsten_blocks_applied_total");
+        if self.prev_blocks_applied > 0 && blocks_applied >= self.prev_blocks_applied {
+            let delta = blocks_applied - self.prev_blocks_applied;
+            if self.block_rate_history.len() >= BLOCK_HISTORY_LEN {
+                self.block_rate_history.pop_front();
+            }
+            self.block_rate_history.push_back(delta);
+        }
+        // Initialise on first call (or after a reset) so prev is correct next poll.
+        if blocks_applied > 0 {
+            self.prev_blocks_applied = blocks_applied;
+        }
 
         self.metrics = snapshot;
     }
@@ -571,5 +602,55 @@ mod tests {
         assert!(app.show_help);
         app.toggle_help();
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_block_rate_history_accumulates_deltas() {
+        let mut app = App::new();
+
+        // First poll — just initialises prev_blocks_applied.
+        app.update_metrics(make_snapshot(vec![(
+            "torsten_blocks_applied_total",
+            1000.0,
+        )]));
+        assert!(
+            app.block_rate_history.is_empty(),
+            "no delta on first poll (no previous baseline)"
+        );
+
+        // Second poll: 50 new blocks applied.
+        app.update_metrics(make_snapshot(vec![(
+            "torsten_blocks_applied_total",
+            1050.0,
+        )]));
+        assert_eq!(app.block_rate_history.len(), 1);
+        assert_eq!(app.block_rate_history[0], 50);
+
+        // Third poll: 30 more.
+        app.update_metrics(make_snapshot(vec![(
+            "torsten_blocks_applied_total",
+            1080.0,
+        )]));
+        assert_eq!(app.block_rate_history.len(), 2);
+        assert_eq!(app.block_rate_history[1], 30);
+    }
+
+    #[test]
+    fn test_block_rate_history_capped_at_max_len() {
+        let mut app = App::new();
+        // Seed with an initial value.
+        app.update_metrics(make_snapshot(vec![("torsten_blocks_applied_total", 0.0)]));
+        // Push more samples than BLOCK_HISTORY_LEN.
+        for i in 1..=(BLOCK_HISTORY_LEN + 5) as u64 {
+            app.update_metrics(make_snapshot(vec![(
+                "torsten_blocks_applied_total",
+                i as f64,
+            )]));
+        }
+        assert_eq!(
+            app.block_rate_history.len(),
+            BLOCK_HISTORY_LEN,
+            "history should be capped at BLOCK_HISTORY_LEN"
+        );
     }
 }

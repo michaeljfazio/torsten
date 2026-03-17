@@ -1,27 +1,26 @@
 //! Compact 2-line header bar widget for the Torsten TUI dashboard.
 //!
 //! Displays critical node status at a glance:
-//! - Line 1: node name, sync status, epoch, tip age, uptime
+//! - Line 1: node name, sync status pill, epoch, tip age, uptime
 //! - Line 2: epoch progress bar showing slot position within the current epoch
+//!
+//! Colors are sourced from the active [`crate::theme::Theme`] so that the widget
+//! participates in theme cycling.  The main dashboard renders the header using
+//! inline spans in [`crate::ui`] for layout flexibility; this widget is provided
+//! for embedding in custom / compact panel arrangements.
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::Widget,
 };
 
-/// Color constants matching the main UI palette.
-const ACCENT_GREEN: Color = Color::Rgb(80, 220, 100);
-const ACCENT_YELLOW: Color = Color::Rgb(255, 215, 0);
-const ACCENT_RED: Color = Color::Rgb(255, 80, 80);
-const DIM_WHITE: Color = Color::Rgb(160, 160, 170);
-const BRIGHT_WHITE: Color = Color::Rgb(230, 230, 240);
-const BORDER_DIM: Color = Color::Rgb(70, 70, 85);
+use crate::theme::Theme;
 
 /// A compact 2-line header bar showing critical node status.
-pub struct HeaderBar {
-    /// Sync progress percentage (0.0 - 100.0).
+pub struct HeaderBar<'a> {
+    /// Sync progress percentage (0.0 – 100.0).
     pub sync_pct: f64,
     /// Whether the node is fully synced.
     pub is_synced: bool,
@@ -33,13 +32,15 @@ pub struct HeaderBar {
     pub tip_age: u64,
     /// Uptime as a formatted string (e.g. "1h 5m").
     pub uptime: String,
-    /// Epoch progress as a fraction (0.0 - 1.0).
+    /// Epoch progress as a fraction (0.0 – 1.0).
     pub epoch_progress: f64,
-    /// Whether the node is connected.
+    /// Whether the node is connected to the metrics endpoint.
     pub connected: bool,
+    /// Active theme for colors.
+    pub theme: &'a Theme,
 }
 
-impl Widget for HeaderBar {
+impl Widget for HeaderBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 10 || area.height < 1 {
             return;
@@ -48,13 +49,13 @@ impl Widget for HeaderBar {
         // --- Line 1: status summary ---
         let y = area.top();
         let status_color = if !self.connected {
-            ACCENT_RED
+            self.theme.error
         } else if self.is_synced {
-            ACCENT_GREEN
+            self.theme.success
         } else if self.is_stalled {
-            ACCENT_RED
+            self.theme.error
         } else {
-            ACCENT_YELLOW
+            self.theme.warning
         };
 
         let status_text = if !self.connected {
@@ -67,16 +68,10 @@ impl Widget for HeaderBar {
             format!("Syncing {:.2}%", self.sync_pct)
         };
 
-        // Build the status line: "torsten-tui | Synced 99.99% | Epoch 1237 | Tip: 12s | Up: 1h 5m"
-        let line = format!(
-            " torsten-tui \u{2502} {} \u{2502} Epoch {} \u{2502} Tip: {}s \u{2502} Up: {}",
-            status_text, self.epoch, self.tip_age, self.uptime
-        );
-
-        // Render character by character with appropriate styling
+        // Render character by character with appropriate styling.
         let mut x = area.left();
 
-        // "torsten-tui" portion
+        // "torsten-tui" logo.
         let prefix = " torsten-tui ";
         for ch in prefix.chars() {
             if x >= area.right() {
@@ -84,21 +79,21 @@ impl Widget for HeaderBar {
             }
             buf[(x, y)].set_char(ch).set_style(
                 Style::default()
-                    .fg(BRIGHT_WHITE)
+                    .fg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             );
             x += 1;
         }
 
-        // Separator
+        // Separator.
         if x < area.right() {
             buf[(x, y)]
                 .set_char('\u{2502}')
-                .set_style(Style::default().fg(BORDER_DIM));
+                .set_style(Style::default().fg(self.theme.border));
             x += 1;
         }
 
-        // Status text
+        // Status text (colored by sync state).
         let status_part = format!(" {} ", status_text);
         for ch in status_part.chars() {
             if x >= area.right() {
@@ -112,7 +107,7 @@ impl Widget for HeaderBar {
             x += 1;
         }
 
-        // Remaining segments
+        // Remaining segments: epoch, tip age, uptime.
         let segments = [
             format!("\u{2502} Epoch {} ", self.epoch),
             format!("\u{2502} Tip: {}s ", self.tip_age),
@@ -125,17 +120,17 @@ impl Widget for HeaderBar {
                     break;
                 }
                 let style = if i == 0 {
-                    // Separator character
-                    Style::default().fg(BORDER_DIM)
+                    // Separator character.
+                    Style::default().fg(self.theme.border)
                 } else {
-                    Style::default().fg(DIM_WHITE)
+                    Style::default().fg(self.theme.muted)
                 };
                 buf[(x, y)].set_char(ch).set_style(style);
                 x += 1;
             }
         }
 
-        // Fill remaining width on line 1 with spaces
+        // Fill remaining width on line 1 with spaces.
         while x < area.right() {
             buf[(x, y)].set_char(' ').set_style(Style::default());
             x += 1;
@@ -151,13 +146,17 @@ impl Widget for HeaderBar {
         let progress = self.epoch_progress.clamp(0.0, 1.0);
         let filled = ((bar_width as f64) * progress) as u16;
 
-        // Epoch progress label
+        // Epoch progress label.
         let label = format!(" Epoch {:.1}% ", progress * 100.0);
         let label_start = (bar_width.saturating_sub(label.len() as u16)) / 2;
 
-        // Avoid computing on very small line lengths; just write what we have.
-        // Ensure we don't overflow on the second line allocation.
-        let _line_used = line;
+        let bar_color = if self.is_synced {
+            self.theme.success
+        } else if self.is_stalled {
+            self.theme.error
+        } else {
+            self.theme.gauge_fill
+        };
 
         for col in 0..bar_width {
             let abs_x = area.left() + col;
@@ -166,24 +165,17 @@ impl Widget for HeaderBar {
             }
 
             let in_filled = col < filled;
-            let bar_color = if self.is_synced {
-                ACCENT_GREEN
-            } else if self.is_stalled {
-                ACCENT_RED
-            } else {
-                ACCENT_YELLOW
-            };
 
-            // Check if this position falls within the label
+            // Check if this position falls within the label.
             let label_idx = col.saturating_sub(label_start) as usize;
             let in_label = col >= label_start && label_idx < label.len();
 
             if in_label {
                 let ch = label.as_bytes()[label_idx] as char;
                 let (fg, bg) = if in_filled {
-                    (Color::Black, bar_color)
+                    (ratatui::style::Color::Black, bar_color)
                 } else {
-                    (BRIGHT_WHITE, Color::Reset)
+                    (self.theme.fg, ratatui::style::Color::Reset)
                 };
                 buf[(abs_x, y2)]
                     .set_char(ch)
@@ -195,7 +187,7 @@ impl Widget for HeaderBar {
             } else {
                 buf[(abs_x, y2)]
                     .set_char('\u{2591}')
-                    .set_style(Style::default().fg(Color::DarkGray));
+                    .set_style(Style::default().fg(self.theme.gauge_empty));
             }
         }
     }
@@ -204,8 +196,9 @@ impl Widget for HeaderBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::THEME_MONOKAI;
 
-    fn make_header(synced: bool, stalled: bool, connected: bool) -> HeaderBar {
+    fn make_header(synced: bool, stalled: bool, connected: bool) -> HeaderBar<'static> {
         HeaderBar {
             sync_pct: if synced { 99.99 } else { 50.0 },
             is_synced: synced,
@@ -215,6 +208,7 @@ mod tests {
             uptime: "1h 5m".to_string(),
             epoch_progress: 0.65,
             connected,
+            theme: &THEME_MONOKAI,
         }
     }
 
@@ -224,7 +218,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
-        // Verify the first line contains "torsten-tui"
+        // Verify the first line contains "torsten-tui".
         let line1: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
@@ -309,7 +303,20 @@ mod tests {
         header2.epoch_progress = 1.0;
         let mut buf2 = Buffer::empty(area);
         header2.render(area, &mut buf2);
-        // At 100% progress, first cell on line 2 should be filled (or part of label).
-        // Just verify no panic.
+        // At 100% progress, verify no panic.
+    }
+
+    #[test]
+    fn test_header_uses_theme_accent_for_logo() {
+        let header = make_header(true, false, true);
+        let area = Rect::new(0, 0, 120, 2);
+        let mut buf = Buffer::empty(area);
+        header.render(area, &mut buf);
+        // The 't' in "torsten-tui" at cell 1 (0-indexed) should have the accent color.
+        let cell = &buf[(1, 0)];
+        assert_eq!(
+            cell.fg, THEME_MONOKAI.accent,
+            "logo should use theme accent"
+        );
     }
 }

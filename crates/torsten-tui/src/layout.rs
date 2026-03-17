@@ -44,19 +44,23 @@ use ratatui::layout::{Constraint, Layout, Rect};
 // Fixed panel heights (lines including borders)
 // ---------------------------------------------------------------------------
 
-/// Node panel: Role + Network + Version + Era + Uptime + Peers + Forged = 7 content rows + 2 borders = 9
-pub const PANEL_NODE_H: u16 = 9;
-/// Chain panel: epoch bar (1) + 8 data rows + 2 borders = 11.
+/// Node panel: Role + Network + Version + Era + Uptime + Peers + Forged = 7 content rows + sync bar (1) + 2 borders = 10
+pub const PANEL_NODE_H: u16 = 10;
+/// Chain panel: epoch bar (1) + 8 data rows + mempool gauge (1) + 2 borders = 12.
 /// The epoch progress bar lives here (not in the header).
-pub const PANEL_CHAIN_H: u16 = 11;
+pub const PANEL_CHAIN_H: u16 = 12;
 /// Connections panel: P2P + Inbound + Outbound + Cold/Warm/Hot + Uni/Bi/Duplex = 5 content rows + 2 borders = 7
 pub const PANEL_CONNECTIONS_H: u16 = 7;
-/// Resources panel: CPU + Mem live + Mem RSS + mem bar = 4 content rows + 2 borders = 6
-pub const PANEL_RESOURCES_H: u16 = 6;
+/// Resources panel: CPU + Mem live + Mem RSS + mem bar + sparkline = 5 content rows + 2 borders = 7
+pub const PANEL_RESOURCES_H: u16 = 7;
 /// Peers panel: RTT bar + 2 band rows + Low/Avg/High = 4 content rows + 2 borders = 6
 pub const PANEL_PEERS_H: u16 = 6;
 /// Header area height: 1 line (status pill + key metrics only; epoch bar is in Chain panel).
 pub const HEADER_H: u16 = 1;
+
+/// Header area height for the compact layout: 2 lines (status line + epoch progress bar).
+/// The compact header uses the HeaderBar widget which renders both lines.
+pub const HEADER_COMPACT_H: u16 = 2;
 
 // ---------------------------------------------------------------------------
 // Layout mode
@@ -184,7 +188,7 @@ fn compute_two_column_layout(area: Rect, mode: LayoutMode) -> DashboardLayout {
 
 fn compute_compact_layout(area: Rect) -> DashboardLayout {
     let vertical = Layout::vertical([
-        Constraint::Length(HEADER_H), // header
+        Constraint::Length(HEADER_COMPACT_H), // 2-line compact header (status + epoch bar)
         Constraint::Length(PANEL_NODE_H),
         Constraint::Length(PANEL_CHAIN_H),
         Constraint::Length(PANEL_CONNECTIONS_H),
@@ -314,6 +318,18 @@ mod tests {
                 "header must be {HEADER_H} line in {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_compact_header_is_two_lines() {
+        // Compact mode uses a 2-line header (status + epoch progress bar).
+        assert_eq!(HEADER_COMPACT_H, 2, "HEADER_COMPACT_H constant must be 2");
+        let area = Rect::new(0, 0, 60, 60);
+        let layout = compute_layout(area, Some(LayoutMode::Compact));
+        assert_eq!(
+            layout.header.height, HEADER_COMPACT_H,
+            "compact header must be {HEADER_COMPACT_H} lines"
+        );
     }
 
     #[test]

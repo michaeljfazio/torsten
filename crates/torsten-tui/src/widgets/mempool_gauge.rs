@@ -1,9 +1,12 @@
 //! Horizontal mempool gauge widget for the Torsten TUI dashboard.
 //!
-//! Displays a color-coded horizontal bar showing mempool tx count relative
-//! to a configurable maximum capacity. The bar is colored green when the
-//! mempool is under 25% full, yellow between 25-75%, and red above 75%.
-//! A centered label shows "current/max txs".
+//! Renders a color-coded horizontal bar showing mempool tx count relative
+//! to a configurable maximum capacity.  The bar is green when the mempool is
+//! under 25% full, yellow between 25–75%, and red above 75%.  A centered label
+//! shows "current/max txs".
+//!
+//! The fill, empty, and label colors are drawn from a [`crate::theme::Theme`]
+//! so that the widget participates in theme cycling.
 
 use ratatui::{
     buffer::Buffer,
@@ -12,51 +15,51 @@ use ratatui::{
     widgets::Widget,
 };
 
-/// Default mempool capacity used for gauge scaling.
-const DEFAULT_MEMPOOL_MAX: u64 = 4000;
+use crate::theme::Theme;
 
-/// Color thresholds.
-const GREEN: Color = Color::Rgb(80, 220, 100);
-const YELLOW: Color = Color::Rgb(255, 215, 0);
-const RED: Color = Color::Rgb(255, 80, 80);
+/// Default mempool capacity used for gauge scaling.
+const DEFAULT_MEMPOOL_MAX: u64 = 4_000;
 
 /// A horizontal gauge widget showing mempool fill level.
-pub struct MempoolGauge {
+pub struct MempoolGauge<'a> {
     /// Current number of transactions in the mempool.
     pub current: u64,
     /// Maximum capacity for gauge scaling.
     pub max: u64,
+    /// Active theme for colors.
+    theme: &'a Theme,
 }
 
-impl MempoolGauge {
+impl<'a> MempoolGauge<'a> {
     /// Create a new mempool gauge with the default max capacity.
-    pub fn new(current: u64) -> Self {
+    pub fn new(current: u64, theme: &'a Theme) -> Self {
         Self {
             current,
             max: DEFAULT_MEMPOOL_MAX,
+            theme,
         }
     }
 
     /// Set a custom max capacity for the gauge.
-    pub fn _with_max(mut self, max: u64) -> Self {
+    pub fn with_max(mut self, max: u64) -> Self {
         self.max = max.max(1);
         self
     }
 
-    /// Determine the bar color based on fill ratio.
+    /// Determine the bar fill color based on fill ratio using theme colors.
     fn bar_color(&self) -> Color {
         let ratio = self.fill_ratio();
         if ratio > 0.75 {
-            RED
+            self.theme.error
         } else if ratio > 0.25 {
-            YELLOW
+            self.theme.warning
         } else {
-            GREEN
+            self.theme.success
         }
     }
 
     /// Compute fill ratio clamped to [0.0, 1.0].
-    fn fill_ratio(&self) -> f64 {
+    pub fn fill_ratio(&self) -> f64 {
         if self.max == 0 {
             return 0.0;
         }
@@ -64,7 +67,7 @@ impl MempoolGauge {
     }
 }
 
-impl Widget for MempoolGauge {
+impl Widget for MempoolGauge<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 8 || area.height < 1 {
             return;
@@ -87,7 +90,7 @@ impl Widget for MempoolGauge {
         for x in area.left().saturating_add(filled_width)..area.right() {
             buf[(x, area.top())]
                 .set_char('\u{2591}') // light shade
-                .set_style(Style::default().fg(Color::DarkGray));
+                .set_style(Style::default().fg(self.theme.gauge_empty));
         }
 
         // Centered label: "current/max txs"
@@ -100,7 +103,7 @@ impl Widget for MempoolGauge {
                 let (fg, bg) = if in_filled {
                     (Color::Black, color)
                 } else {
-                    (Color::White, Color::Reset)
+                    (self.theme.fg, Color::Reset)
                 };
                 buf[(x, area.top())]
                     .set_char(ch)
@@ -113,10 +116,11 @@ impl Widget for MempoolGauge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::THEME_DEFAULT;
 
     #[test]
     fn test_mempool_gauge_empty() {
-        let gauge = MempoolGauge::new(0);
+        let gauge = MempoolGauge::new(0, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         gauge.render(area, &mut buf);
@@ -129,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_mempool_gauge_half_full() {
-        let gauge = MempoolGauge::new(2000);
+        let gauge = MempoolGauge::new(2000, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         gauge.render(area, &mut buf);
@@ -141,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_mempool_gauge_full() {
-        let gauge = MempoolGauge::new(4000);
+        let gauge = MempoolGauge::new(4000, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         gauge.render(area, &mut buf);
@@ -153,32 +157,35 @@ mod tests {
 
     #[test]
     fn test_mempool_gauge_over_capacity() {
-        let gauge = MempoolGauge::new(5000);
+        let gauge = MempoolGauge::new(5000, &THEME_DEFAULT);
         assert_eq!(gauge.fill_ratio(), 1.0);
     }
 
     #[test]
     fn test_mempool_gauge_custom_max() {
-        let gauge = MempoolGauge::new(100)._with_max(200);
+        let gauge = MempoolGauge::new(100, &THEME_DEFAULT).with_max(200);
         assert_eq!(gauge.max, 200);
         assert!((gauge.fill_ratio() - 0.5).abs() < 0.01);
     }
 
     #[test]
     fn test_mempool_gauge_color_thresholds() {
-        let low = MempoolGauge::new(500); // 12.5%
-        assert_eq!(low.bar_color(), GREEN);
+        // 12.5% → success (green)
+        let low = MempoolGauge::new(500, &THEME_DEFAULT);
+        assert_eq!(low.bar_color(), THEME_DEFAULT.success);
 
-        let mid = MempoolGauge::new(2000); // 50%
-        assert_eq!(mid.bar_color(), YELLOW);
+        // 50% → warning (yellow)
+        let mid = MempoolGauge::new(2000, &THEME_DEFAULT);
+        assert_eq!(mid.bar_color(), THEME_DEFAULT.warning);
 
-        let high = MempoolGauge::new(3500); // 87.5%
-        assert_eq!(high.bar_color(), RED);
+        // 87.5% → error (red)
+        let high = MempoolGauge::new(3500, &THEME_DEFAULT);
+        assert_eq!(high.bar_color(), THEME_DEFAULT.error);
     }
 
     #[test]
     fn test_mempool_gauge_narrow_area() {
-        let gauge = MempoolGauge::new(100);
+        let gauge = MempoolGauge::new(100, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 5, 1);
         let mut buf = Buffer::empty(area);
         // Should bail early without panic.
