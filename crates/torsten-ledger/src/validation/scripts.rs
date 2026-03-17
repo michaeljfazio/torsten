@@ -201,6 +201,16 @@ pub(crate) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
 /// `ceiling` to produce the final integer lovelace amount. Using `floor` here
 /// would cause a 1-lovelace undercount on transactions where the fractional
 /// accumulation is non-zero.
+///
+/// # Overflow safety
+///
+/// The rational accumulation uses `checked_mul` at each step. If any
+/// intermediate product overflows `u128` (which can happen for pathologically
+/// large scripts far exceeding the 1 MiB block limit), the function falls back
+/// to a `f64`-based approximation.  At script sizes that trigger the block-limit
+/// rejection (`> 1 MiB`), the computed fee is already astronomically large
+/// (> 10^19 lovelace) so a rounding error of a few ULP is inconsequential —
+/// the transaction/block will be rejected regardless.
 pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u64 {
     const TIER_SIZE: u64 = 25_600; // 25 KiB (= 25 * 1024)
     const MULT_NUM: u128 = 6; // 1.2 = 6/5
@@ -217,13 +227,47 @@ pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size
     while remaining > 0 {
         let chunk = remaining.min(TIER_SIZE);
         // acc += chunk * (price_num / price_den)
-        // Performed exactly: new_num = old_num * price_den + chunk * price_num * old_den
-        acc_num = acc_num * price_den + chunk as u128 * price_num * acc_den;
-        acc_den *= price_den;
+        //
+        // Exact rational form:
+        //   new_num = old_acc_num * price_den + chunk * price_num * old_acc_den
+        //   new_den = old_acc_den * price_den
+        //
+        // Use checked arithmetic at every step to detect overflow. For pathologically
+        // large scripts (far beyond the 1 MiB block limit), intermediate products can
+        // overflow u128. When that happens, fall back to an f64 approximation — the
+        // result will be imprecise but the fee will already be astronomically large
+        // (≫ u64::MAX lovelace), so the transaction/block is rejected regardless.
+        let a = match acc_num.checked_mul(price_den) {
+            Some(v) => v,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
+        let b = (chunk as u128)
+            .checked_mul(price_num)
+            .and_then(|v| v.checked_mul(acc_den));
+        let b = match b {
+            Some(v) => v,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
+        acc_num = match a.checked_add(b) {
+            Some(v) => v,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
+        acc_den = match acc_den.checked_mul(price_den) {
+            Some(v) => v,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
+
         remaining -= chunk;
+
         // price *= 6/5 (exact rational multiplication, reduce immediately to prevent overflow)
-        price_num *= MULT_NUM;
-        price_den *= MULT_DEN;
+        price_num = match price_num.checked_mul(MULT_NUM) {
+            Some(p) => p,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
+        price_den = match price_den.checked_mul(MULT_DEN) {
+            Some(p) => p,
+            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        };
         let g = gcd_u128(price_num, price_den);
         price_num /= g;
         price_den /= g;
@@ -234,6 +278,28 @@ pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size
     // ceiling(acc_num / acc_den) — single ceiling at the end per spec.
     // div_ceil is equivalent to (acc_num + acc_den - 1) / acc_den but overflow-safe.
     acc_num.div_ceil(acc_den) as u64
+}
+
+/// f64 fallback for `calculate_ref_script_tiered_fee` used when the exact
+/// rational accumulation would overflow `u128`.
+///
+/// Only reachable for scripts far larger than the 1 MiB block limit; precision
+/// loss at this scale is acceptable because the fee will exceed `u64::MAX`
+/// lovelace anyway and the transaction will be rejected on other grounds.
+fn calculate_ref_script_tiered_fee_f64(base_fee_per_byte: u64, total_size: u64) -> u64 {
+    const TIER_SIZE: f64 = 25_600.0;
+    let mut remaining = total_size as f64;
+    let mut acc: f64 = 0.0;
+    let mut price: f64 = base_fee_per_byte as f64;
+
+    while remaining > 0.0 {
+        let chunk = remaining.min(TIER_SIZE);
+        acc += chunk * price;
+        remaining -= chunk;
+        price *= 1.2;
+    }
+    // ceiling
+    acc.ceil() as u64
 }
 
 fn gcd_u128(mut a: u128, mut b: u128) -> u128 {

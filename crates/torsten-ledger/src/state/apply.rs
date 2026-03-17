@@ -14,9 +14,7 @@ use super::{
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
-use crate::validation::{
-    calculate_ref_script_size, script_ref_byte_size, validate_transaction, ValidationError,
-};
+use crate::validation::{script_ref_byte_size, validate_transaction, ValidationError};
 use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
@@ -243,11 +241,50 @@ impl LedgerState {
         //
         // Per the Haskell implementation, this check fires for Conway era only
         // (protocol version >= 9). Earlier eras have no such block-level limit.
+        //
+        // Within-block UTxO overlay: when a transaction in the block creates an output
+        // that carries a reference script, and a later transaction in the same block
+        // references that output (either as a spending input or reference input), the
+        // initial `self.utxo_set` does not yet contain that output. To correctly count
+        // the ref script contribution of all txs (including ones that depend on
+        // within-block outputs), we build a lightweight overlay of all outputs created
+        // by valid transactions in the block. The overlay is checked first; on miss,
+        // we fall back to `self.utxo_set`.
+        //
+        // This is a pre-scan that runs before the per-tx application loop so that the
+        // block is rejected early (before any state changes) if the limit is exceeded.
         if self.protocol_params.protocol_version_major >= 9
             && mode == BlockValidationMode::ValidateAll
         {
-            // We sum ref scripts from both regular inputs AND reference_inputs
-            // (Haskell uses `allInputsTxBodyF` which is the union of both sets).
+            // Build within-block UTxO overlay: maps (tx_hash, output_index) → TransactionOutput
+            // for all outputs produced by valid transactions in this block.
+            let mut block_utxo_overlay: std::collections::HashMap<
+                torsten_primitives::transaction::TransactionInput,
+                torsten_primitives::transaction::TransactionOutput,
+            > = std::collections::HashMap::new();
+            for tx in &block.transactions {
+                if tx.is_valid {
+                    for (idx, output) in tx.body.outputs.iter().enumerate() {
+                        block_utxo_overlay.insert(
+                            torsten_primitives::transaction::TransactionInput {
+                                transaction_id: tx.hash,
+                                index: idx as u32,
+                            },
+                            output.clone(),
+                        );
+                    }
+                }
+            }
+
+            // Helper: look up a UTxO, checking the within-block overlay first.
+            let lookup_with_overlay =
+                |input: &torsten_primitives::transaction::TransactionInput| {
+                    block_utxo_overlay
+                        .get(input)
+                        .cloned()
+                        .or_else(|| self.utxo_set.lookup(input))
+                };
+
             let total_ref_script_size: u64 = block
                 .transactions
                 .iter()
@@ -258,14 +295,20 @@ impl LedgerState {
                         .inputs
                         .iter()
                         .filter_map(|inp| {
-                            self.utxo_set
-                                .lookup(inp)
+                            lookup_with_overlay(inp)
                                 .and_then(|utxo| utxo.script_ref.as_ref().map(script_ref_byte_size))
                         })
                         .sum();
-                    // Count ref scripts from reference inputs
-                    let reference_size =
-                        calculate_ref_script_size(&tx.body.reference_inputs, &self.utxo_set);
+                    // Count ref scripts from reference inputs (also check overlay)
+                    let reference_size: u64 = tx
+                        .body
+                        .reference_inputs
+                        .iter()
+                        .filter_map(|inp| {
+                            lookup_with_overlay(inp)
+                                .and_then(|utxo| utxo.script_ref.as_ref().map(script_ref_byte_size))
+                        })
+                        .sum();
                     spending_size.saturating_add(reference_size)
                 })
                 .fold(0u64, |acc, x| acc.saturating_add(x));
@@ -385,6 +428,17 @@ impl LedgerState {
                     }
 
                     // Producer claims tx is valid — verify with full validation.
+                    //
+                    // Sequential UTxO visibility: by the time we reach tx[i] in this
+                    // loop, `self.utxo_set` already contains the outputs created by
+                    // tx[0]..tx[i-1] (each was applied by the `apply_transaction` call
+                    // in its own loop iteration, before we advanced to the next tx).
+                    // This matches Haskell's sequential LEDGER rule application inside
+                    // the LEDGERS block rule — later txs in a block can spend or
+                    // reference UTxOs created by earlier txs in the same block,
+                    // fixing the root cause of `InputNotFound` and `InvalidMint`
+                    // errors for within-block UTxO dependencies.
+                    //
                     // Use tx raw_cbor size as tx_size (approximate, sufficient for validation).
                     let tx_size = tx.raw_cbor.as_ref().map_or(0, |c| c.len() as u64);
                     let result = validate_transaction(
@@ -426,11 +480,17 @@ impl LedgerState {
                             // Fall through — treat as valid, process normally
                         } else {
                             // Phase-1 failure on an on-chain confirmed block.
-                            // Some Phase-1 checks (e.g., InvalidMint for reference
-                            // scripts resolved from earlier txs in the same block)
-                            // may diverge from Haskell due to per-tx vs per-block
-                            // UTxO resolution timing. Log as warning; don't reject
-                            // confirmed blocks.
+                            //
+                            // With correct sequential UTxO application (outputs from tx[i-1]
+                            // are visible when validating tx[i]), within-block UTxO
+                            // dependencies are resolved correctly. A Phase-1 failure here
+                            // indicates either a real protocol violation or a remaining
+                            // difference in validation logic between Torsten and Haskell.
+                            //
+                            // For confirmed blocks (on-chain consensus is authoritative),
+                            // we log the error and continue rather than rejecting — diverging
+                            // ledger state is less harmful than halting sync. The warning
+                            // should be investigated and the root cause fixed.
                             let err_str: Vec<String> =
                                 errors.iter().map(|e| e.to_string()).collect();
                             warn!(
