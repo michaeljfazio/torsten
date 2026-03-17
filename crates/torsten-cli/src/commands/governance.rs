@@ -325,10 +325,17 @@ impl GovernanceCmd {
                     if output_format == "hex" {
                         println!("{}", hex::encode(&key_hash));
                     } else {
-                        let drep_id = bech32::encode::<bech32::Bech32>(
-                            bech32::Hrp::parse("drep")?,
-                            &key_hash,
-                        )?;
+                        // CIP-0129: DRep key-hash identifiers use the `drep1` HRP.
+                        // (The legacy `drep` prefix was superseded by CIP-0129.)
+                        let hash28 = torsten_primitives::Hash28::try_from(key_hash.as_slice())
+                            .map_err(|_| {
+                                anyhow::anyhow!(
+                                    "DRep key hash must be 28 bytes, got {}",
+                                    key_hash.len()
+                                )
+                            })?;
+                        let drep_id = torsten_primitives::encode_drep_key(&hash28)
+                            .map_err(|e| anyhow::anyhow!("Failed to encode DRep ID: {e}"))?;
                         println!("{drep_id}");
                     }
                     Ok(())

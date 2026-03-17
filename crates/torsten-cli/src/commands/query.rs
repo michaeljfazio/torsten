@@ -872,16 +872,24 @@ impl QueryCmd {
                 // Parse Map<Credential, DRepState>
                 // Credential: [type, hash(28)], DRepState: array(4) [expiry, maybe_anchor, deposit, delegators]
                 let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                let mut dreps = Vec::new();
+                // Each entry: (cip0129_id, hex_hash, deposit, anchor_url, expiry_epoch)
+                let mut dreps: Vec<(String, String, u64, String, u64)> = Vec::new();
 
                 for _ in 0..map_len {
-                    // Key: Credential [type, hash]
-                    let _ = decoder.array(); // [type, hash]
-                    let _ = decoder.u8(); // credential type
-                    let cred = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    // Key: Credential array(2) [type, hash]
+                    let _ = decoder.array();
+                    // Credential type: 0 = key hash, 1 = script hash
+                    let cred_type = decoder.u8().unwrap_or(0);
+                    let hash_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                    let hex_hash = hex::encode(&hash_bytes);
+
+                    // Encode as CIP-0129 bech32 identifier (drep1 / drep_script1)
+                    let cip0129_id =
+                        torsten_primitives::encode_drep_from_cbor(cred_type, &hash_bytes)
+                            .unwrap_or_else(|_| hex_hash.clone());
 
                     // Value: DRepState array(4)
-                    let _ = decoder.array(); // array(4)
+                    let _ = decoder.array();
                     let expiry_epoch = decoder.u64().unwrap_or(0);
                     // maybe_anchor: array(0)=None, array(1)=[anchor]
                     let anchor_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
@@ -894,14 +902,14 @@ impl QueryCmd {
                     let deposit = decoder.u64().unwrap_or(0);
                     decoder.skip().ok(); // skip delegators set
 
-                    dreps.push((cred, deposit, anchor, expiry_epoch));
+                    dreps.push((cip0129_id, hex_hash, deposit, anchor, expiry_epoch));
                 }
 
-                // Filter by key hash if provided
+                // Filter by key hash if provided — match against either the hex hash or the bech32 id
                 let filtered: Vec<_> = if let Some(ref hash) = drep_key_hash {
                     dreps
                         .iter()
-                        .filter(|(c, _, _, _)| c.contains(hash))
+                        .filter(|(id, hex, _, _, _)| hex.contains(hash) || id.contains(hash))
                         .collect()
                 } else {
                     dreps.iter().collect()
@@ -912,14 +920,15 @@ impl QueryCmd {
                 println!("Total DReps: {}", dreps.len());
 
                 if !filtered.is_empty() {
+                    // CIP-0129 identifiers are at most ~63 chars; use 66-char column.
                     println!(
                         "\n{:<66} {:>16} {:>8}",
-                        "Credential Hash", "Deposit (ADA)", "Epoch"
+                        "DRep ID (CIP-0129)", "Deposit (ADA)", "Epoch"
                     );
                     println!("{}", "-".repeat(92));
-                    for (cred, deposit, anchor, epoch) in &filtered {
+                    for (cip0129_id, _hex, deposit, anchor, epoch) in &filtered {
                         let deposit_ada = *deposit / 1_000_000;
-                        println!("{cred:<66} {deposit_ada:>16} {epoch:>8}");
+                        println!("{cip0129_id:<66} {deposit_ada:>16} {epoch:>8}");
                         if !anchor.is_empty() {
                             println!("  Anchor: {anchor}");
                         }
@@ -962,14 +971,18 @@ impl QueryCmd {
 
                 // [0] Map<ColdCredential, CommitteeMemberState>
                 let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-                let mut members = Vec::new();
+                // Each entry: (cold_cip0129, hot_cip0129, status_tag)
+                let mut members: Vec<(String, String, u32)> = Vec::new();
                 let mut resigned_count = 0u64;
 
                 for _ in 0..map_len {
-                    // Key: Credential [type, hash]
+                    // Key: ColdCredential array(2) [type, hash]
                     let _ = decoder.array();
-                    let _ = decoder.u8();
-                    let cold = hex::encode(decoder.bytes().unwrap_or(&[]));
+                    let cold_type = decoder.u8().unwrap_or(0);
+                    let cold_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                    // Encode with CIP-0129 cc_cold1 / cc_cold_script1
+                    let cold = torsten_primitives::encode_cc_cold_from_cbor(cold_type, &cold_bytes)
+                        .unwrap_or_else(|_| hex::encode(&cold_bytes));
 
                     // Value: CommitteeMemberState array(4)
                     let _ = decoder.array();
@@ -978,10 +991,13 @@ impl QueryCmd {
                     let status_tag = decoder.u32().unwrap_or(1);
                     let mut hot = String::new();
                     if status_tag == 0 && status_arr >= 2 {
-                        // MemberAuthorized: [0, credential]
+                        // MemberAuthorized: [0, hot_credential]
                         let _ = decoder.array(); // [type, hash]
-                        let _ = decoder.u8();
-                        hot = hex::encode(decoder.bytes().unwrap_or(&[]));
+                        let hot_type = decoder.u8().unwrap_or(0);
+                        let hot_bytes = decoder.bytes().unwrap_or(&[]).to_vec();
+                        // Encode with CIP-0129 cc_hot1 / cc_hot_script1
+                        hot = torsten_primitives::encode_cc_hot_from_cbor(hot_type, &hot_bytes)
+                            .unwrap_or_else(|_| hex::encode(&hot_bytes));
                     } else if status_tag == 2 {
                         resigned_count += 1;
                         // MemberResigned: skip maybe_anchor
@@ -1015,10 +1031,14 @@ impl QueryCmd {
 
                 let authorized: Vec<_> = members.iter().filter(|(_, _, s)| *s == 0).collect();
                 if !authorized.is_empty() {
-                    println!("\n{:<60} {:<60}", "Cold Credential", "Hot Credential");
-                    println!("{}", "-".repeat(122));
+                    // CIP-0129 identifiers: cc_cold1/cc_cold_script1 and cc_hot1/cc_hot_script1
+                    println!(
+                        "\n{:<65} {:<65}",
+                        "Cold Credential (CIP-0129)", "Hot Credential (CIP-0129)"
+                    );
+                    println!("{}", "-".repeat(132));
                     for (cold, hot, _) in &authorized {
-                        println!("{cold:<60} {hot:<60}");
+                        println!("{cold:<65} {hot:<65}");
                     }
                 }
 
