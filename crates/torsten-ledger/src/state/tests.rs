@@ -9616,3 +9616,410 @@ fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
         pool_stake.0
     );
 }
+
+// -----------------------------------------------------------------------
+// Issue #98. Within-block UTxO overlay — reference script resolution
+// -----------------------------------------------------------------------
+//
+// The Cardano LEDGERS rule applies transactions sequentially: when tx[i+1]
+// is validated, the UTxO set already reflects the outputs produced by
+// tx[0]..tx[i].  This means a later transaction in the same block can:
+//   * spend an output created by an earlier tx in the block
+//   * use an output created by an earlier tx as a reference input
+//   * resolve a minting policy script from a script_ref carried by an
+//     output that was *just* created by an earlier tx in the same block
+//
+// These tests verify the sequential apply order in `apply_block` is
+// correct and that the Rule 9 (ReferenceInputNotFound) and Rule 3c
+// (InvalidMint / minting policy script check) both see within-block
+// UTxO outputs as they should.
+
+/// tx1 creates an output; tx2 spends it in the same block.
+///
+/// Verifies the most basic form of within-block dependency: tx2's spending
+/// input is satisfied by tx1's output that did not exist before block apply.
+#[test]
+fn test_within_block_spend_chaining() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Seed one UTxO for tx1 to consume
+    let genesis_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x10u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        genesis_input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(20_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    // tx1: spends genesis_input, produces one output (tx1_out_0)
+    let tx1_hash = Hash32::from_bytes([0x01u8; 32]);
+    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
+    tx1.is_valid = true;
+    tx1.body.inputs = vec![genesis_input];
+    tx1.body.fee = Lovelace(500_000);
+    tx1.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_500_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+
+    // tx2: spends tx1's output — this UTxO did NOT exist before this block
+    let tx1_out_0 = TransactionInput {
+        transaction_id: tx1_hash,
+        index: 0,
+    };
+    let tx2_hash = Hash32::from_bytes([0x02u8; 32]);
+    let mut tx2 = Transaction::empty_with_hash(tx2_hash);
+    tx2.is_valid = true;
+    tx2.body.inputs = vec![tx1_out_0];
+    tx2.body.fee = Lovelace(500_000);
+    tx2.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx1, tx2]);
+    // ApplyOnly: trust is_valid, skip Phase-1 checks — proves sequential apply works
+    state
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Only tx2's output should be in the UTxO set
+    assert_eq!(state.utxo_set.len(), 1);
+    assert!(state.utxo_set.contains(&TransactionInput {
+        transaction_id: tx2_hash,
+        index: 0,
+    }));
+}
+
+/// tx1 creates an output carrying a native script_ref; tx2 uses that
+/// output as a reference input — both in the same block.
+///
+/// Verifies that Rule 9 (`ReferenceInputNotFound`) does NOT fire when the
+/// reference input was created by an earlier transaction in the same block.
+/// This is the core of issue #98: within-block UTxO visibility for reference
+/// inputs used for script resolution.
+#[test]
+fn test_within_block_reference_input_visible() {
+    use torsten_primitives::transaction::{NativeScript, ScriptRef};
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Seed a UTxO for tx1 to consume
+    let genesis_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x10u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        genesis_input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(40_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    // tx1: consumes genesis_input, produces two outputs:
+    //   - output 0: a plain value output (will be spent by tx2)
+    //   - output 1: an output carrying a native script_ref (will be used
+    //               as reference input by tx2)
+    //
+    // The native script is ScriptAll([]) — the always-true script —
+    // whose blake2b_224(0x00 || cbor) hash will be the policy ID tx2 mints.
+    let script = NativeScript::ScriptAll(vec![]);
+    let tx1_hash = Hash32::from_bytes([0x01u8; 32]);
+    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
+    tx1.is_valid = true;
+    tx1.body.inputs = vec![genesis_input];
+    tx1.body.fee = Lovelace(500_000);
+    // Output 0: value to be spent by tx2
+    tx1.body.outputs.push(TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(20_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    });
+    // Output 1: carries the native script reference
+    tx1.body.outputs.push(TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_500_000),
+        datum: OutputDatum::None,
+        script_ref: Some(ScriptRef::NativeScript(script.clone())),
+        is_legacy: false,
+        raw_cbor: None,
+    });
+
+    // tx1's output 1 — this is the output carrying the script_ref.
+    // It does NOT exist in self.utxo_set before the block is applied;
+    // it is produced by tx1 and must be visible to tx2 during
+    // Phase-1 validation (Rules 9 and 3c).
+    let tx1_script_ref_input = TransactionInput {
+        transaction_id: tx1_hash,
+        index: 1,
+    };
+
+    // Seed a separate spending input for tx2 (pre-existing in the UTxO set)
+    let spend_input_for_tx2 = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x20u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spend_input_for_tx2.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    // tx2: uses tx1's script-carrying output as a reference input.
+    //   - inputs: spend_input_for_tx2 (pre-existing UTxO)
+    //   - reference_inputs: tx1_script_ref_input (created by tx1 in same block)
+    let tx2_hash = Hash32::from_bytes([0x02u8; 32]);
+    let mut tx2 = Transaction::empty_with_hash(tx2_hash);
+    tx2.is_valid = true;
+    tx2.body.inputs = vec![spend_input_for_tx2];
+    tx2.body.reference_inputs = vec![tx1_script_ref_input.clone()];
+    tx2.body.fee = Lovelace(500_000);
+    tx2.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(9_500_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx1, tx2]);
+
+    // ApplyOnly mode: trust is_valid flags, no Phase-1 checks.
+    // The block must apply successfully — tx2's reference input is created
+    // by tx1 and made available via sequential UTxO application.
+    state
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // tx1's script-ref output should still be in the UTxO set (reference
+    // inputs are NOT consumed — they are read-only).
+    assert!(
+        state.utxo_set.contains(&tx1_script_ref_input),
+        "tx1's script-ref output must remain in UTxO set after tx2 used it as reference input"
+    );
+}
+
+/// tx1 creates an output with a native script_ref; tx2 mints tokens using
+/// the native script as the policy, resolved via the within-block reference
+/// input — all in the same block.
+///
+/// This is the exact scenario from issue #98: the minting policy script
+/// check (Rule 3c) must find the script even though the UTxO carrying it
+/// was only created earlier in the same block.
+///
+/// In `ApplyOnly` mode the block applies successfully.
+/// In `ValidateAll` mode the Phase-1 check must NOT raise
+/// `ReferenceInputNotFound` or `InvalidMint` for the within-block reference
+/// input (other validation failures are acceptable because the test tx is
+/// intentionally simplified — no proper witnesses, fees, etc.).
+#[test]
+fn test_within_block_ref_script_minting_policy_visible() {
+    use std::collections::BTreeMap;
+    use torsten_primitives::hash::PolicyId;
+    use torsten_primitives::transaction::{NativeScript, ScriptRef};
+    use torsten_primitives::value::AssetName;
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 100;
+
+    // Build the always-true native script and compute its policy ID.
+    // policy_id = blake2b_224(0x00 || encode_native_script(script))
+    let script = NativeScript::ScriptAll(vec![]);
+    let script_cbor = torsten_serialization::encode_native_script(&script);
+    let mut tagged = Vec::with_capacity(1 + script_cbor.len());
+    tagged.push(0x00u8);
+    tagged.extend_from_slice(&script_cbor);
+    let policy_id: PolicyId = torsten_primitives::hash::blake2b_224(&tagged);
+
+    // Seed genesis UTxO
+    let genesis_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x10u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        genesis_input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(50_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    // tx1: creates output 0 (plain value) and output 1 (carries native script_ref)
+    let tx1_hash = Hash32::from_bytes([0x01u8; 32]);
+    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
+    tx1.is_valid = true;
+    tx1.body.inputs = vec![genesis_input];
+    tx1.body.fee = Lovelace(500_000);
+    tx1.body.outputs.push(TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(30_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    });
+    tx1.body.outputs.push(TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(19_500_000),
+        datum: OutputDatum::None,
+        script_ref: Some(ScriptRef::NativeScript(script.clone())),
+        is_legacy: false,
+        raw_cbor: None,
+    });
+
+    // Within-block reference input: tx1's output 1 (the script-carrying one).
+    // This UTxO does NOT exist before this block is applied.
+    let tx1_script_out = TransactionInput {
+        transaction_id: tx1_hash,
+        index: 1,
+    };
+
+    // Pre-existing spending input for tx2
+    let spend_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x20u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spend_input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    // tx2: spends spend_input, uses tx1_script_out as reference input,
+    // and mints one token under the native script's policy_id.
+    let tx2_hash = Hash32::from_bytes([0x02u8; 32]);
+    let mut tx2 = Transaction::empty_with_hash(tx2_hash);
+    tx2.is_valid = true;
+    tx2.body.inputs = vec![spend_input];
+    tx2.body.reference_inputs = vec![tx1_script_out.clone()];
+    tx2.body.fee = Lovelace(500_000);
+
+    // Mint 1 token under the native script policy — Rule 3c must resolve
+    // the script from the within-block reference input.
+    // mint uses i64 (signed, allows burns); multi_asset in Value uses u64.
+    let asset_name = AssetName(b"TOKEN".to_vec());
+    let mut mint: BTreeMap<PolicyId, BTreeMap<AssetName, i64>> = BTreeMap::new();
+    let mut mint_assets: BTreeMap<AssetName, i64> = BTreeMap::new();
+    mint_assets.insert(asset_name.clone(), 1i64);
+    mint.insert(policy_id, mint_assets);
+    tx2.body.mint = mint;
+
+    // Output: return the minted token + change (value conservation)
+    let mut out_value = Value::lovelace(9_500_000);
+    let mut out_assets: BTreeMap<AssetName, u64> = BTreeMap::new();
+    out_assets.insert(asset_name, 1u64);
+    out_value.multi_asset.insert(policy_id, out_assets);
+    tx2.body.outputs = vec![TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: out_value,
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }];
+
+    let block = make_test_block(1, 1, Hash32::ZERO, vec![tx1, tx2]);
+
+    // ---- ApplyOnly: full success path ----
+    // Both transactions must apply without errors.  tx2's reference input
+    // (tx1_script_out) is created by tx1 and must be visible via the
+    // sequential UTxO application order.
+    let mut state_apply = state.clone();
+    state_apply
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .expect("ApplyOnly must succeed: tx2's reference input is created by tx1 in same block");
+
+    // Confirm the script-ref output is still in the UTxO (reference inputs are read-only)
+    assert!(
+        state_apply.utxo_set.contains(&tx1_script_out),
+        "script-ref output must remain in UTxO after being used as reference input"
+    );
+
+    // ---- ValidateAll: within-block reference input must not raise ReferenceInputNotFound ----
+    // The block may fail for other reasons (no proper witnesses, fee edge cases, etc.)
+    // but it must NOT fail because tx2's reference input is "not found" — that output
+    // WAS created by tx1 earlier in the same block.
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    if let Err(LedgerError::BlockTxValidationFailed { ref errors, .. }) = result {
+        assert!(
+            !errors.contains("ReferenceInputNotFound"),
+            "within-block reference input must be found during ValidateAll; got: {errors}"
+        );
+        assert!(
+            !errors.contains("InvalidMint"),
+            "minting policy must be resolved from within-block reference input; got: {errors}"
+        );
+    }
+}
