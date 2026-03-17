@@ -1237,9 +1237,24 @@ impl Node {
         }
 
         // Main connection loop — connect to peers and sync
+        //
+        // Backoff parameters are intentionally short so that after a network
+        // outage (e.g., sleep/hibernate, router restart) the node reconnects
+        // within seconds rather than minutes.  The exponential schedule is:
+        //   retry 1:  2 * 2^1 =  4 s
+        //   retry 2:  2 * 2^2 =  8 s
+        //   retry 3:  2 * 2^3 = 16 s
+        //   retry 4+: clamped to 20 s
+        // Maximum total reconnect time (4 retries, 4+8+16+20 s) < 60 s.
         let mut retry_count = 0u32;
-        let base_delay_secs = 5u64;
-        let max_delay_secs = 60u64;
+        let base_delay_secs = 2u64;
+        let max_delay_secs = 20u64;
+
+        // Per-peer TCP connect timeout.  Keeping this tight (5 s) ensures
+        // that a topology list with several unreachable peers does not add
+        // more than ~5 s per peer before we move on to the next candidate.
+        // The OS default can be 20-120 s depending on the platform.
+        let connect_timeout = std::time::Duration::from_secs(5);
 
         loop {
             if *shutdown_rx.borrow() {
@@ -1263,7 +1278,12 @@ impl Node {
                     debug!("Connecting to peer {target}...");
                     let connect_start = std::time::Instant::now();
                     let connect_result = tokio::select! {
-                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        r = tokio::time::timeout(
+                            connect_timeout,
+                            NodeToNodeClient::connect(&*target, network_magic),
+                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
+                            format!("{target}: connection timed out after {}s", connect_timeout.as_secs()),
+                        ))),
                         _ = shutdown_rx.changed() => break,
                     };
                     match connect_result {
@@ -1299,7 +1319,12 @@ impl Node {
                     let target = format!("{addr}:{port}");
                     debug!("Connecting to peer {target}...");
                     let connect_result = tokio::select! {
-                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        r = tokio::time::timeout(
+                            connect_timeout,
+                            NodeToNodeClient::connect(&*target, network_magic),
+                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
+                            format!("{target}: connection timed out after {}s", connect_timeout.as_secs()),
+                        ))),
                         _ = shutdown_rx.changed() => break,
                     };
                     match connect_result {
@@ -1545,9 +1570,10 @@ impl Node {
                 }
             }
 
-            // Brief delay before reconnecting
+            // Brief delay before reconnecting — short enough that a transient
+            // disconnect (e.g., peer restart) is recovered in well under 5 s.
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
                 _ = shutdown_rx.changed() => { break; }
             }
         }

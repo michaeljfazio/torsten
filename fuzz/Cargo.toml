@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 torsten-serialization = { path = "../crates/torsten-serialization" }
+torsten-network = { path = "../crates/torsten-network" }
+torsten-primitives = { path = "../crates/torsten-primitives" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -23,4 +25,14 @@ doc = false
 [[bin]]
 name = "fuzz_decode_transaction"
 path = "fuzz_targets/decode_transaction.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_mux_segment"
+path = "fuzz_targets/mux_segment.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_nonce_update"
+path = "fuzz_targets/nonce_update.rs"
 doc = false

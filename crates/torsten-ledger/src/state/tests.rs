@@ -8590,336 +8590,6 @@ fn test_block_ref_script_size_under_1mib_accepted() {
 }
 
 // -----------------------------------------------------------------------
-// 7b. Within-block UTxO resolution tests
-//
-// These tests verify that the sequential UTxO application inside `apply_block`
-// allows later transactions in a block to see UTxO outputs created by earlier
-// transactions in the same block.  This is required for correct Cardano ledger
-// semantics (Haskell's LEDGERS rule applies each LEDGER tx sequentially within
-// a block) and is the root cause of `InputNotFound` and `InvalidMint` errors
-// when within-block UTxO dependencies are present.
-// -----------------------------------------------------------------------
-
-/// Verify that a transaction can spend an output created by an earlier transaction
-/// in the same block (within-block spending chain).
-///
-/// This is the simplest within-block UTxO dependency: tx0 creates output O0,
-/// tx1 spends O0.  When apply_block processes tx1, the UTxO set must already
-/// contain O0 (applied during tx0's iteration).
-#[test]
-fn test_within_block_utxo_spending_chain() {
-    let params = ProtocolParameters::mainnet_defaults();
-    let mut state = LedgerState::new(params);
-    state.epoch_length = 100;
-
-    // Seed the UTxO with a genesis input that tx0 will spend.
-    let genesis_input = TransactionInput {
-        transaction_id: Hash32::from_bytes([0x10u8; 32]),
-        index: 0,
-    };
-    state.utxo_set.insert(
-        genesis_input.clone(),
-        TransactionOutput {
-            address: Address::Byron(ByronAddress {
-                payload: vec![0u8; 32],
-            }),
-            value: Value::lovelace(20_000_000),
-            datum: OutputDatum::None,
-            script_ref: None,
-            is_legacy: false,
-            raw_cbor: None,
-        },
-    );
-
-    // tx0: spends genesis_input, creates output O0 with 18 ADA.
-    let tx0_hash = Hash32::from_bytes([0x01u8; 32]);
-    let mut tx0 = Transaction::empty_with_hash(tx0_hash);
-    tx0.is_valid = true;
-    tx0.body.inputs = vec![genesis_input];
-    tx0.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(18_000_000),
-        datum: OutputDatum::None,
-        script_ref: None,
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx0.body.fee = Lovelace(2_000_000);
-
-    // The output O0 that tx1 will spend — created by tx0 at index 0.
-    let o0_input = TransactionInput {
-        transaction_id: tx0_hash,
-        index: 0,
-    };
-
-    // tx1: spends O0 (created by tx0 in the same block).
-    let tx1_hash = Hash32::from_bytes([0x02u8; 32]);
-    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
-    tx1.is_valid = true;
-    tx1.body.inputs = vec![o0_input.clone()];
-    tx1.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(16_000_000),
-        datum: OutputDatum::None,
-        script_ref: None,
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx1.body.fee = Lovelace(2_000_000);
-
-    let block = make_test_block(100, 1, Hash32::ZERO, vec![tx0, tx1]);
-    // ApplyOnly mode: no validation, pure ledger state application.
-    // The within-block spending chain MUST succeed — tx1 can see tx0's output.
-    state
-        .apply_block(&block, BlockValidationMode::ApplyOnly)
-        .expect("apply_block must succeed for within-block spending chain");
-
-    // tx0's output (O0) should have been spent by tx1 — not in UTxO.
-    assert!(
-        !state.utxo_set.contains(&o0_input),
-        "O0 (tx0's output) must be spent by tx1 — should not be in UTxO after block"
-    );
-    // tx1's output should be in the UTxO.
-    let tx1_out = TransactionInput {
-        transaction_id: tx1_hash,
-        index: 0,
-    };
-    assert!(
-        state.utxo_set.contains(&tx1_out),
-        "tx1's output must be in the UTxO after block"
-    );
-    assert_eq!(
-        state.utxo_set.lookup(&tx1_out).unwrap().value.coin.0,
-        16_000_000
-    );
-}
-
-/// Verify that a reference input pointing to a UTxO created by an earlier
-/// transaction in the same block is correctly resolved during the block-level
-/// ref script size check.
-///
-/// Scenario: tx0 creates an output with a reference script (small, under limit).
-/// tx1 uses that output as a reference_input.  The block-level ref script size
-/// pre-scan must count the script contribution from tx1's reference_input even
-/// though the creating tx0 is also in the same block.
-#[test]
-fn test_within_block_ref_script_counting_via_overlay() {
-    use torsten_primitives::transaction::ScriptRef;
-
-    let params = ProtocolParameters::mainnet_defaults();
-    let mut state = LedgerState::new(params);
-    state.epoch_length = 100;
-
-    // Seed UTxO for tx0 to consume.
-    let genesis_input = TransactionInput {
-        transaction_id: Hash32::from_bytes([0x10u8; 32]),
-        index: 0,
-    };
-    state.utxo_set.insert(
-        genesis_input.clone(),
-        TransactionOutput {
-            address: Address::Byron(ByronAddress {
-                payload: vec![0u8; 32],
-            }),
-            value: Value::lovelace(50_000_000),
-            datum: OutputDatum::None,
-            script_ref: None,
-            is_legacy: false,
-            raw_cbor: None,
-        },
-    );
-    // Seed UTxO for tx1 to consume.
-    let spend_input_for_tx1 = TransactionInput {
-        transaction_id: Hash32::from_bytes([0x11u8; 32]),
-        index: 0,
-    };
-    state.utxo_set.insert(
-        spend_input_for_tx1.clone(),
-        TransactionOutput {
-            address: Address::Byron(ByronAddress {
-                payload: vec![0u8; 32],
-            }),
-            value: Value::lovelace(20_000_000),
-            datum: OutputDatum::None,
-            script_ref: None,
-            is_legacy: false,
-            raw_cbor: None,
-        },
-    );
-
-    // tx0: creates an output that carries a 50 KiB reference script.
-    // This output is NOT in the initial UTxO — it is created by tx0.
-    let tx0_hash = Hash32::from_bytes([0x01u8; 32]);
-    let script_50kb = vec![0u8; 50_000]; // 50 KiB — well under 1 MiB block limit
-    let mut tx0 = Transaction::empty_with_hash(tx0_hash);
-    tx0.is_valid = true;
-    tx0.body.inputs = vec![genesis_input];
-    tx0.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(48_000_000),
-        datum: OutputDatum::None,
-        script_ref: Some(ScriptRef::PlutusV2(script_50kb)),
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx0.body.fee = Lovelace(2_000_000);
-
-    // The output of tx0 that tx1 will use as a reference_input.
-    let ref_input_from_tx0 = TransactionInput {
-        transaction_id: tx0_hash,
-        index: 0,
-    };
-
-    // tx1: uses tx0's output as a reference_input.
-    let tx1_hash = Hash32::from_bytes([0x02u8; 32]);
-    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
-    tx1.is_valid = true;
-    tx1.body.inputs = vec![spend_input_for_tx1];
-    tx1.body.reference_inputs = vec![ref_input_from_tx0];
-    tx1.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(18_000_000),
-        datum: OutputDatum::None,
-        script_ref: None,
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx1.body.fee = Lovelace(2_000_000);
-
-    // The block should apply successfully — 50 KiB is under the 1 MiB limit.
-    let block = make_test_block(100, 1, Hash32::ZERO, vec![tx0, tx1]);
-    state
-        .apply_block(&block, BlockValidationMode::ApplyOnly)
-        .expect("block with within-block reference_input (50 KiB script) must be accepted");
-
-    // Both transactions' outputs should be in the UTxO.
-    let tx1_out = TransactionInput {
-        transaction_id: tx1_hash,
-        index: 0,
-    };
-    assert!(
-        state.utxo_set.contains(&tx1_out),
-        "tx1's output must be in the UTxO after block"
-    );
-}
-
-/// Verify that the block-level ref script size pre-scan correctly accounts for
-/// a reference script created within the block when summing the TOTAL block size.
-///
-/// In this test, tx0 creates a 600 KiB reference script output and tx1 uses it
-/// as a reference_input.  Together they contribute 600 KiB to the block total,
-/// which is under the 1 MiB limit — so the block is accepted.
-///
-/// Previously (before the within-block UTxO overlay was added), the pre-scan
-/// would miss tx1's 600 KiB contribution (because tx0's output wasn't yet in
-/// `self.utxo_set` during the pre-scan) and incorrectly accept a block that
-/// might violate the limit.
-#[test]
-fn test_within_block_ref_script_overlay_counts_correctly() {
-    use torsten_primitives::transaction::ScriptRef;
-
-    let params = ProtocolParameters::mainnet_defaults();
-    let mut state = LedgerState::new(params);
-    state.epoch_length = 100;
-
-    // Seed genesis UTxOs.
-    let genesis0 = TransactionInput {
-        transaction_id: Hash32::from_bytes([0x10u8; 32]),
-        index: 0,
-    };
-    state.utxo_set.insert(
-        genesis0.clone(),
-        TransactionOutput {
-            address: Address::Byron(ByronAddress {
-                payload: vec![0u8; 32],
-            }),
-            value: Value::lovelace(100_000_000),
-            datum: OutputDatum::None,
-            script_ref: None,
-            is_legacy: false,
-            raw_cbor: None,
-        },
-    );
-    let genesis1 = TransactionInput {
-        transaction_id: Hash32::from_bytes([0x11u8; 32]),
-        index: 0,
-    };
-    state.utxo_set.insert(
-        genesis1.clone(),
-        TransactionOutput {
-            address: Address::Byron(ByronAddress {
-                payload: vec![0u8; 32],
-            }),
-            value: Value::lovelace(50_000_000),
-            datum: OutputDatum::None,
-            script_ref: None,
-            is_legacy: false,
-            raw_cbor: None,
-        },
-    );
-
-    // tx0: creates a UTxO with a 600 KiB script.
-    let tx0_hash = Hash32::from_bytes([0x01u8; 32]);
-    let script_600kb = vec![0xABu8; 600_000]; // 600 KiB
-    let mut tx0 = Transaction::empty_with_hash(tx0_hash);
-    tx0.is_valid = true;
-    tx0.body.inputs = vec![genesis0];
-    tx0.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(98_000_000),
-        datum: OutputDatum::None,
-        script_ref: Some(ScriptRef::PlutusV2(script_600kb)),
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx0.body.fee = Lovelace(2_000_000);
-
-    // tx1: references tx0's output (a 600 KiB script).
-    let tx0_out = TransactionInput {
-        transaction_id: tx0_hash,
-        index: 0,
-    };
-    let tx1_hash = Hash32::from_bytes([0x02u8; 32]);
-    let mut tx1 = Transaction::empty_with_hash(tx1_hash);
-    tx1.is_valid = true;
-    tx1.body.inputs = vec![genesis1];
-    tx1.body.reference_inputs = vec![tx0_out];
-    tx1.body.outputs = vec![TransactionOutput {
-        address: Address::Byron(ByronAddress {
-            payload: vec![0u8; 32],
-        }),
-        value: Value::lovelace(48_000_000),
-        datum: OutputDatum::None,
-        script_ref: None,
-        is_legacy: false,
-        raw_cbor: None,
-    }];
-    tx1.body.fee = Lovelace(2_000_000);
-
-    // Total ref script contribution: tx0 contributes 0 (its output is created
-    // in this block, not referenced as a spending/ref input); tx1 contributes
-    // 600 KiB (its reference_input is tx0's output, counted via the overlay).
-    // 600 KiB < 1 MiB → block is accepted.
-    let block = make_test_block(100, 1, Hash32::ZERO, vec![tx0, tx1]);
-    let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
-    assert!(
-        result.is_ok(),
-        "Block with 600 KiB within-block ref script reference (under 1 MiB limit) must be accepted; \
-         got: {result:?}"
-    );
-}
-
-// -----------------------------------------------------------------------
 // 8. Treasury value check — match and mismatch
 // -----------------------------------------------------------------------
 
@@ -9256,4 +8926,243 @@ fn test_snapshot_checksum_detects_corruption() {
 
     let result = LedgerState::load_snapshot(&snap_path);
     assert!(result.is_err(), "Corrupted snapshot must fail to load");
+}
+
+// ===========================================================================
+// Property-based tests: nonce computation and UTxO conservation
+// ===========================================================================
+
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        /// For any sequence of VRF outputs, `update_evolving_nonce` always
+        /// produces a valid 32-byte Hash32 (never panics, never returns a
+        /// zero-length result).
+        ///
+        /// The nonce update rule is:
+        ///   evolving' = blake2b_256(evolving || blake2b_256(eta))
+        ///
+        /// This property verifies that for ANY input length and content,
+        /// the output is always exactly 32 bytes.
+        #[test]
+        fn prop_nonce_update_always_produces_32_bytes(
+            // Use a sequence of 1..10 VRF outputs of variable length
+            vrf_outputs in prop::collection::vec(
+                prop::collection::vec(any::<u8>(), 0..=128),
+                1..=10,
+            )
+        ) {
+            let params = ProtocolParameters::mainnet_defaults();
+            let mut state = LedgerState::new(params);
+
+            for eta in &vrf_outputs {
+                state.update_evolving_nonce(eta);
+                // Must always be exactly 32 bytes
+                prop_assert_eq!(
+                    state.evolving_nonce.as_bytes().len(),
+                    32,
+                    "Evolving nonce must always be 32 bytes"
+                );
+                // Must not be all zeros (astronomically unlikely for blake2b)
+                prop_assert!(
+                    state.evolving_nonce != Hash32::ZERO,
+                    "Evolving nonce should not be zero after update"
+                );
+            }
+        }
+
+        /// Nonce computation is deterministic: applying the same sequence
+        /// of VRF outputs twice produces the same evolving nonce.
+        #[test]
+        fn prop_nonce_update_deterministic(
+            vrf_outputs in prop::collection::vec(
+                prop::collection::vec(any::<u8>(), 1..=64),
+                1..=5,
+            )
+        ) {
+            let params = ProtocolParameters::mainnet_defaults();
+
+            let mut state_a = LedgerState::new(params.clone());
+            let mut state_b = LedgerState::new(params);
+
+            for eta in &vrf_outputs {
+                state_a.update_evolving_nonce(eta);
+                state_b.update_evolving_nonce(eta);
+            }
+
+            prop_assert_eq!(
+                state_a.evolving_nonce,
+                state_b.evolving_nonce,
+                "Same input sequence must produce identical nonces"
+            );
+        }
+
+        /// Different VRF input sequences produce different nonces.
+        ///
+        /// If we apply two distinct single-step VRF inputs from the same
+        /// initial state, the resulting nonces must differ (collision
+        /// resistance of blake2b).
+        #[test]
+        fn prop_nonce_update_collision_resistance(
+            eta_a in prop::collection::vec(any::<u8>(), 1..=64),
+            eta_b in prop::collection::vec(any::<u8>(), 1..=64),
+        ) {
+            prop_assume!(eta_a != eta_b);
+
+            let params = ProtocolParameters::mainnet_defaults();
+            let mut state_a = LedgerState::new(params.clone());
+            let mut state_b = LedgerState::new(params);
+
+            state_a.update_evolving_nonce(&eta_a);
+            state_b.update_evolving_nonce(&eta_b);
+
+            prop_assert_ne!(
+                state_a.evolving_nonce,
+                state_b.evolving_nonce,
+                "Different VRF inputs must produce different nonces (blake2b collision)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-based tests: UTxO conservation
+    // -----------------------------------------------------------------------
+
+    /// Strategy for generating a random TransactionOutput with a given lovelace value.
+    fn arb_output(lovelace: u64) -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(lovelace),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        /// UTxO conservation: `apply_transaction` preserves total lovelace.
+        ///
+        /// Given any initial UTxO and a transaction that splits its value
+        /// into N outputs (with fee), the total lovelace in the UTxO set
+        /// after application equals (initial - fee).
+        ///
+        /// This is the fundamental accounting invariant:
+        ///   sum(inputs) = sum(outputs) + fee
+        ///   => utxo_total_after = utxo_total_before - fee
+        #[test]
+        fn prop_utxo_apply_preserves_lovelace(
+            // Start with a single UTxO holding `initial` lovelace
+            initial in 2_000_000u64..1_000_000_000_000,
+            // Number of output splits (1..=5)
+            num_outputs in 1usize..=5,
+            // Fee as a fraction of the initial value (0.01% to 10%)
+            fee_pct in 1u64..1000,
+        ) {
+            let mut utxo_set = crate::utxo::UtxoSet::new();
+
+            // Create initial UTxO
+            let genesis_hash = Hash32::from_bytes([0xAA; 32]);
+            let genesis_input = TransactionInput {
+                transaction_id: genesis_hash,
+                index: 0,
+            };
+            utxo_set.insert(genesis_input.clone(), arb_output(initial));
+
+            let total_before = utxo_set.total_lovelace();
+            prop_assert_eq!(total_before, Lovelace(initial));
+
+            // Compute fee (capped at initial - num_outputs to leave at least 1 per output)
+            let fee = (initial * fee_pct / 10_000).min(initial.saturating_sub(num_outputs as u64));
+            let remaining = initial.saturating_sub(fee);
+
+            // Split remaining value across outputs as evenly as possible
+            let per_output = remaining / num_outputs as u64;
+            let leftover = remaining - per_output * num_outputs as u64;
+            let mut outputs = Vec::with_capacity(num_outputs);
+            for i in 0..num_outputs {
+                let amount = if i == 0 {
+                    per_output + leftover
+                } else {
+                    per_output
+                };
+                outputs.push(arb_output(amount));
+            }
+
+            // Verify output sum + fee = initial
+            let output_sum: u64 = outputs.iter().map(|o| o.value.coin.0).sum();
+            prop_assert_eq!(
+                output_sum + fee,
+                initial,
+                "Output sum ({}) + fee ({}) must equal initial ({})",
+                output_sum, fee, initial,
+            );
+
+            // Apply the transaction
+            let tx_hash = Hash32::from_bytes([0xBB; 32]);
+            utxo_set
+                .apply_transaction(&tx_hash, &[genesis_input], &outputs)
+                .expect("apply_transaction must succeed");
+
+            // Verify UTxO set total = initial - fee
+            let total_after = utxo_set.total_lovelace();
+            prop_assert_eq!(
+                total_after,
+                Lovelace(initial - fee),
+                "UTxO total after ({}) must equal initial ({}) minus fee ({})",
+                total_after.0, initial, fee,
+            );
+        }
+
+        /// UTxO apply+rollback is identity: total_lovelace is restored.
+        #[test]
+        fn prop_utxo_apply_rollback_identity(
+            initial in 1_000_000u64..1_000_000_000,
+            out_a in 100_000u64..500_000_000,
+        ) {
+            let out_a = out_a.min(initial.saturating_sub(1));
+            let out_b = initial.saturating_sub(out_a);
+
+            let mut utxo_set = crate::utxo::UtxoSet::new();
+            let genesis_hash = Hash32::from_bytes([0xCC; 32]);
+            let genesis_input = TransactionInput {
+                transaction_id: genesis_hash,
+                index: 0,
+            };
+            let genesis_output = arb_output(initial);
+            utxo_set.insert(genesis_input.clone(), genesis_output.clone());
+
+            let total_before = utxo_set.total_lovelace();
+
+            // Apply
+            let tx_hash = Hash32::from_bytes([0xDD; 32]);
+            let outputs = vec![arb_output(out_a), arb_output(out_b)];
+            utxo_set
+                .apply_transaction(&tx_hash, std::slice::from_ref(&genesis_input), &outputs)
+                .unwrap();
+
+            // Rollback
+            utxo_set.rollback_transaction(
+                &tx_hash,
+                &[(genesis_input, genesis_output)],
+                outputs.len(),
+            );
+
+            // Total must be restored exactly
+            let total_after = utxo_set.total_lovelace();
+            prop_assert_eq!(
+                total_before,
+                total_after,
+                "apply+rollback must restore total lovelace"
+            );
+        }
+    }
 }

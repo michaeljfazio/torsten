@@ -1624,4 +1624,146 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based tests: chain selection transitivity
+    // -----------------------------------------------------------------------
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate a Praos-style tip with arbitrary block number and slot.
+        /// Slot is always >= block_no (at least one slot per block).
+        fn arb_praos_tip() -> impl Strategy<Value = (Tip, Hash32)> {
+            (1u64..10_000, 1u64..100_000).prop_flat_map(|(block_no, extra_slot)| {
+                let slot = block_no.saturating_add(extra_slot);
+                prop::array::uniform32(any::<u8>()).prop_map(move |hash_bytes| {
+                    let hash = Hash32::from_bytes(hash_bytes);
+                    let tip = Tip {
+                        point: Point::Specific(SlotNo(slot), hash),
+                        block_number: BlockNo(block_no),
+                    };
+                    (tip, hash)
+                })
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(500))]
+
+            /// Transitivity: if A > B and B > C then A > C.
+            ///
+            /// For the Praos longest-chain rule, "prefer" is a total order on
+            /// block numbers with hash-based tiebreaking. This property verifies
+            /// that the `prefer_chain` comparison is transitive for Shelley+ eras.
+            #[test]
+            fn prop_chain_selection_transitivity(
+                (tip_a, hash_a) in arb_praos_tip(),
+                (tip_b, hash_b) in arb_praos_tip(),
+                (tip_c, hash_c) in arb_praos_tip(),
+            ) {
+                // Compare A vs B (with B as current)
+                let mut cs_b = ChainSelection::new();
+                cs_b.set_tip(tip_b.clone());
+                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage, &hash_b, &hash_a);
+
+                // Compare B vs C (with C as current)
+                let mut cs_c = ChainSelection::new();
+                cs_c.set_tip(tip_c.clone());
+                let b_vs_c = cs_c.prefer_chain(&tip_b, Era::Babbage, &hash_c, &hash_b);
+
+                // If A preferred over B, and B preferred over C, then A must be preferred over C.
+                if a_vs_b == ChainPreference::PreferCandidate
+                    && b_vs_c == ChainPreference::PreferCandidate
+                {
+                    let mut cs_c2 = ChainSelection::new();
+                    cs_c2.set_tip(tip_c.clone());
+                    let a_vs_c = cs_c2.prefer_chain(&tip_a, Era::Babbage, &hash_c, &hash_a);
+                    prop_assert_eq!(
+                        a_vs_c,
+                        ChainPreference::PreferCandidate,
+                        "Transitivity violated: A > B and B > C but A !> C"
+                    );
+                }
+            }
+
+            /// Antisymmetry: if A > B then B is NOT > A.
+            ///
+            /// Chain preference must be antisymmetric — if we prefer A over B
+            /// then we must not also prefer B over A.
+            #[test]
+            fn prop_chain_selection_antisymmetry(
+                (tip_a, hash_a) in arb_praos_tip(),
+                (tip_b, hash_b) in arb_praos_tip(),
+            ) {
+                let mut cs_b = ChainSelection::new();
+                cs_b.set_tip(tip_b.clone());
+                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage, &hash_b, &hash_a);
+
+                let mut cs_a = ChainSelection::new();
+                cs_a.set_tip(tip_a.clone());
+                let b_vs_a = cs_a.prefer_chain(&tip_b, Era::Babbage, &hash_a, &hash_b);
+
+                match a_vs_b {
+                    ChainPreference::PreferCandidate => {
+                        // A preferred over B => B must NOT be preferred over A
+                        prop_assert_ne!(
+                            b_vs_a,
+                            ChainPreference::PreferCandidate,
+                            "Antisymmetry violated: A > B and B > A"
+                        );
+                    }
+                    ChainPreference::PreferCurrent => {
+                        // B preferred over A => A must NOT be preferred over B
+                        prop_assert_ne!(
+                            b_vs_a,
+                            ChainPreference::PreferCurrent,
+                            "Antisymmetry violated: B > A but also B < A"
+                        );
+                    }
+                    ChainPreference::Equal => {
+                        // Equal must be symmetric
+                        prop_assert_eq!(
+                            b_vs_a,
+                            ChainPreference::Equal,
+                            "Symmetry of Equal violated"
+                        );
+                    }
+                }
+            }
+
+            /// Longer chain always wins in Praos (Shelley+).
+            ///
+            /// When block numbers differ, the chain with the higher block number
+            /// must always be preferred, regardless of slot numbers or hashes.
+            #[test]
+            fn prop_longer_chain_always_preferred(
+                (tip_long, hash_long) in arb_praos_tip(),
+                delta in 1u64..1000,
+                slot_short in 1u64..100_000,
+                hash_bytes_short in prop::array::uniform32(any::<u8>()),
+            ) {
+                // Ensure the "short" chain is strictly shorter
+                let short_block_no = tip_long.block_number.0.saturating_sub(delta);
+                let hash_short = Hash32::from_bytes(hash_bytes_short);
+                let tip_short = Tip {
+                    point: Point::Specific(SlotNo(slot_short), hash_short),
+                    block_number: BlockNo(short_block_no),
+                };
+
+                // With the shorter chain as current, the longer must be preferred
+                let mut cs = ChainSelection::new();
+                cs.set_tip(tip_short);
+                let result = cs.prefer_chain(&tip_long, Era::Babbage, &hash_short, &hash_long);
+                prop_assert_eq!(
+                    result,
+                    ChainPreference::PreferCandidate,
+                    "Longer chain (block_no={}) not preferred over shorter (block_no={})",
+                    tip_long.block_number.0,
+                    short_block_no,
+                );
+            }
+        }
+    }
 }

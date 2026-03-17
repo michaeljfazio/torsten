@@ -418,4 +418,122 @@ mod tests {
             );
         }
     }
+
+    // -------------------------------------------------------------------
+    // Property-based tests: multiplexer segment encode/decode
+    // -------------------------------------------------------------------
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(500))]
+
+            /// Segment encode → decode roundtrip for arbitrary segments.
+            ///
+            /// For payloads up to MAX_SEGMENT_PAYLOAD, a single decode call
+            /// must recover all original fields exactly.
+            #[test]
+            fn prop_segment_encode_decode_roundtrip(
+                transmission_time in any::<u32>(),
+                protocol_id in 0u16..=0x7FFF,
+                is_responder in any::<bool>(),
+                payload in prop::collection::vec(any::<u8>(), 0..=MAX_SEGMENT_PAYLOAD),
+            ) {
+                let segment = Segment {
+                    transmission_time,
+                    protocol_id,
+                    is_responder,
+                    payload: payload.clone(),
+                };
+
+                let encoded = segment.encode();
+
+                // For single-segment payloads, decode should recover everything
+                let (decoded, consumed) = Segment::decode(&encoded).unwrap();
+                prop_assert_eq!(consumed, encoded.len());
+                prop_assert_eq!(decoded.transmission_time, transmission_time);
+                prop_assert_eq!(decoded.protocol_id, protocol_id);
+                prop_assert_eq!(decoded.is_responder, is_responder);
+                prop_assert_eq!(decoded.payload, payload);
+            }
+
+            /// Chunked segment encode → multi-decode roundtrip.
+            ///
+            /// For payloads that exceed MAX_SEGMENT_PAYLOAD, encoding
+            /// produces multiple wire segments. Reassembling all chunks
+            /// must recover the original payload.
+            #[test]
+            fn prop_chunked_segment_reassembly(
+                transmission_time in any::<u32>(),
+                protocol_id in 0u16..=0x7FFF,
+                is_responder in any::<bool>(),
+                // Generate payloads that may span 1-3 chunks
+                payload_len in 0usize..=(MAX_SEGMENT_PAYLOAD * 3),
+            ) {
+                let payload: Vec<u8> = (0..payload_len).map(|i| (i % 256) as u8).collect();
+                let segment = Segment {
+                    transmission_time,
+                    protocol_id,
+                    is_responder,
+                    payload: payload.clone(),
+                };
+
+                let encoded = segment.encode();
+
+                // Decode all chunks and reassemble
+                let mut offset = 0;
+                let mut reassembled = Vec::new();
+                while offset < encoded.len() {
+                    let (chunk, consumed) = Segment::decode(&encoded[offset..]).unwrap();
+                    prop_assert_eq!(chunk.protocol_id, protocol_id);
+                    prop_assert_eq!(chunk.is_responder, is_responder);
+                    prop_assert_eq!(chunk.transmission_time, transmission_time);
+                    reassembled.extend_from_slice(&chunk.payload);
+                    offset += consumed;
+                }
+                prop_assert_eq!(offset, encoded.len());
+                prop_assert_eq!(reassembled, payload);
+            }
+
+            /// Segment::decode never panics on random bytes.
+            ///
+            /// The multiplexer must handle arbitrary network data without
+            /// crashing. Any byte sequence should produce Ok or Err, never
+            /// a panic.
+            #[test]
+            fn prop_segment_decode_no_panic(
+                data in prop::collection::vec(any::<u8>(), 0..=128),
+            ) {
+                // Must not panic; Ok or Err are both acceptable
+                let _ = Segment::decode(&data);
+            }
+
+            /// Responder bit encoding: bit 15 of the protocol word is
+            /// correctly set/cleared and does not leak into protocol_id.
+            #[test]
+            fn prop_responder_bit_isolation(
+                protocol_id in 0u16..=0x7FFF,
+                is_responder in any::<bool>(),
+            ) {
+                let segment = Segment {
+                    transmission_time: 0,
+                    protocol_id,
+                    is_responder,
+                    payload: vec![0x42],
+                };
+
+                let encoded = segment.encode();
+                let wire_word = u16::from_be_bytes([encoded[4], encoded[5]]);
+
+                if is_responder {
+                    prop_assert_ne!(wire_word & 0x8000, 0, "Bit 15 must be set for responder");
+                } else {
+                    prop_assert_eq!(wire_word & 0x8000, 0, "Bit 15 must be clear for initiator");
+                }
+                prop_assert_eq!(wire_word & 0x7FFF, protocol_id, "Protocol ID corrupted by responder bit");
+            }
+        }
+    }
 }

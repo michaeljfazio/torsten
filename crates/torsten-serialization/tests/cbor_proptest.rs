@@ -687,3 +687,105 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 }
+
+// ===========================================================================
+// Property-based tests: CBOR roundtrip for higher-level Cardano types
+// ===========================================================================
+//
+// These tests verify that encoding a Cardano type to CBOR and then
+// decoding the resulting bytes back via minicbor produces the original
+// value. This catches:
+// - Missing or extra fields in the encoder
+// - CBOR major type mismatches (e.g., encoding a map header when array expected)
+// - Off-by-one errors in length prefixes
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// TransactionInput: encode → decode roundtrip via minicbor.
+    ///
+    /// TransactionInput is encoded as CBOR array(2): [tx_hash, index].
+    /// We decode it manually and verify both fields match.
+    #[test]
+    fn prop_tx_input_cbor_full_roundtrip(input in arb_tx_input()) {
+        let encoded = encode_tx_input(&input);
+
+        // Decode via minicbor
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr_len = dec.array().unwrap().unwrap();
+        prop_assert_eq!(arr_len, 2, "TransactionInput must be array(2)");
+
+        let hash_bytes = dec.bytes().unwrap();
+        prop_assert_eq!(hash_bytes.len(), 32, "tx hash must be 32 bytes");
+        let decoded_hash = Hash32::from_bytes(<[u8; 32]>::try_from(hash_bytes).unwrap());
+        prop_assert_eq!(decoded_hash, input.transaction_id);
+
+        let decoded_index = dec.u32().unwrap();
+        prop_assert_eq!(decoded_index, input.index);
+    }
+
+    /// Value (ADA-only): encode → decode roundtrip via minicbor.
+    #[test]
+    fn prop_value_ada_only_minicbor_roundtrip(coin in any::<u64>()) {
+        let value = Value::lovelace(coin);
+        let encoded = encode_value(&value);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let decoded_coin = dec.u64().unwrap();
+        prop_assert_eq!(decoded_coin, coin);
+    }
+
+    /// Value (multi-asset): encode → decode roundtrip verifying structure.
+    ///
+    /// Multi-asset values are [coin, {policy_id: {asset_name: quantity}}].
+    /// We verify the top-level structure, coin value, and policy count.
+    #[test]
+    fn prop_value_multi_asset_minicbor_roundtrip(value in arb_value_multi_asset()) {
+        let encoded = encode_value(&value);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let arr_len = dec.array().unwrap().unwrap();
+        prop_assert_eq!(arr_len, 2, "Multi-asset value must be array(2)");
+
+        let decoded_coin = dec.u64().unwrap();
+        prop_assert_eq!(decoded_coin, value.coin.0);
+
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        prop_assert_eq!(
+            map_len,
+            value.multi_asset.len(),
+            "Policy count mismatch"
+        );
+    }
+
+    /// Hash32 encode → minicbor decode roundtrip.
+    #[test]
+    fn prop_hash32_minicbor_roundtrip(hash in arb_hash32()) {
+        let encoded = encode_hash32(&hash);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        let bytes = dec.bytes().unwrap();
+        prop_assert_eq!(bytes.len(), 32);
+        let decoded = Hash32::from_bytes(<[u8; 32]>::try_from(bytes).unwrap());
+        prop_assert_eq!(decoded, hash);
+    }
+
+    /// CBOR decode_block never panics on random input.
+    ///
+    /// This is the same property verified by the fuzz target, but running
+    /// as a proptest gives quick coverage without needing cargo-fuzz.
+    #[test]
+    fn prop_decode_block_no_panic(data in prop::collection::vec(any::<u8>(), 0..=512)) {
+        // Must not panic regardless of input; Ok or Err are both fine
+        let _ = torsten_serialization::decode_block(&data);
+    }
+
+    /// CBOR decode_transaction never panics on random input for any era.
+    #[test]
+    fn prop_decode_transaction_no_panic(
+        era_id in 0u16..=6,
+        data in prop::collection::vec(any::<u8>(), 0..=512),
+    ) {
+        let _ = torsten_serialization::decode_transaction(era_id, &data);
+    }
+}
