@@ -704,7 +704,7 @@ async fn process_n2n_segment(
             Ok(resp)
         }
         MINI_PROTOCOL_TXSUBMISSION => {
-            let resp = handle_n2n_txsubmission(&segment.payload, peer_state, mempool)?;
+            let resp = handle_n2n_txsubmission(&segment.payload, peer_addr, peer_state, mempool)?;
             Ok(resp.into_iter().collect())
         }
         MINI_PROTOCOL_KEEPALIVE => {
@@ -1360,9 +1360,18 @@ fn handle_keepalive(payload: &[u8]) -> Result<Option<Segment>, N2NServerError> {
 ///   MsgInit (6) → respond with MsgInit (6) to complete bidirectional init
 ///   MsgRequestTxIds (0) [blocking, ack_count, req_count] → MsgReplyTxIds (1) []
 ///   MsgRequestTxs (2) [tx_ids] → MsgReplyTxs (3) []
-///   MsgDone (5) → close protocol
+///   MsgDone (4) → close protocol
+///
+/// Ouroboros CDDL tag reference:
+///   MsgRequestTxIds  = [0, ...]
+///   MsgReplyTxIds    = [1, ...]
+///   MsgRequestTxs    = [2, ...]
+///   MsgReplyTxs      = [3, ...]
+///   MsgDone          = [4]   ← tag 4, NOT 5
+///   MsgInit          = [6]
 fn handle_n2n_txsubmission(
     payload: &[u8],
+    peer_addr: SocketAddr,
     peer_state: &mut PeerState,
     mempool: &Option<Arc<dyn MempoolProvider>>,
 ) -> Result<Option<Segment>, N2NServerError> {
@@ -1385,7 +1394,7 @@ fn handle_n2n_txsubmission(
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 enc.u32(6)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                debug!("TxSubmission2: init handshake complete");
+                info!(peer = %peer_addr, "TxSubmission2: init handshake complete");
                 Ok(Some(Segment {
                     transmission_time: 0,
                     protocol_id: MINI_PROTOCOL_TXSUBMISSION,
@@ -1398,31 +1407,60 @@ fn handle_n2n_txsubmission(
         }
         // MsgRequestTxIds: [0, blocking, ack_count, req_count]
         0 => {
-            let _blocking = decoder.bool().unwrap_or(false);
+            let blocking = decoder.bool().unwrap_or(false);
             let ack_count = decoder.u16().unwrap_or(0) as usize;
             let req_count = decoder.u16().unwrap_or(0) as usize;
 
-            // Acknowledge previously sent tx IDs (remove from inflight)
+            debug!(
+                peer = %peer_addr,
+                blocking,
+                ack_count,
+                req_count,
+                "TxSubmission2: received MsgRequestTxIds"
+            );
+
+            // Acknowledge previously sent tx IDs (remove from inflight).
+            // If the peer acks more than we have tracked, just clear entirely.
             if ack_count > 0 && ack_count <= peer_state.tx_inflight.len() {
                 peer_state.tx_inflight.drain(..ack_count);
-                debug!(ack_count, "TxSubmission2: acknowledged tx ids");
+                debug!(
+                    peer = %peer_addr,
+                    ack_count,
+                    "TxSubmission2: acknowledged tx ids"
+                );
             } else if ack_count > 0 {
                 peer_state.tx_inflight.clear();
             }
 
-            // Enforce inflight cap: reject if peer hasn't acknowledged and we're at limit
+            // Enforce inflight cap: if we have hit the limit and the peer has not
+            // acknowledged, return an empty reply rather than closing the connection.
+            // This is friendlier than returning a Protocol error.
             const MAX_TX_INFLIGHT: usize = 1000;
             if peer_state.tx_inflight.len() >= MAX_TX_INFLIGHT {
                 warn!(
+                    peer = %peer_addr,
                     inflight = peer_state.tx_inflight.len(),
-                    "TxSubmission2: inflight cap reached, peer must acknowledge before requesting more"
+                    "TxSubmission2: inflight cap reached, sending empty reply to allow ack"
                 );
-                return Err(N2NServerError::Protocol(
-                    "TxSubmission2 inflight cap exceeded".into(),
-                ));
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(1)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.array(0u64)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                return Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                    is_responder: true,
+                    payload: buf,
+                }));
             }
 
-            // Cap requested count to prevent oversized responses
+            // Cap requested count to prevent oversized responses.
+            // Do NOT use .max(1) here — if the peer requests 0 IDs (pure ack), we
+            // must reply with an empty list, not force-send a tx.
             const MAX_TX_IDS_PER_REQUEST: usize = 100;
             let capped_req = req_count.min(MAX_TX_IDS_PER_REQUEST);
 
@@ -1444,7 +1482,8 @@ fn handle_n2n_txsubmission(
                             .iter()
                             .any(|inflight| inflight == bytes)
                     })
-                    .take(effective_count.max(1))
+                    // effective_count of 0 means either req_count=0 (pure ack) or cap reached
+                    .take(effective_count)
                     .filter_map(|h| mp.get_tx_size(h).map(|size| (*h.as_bytes(), size)))
                     .collect()
             } else {
@@ -1456,6 +1495,15 @@ fn handle_n2n_txsubmission(
                 if peer_state.tx_inflight.len() < MAX_TX_INFLIGHT {
                     peer_state.tx_inflight.push(*tx_hash);
                 }
+            }
+
+            if !txs.is_empty() {
+                info!(
+                    peer = %peer_addr,
+                    count = txs.len(),
+                    inflight = peer_state.tx_inflight.len(),
+                    "TxSubmission2: sending MsgReplyTxIds"
+                );
             }
 
             // MsgReplyTxIds: [1, [[tx_id, size], ...]]
@@ -1474,9 +1522,10 @@ fn handle_n2n_txsubmission(
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
             }
             debug!(
+                peer = %peer_addr,
                 count = txs.len(),
                 inflight = peer_state.tx_inflight.len(),
-                "TxSubmission2: replied with tx ids"
+                "TxSubmission2: replied with MsgReplyTxIds"
             );
             Ok(Some(Segment {
                 transmission_time: 0,
@@ -1495,21 +1544,35 @@ fn handle_n2n_txsubmission(
             const MAX_TX_BODY_REQUEST: u64 = 1000;
             let capped_len = requested_len.min(MAX_TX_BODY_REQUEST);
 
+            debug!(
+                peer = %peer_addr,
+                count = requested_len,
+                "TxSubmission2: received MsgRequestTxs"
+            );
+
             let mut tx_bodies = Vec::new();
             if let Some(mp) = mempool {
                 for _ in 0..capped_len {
                     if let Ok(tx_hash_bytes) = decoder.bytes() {
                         if let Ok(hash_arr) = <[u8; 32]>::try_from(tx_hash_bytes) {
                             let hash = torsten_primitives::hash::Hash32::from_bytes(hash_arr);
-                            if let Some(tx) = mp.get_tx(&hash) {
-                                if let Some(ref raw) = tx.raw_cbor {
-                                    tx_bodies.push(raw.clone());
-                                }
+                            // Prefer raw CBOR bytes; fall back to get_tx_cbor helper
+                            let raw = mp
+                                .get_tx_cbor(&hash)
+                                .or_else(|| mp.get_tx(&hash).and_then(|tx| tx.raw_cbor.clone()));
+                            if let Some(body) = raw {
+                                tx_bodies.push(body);
                             }
                         }
                     }
                 }
             }
+
+            info!(
+                peer = %peer_addr,
+                count = tx_bodies.len(),
+                "TxSubmission2: sending MsgReplyTxs"
+            );
 
             // MsgReplyTxs: [3, [tx_cbor, ...]]
             let mut buf = Vec::new();
@@ -1524,7 +1587,11 @@ fn handle_n2n_txsubmission(
                 enc.bytes(body)
                     .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
             }
-            debug!(count = tx_bodies.len(), "TxSubmission2: replied with txs");
+            debug!(
+                peer = %peer_addr,
+                count = tx_bodies.len(),
+                "TxSubmission2: replied with MsgReplyTxs"
+            );
             Ok(Some(Segment {
                 transmission_time: 0,
                 protocol_id: MINI_PROTOCOL_TXSUBMISSION,
@@ -1532,9 +1599,9 @@ fn handle_n2n_txsubmission(
                 payload: buf,
             }))
         }
-        // MsgDone
-        5 => {
-            debug!("TxSubmission2: peer sent MsgDone");
+        // MsgDone: [4] — per Ouroboros CDDL txsubmission2_MsgDone = [4]
+        4 => {
+            info!(peer = %peer_addr, "TxSubmission2: peer sent MsgDone");
             Ok(None)
         }
         other => {
@@ -1945,9 +2012,15 @@ mod tests {
         assert!(segments.is_empty());
     }
 
+    /// Returns a dummy peer address for use in tests.
+    fn test_peer_addr() -> SocketAddr {
+        "127.0.0.1:51820".parse().unwrap()
+    }
+
     #[test]
     fn test_handle_txsubmission_init() {
         let mut peer_state = PeerState::new();
+        let peer_addr = test_peer_addr();
 
         // MsgInit: [6]
         let mut buf = Vec::new();
@@ -1956,7 +2029,8 @@ mod tests {
         enc.u32(6).unwrap();
 
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
-        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool).unwrap();
+        let result =
+            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
         assert!(result.is_some());
         let seg = result.unwrap();
         assert_eq!(seg.protocol_id, MINI_PROTOCOL_TXSUBMISSION);
@@ -1965,8 +2039,9 @@ mod tests {
         dec.array().unwrap();
         assert_eq!(dec.u32().unwrap(), 6); // MsgInit response
 
-        // Second init should be no-op
-        let result2 = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool).unwrap();
+        // Second init should be a no-op
+        let result2 =
+            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
         assert!(result2.is_none());
     }
 
@@ -1974,6 +2049,7 @@ mod tests {
     fn test_handle_txsubmission_request_tx_ids() {
         let mut peer_state = PeerState::new();
         peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
 
         // MsgRequestTxIds: [0, false, 0, 1]
         let mut buf = Vec::new();
@@ -1985,7 +2061,8 @@ mod tests {
         enc.u32(1).unwrap();
 
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
-        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool).unwrap();
+        let result =
+            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
         assert!(result.is_some());
         let seg = result.unwrap();
 
@@ -1998,6 +2075,7 @@ mod tests {
     fn test_txsubmission_flow_control() {
         let mut peer_state = PeerState::new();
         peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
 
         // Simulate sending tx IDs: peer_state inflight tracking
         let hash1 = [1u8; 32];
@@ -2016,7 +2094,8 @@ mod tests {
         enc.u32(1).unwrap(); // request 1
 
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
-        let _result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool).unwrap();
+        let _result =
+            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
 
         // Should have removed one from inflight
         assert_eq!(peer_state.tx_inflight.len(), 1);
@@ -2031,14 +2110,19 @@ mod tests {
         enc2.u32(1).unwrap(); // ack 1
         enc2.u32(1).unwrap();
 
-        let _result2 = handle_n2n_txsubmission(&buf2, &mut peer_state, &no_mempool).unwrap();
+        let _result2 =
+            handle_n2n_txsubmission(&buf2, peer_addr, &mut peer_state, &no_mempool).unwrap();
         assert!(peer_state.tx_inflight.is_empty());
     }
 
     #[test]
-    fn test_txsubmission_inflight_cap_rejects() {
+    fn test_txsubmission_inflight_cap_returns_empty_reply() {
+        // Changed behavior: when inflight cap is reached, we return an empty MsgReplyTxIds
+        // instead of closing the connection with an error.  This allows the peer to ack
+        // outstanding IDs before we send more.
         let mut peer_state = PeerState::new();
         peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
 
         // Fill inflight to the cap (1000)
         for i in 0..1000u32 {
@@ -2048,7 +2132,7 @@ mod tests {
         }
         assert_eq!(peer_state.tx_inflight.len(), 1000);
 
-        // MsgRequestTxIds with ack_count=0 should fail because inflight is at cap
+        // MsgRequestTxIds with ack_count=0: cap is reached, should get empty reply (not error)
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(4).unwrap();
@@ -2058,14 +2142,25 @@ mod tests {
         enc.u16(10).unwrap(); // request 10
 
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
-        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool);
-        assert!(result.is_err(), "Should reject when inflight cap reached");
+        let result = handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool);
+        assert!(
+            result.is_ok(),
+            "inflight cap should return empty reply, not error"
+        );
+
+        let seg = result.unwrap().expect("should return a segment");
+        let mut dec = minicbor::Decoder::new(&seg.payload);
+        dec.array().unwrap();
+        assert_eq!(dec.u32().unwrap(), 1, "should be MsgReplyTxIds (1)");
+        let items = dec.array().unwrap().unwrap_or(0);
+        assert_eq!(items, 0, "MsgReplyTxIds must be empty when cap is reached");
     }
 
     #[test]
     fn test_txsubmission_inflight_cap_allows_after_ack() {
         let mut peer_state = PeerState::new();
         peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
 
         // Fill inflight to cap
         for i in 0..1000u32 {
@@ -2084,9 +2179,65 @@ mod tests {
         enc.u16(10).unwrap();
 
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
-        let result = handle_n2n_txsubmission(&buf, &mut peer_state, &no_mempool);
+        let result = handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool);
         assert!(result.is_ok(), "Should allow after acknowledgment");
         assert_eq!(peer_state.tx_inflight.len(), 500);
+    }
+
+    #[test]
+    fn test_txsubmission_msg_done_tag_is_4() {
+        // Regression test: MsgDone must be tag 4 per Ouroboros CDDL spec.
+        // Previously had a bug where the server accepted tag 5.
+        let mut peer_state = PeerState::new();
+        peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
+
+        // MsgDone: [4]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(1).unwrap();
+        enc.u32(4).unwrap();
+
+        let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
+        let result = handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool);
+        assert!(result.is_ok());
+        // MsgDone returns None (close protocol)
+        assert!(
+            result.unwrap().is_none(),
+            "MsgDone [4] must close the protocol"
+        );
+    }
+
+    #[test]
+    fn test_txsubmission_pure_ack_req_count_zero() {
+        // When req_count = 0, server must NOT send any tx IDs — it's a pure ack message.
+        // This tests the fix for the effective_count.max(1) bug.
+        let mut peer_state = PeerState::new();
+        peer_state.tx_submission_init_sent = true;
+        let peer_addr = test_peer_addr();
+
+        // MsgRequestTxIds: [0, false, 2, 0]  — ack=2, req=0
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(4).unwrap();
+        enc.u32(0).unwrap();
+        enc.bool(false).unwrap();
+        enc.u16(2u16).unwrap(); // ack 2
+        enc.u16(0u16).unwrap(); // request 0
+
+        let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
+        let result =
+            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
+        let seg = result.expect("should return a segment");
+
+        let mut dec = minicbor::Decoder::new(&seg.payload);
+        dec.array().unwrap();
+        assert_eq!(dec.u32().unwrap(), 1, "must be MsgReplyTxIds (1)");
+        let items = dec.array().unwrap().unwrap_or(0);
+        assert_eq!(
+            items, 0,
+            "req_count=0 must produce empty MsgReplyTxIds, not force-send a tx"
+        );
     }
 
     #[test]
