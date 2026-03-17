@@ -392,6 +392,264 @@ impl Default for ChainSelection {
     }
 }
 
+// ── Ouroboros Genesis density-based chain selection ──────────────────────────
+
+/// A sliding window of block arrival slots used to compute chain density.
+///
+/// The Ouroboros Genesis paper defines the "genesis window" as a contiguous
+/// span of `s = 3k/f` slots anchored at the intersection point of two
+/// candidate chains. Within this window, the chain with more blocks (higher
+/// density) wins, regardless of which chain is longer beyond the window.
+///
+/// This struct tracks the slots of blocks observed within one such window.
+/// Slots are stored in sorted order so that stale entries (before the window
+/// start) can be efficiently trimmed.
+///
+/// ## Invariant
+///
+/// Every slot in `slots` satisfies `intersection_slot < slot <= window_end`.
+/// `window_end = intersection_slot + window_size`.
+#[derive(Debug, Clone)]
+pub struct DensityWindow {
+    /// Absolute slot of the intersection point (fork origin).
+    pub intersection_slot: u64,
+    /// Window size in slots: `3k/f` where `k` is the security parameter
+    /// and `f` is the active slot coefficient.
+    pub window_size: u64,
+    /// Sorted list of block slots observed within the window.
+    slots: Vec<u64>,
+}
+
+impl DensityWindow {
+    /// Create a new window anchored at `intersection_slot`.
+    pub fn new(intersection_slot: u64, window_size: u64) -> Self {
+        DensityWindow {
+            intersection_slot,
+            window_size,
+            slots: Vec::new(),
+        }
+    }
+
+    /// Return the slot at which the window closes.
+    #[inline]
+    pub fn end_slot(&self) -> u64 {
+        self.intersection_slot.saturating_add(self.window_size)
+    }
+
+    /// Record a block at `slot`, if it falls within the open window.
+    ///
+    /// Blocks at or before `intersection_slot` are the shared history and
+    /// are not counted — density comparison starts strictly after the fork.
+    /// Blocks beyond `window_end` are ignored because the comparison only
+    /// covers the genesis window.
+    ///
+    /// Returns `true` if the block was recorded.
+    pub fn record_block(&mut self, slot: u64) -> bool {
+        if slot > self.intersection_slot && slot <= self.end_slot() {
+            // Maintain sorted order via insertion sort — windows are typically
+            // small (a few hundred slots) and blocks arrive roughly in order.
+            let pos = self.slots.partition_point(|&s| s < slot);
+            self.slots.insert(pos, slot);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of blocks seen within the genesis window.
+    #[inline]
+    pub fn block_count(&self) -> u64 {
+        self.slots.len() as u64
+    }
+
+    /// Returns `true` once the leading slot has passed the window end.
+    ///
+    /// After the window closes, density comparison is complete and normal
+    /// Praos chain selection (longest-chain) resumes.
+    pub fn is_closed(&self, current_tip_slot: u64) -> bool {
+        current_tip_slot > self.end_slot()
+    }
+
+    /// Reset the window to a new intersection (e.g., after a rollback).
+    pub fn reset(&mut self, intersection_slot: u64) {
+        self.intersection_slot = intersection_slot;
+        self.slots.clear();
+    }
+}
+
+/// Density-based chain selection for Ouroboros Genesis.
+///
+/// During initial sync the node may receive two competing chains that diverge
+/// at a common intersection point. Within the `s = 3k/f` slot genesis window
+/// immediately following that intersection, a denser chain is preferred over a
+/// sparser one — even if the sparse chain is longer beyond the window. This
+/// prevents an adversary from presenting a long-but-empty chain to stall the
+/// honest node.
+///
+/// Once the window closes (the current tip slot has passed `intersection +
+/// window_size`) or the GSM transitions to `CaughtUp`, normal Praos
+/// longest-chain selection is used instead.
+///
+/// ## Algorithm (matching Haskell `ChainSel` in `ouroboros-consensus`)
+///
+/// Given chains A and B diverging at slot `I`:
+///
+/// 1. Count blocks in `(I, I + s]` for each chain → `density_A`, `density_B`
+/// 2. If `density_A > density_B` → prefer A
+/// 3. If `density_A < density_B` → prefer B
+/// 4. If equal density → fall back to standard Praos tiebreaker (longest chain)
+///
+/// The `GenesisDensityComparator` operates on a snapshot of two density
+/// windows at the moment of comparison. It is deliberately stateless so it
+/// can be called from multiple contexts without lock contention.
+pub struct GenesisDensityComparator {
+    /// Genesis window size in slots (`3k/f`).
+    pub window_size: u64,
+}
+
+impl GenesisDensityComparator {
+    /// Construct a comparator for the given genesis window size.
+    ///
+    /// `window_size` should be `3 * k / f` rounded to the nearest integer,
+    /// where `k` is the security parameter and `f` is the active slot
+    /// coefficient from the Shelley genesis.
+    pub fn new(window_size: u64) -> Self {
+        GenesisDensityComparator { window_size }
+    }
+
+    /// Compare two chains by density within the genesis window.
+    ///
+    /// `intersection_slot` — the last slot shared by both chains.
+    /// `current_blocks_in_window` — blocks in `(I, I+s]` on the current chain.
+    /// `candidate_blocks_in_window` — blocks in `(I, I+s]` on the candidate chain.
+    /// `candidate_tip` — used to fall back to Praos if the window is closed.
+    /// `current_praos_tip` — used for Praos fallback.
+    ///
+    /// Returns a `ChainPreference` according to Genesis density rules.
+    pub fn compare(
+        &self,
+        intersection_slot: u64,
+        current_blocks_in_window: u64,
+        candidate_blocks_in_window: u64,
+        candidate_tip: &Tip,
+        current_praos_tip: &Tip,
+    ) -> ChainPreference {
+        // Determine whether the window is still open.
+        // We use the candidate's tip slot as the "furthest point" — if the
+        // candidate is still inside the window, the comparison is live.
+        let window_end = intersection_slot.saturating_add(self.window_size);
+        let candidate_slot = candidate_tip.point.slot().map(|s| s.0).unwrap_or(0);
+        let current_slot = current_praos_tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+        // If neither chain has reached the window yet, we cannot make a density
+        // judgement — fall back to Praos (no block beats genesis).
+        if candidate_slot <= intersection_slot && current_slot <= intersection_slot {
+            return ChainPreference::Equal;
+        }
+
+        // If both chains have fully passed the window end AND both have the
+        // same block count within the window, fall back to Praos length.
+        // This prevents Genesis from permanently overriding Praos selection
+        // once the window is behind us.
+        let window_closed_current = current_slot > window_end;
+        let window_closed_candidate = candidate_slot > window_end;
+
+        if window_closed_current && window_closed_candidate {
+            // Window is behind both chains — compare by density then length.
+            return self.density_then_length(
+                current_blocks_in_window,
+                candidate_blocks_in_window,
+                current_praos_tip,
+                candidate_tip,
+            );
+        }
+
+        // Window is still open for at least one chain — compare partial density.
+        // Normalize to the same observed slot range so that a chain that has
+        // simply seen more slots does not win unfairly.
+        //
+        // The window spans `(intersection_slot, window_end]` — at most
+        // `window_size` slots. A chain that has only produced `n` blocks in
+        // `m` of those slots cannot be compared fairly with one that has
+        // produced `n'` blocks in `m'` slots when `m ≠ m'`.  We therefore
+        // compare using cross-multiplication on the observed slot spans.
+        let current_observed = current_slot
+            .saturating_sub(intersection_slot)
+            .min(self.window_size);
+        let candidate_observed = candidate_slot
+            .saturating_sub(intersection_slot)
+            .min(self.window_size);
+
+        // Guard: if neither chain has produced any observed slots past the
+        // intersection, they are equal.
+        if current_observed == 0 && candidate_observed == 0 {
+            return ChainPreference::Equal;
+        }
+
+        // Cross-multiply to compare rates without floating point:
+        //   candidate_density > current_density
+        //   ⟺ candidate_blocks / candidate_observed > current_blocks / current_observed
+        //   ⟺ candidate_blocks * current_observed > current_blocks * candidate_observed
+        //
+        // Use u128 to prevent overflow (block counts and slot counts are u64).
+        let lhs = (candidate_blocks_in_window as u128) * (current_observed as u128);
+        let rhs = (current_blocks_in_window as u128) * (candidate_observed as u128);
+
+        match lhs.cmp(&rhs) {
+            std::cmp::Ordering::Greater => ChainPreference::PreferCandidate,
+            std::cmp::Ordering::Less => ChainPreference::PreferCurrent,
+            std::cmp::Ordering::Equal => {
+                // Equal density — fall back to Praos length comparison.
+                self.length_comparison(current_praos_tip, candidate_tip)
+            }
+        }
+    }
+
+    /// Compare density once the window is fully behind both chains, then fall
+    /// back to Praos length if densities are equal.
+    fn density_then_length(
+        &self,
+        current_in_window: u64,
+        candidate_in_window: u64,
+        current_tip: &Tip,
+        candidate_tip: &Tip,
+    ) -> ChainPreference {
+        match candidate_in_window.cmp(&current_in_window) {
+            std::cmp::Ordering::Greater => ChainPreference::PreferCandidate,
+            std::cmp::Ordering::Less => ChainPreference::PreferCurrent,
+            std::cmp::Ordering::Equal => self.length_comparison(current_tip, candidate_tip),
+        }
+    }
+
+    /// Praos longest-chain fallback (block number comparison).
+    fn length_comparison(&self, current: &Tip, candidate: &Tip) -> ChainPreference {
+        if candidate.block_number > current.block_number {
+            ChainPreference::PreferCandidate
+        } else if candidate.block_number < current.block_number {
+            ChainPreference::PreferCurrent
+        } else {
+            ChainPreference::Equal
+        }
+    }
+
+    /// Compute the genesis window size from protocol parameters.
+    ///
+    /// `s = 3k/f` where `k` is the security parameter (typically 2160 for
+    /// mainnet) and `f` is the active slot coefficient (typically 0.05).
+    ///
+    /// For mainnet: `3 * 2160 / 0.05 = 129_600` slots (36 hours).
+    /// For preview: `3 * 2160 / 0.05 = 129_600` slots (36 hours).
+    ///
+    /// The result is truncated to `u64`. Callers should pass the values
+    /// directly from the Shelley genesis.
+    pub fn window_size_from_params(security_param_k: u64, active_slot_coeff_f: f64) -> u64 {
+        if active_slot_coeff_f <= 0.0 {
+            return 0;
+        }
+        ((3.0 * security_param_k as f64) / active_slot_coeff_f) as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1765,5 +2023,200 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Genesis density: DensityWindow tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_density_window_records_within_range() {
+        // Window: (100, 600]
+        let mut w = DensityWindow::new(100, 500);
+        assert!(!w.record_block(100)); // at intersection — not counted
+        assert!(w.record_block(101)); // just inside
+        assert!(w.record_block(600)); // right at end
+        assert!(!w.record_block(601)); // just outside
+        assert_eq!(w.block_count(), 2);
+    }
+
+    #[test]
+    fn test_density_window_sorted_insertion() {
+        let mut w = DensityWindow::new(0, 1000);
+        w.record_block(300);
+        w.record_block(100);
+        w.record_block(200);
+        // Slots should be sorted
+        assert_eq!(w.slots, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn test_density_window_is_closed() {
+        let w = DensityWindow::new(1000, 500); // window ends at 1500
+        assert!(!w.is_closed(1500)); // at end — window still includes this slot
+        assert!(w.is_closed(1501)); // just past end
+        assert!(!w.is_closed(999)); // well before end
+    }
+
+    #[test]
+    fn test_density_window_reset() {
+        let mut w = DensityWindow::new(100, 500);
+        w.record_block(200);
+        w.record_block(300);
+        assert_eq!(w.block_count(), 2);
+
+        w.reset(500);
+        assert_eq!(w.intersection_slot, 500);
+        assert_eq!(w.block_count(), 0);
+        assert!(!w.record_block(200)); // old slot — below new intersection
+        assert!(w.record_block(600)); // new window valid
+    }
+
+    #[test]
+    fn test_density_window_end_slot_overflow_safe() {
+        // intersection near u64::MAX should not panic
+        let w = DensityWindow::new(u64::MAX - 10, 100);
+        assert_eq!(w.end_slot(), u64::MAX); // saturating_add caps at MAX
+    }
+
+    // -----------------------------------------------------------------------
+    // Genesis density: GenesisDensityComparator tests
+    // -----------------------------------------------------------------------
+
+    fn make_tip_at_slot(block_no: u64, slot: u64) -> Tip {
+        make_tip(block_no, slot)
+    }
+
+    #[test]
+    fn test_genesis_dense_candidate_wins() {
+        // Intersection at slot 1000, window = 5000 slots (closes at 6000).
+        // Current chain: 10 blocks in 5000 observed slots.
+        // Candidate chain: 50 blocks in 5000 observed slots (much denser).
+        let cmp = GenesisDensityComparator::new(5000);
+        let current_tip = make_tip_at_slot(10, 6000);
+        let candidate_tip = make_tip_at_slot(50, 6000);
+
+        let result = cmp.compare(1000, 10, 50, &candidate_tip, &current_tip);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Denser candidate should win"
+        );
+    }
+
+    #[test]
+    fn test_genesis_sparse_candidate_loses() {
+        // Intersection at slot 1000, window = 5000 slots.
+        // Current chain: 50 blocks (dense), candidate: 10 blocks (sparse).
+        let cmp = GenesisDensityComparator::new(5000);
+        let current_tip = make_tip_at_slot(50, 6000);
+        let candidate_tip = make_tip_at_slot(10, 6000);
+
+        let result = cmp.compare(1000, 50, 10, &candidate_tip, &current_tip);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Sparser candidate should lose"
+        );
+    }
+
+    #[test]
+    fn test_genesis_equal_density_falls_back_to_length() {
+        // Both chains have identical density. Candidate is longer — should win.
+        let cmp = GenesisDensityComparator::new(5000);
+        let current_tip = make_tip_at_slot(50, 6100);
+        let candidate_tip = make_tip_at_slot(55, 6200); // longer
+
+        // 50 blocks in 5000 slots vs 50 blocks in 5000 slots (equal density)
+        let result = cmp.compare(1000, 50, 50, &candidate_tip, &current_tip);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Equal density: longer chain (55 blocks) should win"
+        );
+    }
+
+    #[test]
+    fn test_genesis_equal_density_equal_length() {
+        // Identical density and length → Equal.
+        let cmp = GenesisDensityComparator::new(5000);
+        let current_tip = make_tip_at_slot(50, 6000);
+        let candidate_tip = make_tip_at_slot(50, 6000);
+
+        let result = cmp.compare(1000, 50, 50, &candidate_tip, &current_tip);
+        assert_eq!(result, ChainPreference::Equal);
+    }
+
+    #[test]
+    fn test_genesis_neither_chain_in_window_yet() {
+        // Both chains are still at the intersection — no data to compare.
+        let cmp = GenesisDensityComparator::new(5000);
+        let current_tip = make_tip_at_slot(0, 1000);
+        let candidate_tip = make_tip_at_slot(0, 1000);
+
+        let result = cmp.compare(1000, 0, 0, &candidate_tip, &current_tip);
+        assert_eq!(result, ChainPreference::Equal);
+    }
+
+    #[test]
+    fn test_genesis_partial_window_cross_multiply() {
+        // Window = 1000 slots, intersection = 0.
+        // Current: 5 blocks, observed 500 slots (rate = 1/100).
+        // Candidate: 6 blocks, observed 1000 slots (rate = 6/1000 = 3/500).
+        // Rate C: 5/500 = 1/100 = 10/1000
+        // Rate K: 6/1000
+        // 10/1000 > 6/1000, so current is denser → PreferCurrent
+        let cmp = GenesisDensityComparator::new(1000);
+        let current_tip = make_tip_at_slot(5, 500); // 500 observed slots
+        let candidate_tip = make_tip_at_slot(6, 1000); // 1000 observed slots
+
+        // cross-mult: candidate(6) * current_obs(500) = 3000
+        //             current(5) * candidate_obs(1000) = 5000
+        // 3000 < 5000 → PreferCurrent
+        let result = cmp.compare(0, 5, 6, &candidate_tip, &current_tip);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Current chain is denser per observed slot"
+        );
+    }
+
+    #[test]
+    fn test_genesis_window_size_from_params_mainnet() {
+        // Mainnet: k=2160, f=0.05 → 3*2160/0.05 = 129_600
+        let s = GenesisDensityComparator::window_size_from_params(2160, 0.05);
+        assert_eq!(s, 129_600, "Mainnet genesis window should be 129_600 slots");
+    }
+
+    #[test]
+    fn test_genesis_window_size_zero_f() {
+        // Zero active slot coefficient should not panic
+        let s = GenesisDensityComparator::window_size_from_params(2160, 0.0);
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn test_genesis_longer_sparse_loses_to_denser_shorter() {
+        // This is the core security property of Ouroboros Genesis:
+        // An adversary presents a longer but sparse chain. The honest chain
+        // is shorter but denser. The honest chain must win.
+        //
+        // Honest: 100 blocks in window of 5000 slots
+        // Adversary: 20 blocks in window of 5000 slots, but chain is longer
+        //            beyond the window (block_no = 200 vs 100).
+        let cmp = GenesisDensityComparator::new(5000);
+        // After the window both chains have advanced past it.
+        let honest_tip = make_tip_at_slot(100, 7000); // block 100
+        let adversary_tip = make_tip_at_slot(200, 8000); // block 200 — longer!
+
+        // Honest is current, adversary is candidate.
+        // Even though adversary has block_no=200 > honest block_no=100,
+        // density 100 > 20 means current (honest) should be preferred.
+        let result = cmp.compare(1000, 100, 20, &adversary_tip, &honest_tip);
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Honest dense chain must beat longer sparse adversary chain"
+        );
     }
 }

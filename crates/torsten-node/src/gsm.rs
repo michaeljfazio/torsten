@@ -9,25 +9,6 @@
 //! to drive state transitions. It also enforces the Limit on Eagerness (LoE)
 //! and runs the Genesis Density Disconnector (GDD).
 //!
-//! ## Current Limitations
-//!
-//! The GSM implementation provides basic state tracking and peer density
-//! comparison but does not yet include:
-//!
-//! - **Lightweight checkpointing**: The Ouroboros Genesis specification calls
-//!   for lightweight checkpoints to speed up initial sync by providing trusted
-//!   anchor points. This is not yet implemented.
-//!
-//! - **Genesis-specific peer selection**: Full Genesis requires a dedicated
-//!   peer selection policy that prioritizes big ledger peers (BLPs) during
-//!   the PreSyncing and Syncing phases. Currently, peer selection uses the
-//!   standard P2P governor policy for all states.
-//!
-//! These limitations do not affect normal operation. The Genesis protocol
-//! features are future-proofing for the Ouroboros Genesis hard fork, which
-//! will enable trustless bootstrap from an empty database without relying
-//! on Mithril snapshots.
-//!
 //! ## LoE enforcement
 //!
 //! `loe_limit()` is wired into `process_forward_blocks()` in `node.rs`.
@@ -36,18 +17,31 @@
 //! cannot advance past the common prefix of all candidate chains.  When the
 //! GSM reaches CaughtUp, `loe_limit()` returns `None` and the normal
 //! unconstrained `flush_to_immutable()` is used instead.
+//!
+//! ## GDD (Genesis Density Disconnector)
+//!
+//! During Syncing state the GSM maintains a per-peer `DensityWindow` tracking
+//! how many blocks each peer's chain contains within the genesis window
+//! `(intersection_slot, intersection_slot + 3k/f]`.  On each GDD evaluation
+//! any peer whose density upper-bound is dominated by another peer's
+//! density lower-bound is flagged for disconnection.
+//!
+//! ## Current Limitations
+//!
+//! - **Lightweight checkpointing**: The Ouroboros Genesis specification calls
+//!   for lightweight checkpoints to speed up initial sync. Not yet implemented.
+//!
+//! - **Genesis-specific peer selection**: Full Genesis requires a dedicated
+//!   peer selection policy that prioritises big ledger peers (BLPs). Currently,
+//!   peer selection uses the standard P2P governor policy.
 
-#[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::net::SocketAddr;
-#[cfg(test)]
-use std::path::Path;
 use std::path::PathBuf;
+
+use torsten_consensus::DensityWindow;
 use torsten_primitives::block::Point;
-#[cfg(test)]
-use tracing::debug;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Genesis sync state matching Ouroboros Genesis specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,9 +71,12 @@ pub struct GsmConfig {
     pub min_active_blp: usize,
     /// Maximum tip age (seconds) before CaughtUp → PreSyncing regression
     pub max_tip_age_secs: u64,
-    /// Genesis security parameter (window size in slots for GDD density comparison).
-    /// Used by `gdd_evaluate()` for density comparison across peers.
-    pub _genesis_window_slots: u64,
+    /// Genesis window size in slots (`3k/f`).
+    ///
+    /// The GDD compares block density across peers within this window,
+    /// anchored at the intersection point.  Defaults to 129_600 slots
+    /// (~36 hours at 1-second slot intervals, matching mainnet `k=2160, f=0.05`).
+    pub genesis_window_slots: u64,
     /// Path for the caught_up marker file
     pub marker_path: PathBuf,
 }
@@ -88,12 +85,58 @@ impl Default for GsmConfig {
     fn default() -> Self {
         GsmConfig {
             min_active_blp: 5,
-            max_tip_age_secs: 1200,        // 20 minutes
-            _genesis_window_slots: 36_000, // ~10 hours at 1s slots
+            max_tip_age_secs: 1200, // 20 minutes
+            // 3 * 2160 / 0.05 = 129_600 slots (mainnet default)
+            genesis_window_slots: 129_600,
             marker_path: PathBuf::from("caught_up.marker"),
         }
     }
 }
+
+// ── Per-peer chain density tracking ─────────────────────────────────────────
+
+/// Live density information tracked per peer for GDD comparison.
+///
+/// The GDD requires knowing how many blocks a peer's chain places within the
+/// genesis window `(I, I + s]` where `I` is the fork intersection slot.  This
+/// struct combines the sliding `DensityWindow` (which records block slots) with
+/// the peer's reported tip slot for staleness detection.
+#[derive(Debug, Clone)]
+pub struct PeerChainInfo {
+    /// Density window tracking blocks in the genesis window for this peer.
+    pub density_window: DensityWindow,
+    /// Most recent tip slot reported by this peer.
+    pub tip_slot: u64,
+}
+
+impl PeerChainInfo {
+    /// Create a new info record with a fresh density window.
+    pub fn new(intersection_slot: u64, window_size: u64, tip_slot: u64) -> Self {
+        PeerChainInfo {
+            density_window: DensityWindow::new(intersection_slot, window_size),
+            tip_slot,
+        }
+    }
+
+    /// Number of blocks this peer has within the genesis window.
+    pub fn blocks_in_window(&self) -> u64 {
+        self.density_window.block_count()
+    }
+
+    /// Record a block arriving at `slot` from this peer.
+    pub fn record_block(&mut self, slot: u64) {
+        self.density_window.record_block(slot);
+    }
+
+    /// Update the peer's tip slot (called when a new header is received).
+    pub fn update_tip(&mut self, slot: u64) {
+        if slot > self.tip_slot {
+            self.tip_slot = slot;
+        }
+    }
+}
+
+// ── GenesisStateMachine ──────────────────────────────────────────────────────
 
 /// The Genesis State Machine.
 ///
@@ -106,6 +149,17 @@ pub struct GenesisStateMachine {
     state: GenesisSyncState,
     /// Whether genesis mode is enabled (opt-in via --consensus-mode genesis)
     enabled: bool,
+    /// Per-peer chain density information, keyed by peer socket address.
+    ///
+    /// Only populated when `enabled` and in `Syncing` state. Each entry
+    /// holds the peer's `DensityWindow` anchored at the current intersection
+    /// slot. Entries are inserted on first contact and removed on disconnect.
+    peer_info: HashMap<SocketAddr, PeerChainInfo>,
+    /// The intersection slot shared by all candidate chains.
+    ///
+    /// Set when the sync loop resolves `find_intersect()`. All density
+    /// windows are anchored at this slot.
+    pub intersection_slot: u64,
 }
 
 impl GenesisStateMachine {
@@ -128,6 +182,8 @@ impl GenesisStateMachine {
             config,
             state: initial_state,
             enabled,
+            peer_info: HashMap::new(),
+            intersection_slot: 0,
         }
     }
 
@@ -135,6 +191,65 @@ impl GenesisStateMachine {
     pub fn state(&self) -> GenesisSyncState {
         self.state
     }
+
+    // ── Peer density tracking ────────────────────────────────────────────────
+
+    /// Register a newly connected peer or reset its density window.
+    ///
+    /// Called when the sync loop establishes an intersection with a peer.
+    /// `intersection_slot` is the slot of the common point.
+    pub fn register_peer(&mut self, addr: SocketAddr, intersection_slot: u64, tip_slot: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.intersection_slot = intersection_slot;
+        let info = PeerChainInfo::new(
+            intersection_slot,
+            self.config.genesis_window_slots,
+            tip_slot,
+        );
+        self.peer_info.insert(addr, info);
+        debug!(
+            %addr,
+            intersection_slot,
+            window_size = self.config.genesis_window_slots,
+            "GDD: registered peer"
+        );
+    }
+
+    /// Remove a disconnected peer from density tracking.
+    pub fn deregister_peer(&mut self, addr: &SocketAddr) {
+        if self.peer_info.remove(addr).is_some() {
+            debug!(%addr, "GDD: deregistered peer");
+        }
+    }
+
+    /// Record a block received from `addr` at `slot`.
+    ///
+    /// Noop if the peer is unknown or if genesis mode is disabled.
+    pub fn record_block(&mut self, addr: &SocketAddr, slot: u64) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(info) = self.peer_info.get_mut(addr) {
+            info.record_block(slot);
+        }
+    }
+
+    /// Update the tip slot reported by `addr`.
+    pub fn update_peer_tip(&mut self, addr: &SocketAddr, tip_slot: u64) {
+        if let Some(info) = self.peer_info.get_mut(addr) {
+            info.update_tip(tip_slot);
+        }
+    }
+
+    /// Read-only view of the peer density map (for metrics / tests).
+    #[allow(dead_code)] // exposed for diagnostics and test introspection
+    pub fn peer_info(&self) -> &HashMap<SocketAddr, PeerChainInfo> {
+        &self.peer_info
+    }
+
+    // ── State transitions ────────────────────────────────────────────────────
 
     /// Evaluate state transitions based on current conditions.
     ///
@@ -165,7 +280,7 @@ impl GenesisStateMachine {
             }
             GenesisSyncState::Syncing => {
                 // Transition to CaughtUp when all ChainSync clients are idle
-                // and there's no better candidate chain
+                // and the tip is fresh enough.
                 if all_chainsync_idle && tip_age_secs < self.config.max_tip_age_secs {
                     self.state = GenesisSyncState::CaughtUp;
                     self.write_marker();
@@ -195,6 +310,8 @@ impl GenesisStateMachine {
             None
         }
     }
+
+    // ── LoE ─────────────────────────────────────────────────────────────────
 
     /// Check the Limit on Eagerness constraint.
     ///
@@ -230,55 +347,72 @@ impl GenesisStateMachine {
         }
     }
 
+    // ── GDD ─────────────────────────────────────────────────────────────────
+
     /// Run the Genesis Density Disconnector (GDD).
     ///
-    /// During Syncing state, compares chain density across peers within the
-    /// genesis window. Peers whose density upper bound is ≤ another peer's
-    /// lower bound are disconnected.
+    /// During Syncing state, compares chain density across all known peers
+    /// within the genesis window. A peer is flagged for disconnection when its
+    /// density *upper bound* is dominated by another peer's density *lower bound*.
+    ///
+    /// ## Density bounds
+    ///
+    /// The GDD uses conservative bounds to avoid false positives from network
+    /// jitter:
+    ///
+    /// - **Lower bound**: `blocks_in_window / window_size` — minimum guaranteed
+    ///   density based on blocks actually observed.
+    /// - **Upper bound**: `(blocks_in_window + slack) / window_size` where
+    ///   `slack = blocks_in_window * 0.10 + 1` — allows 10 % extra for blocks
+    ///   still in flight plus one block of absolute tolerance.
+    ///
+    /// A peer is disconnected when `upper_bound(peer) <= max_lower_bound` where
+    /// `max_lower_bound` is the highest lower bound across all peers. This means
+    /// the peer's best-case density still cannot beat the best-observed peer.
     ///
     /// Returns addresses of peers that should be disconnected.
-    #[cfg(test)]
-    pub fn gdd_evaluate(
-        &self,
-        peer_chain_lengths: &HashMap<SocketAddr, PeerChainInfo>,
-    ) -> Vec<SocketAddr> {
+    pub fn gdd_evaluate(&self) -> Vec<SocketAddr> {
         if !self.enabled || self.state != GenesisSyncState::Syncing {
             return Vec::new();
         }
 
-        if peer_chain_lengths.len() < 2 {
+        if self.peer_info.len() < 2 {
             return Vec::new();
         }
 
-        let mut to_disconnect = Vec::new();
+        let window = self.config.genesis_window_slots as f64;
 
-        // For each peer, compute density bounds within genesis window
-        let densities: Vec<(SocketAddr, f64, f64)> = peer_chain_lengths
+        // Compute density bounds per peer.
+        let densities: Vec<(SocketAddr, f64, f64)> = self
+            .peer_info
             .iter()
             .map(|(addr, info)| {
-                let window = self.config._genesis_window_slots as f64;
-                // Lower bound: assume minimum blocks in window
-                let lower = info.blocks_in_window as f64 / window;
-                // Upper bound: actual observed + 10% margin for latency
-                let upper = (info.blocks_in_window as f64 * 1.1) / window;
+                let blocks = info.blocks_in_window() as f64;
+                // Lower bound: confirmed blocks / full window
+                let lower = blocks / window;
+                // Upper bound: allow 10 % slack for in-flight blocks, plus one
+                // absolute block of tolerance.
+                let slack = blocks * 0.10 + 1.0;
+                let upper = (blocks + slack) / window;
                 (*addr, lower, upper)
             })
             .collect();
 
-        // Find the maximum lower bound (best peer's guaranteed density)
+        // Find the best-observed density lower bound.
         let max_lower = densities
             .iter()
             .map(|(_, lower, _)| *lower)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or(0.0);
+            .fold(f64::NEG_INFINITY, f64::max);
 
-        // Disconnect peers whose upper bound is ≤ the max lower bound
-        for (addr, _, upper) in &densities {
-            if *upper > 0.0 && *upper <= max_lower {
+        // Disconnect peers whose upper bound is ≤ the best lower bound.
+        let mut to_disconnect = Vec::new();
+        for (addr, _lower, upper) in &densities {
+            if *upper <= max_lower {
                 debug!(
                     %addr,
                     upper,
                     max_lower,
+                    blocks = self.peer_info.get(addr).map(|i| i.blocks_in_window()).unwrap_or(0),
                     "GDD: disconnecting sparse peer"
                 );
                 to_disconnect.push(*addr);
@@ -288,12 +422,15 @@ impl GenesisStateMachine {
         if !to_disconnect.is_empty() {
             info!(
                 disconnecting = to_disconnect.len(),
+                total_peers = self.peer_info.len(),
                 "GDD: disconnecting peers with insufficient chain density"
             );
         }
 
         to_disconnect
     }
+
+    // ── Marker file helpers ──────────────────────────────────────────────────
 
     /// Write the caught_up marker file
     fn write_marker(&self) {
@@ -318,23 +455,15 @@ impl GenesisStateMachine {
     }
 }
 
-/// Chain info tracked per peer for GDD density comparison.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub struct PeerChainInfo {
-    /// Number of blocks this peer's chain has within the genesis window
-    pub blocks_in_window: u64,
-    /// Peer's reported tip slot
-    pub _tip_slot: u64,
-}
+// ── Big ledger peer identification ──────────────────────────────────────────
 
 /// Identify big ledger peers from the stake distribution.
 ///
-/// Sorts pools by active stake descending and accumulates until 90% of total
-/// active stake is covered. Pools in the top 90% are "big ledger peers".
+/// Sorts pools by active stake descending and accumulates until 90 % of total
+/// active stake is covered. Pools in the top 90 % are "big ledger peers" (BLPs).
 ///
-/// Returns (big_ledger_pool_ids, remaining_pool_ids).
-#[cfg(test)]
+/// Returns `(big_ledger_pool_ids, remaining_pool_ids)`.
+#[allow(dead_code)] // future use: Genesis peer selection will use BLP classification
 pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     if pool_stakes.is_empty() {
         return (Vec::new(), Vec::new());
@@ -362,11 +491,13 @@ pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>
     (big_ledger, remaining)
 }
 
+// ── Peer snapshot loader ─────────────────────────────────────────────────────
+
 /// Load peer snapshot from a JSON file.
 ///
 /// Format: `[{"addr": "1.2.3.4", "port": 3001}, ...]`
-#[cfg(test)]
-pub fn load_peer_snapshot(path: &Path) -> Result<Vec<SocketAddr>, String> {
+#[allow(dead_code)] // future use: Genesis ledger peer snapshot loading
+pub fn load_peer_snapshot(path: &std::path::Path) -> Result<Vec<SocketAddr>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read peer snapshot file: {e}"))?;
 
@@ -388,21 +519,28 @@ pub fn load_peer_snapshot(path: &Path) -> Result<Vec<SocketAddr>, String> {
     Ok(peers)
 }
 
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use torsten_primitives::time::SlotNo;
 
+    fn make_gsm(enabled: bool, marker_path: &str) -> GenesisStateMachine {
+        let _ = std::fs::remove_file(marker_path);
+        let config = GsmConfig {
+            min_active_blp: 3,
+            max_tip_age_secs: 600,
+            genesis_window_slots: 1_000,
+            marker_path: PathBuf::from(marker_path),
+        };
+        GenesisStateMachine::new(config, enabled)
+    }
+
     #[test]
     fn test_gsm_disabled_stays_caught_up() {
-        let config = GsmConfig {
-            marker_path: PathBuf::from("/tmp/test_gsm_disabled_marker"),
-            ..Default::default()
-        };
-        let mut gsm = GenesisStateMachine::new(config, false);
-
+        let mut gsm = make_gsm(false, "/tmp/test_gsm_disabled_marker");
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
-        // Should not transition even with bad conditions
         let result = gsm.evaluate(0, false, 9999);
         assert_eq!(result, None);
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
@@ -410,15 +548,7 @@ mod tests {
 
     #[test]
     fn test_gsm_presyncing_to_syncing() {
-        let config = GsmConfig {
-            min_active_blp: 3,
-            marker_path: PathBuf::from("/tmp/test_gsm_pre_sync_marker"),
-            ..Default::default()
-        };
-        // Ensure no marker file
-        let _ = std::fs::remove_file(&config.marker_path);
-        let mut gsm = GenesisStateMachine::new(config, true);
-
+        let mut gsm = make_gsm(true, "/tmp/test_gsm_pre_sync_marker");
         assert_eq!(gsm.state(), GenesisSyncState::PreSyncing);
 
         // Not enough BLPs
@@ -433,99 +563,81 @@ mod tests {
 
     #[test]
     fn test_gsm_syncing_to_caught_up() {
+        let marker = PathBuf::from("/tmp/test_gsm_sync_caught_marker");
+        let _ = std::fs::remove_file(&marker);
         let config = GsmConfig {
             min_active_blp: 1,
             max_tip_age_secs: 600,
-            marker_path: PathBuf::from("/tmp/test_gsm_sync_caught_marker"),
-            ..Default::default()
+            genesis_window_slots: 1_000,
+            marker_path: marker.clone(),
         };
-        let _ = std::fs::remove_file(&config.marker_path);
-        let mut gsm = GenesisStateMachine::new(config.clone(), true);
+        let mut gsm = GenesisStateMachine::new(config, true);
 
-        // Move to Syncing
-        gsm.evaluate(5, false, 0);
+        gsm.evaluate(5, false, 0); // → Syncing
         assert_eq!(gsm.state(), GenesisSyncState::Syncing);
 
         // Not idle yet
         assert_eq!(gsm.evaluate(5, false, 100), None);
-        assert_eq!(gsm.state(), GenesisSyncState::Syncing);
 
         // Idle but tip too old
         assert_eq!(gsm.evaluate(5, true, 700), None);
-        assert_eq!(gsm.state(), GenesisSyncState::Syncing);
 
         // Idle and tip fresh
         let result = gsm.evaluate(5, true, 100);
         assert_eq!(result, Some(GenesisSyncState::CaughtUp));
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
 
-        // Marker file should exist
-        assert!(config.marker_path.exists());
-        let _ = std::fs::remove_file(&config.marker_path);
+        assert!(marker.exists());
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]
     fn test_gsm_caught_up_regression() {
+        let marker = PathBuf::from("/tmp/test_gsm_regression_marker");
+        let _ = std::fs::remove_file(&marker);
         let config = GsmConfig {
             min_active_blp: 1,
             max_tip_age_secs: 600,
-            marker_path: PathBuf::from("/tmp/test_gsm_regression_marker"),
-            ..Default::default()
+            genesis_window_slots: 1_000,
+            marker_path: marker.clone(),
         };
-        let _ = std::fs::remove_file(&config.marker_path);
-        let mut gsm = GenesisStateMachine::new(config.clone(), true);
+        let mut gsm = GenesisStateMachine::new(config, true);
 
-        // Fast-track to CaughtUp
         gsm.evaluate(5, false, 0); // → Syncing
         gsm.evaluate(5, true, 100); // → CaughtUp
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
 
-        // Tip becomes stale → regress
         let result = gsm.evaluate(5, false, 1300);
         assert_eq!(result, Some(GenesisSyncState::PreSyncing));
-        assert_eq!(gsm.state(), GenesisSyncState::PreSyncing);
-
-        let _ = std::fs::remove_file(&config.marker_path);
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]
     fn test_gsm_marker_fast_restart() {
         let marker_path = PathBuf::from("/tmp/test_gsm_fast_restart_marker");
         std::fs::write(&marker_path, "caught_up").unwrap();
-
         let config = GsmConfig {
             marker_path: marker_path.clone(),
             ..Default::default()
         };
         let gsm = GenesisStateMachine::new(config, true);
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
-
         let _ = std::fs::remove_file(&marker_path);
     }
 
+    // ── LoE tests ────────────────────────────────────────────────────────────
+
     #[test]
     fn test_loe_presyncing_blocks_all() {
-        let config = GsmConfig {
-            marker_path: PathBuf::from("/tmp/test_loe_pre_marker"),
-            ..Default::default()
-        };
-        let _ = std::fs::remove_file(&config.marker_path);
-        let gsm = GenesisStateMachine::new(config, true);
+        let gsm = make_gsm(true, "/tmp/test_loe_pre_marker");
         assert_eq!(gsm.state(), GenesisSyncState::PreSyncing);
-
         let limit = gsm.loe_limit(&[]);
-        assert_eq!(limit, Some(0)); // Block everything
+        assert_eq!(limit, Some(0));
     }
 
     #[test]
     fn test_loe_syncing_constrains_to_common_prefix() {
-        let config = GsmConfig {
-            min_active_blp: 1,
-            marker_path: PathBuf::from("/tmp/test_loe_sync_marker"),
-            ..Default::default()
-        };
-        let _ = std::fs::remove_file(&config.marker_path);
-        let mut gsm = GenesisStateMachine::new(config, true);
+        let mut gsm = make_gsm(true, "/tmp/test_loe_sync_marker");
         gsm.evaluate(5, false, 0); // → Syncing
 
         let tips = vec![
@@ -534,57 +646,47 @@ mod tests {
             Point::Specific(SlotNo(1200), torsten_primitives::hash::Hash32::ZERO),
         ];
         let limit = gsm.loe_limit(&tips);
-        assert_eq!(limit, Some(800)); // Min of all candidate tip slots
+        assert_eq!(limit, Some(800));
     }
 
     #[test]
     fn test_loe_caught_up_no_constraint() {
+        let marker = PathBuf::from("/tmp/test_loe_caught_marker");
+        std::fs::write(&marker, "caught_up").unwrap();
         let config = GsmConfig {
-            marker_path: PathBuf::from("/tmp/test_loe_caught_marker"),
+            marker_path: marker.clone(),
             ..Default::default()
         };
-        let _ = std::fs::remove_file(&config.marker_path);
-        std::fs::write(&config.marker_path, "caught_up").unwrap();
-        let gsm = GenesisStateMachine::new(config.clone(), true);
+        let gsm = GenesisStateMachine::new(config, true);
         assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
-
-        let limit = gsm.loe_limit(&[]);
-        assert_eq!(limit, None); // No constraint
-        let _ = std::fs::remove_file(&config.marker_path);
+        assert_eq!(gsm.loe_limit(&[]), None);
+        let _ = std::fs::remove_file(&marker);
     }
+
+    // ── GDD tests ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_gdd_disconnects_sparse_peers() {
-        let config = GsmConfig {
-            min_active_blp: 1,
-            _genesis_window_slots: 1000,
-            marker_path: PathBuf::from("/tmp/test_gdd_marker"),
-            ..Default::default()
-        };
-        let _ = std::fs::remove_file(&config.marker_path);
-        let mut gsm = GenesisStateMachine::new(config, true);
+        let mut gsm = make_gsm(true, "/tmp/test_gdd_marker");
         gsm.evaluate(5, false, 0); // → Syncing
 
         let addr_good: SocketAddr = "1.2.3.4:3001".parse().unwrap();
         let addr_bad: SocketAddr = "5.6.7.8:3001".parse().unwrap();
 
-        let mut peers = HashMap::new();
-        peers.insert(
-            addr_good,
-            PeerChainInfo {
-                blocks_in_window: 900,
-                _tip_slot: 1000,
-            },
-        );
-        peers.insert(
-            addr_bad,
-            PeerChainInfo {
-                blocks_in_window: 100, // Very sparse
-                _tip_slot: 1000,
-            },
-        );
+        // Register peers at intersection 0
+        gsm.register_peer(addr_good, 0, 1000);
+        gsm.register_peer(addr_bad, 0, 1000);
 
-        let to_disconnect = gsm.gdd_evaluate(&peers);
+        // Good peer: 900 dense blocks in window of 1000
+        for slot in 1..=900u64 {
+            gsm.record_block(&addr_good, slot);
+        }
+        // Bad peer: only 10 sparse blocks
+        for slot in 1..=10u64 {
+            gsm.record_block(&addr_bad, slot);
+        }
+
+        let to_disconnect = gsm.gdd_evaluate();
         assert!(
             to_disconnect.contains(&addr_bad),
             "Sparse peer should be disconnected"
@@ -596,38 +698,127 @@ mod tests {
     }
 
     #[test]
-    fn test_gdd_disabled_when_caught_up() {
+    fn test_gdd_no_disconnect_when_caught_up() {
+        let marker = PathBuf::from("/tmp/test_gdd_disabled_marker");
+        std::fs::write(&marker, "caught_up").unwrap();
         let config = GsmConfig {
-            marker_path: PathBuf::from("/tmp/test_gdd_disabled_marker"),
+            marker_path: marker.clone(),
+            genesis_window_slots: 1_000,
             ..Default::default()
         };
-        let _ = std::fs::remove_file(&config.marker_path);
-        std::fs::write(&config.marker_path, "caught_up").unwrap();
-        let gsm = GenesisStateMachine::new(config.clone(), true);
+        let mut gsm = GenesisStateMachine::new(config, true);
+        assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
 
-        let mut peers = HashMap::new();
-        peers.insert(
-            "1.2.3.4:3001".parse().unwrap(),
-            PeerChainInfo {
-                blocks_in_window: 900,
-                _tip_slot: 1000,
-            },
-        );
-        peers.insert(
-            "5.6.7.8:3001".parse().unwrap(),
-            PeerChainInfo {
-                blocks_in_window: 10,
-                _tip_slot: 1000,
-            },
-        );
+        let addr_a: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        let addr_b: SocketAddr = "5.6.7.8:3001".parse().unwrap();
+        gsm.register_peer(addr_a, 0, 1000);
+        gsm.register_peer(addr_b, 0, 1000);
 
-        let to_disconnect = gsm.gdd_evaluate(&peers);
+        // Even with a sparse peer, GDD should not fire when CaughtUp
+        for slot in 1..=900u64 {
+            gsm.record_block(&addr_a, slot);
+        }
+        let to_disconnect = gsm.gdd_evaluate();
+        assert!(to_disconnect.is_empty(), "GDD inactive in CaughtUp");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn test_gdd_single_peer_never_disconnects() {
+        let mut gsm = make_gsm(true, "/tmp/test_gdd_single_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+
+        let addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        gsm.register_peer(addr, 0, 1000);
+        // No matter how sparse, with only 1 peer there's no comparison to make
+        let to_disconnect = gsm.gdd_evaluate();
         assert!(
             to_disconnect.is_empty(),
-            "GDD should be inactive when CaughtUp"
+            "Single peer must not be disconnected"
         );
-        let _ = std::fs::remove_file(&config.marker_path);
     }
+
+    #[test]
+    fn test_gdd_disabled_when_not_enabled() {
+        // GSM disabled (praos mode)
+        let config = GsmConfig {
+            marker_path: PathBuf::from("/tmp/test_gdd_not_enabled_marker"),
+            genesis_window_slots: 1_000,
+            ..Default::default()
+        };
+        let mut gsm = GenesisStateMachine::new(config, false);
+        let addr_a: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        let addr_b: SocketAddr = "5.6.7.8:3001".parse().unwrap();
+        gsm.register_peer(addr_a, 0, 1000);
+        gsm.register_peer(addr_b, 0, 1000);
+        // Dense vs sparse — but genesis is disabled
+        for slot in 1..=900u64 {
+            gsm.record_block(&addr_a, slot);
+        }
+        assert!(
+            gsm.gdd_evaluate().is_empty(),
+            "GDD must be inactive when genesis mode is disabled"
+        );
+    }
+
+    #[test]
+    fn test_gdd_equal_density_no_disconnect() {
+        let mut gsm = make_gsm(true, "/tmp/test_gdd_equal_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+
+        let addr_a: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        let addr_b: SocketAddr = "5.6.7.8:3001".parse().unwrap();
+        gsm.register_peer(addr_a, 0, 1000);
+        gsm.register_peer(addr_b, 0, 1000);
+
+        // Both peers have identical density
+        for slot in [100u64, 200, 300, 400, 500].iter() {
+            gsm.record_block(&addr_a, *slot);
+            gsm.record_block(&addr_b, *slot);
+        }
+        let to_disconnect = gsm.gdd_evaluate();
+        assert!(
+            to_disconnect.is_empty(),
+            "Equal-density peers must not be disconnected"
+        );
+    }
+
+    #[test]
+    fn test_register_deregister_peer() {
+        let mut gsm = make_gsm(true, "/tmp/test_register_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+
+        let addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        assert_eq!(gsm.peer_info().len(), 0);
+
+        gsm.register_peer(addr, 500, 1500);
+        assert_eq!(gsm.peer_info().len(), 1);
+        assert_eq!(gsm.intersection_slot, 500);
+
+        gsm.deregister_peer(&addr);
+        assert_eq!(gsm.peer_info().len(), 0);
+    }
+
+    #[test]
+    fn test_record_block_updates_density() {
+        let mut gsm = make_gsm(true, "/tmp/test_record_density_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+
+        let addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        gsm.register_peer(addr, 0, 2000);
+
+        assert_eq!(gsm.peer_info()[&addr].blocks_in_window(), 0);
+        gsm.record_block(&addr, 100);
+        gsm.record_block(&addr, 200);
+        gsm.record_block(&addr, 300);
+        assert_eq!(gsm.peer_info()[&addr].blocks_in_window(), 3);
+
+        // Blocks outside window should not count (window_size=1000, intersection=0)
+        gsm.record_block(&addr, 1001); // just outside
+        assert_eq!(gsm.peer_info()[&addr].blocks_in_window(), 3);
+    }
+
+    // ── Big ledger peer identification ───────────────────────────────────────
 
     #[test]
     fn test_identify_big_ledger_peers() {
@@ -640,12 +831,9 @@ mod tests {
         ];
 
         let (big, remaining) = identify_big_ledger_peers(&pools);
-        // 90% threshold = 1800. Pool 1 (1000) + Pool 2 (500) + Pool 3 (300) = 1800
+        // 90% threshold = 1800. Pools 1+2+3 = 1800 (cumulative).
         assert!(big.len() >= 2, "Should have at least 2 big ledger peers");
-        assert!(
-            !remaining.is_empty(),
-            "Should have some remaining small pools"
-        );
+        assert!(!remaining.is_empty(), "Should have remaining small pools");
     }
 
     #[test]
@@ -654,6 +842,8 @@ mod tests {
         assert!(big.is_empty());
         assert!(remaining.is_empty());
     }
+
+    // ── Peer snapshot loader ─────────────────────────────────────────────────
 
     #[test]
     fn test_load_peer_snapshot() {

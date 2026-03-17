@@ -1186,6 +1186,22 @@ impl Node {
         }
         info!(remote_tip = %remote_tip, "Remote tip");
 
+        // Genesis State Machine: register this peer with the intersection slot so
+        // that the GDD can anchor its density window correctly.  `register_peer`
+        // is a no-op when genesis mode is disabled (GSM in CaughtUp state).
+        {
+            let intersection_slot = intersect
+                .as_ref()
+                .and_then(|p| p.slot())
+                .map(|s| s.0)
+                .unwrap_or(0);
+            let remote_tip_slot = remote_tip.point.slot().map(|s| s.0).unwrap_or(0);
+            self.gsm
+                .write()
+                .await
+                .register_peer(peer_addr, intersection_slot, remote_tip_slot);
+        }
+
         // Stale peer detection: if the remote tip is significantly behind the
         // current wall-clock slot, this peer is likely stale or stuck. Disconnect
         // and let the outer loop try a different peer. This handles the case where
@@ -1450,14 +1466,46 @@ impl Node {
                                 self.peer_manager.write().await.record_block_fetch(
                                     &peer_addr, fetch_ms, header_count, 0,
                                 );
+
+                                // GDD density tracking: record every block slot for this
+                                // peer so the genesis density comparator has accurate data.
+                                // Collect slots before moving `blocks` into process_forward_blocks.
+                                let batch_slots: Vec<u64> = blocks
+                                    .iter()
+                                    .map(|b| b.slot().0)
+                                    .collect();
+                                let remote_tip_slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
+
                                 let applied = self.process_forward_blocks(
                                     blocks, &tip, &ebb_hashes,
                                     &mut blocks_received,
                                     &mut blocks_since_last_log, &mut last_snapshot_epoch,
                                     &mut last_log_time, &mut last_query_update,
                                 ).await;
+
+                                // Update GSM per-peer density and run GDD evaluation.
+                                // This is a no-op in Praos mode (genesis disabled).
                                 if applied > 0 {
                                     consecutive_apply_failures = 0;
+                                    let to_disconnect = {
+                                        let mut gsm = self.gsm.write().await;
+                                        for slot in &batch_slots {
+                                            gsm.record_block(&peer_addr, *slot);
+                                        }
+                                        gsm.update_peer_tip(&peer_addr, remote_tip_slot);
+                                        gsm.gdd_evaluate()
+                                    };
+                                    // Disconnect GDD-flagged peers via the peer manager.
+                                    if !to_disconnect.is_empty() {
+                                        let mut pm = self.peer_manager.write().await;
+                                        for addr in &to_disconnect {
+                                            warn!(
+                                                %addr,
+                                                "GDD: disconnecting peer with insufficient chain density"
+                                            );
+                                            pm.peer_failed(addr);
+                                        }
+                                    }
                                 } else if header_count > 0 {
                                     consecutive_apply_failures += 1;
                                     if consecutive_apply_failures >= 5 {
@@ -1577,9 +1625,32 @@ impl Node {
                                                     self.peer_manager.write().await.record_block_fetch(
                                                         &peer_addr, fetch_ms, header_count, 0,
                                                     );
+                                                    // GDD: collect slots before moving blocks
+                                                    let batch_slots: Vec<u64> = blocks
+                                                        .iter()
+                                                        .map(|b| b.slot().0)
+                                                        .collect();
+                                                    let remote_tip_slot =
+                                                        tip.point.slot().map(|s| s.0).unwrap_or(0);
                                                     let applied = self.process_forward_blocks(blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                                     if applied > 0 {
                                                         consecutive_apply_failures = 0;
+                                                        // GDD evaluation (no-op in Praos mode)
+                                                        let to_disconnect = {
+                                                            let mut gsm = self.gsm.write().await;
+                                                            for slot in &batch_slots {
+                                                                gsm.record_block(&peer_addr, *slot);
+                                                            }
+                                                            gsm.update_peer_tip(&peer_addr, remote_tip_slot);
+                                                            gsm.gdd_evaluate()
+                                                        };
+                                                        if !to_disconnect.is_empty() {
+                                                            let mut pm = self.peer_manager.write().await;
+                                                            for addr in &to_disconnect {
+                                                                warn!(%addr, "GDD: disconnecting sparse peer");
+                                                                pm.peer_failed(addr);
+                                                            }
+                                                        }
                                                     } else if header_count > 0 {
                                                         consecutive_apply_failures += 1;
                                                         if consecutive_apply_failures >= 5 {
@@ -1740,6 +1811,11 @@ impl Node {
             }
             fetch_pool.disconnect_all().await;
         }
+
+        // GSM cleanup: remove this peer from density tracking on disconnect.
+        // This prevents the GDD from comparing against stale density windows
+        // from a peer that is no longer connected.
+        self.gsm.write().await.deregister_peer(&peer_addr);
 
         debug!("Chain sync stopped after {blocks_received} blocks");
         Ok(())
