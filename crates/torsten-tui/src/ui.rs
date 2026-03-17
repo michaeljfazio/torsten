@@ -85,6 +85,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     render_connections_panel(frame, app, theme, layout.connections);
     render_resources_panel(frame, app, theme, layout.resources);
     render_peers_panel(frame, app, theme, layout.peers);
+    render_governance_panel(frame, app, theme, layout.governance);
     render_footer(frame, app, theme, layout.footer);
 
     if app.show_help {
@@ -183,7 +184,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             &tip_str,
             Style::default()
                 .fg(tip_age_col)
-                .add_modifier(if tip_age >= 60 {
+                .add_modifier(if tip_age >= 120 {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -380,7 +381,21 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let total_tx = App::format_number(app.metrics.get_u64("torsten_transactions_received_total"));
     let pending_tx = app.metrics.get_u64("torsten_mempool_tx_count");
     let utxo_count = app.metrics.get_u64("torsten_utxo_count");
-    let density = app.metrics.get("torsten_chain_density");
+    // Prefer the dedicated density gauge; fall back to block_number / slot_number
+    // for nodes that do not (yet) publish torsten_chain_density.
+    let density = {
+        let d = app.metrics.get("torsten_chain_density");
+        if d > 0.0 {
+            d
+        } else {
+            let slot = app.metrics.get_u64("torsten_slot_number");
+            if slot > 0 {
+                app.metrics.get_u64("torsten_block_number") as f64 / slot as f64
+            } else {
+                0.0
+            }
+        }
+    };
     let forks = app.metrics.get_u64("torsten_rollback_count_total");
 
     let density_str = if density > 0.0 {
@@ -419,7 +434,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             tip_age_col,
             theme,
             col_w,
-            tip_age >= 60,
+            tip_age >= 120,
         ),
         kv_aligned("Density", &density_str, theme.info, theme, col_w),
         kv_aligned(
@@ -810,6 +825,88 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Panel: Governance
+// ---------------------------------------------------------------------------
+
+/// Governance panel: DReps, stake pools, active proposals, treasury balance, delegations.
+///
+/// Displays a concise summary of on-chain governance state sourced from the
+/// Prometheus metrics endpoint.  All values are read-only; the panel never
+/// modifies node state.
+fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let block = panel_block("Governance", theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 1 || inner.width < 8 {
+        return;
+    }
+
+    let drep_count = app.metrics.get_u64("torsten_drep_count");
+    let pool_count = app.metrics.get_u64("torsten_pool_count");
+    let proposal_count = app.metrics.get_u64("torsten_proposal_count");
+    let delegation_count = app.metrics.get_u64("torsten_delegation_count");
+    // Treasury is stored in lovelace; convert to ADA for display.
+    let treasury_lovelace = app.metrics.get_u64("torsten_treasury_lovelace");
+    let treasury_ada = treasury_lovelace / 1_000_000;
+
+    let col_w = inner.width.saturating_sub(2) as usize;
+
+    let mut lines = vec![
+        kv_aligned(
+            "DReps",
+            App::format_number(drep_count),
+            if drep_count > 0 {
+                theme.info
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Pools",
+            App::format_number(pool_count),
+            if pool_count > 0 {
+                theme.info
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Proposals",
+            App::format_number(proposal_count),
+            if proposal_count > 0 {
+                theme.warning
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Treasury",
+            format!("{} ADA", App::format_number(treasury_ada)),
+            theme.success,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Delegations",
+            App::format_number(delegation_count),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+    ];
+
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---------------------------------------------------------------------------
 // Footer
 // ---------------------------------------------------------------------------
 
@@ -893,7 +990,7 @@ fn render_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         )),
         Line::default(),
         Line::from(Span::styled(
-            "Tip indicators: check <20s  ! 20-60s  X >60s",
+            "Tip indicators: OK <60s  !! 60-120s  XX >120s",
             Style::default().fg(theme.muted),
         )),
         Line::default(),
@@ -1066,16 +1163,16 @@ fn sep_spaced(theme: &Theme) -> Span<'static> {
 /// Return (icon_str, color) for tip-age display.
 ///
 /// Thresholds per requirements:
-///   - < 20s  => green check indicator
-///   - 20-60s => warning indicator
-///   - > 60s  => red X indicator
+///   - < 60s    => green check indicator (within one slot interval)
+///   - 60-120s  => warning indicator
+///   - > 120s   => red X indicator
 fn tip_age_indicator(theme: &Theme, tip_age_secs: u64) -> (&'static str, Color) {
     if tip_age_secs == 0 {
         // No data yet — neutral display.
         ("-", theme.muted)
-    } else if tip_age_secs < 20 {
-        ("OK", theme.success)
     } else if tip_age_secs < 60 {
+        ("OK", theme.success)
+    } else if tip_age_secs < 120 {
         ("!!", theme.warning)
     } else {
         ("XX", theme.error)
@@ -1213,32 +1310,33 @@ mod tests {
     #[test]
     fn test_tip_age_indicator_thresholds() {
         let theme = &crate::theme::THEME_MONOKAI;
-        // <20s => success (green check)
+        // 0 => neutral (no data)
         let (icon_0, col_0) = tip_age_indicator(theme, 0);
         assert_eq!(icon_0, "-");
         assert_eq!(col_0, theme.muted);
 
+        // <60s => success (green OK)
         let (icon_5, col_5) = tip_age_indicator(theme, 5);
         assert_eq!(icon_5, "OK");
         assert_eq!(col_5, theme.success);
 
-        let (icon_19, col_19) = tip_age_indicator(theme, 19);
-        assert_eq!(icon_19, "OK");
-        assert_eq!(col_19, theme.success);
-
-        // 20-60s => warning
-        let (icon_20, col_20) = tip_age_indicator(theme, 20);
-        assert_eq!(icon_20, "!!");
-        assert_eq!(col_20, theme.warning);
-
         let (icon_59, col_59) = tip_age_indicator(theme, 59);
-        assert_eq!(icon_59, "!!");
-        assert_eq!(col_59, theme.warning);
+        assert_eq!(icon_59, "OK");
+        assert_eq!(col_59, theme.success);
 
-        // >60s => error (red X)
+        // 60-120s => warning
         let (icon_60, col_60) = tip_age_indicator(theme, 60);
-        assert_eq!(icon_60, "XX");
-        assert_eq!(col_60, theme.error);
+        assert_eq!(icon_60, "!!");
+        assert_eq!(col_60, theme.warning);
+
+        let (icon_119, col_119) = tip_age_indicator(theme, 119);
+        assert_eq!(icon_119, "!!");
+        assert_eq!(col_119, theme.warning);
+
+        // >=120s => error (red X)
+        let (icon_120, col_120) = tip_age_indicator(theme, 120);
+        assert_eq!(icon_120, "XX");
+        assert_eq!(col_120, theme.error);
 
         let (icon_300, col_300) = tip_age_indicator(theme, 300);
         assert_eq!(icon_300, "XX");

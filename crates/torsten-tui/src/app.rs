@@ -110,6 +110,19 @@ impl RttBands {
             .and_then(|buckets| buckets.get("200"))
             .copied()
             .unwrap_or(0.0) as u64;
+        // Finer upper buckets from the standard Prometheus histogram boundaries.
+        let le500 = snap
+            .histogram_buckets
+            .get("torsten_peer_handshake_rtt_ms")
+            .and_then(|b| b.get("500"))
+            .copied()
+            .unwrap_or(0.0) as u64;
+        let le1000 = snap
+            .histogram_buckets
+            .get("torsten_peer_handshake_rtt_ms")
+            .and_then(|b| b.get("1000"))
+            .copied()
+            .unwrap_or(0.0) as u64;
         let total = snap.get_u64("torsten_peer_handshake_rtt_ms_count");
         let sum = snap.get("torsten_peer_handshake_rtt_ms_sum");
 
@@ -117,6 +130,10 @@ impl RttBands {
         let band_0_50 = le50;
         let band_50_100 = le100.saturating_sub(le50);
         let band_100_200 = le200.saturating_sub(le100);
+        // Split the ">200ms" bucket into finer bands using the additional boundaries.
+        let band_200_500 = le500.saturating_sub(le200);
+        let band_500_1000 = le1000.saturating_sub(le500);
+        let band_1000_plus = total.saturating_sub(le1000);
         let band_200_plus = total.saturating_sub(le200);
 
         let avg_ms = if total > 0 {
@@ -138,8 +155,15 @@ impl RttBands {
         } else {
             None
         };
-        let max_approx: Option<f64> = if total > 0 && band_200_plus > 0 {
-            Some(300.0) // representative for 200ms+
+        // Use the finest available bucket to approximate the max RTT.  Without
+        // this, every peer with RTT > 200ms reports "High: 300ms" even when the
+        // average is much higher (e.g. 660ms).
+        let max_approx: Option<f64> = if total > 0 && band_1000_plus > 0 {
+            Some(1500.0) // representative for 1000ms+
+        } else if band_500_1000 > 0 {
+            Some(750.0) // midpoint of 500-1000ms
+        } else if band_200_500 > 0 {
+            Some(350.0) // midpoint of 200-500ms
         } else if band_100_200 > 0 {
             Some(150.0)
         } else if band_50_100 > 0 {

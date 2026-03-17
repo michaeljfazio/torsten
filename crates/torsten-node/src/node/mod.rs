@@ -654,6 +654,14 @@ impl Node {
             genesis_enabled,
         )));
 
+        // Build and configure metrics before assembling the node struct so we
+        // can set the network magic immediately (the TUI reads it on first scrape).
+        let node_metrics = {
+            let m = crate::metrics::NodeMetrics::new();
+            m.set_network_magic(network_magic);
+            Arc::new(m)
+        };
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -681,7 +689,7 @@ impl Node {
             ),
             shelley_genesis,
             topology_path: args.topology_path,
-            metrics: Arc::new(crate::metrics::NodeMetrics::new()),
+            metrics: node_metrics,
             block_producer,
             block_announcement_tx: None,
             rollback_announcement_tx: None,

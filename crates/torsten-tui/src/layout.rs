@@ -55,6 +55,8 @@ pub const PANEL_CONNECTIONS_H: u16 = 7;
 pub const PANEL_RESOURCES_H: u16 = 7;
 /// Peers panel: RTT bar + 2 band rows + Low/Avg/High = 4 content rows + 2 borders = 6
 pub const PANEL_PEERS_H: u16 = 6;
+/// Governance panel: DReps + Pools + Proposals + Treasury + Delegations = 5 content rows + 2 borders = 7
+pub const PANEL_GOVERNANCE_H: u16 = 7;
 /// Header area height: 1 line (status pill + key metrics only; epoch bar is in Chain panel).
 pub const HEADER_H: u16 = 1;
 
@@ -111,6 +113,8 @@ pub struct DashboardLayout {
     pub resources: Rect,
     /// Peers panel area.
     pub peers: Rect,
+    /// Governance panel area (DReps, pools, proposals, treasury, delegations).
+    pub governance: Rect,
     /// Footer (keyboard shortcuts) area.
     pub footer: Rect,
 }
@@ -135,14 +139,15 @@ fn compute_two_column_layout(area: Rect, mode: LayoutMode) -> DashboardLayout {
     let top_h = PANEL_NODE_H.max(PANEL_CHAIN_H);
     let mid_h = PANEL_CONNECTIONS_H.max(PANEL_RESOURCES_H);
 
-    // Vertical split: header | top row | mid row | peers | gap | footer.
+    // Vertical split: header | top row | mid row | peers | governance | gap | footer.
     let vertical = Layout::vertical([
-        Constraint::Length(HEADER_H),      // header (2 lines)
-        Constraint::Length(top_h),         // row 1: Node + Chain
-        Constraint::Length(mid_h),         // row 2: Connections + Resources
-        Constraint::Length(PANEL_PEERS_H), // row 3: Peers
-        Constraint::Min(0),                // gap (absorbs leftover)
-        Constraint::Length(1),             // footer
+        Constraint::Length(HEADER_H),           // header (1 line)
+        Constraint::Length(top_h),              // row 1: Node + Chain
+        Constraint::Length(mid_h),              // row 2: Connections + Resources
+        Constraint::Length(PANEL_PEERS_H),      // row 3: Peers
+        Constraint::Length(PANEL_GOVERNANCE_H), // row 4: Governance
+        Constraint::Min(0),                     // gap (absorbs leftover)
+        Constraint::Length(1),                  // footer
     ])
     .split(area);
 
@@ -150,7 +155,8 @@ fn compute_two_column_layout(area: Rect, mode: LayoutMode) -> DashboardLayout {
     let row1 = vertical[1];
     let row2 = vertical[2];
     let peers = vertical[3];
-    let footer = vertical[5];
+    let governance = vertical[4];
+    let footer = vertical[6];
 
     // Column split: 38% left / 62% right.
     // In Wide mode we allow slightly more room for Chain by keeping the same ratio
@@ -178,6 +184,7 @@ fn compute_two_column_layout(area: Rect, mode: LayoutMode) -> DashboardLayout {
         connections: row2_cols[0],
         resources: row2_cols[1],
         peers,
+        governance,
         footer,
     }
 }
@@ -194,8 +201,9 @@ fn compute_compact_layout(area: Rect) -> DashboardLayout {
         Constraint::Length(PANEL_CONNECTIONS_H),
         Constraint::Length(PANEL_RESOURCES_H),
         Constraint::Length(PANEL_PEERS_H),
-        Constraint::Min(0),    // gap
-        Constraint::Length(1), // footer
+        Constraint::Length(PANEL_GOVERNANCE_H), // governance panel
+        Constraint::Min(0),                     // gap
+        Constraint::Length(1),                  // footer
     ])
     .split(area);
 
@@ -207,7 +215,8 @@ fn compute_compact_layout(area: Rect) -> DashboardLayout {
         connections: vertical[3],
         resources: vertical[4],
         peers: vertical[5],
-        footer: vertical[7],
+        governance: vertical[6],
+        footer: vertical[8],
     }
 }
 
@@ -292,16 +301,16 @@ mod tests {
         let layout = compute_layout(area, Some(LayoutMode::Standard));
         let top_h = PANEL_NODE_H.max(PANEL_CHAIN_H);
         let mid_h = PANEL_CONNECTIONS_H.max(PANEL_RESOURCES_H);
-        let used = HEADER_H + top_h + mid_h + PANEL_PEERS_H + 1; // header + rows + footer
+        let used = HEADER_H + top_h + mid_h + PANEL_PEERS_H + PANEL_GOVERNANCE_H + 1; // header + rows + footer
         assert!(
             used < area.height,
             "gap should exist between panels and footer"
         );
-        // Peers panel bottom edge should be well above the footer.
-        let peers_bottom = layout.peers.y + layout.peers.height;
+        // Governance panel bottom edge should be well above the footer.
+        let gov_bottom = layout.governance.y + layout.governance.height;
         assert!(
-            peers_bottom < layout.footer.y,
-            "peers bottom ({peers_bottom}) should be above footer ({})",
+            gov_bottom < layout.footer.y,
+            "governance bottom ({gov_bottom}) should be above footer ({})",
             layout.footer.y
         );
     }
