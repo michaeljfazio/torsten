@@ -40,7 +40,6 @@ use crate::widgets::epoch_progress::EpochProgress;
 use crate::widgets::header_bar::HeaderBar;
 use crate::widgets::mempool_gauge::MempoolGauge;
 use crate::widgets::sparkline_history::SparklineHistory;
-use crate::widgets::sync_progress::SyncProgressBar;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -276,9 +275,8 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let col_w = inner.width.saturating_sub(2) as usize; // subtract 1-char side padding each side
 
-    // Reserve the last row for the sync progress bar (SyncProgressBar widget).
-    // The text rows occupy everything above it.
-    let text_row_count = (inner.height as usize).saturating_sub(1);
+    // All rows available for text content (sync progress shown in header).
+    let text_row_count = inner.height as usize;
 
     let mut lines = vec![
         kv_aligned("Role", role, role_color, theme, col_w),
@@ -324,26 +322,6 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         height: text_row_count as u16,
     };
     frame.render_widget(Paragraph::new(lines), text_area);
-
-    // Sync progress bar — rendered on the last row inside the Node panel.
-    // Provides a visual glance at sync state; color matches the header pill.
-    let (_, is_synced, is_stalled) = app.sync_status();
-    let sync_pct = app.sync_progress_pct();
-    let bar_y = inner.y + text_row_count as u16;
-    if bar_y < inner.y + inner.height && inner.width >= 6 {
-        let bar_area = Rect {
-            x: inner.x + 1,
-            y: bar_y,
-            width: inner.width.saturating_sub(2),
-            height: 1,
-        };
-        SyncProgressBar::new(sync_pct, is_synced, is_stalled)
-            .fill_color_synced(theme.success)
-            .fill_color_syncing(theme.warning)
-            .fill_color_stalled(theme.error)
-            .empty_color(theme.gauge_empty)
-            .render(bar_area, frame.buffer_mut());
-    }
 }
 
 // ---------------------------------------------------------------------------
