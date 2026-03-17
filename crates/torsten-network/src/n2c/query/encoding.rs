@@ -172,8 +172,8 @@ pub(crate) fn encode_query_result_value(
             enc.u64(*treasury).ok();
             enc.u64(*reserves).ok();
         }
-        QueryResult::GenesisConfig(gc) => {
-            encode_genesis_config(enc, gc);
+        QueryResult::GenesisConfig(gc, version) => {
+            encode_genesis_config(enc, gc, *version);
         }
         QueryResult::NonMyopicMemberRewards(rewards) => {
             // Map from stake_amount -> map from pool_id -> reward
@@ -1706,11 +1706,35 @@ fn encode_system_start(enc: &mut minicbor::Encoder<&mut Vec<u8>>, time_str: &str
 }
 
 /// Encode legacy Shelley PParams as `array(18)` (N2C V16-V20 legacy format).
+/// Encode Shelley PParams in legacy format (V16-V20).
+///
+/// `array(18)` with ProtocolVersion as two flat integers at [14] and [15].
 pub(crate) fn encode_shelley_pparams(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
     pp: &ShelleyPParamsSnapshot,
 ) {
-    enc.array(18).ok();
+    encode_shelley_pparams_common(enc, pp, false);
+}
+
+/// Encode Shelley PParams in new format (V21+).
+///
+/// `array(17)` with ProtocolVersion as `array(2) [major, minor]` at [14].
+pub(crate) fn encode_shelley_pparams_v21(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    pp: &ShelleyPParamsSnapshot,
+) {
+    encode_shelley_pparams_common(enc, pp, true);
+}
+
+/// Shared Shelley PParams encoding. When `v21_protver` is true, uses
+/// `array(17)` with bundled ProtocolVersion; otherwise `array(18)` with
+/// flat major/minor fields per the legacy encoding.
+fn encode_shelley_pparams_common(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    pp: &ShelleyPParamsSnapshot,
+    v21_protver: bool,
+) {
+    enc.array(if v21_protver { 17 } else { 18 }).ok();
     enc.u64(pp.min_fee_a).ok(); // [0] txFeePerByte
     enc.u64(pp.min_fee_b).ok(); // [1] txFeeFixed
     enc.u32(pp.max_block_body_size).ok(); // [2] maxBBSize
@@ -1727,13 +1751,19 @@ pub(crate) fn encode_shelley_pparams(
                                                      // [13] extraEntropy: NeutralNonce = [0]
     enc.array(1).ok();
     enc.u32(0).ok();
-    // [14] protocolVersion major
-    enc.u64(pp.protocol_version_major).ok();
-    // [15] protocolVersion minor
-    enc.u64(pp.protocol_version_minor).ok();
-    // [16] minUTxOValue
+    if v21_protver {
+        // V21+: ProtocolVersion = array(2) [major, minor] at [14]
+        enc.array(2).ok();
+        enc.u64(pp.protocol_version_major).ok();
+        enc.u64(pp.protocol_version_minor).ok();
+    } else {
+        // V16-V20: ProtocolVersion as two flat integers at [14] and [15]
+        enc.u64(pp.protocol_version_major).ok();
+        enc.u64(pp.protocol_version_minor).ok();
+    }
+    // [15/16] minUTxOValue
     enc.u64(pp.min_utxo_value).ok();
-    // [17] minPoolCost
+    // [16/17] minPoolCost
     enc.u64(pp.min_pool_cost).ok();
 }
 
@@ -1792,6 +1822,7 @@ fn encode_era_history(
 fn encode_genesis_config(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
     gc: &crate::query_handler::GenesisConfigSnapshot,
+    n2c_version: u16,
 ) {
     // CompactGenesis: array(15) matching ShelleyGenesis CBOR wire format
     enc.array(15).ok();
@@ -1835,8 +1866,14 @@ fn encode_genesis_config(
     // [10] maxLovelaceSupply: u64
     enc.u64(gc.max_lovelace_supply).ok();
 
-    // [11] protocolParams: legacy Shelley PParams array(18)
-    encode_shelley_pparams(enc, &gc.protocol_params);
+    // [11] protocolParams: version-gated encoding
+    // V16-V20: array(18) with flat ProtocolVersion at [14] and [15]
+    // V21+: array(17) with ProtocolVersion as array(2) [major, minor] at [14]
+    if n2c_version >= 21 {
+        encode_shelley_pparams_v21(enc, &gc.protocol_params);
+    } else {
+        encode_shelley_pparams(enc, &gc.protocol_params);
+    }
 
     // [12] genDelegs: Map<hash28 -> array(2)[hash28, hash32]>
     enc.map(gc.gen_delegs.len() as u64).ok();

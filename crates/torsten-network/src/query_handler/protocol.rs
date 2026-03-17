@@ -321,54 +321,57 @@ pub(crate) fn handle_stake_distribution(state: &NodeStateSnapshot) -> QueryResul
 }
 
 /// Handle GetGenesisConfig (tag 11) -- CompactGenesis.
-pub(crate) fn handle_genesis_config(state: &NodeStateSnapshot) -> QueryResult {
-    debug!("Query: GetGenesisConfig");
+pub(crate) fn handle_genesis_config(state: &NodeStateSnapshot, n2c_version: u16) -> QueryResult {
+    debug!("Query: GetGenesisConfig (N2C V{n2c_version})");
     if let Some(ref gc) = state.genesis_config {
-        QueryResult::GenesisConfig(Box::new(gc.clone()))
+        QueryResult::GenesisConfig(Box::new(gc.clone()), n2c_version)
     } else {
         // Fallback: genesis config from node state fields
-        QueryResult::GenesisConfig(Box::new(GenesisConfigSnapshot {
-            system_start: state.system_start.clone(),
-            network_magic: state.network_magic,
-            network_id: if state.network_magic == 764824073 {
-                1
-            } else {
-                0
-            },
-            active_slots_coeff_num: state.active_slots_coeff_num,
-            active_slots_coeff_den: state.active_slots_coeff_den,
-            security_param: state.security_param,
-            epoch_length: state.epoch_length,
-            slots_per_kes_period: state.slots_per_kes_period,
-            max_kes_evolutions: state.max_kes_evolutions,
-            slot_length_micros: state.slot_length_secs * 1_000_000,
-            update_quorum: state.update_quorum,
-            max_lovelace_supply: state.max_lovelace_supply,
-            protocol_params: ShelleyPParamsSnapshot {
-                min_fee_a: state.protocol_params.min_fee_a,
-                min_fee_b: state.protocol_params.min_fee_b,
-                max_block_body_size: state.protocol_params.max_block_body_size as u32,
-                max_tx_size: state.protocol_params.max_tx_size as u32,
-                max_block_header_size: state.protocol_params.max_block_header_size as u16,
-                key_deposit: state.protocol_params.key_deposit,
-                pool_deposit: state.protocol_params.pool_deposit,
-                e_max: state.protocol_params.e_max as u32,
-                n_opt: state.protocol_params.n_opt as u16,
-                a0_num: state.protocol_params.a0_num,
-                a0_den: state.protocol_params.a0_den,
-                rho_num: state.protocol_params.rho_num,
-                rho_den: state.protocol_params.rho_den,
-                tau_num: state.protocol_params.tau_num,
-                tau_den: state.protocol_params.tau_den,
-                d_num: 0,
-                d_den: 1,
-                protocol_version_major: state.protocol_params.protocol_version_major,
-                protocol_version_minor: state.protocol_params.protocol_version_minor,
-                min_utxo_value: 0,
-                min_pool_cost: state.protocol_params.min_pool_cost,
-            },
-            gen_delegs: Vec::new(),
-        }))
+        QueryResult::GenesisConfig(
+            Box::new(GenesisConfigSnapshot {
+                system_start: state.system_start.clone(),
+                network_magic: state.network_magic,
+                network_id: if state.network_magic == 764824073 {
+                    1
+                } else {
+                    0
+                },
+                active_slots_coeff_num: state.active_slots_coeff_num,
+                active_slots_coeff_den: state.active_slots_coeff_den,
+                security_param: state.security_param,
+                epoch_length: state.epoch_length,
+                slots_per_kes_period: state.slots_per_kes_period,
+                max_kes_evolutions: state.max_kes_evolutions,
+                slot_length_micros: state.slot_length_secs * 1_000_000,
+                update_quorum: state.update_quorum,
+                max_lovelace_supply: state.max_lovelace_supply,
+                protocol_params: ShelleyPParamsSnapshot {
+                    min_fee_a: state.protocol_params.min_fee_a,
+                    min_fee_b: state.protocol_params.min_fee_b,
+                    max_block_body_size: state.protocol_params.max_block_body_size as u32,
+                    max_tx_size: state.protocol_params.max_tx_size as u32,
+                    max_block_header_size: state.protocol_params.max_block_header_size as u16,
+                    key_deposit: state.protocol_params.key_deposit,
+                    pool_deposit: state.protocol_params.pool_deposit,
+                    e_max: state.protocol_params.e_max as u32,
+                    n_opt: state.protocol_params.n_opt as u16,
+                    a0_num: state.protocol_params.a0_num,
+                    a0_den: state.protocol_params.a0_den,
+                    rho_num: state.protocol_params.rho_num,
+                    rho_den: state.protocol_params.rho_den,
+                    tau_num: state.protocol_params.tau_num,
+                    tau_den: state.protocol_params.tau_den,
+                    d_num: 0,
+                    d_den: 1,
+                    protocol_version_major: state.protocol_params.protocol_version_major,
+                    protocol_version_minor: state.protocol_params.protocol_version_minor,
+                    min_utxo_value: 0,
+                    min_pool_cost: state.protocol_params.min_pool_cost,
+                },
+                gen_delegs: Vec::new(),
+            }),
+            n2c_version,
+        )
     }
 }
 
@@ -690,9 +693,9 @@ mod tests {
             }),
             ..NodeStateSnapshot::default()
         };
-        let result = handle_genesis_config(&state);
+        let result = handle_genesis_config(&state, 0);
         match result {
-            QueryResult::GenesisConfig(gc) => {
+            QueryResult::GenesisConfig(gc, _version) => {
                 assert_eq!(gc.network_magic, 2);
                 assert_eq!(gc.network_id, 0);
                 assert_eq!(gc.epoch_length, 86400);
@@ -711,9 +714,9 @@ mod tests {
             security_param: 2160,
             ..NodeStateSnapshot::default()
         };
-        let result = handle_genesis_config(&state);
+        let result = handle_genesis_config(&state, 0);
         match result {
-            QueryResult::GenesisConfig(gc) => {
+            QueryResult::GenesisConfig(gc, _version) => {
                 assert_eq!(gc.network_magic, 2);
                 assert_eq!(gc.network_id, 0); // non-mainnet magic → testnet
                 assert_eq!(gc.epoch_length, 86400);
@@ -728,9 +731,9 @@ mod tests {
             network_magic: 764824073, // mainnet
             ..NodeStateSnapshot::default()
         };
-        let result = handle_genesis_config(&state);
+        let result = handle_genesis_config(&state, 0);
         match result {
-            QueryResult::GenesisConfig(gc) => {
+            QueryResult::GenesisConfig(gc, _version) => {
                 assert_eq!(gc.network_id, 1); // mainnet = 1
             }
             _ => panic!("Expected GenesisConfig"),

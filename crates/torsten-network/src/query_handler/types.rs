@@ -33,7 +33,9 @@ pub enum QueryResult {
         treasury: u64,
         reserves: u64,
     },
-    GenesisConfig(Box<GenesisConfigSnapshot>),
+    /// Second field is N2C version for version-gated PParams encoding:
+    /// V16-V20: array(18) with flat ProtVer, V21+: array(17) with array(2) ProtVer.
+    GenesisConfig(Box<GenesisConfigSnapshot>, u16),
     /// NonMyopicMemberRewards: map from stake_amount -> pool rewards
     NonMyopicMemberRewards(Vec<NonMyopicRewardEntry>),
     /// Empty proposed protocol parameter updates (Conway uses governance proposals)
