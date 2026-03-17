@@ -56,21 +56,37 @@ pub struct NodeConfig {
     #[serde(default)]
     pub conway_genesis_hash: Option<String>,
 
-    /// Enable P2P networking
-    #[serde(default)]
+    /// Enable P2P networking (default: true, matching cardano-node)
+    #[serde(default = "default_enable_p2p")]
     pub enable_p2_p: bool,
 
-    /// Target number of active peers
-    #[serde(default = "default_target_peers")]
+    /// Target number of root peers (default: 60, matching cardano-node)
+    #[serde(default = "default_root_peers")]
+    pub target_number_of_root_peers: usize,
+
+    /// Target number of active peers (default: 15, matching cardano-node)
+    #[serde(default = "default_active_peers")]
     pub target_number_of_active_peers: usize,
 
-    /// Target number of established peers
+    /// Target number of established peers (default: 40, matching cardano-node)
     #[serde(default = "default_established_peers")]
     pub target_number_of_established_peers: usize,
 
-    /// Target number of known peers
+    /// Target number of known peers (default: 85, matching cardano-node)
     #[serde(default = "default_known_peers")]
     pub target_number_of_known_peers: usize,
+
+    /// Target number of active big ledger peers (default: 5, matching cardano-node)
+    #[serde(default = "default_active_big_ledger_peers")]
+    pub target_number_of_active_big_ledger_peers: usize,
+
+    /// Target number of established big ledger peers (default: 10, matching cardano-node)
+    #[serde(default = "default_established_big_ledger_peers")]
+    pub target_number_of_established_big_ledger_peers: usize,
+
+    /// Target number of known big ledger peers (default: 15, matching cardano-node)
+    #[serde(default = "default_known_big_ledger_peers")]
+    pub target_number_of_known_big_ledger_peers: usize,
 
     /// Trace options
     #[serde(default)]
@@ -115,8 +131,16 @@ fn default_network() -> NetworkId {
     NetworkId::Mainnet
 }
 
-fn default_target_peers() -> usize {
-    20
+fn default_enable_p2p() -> bool {
+    true
+}
+
+fn default_root_peers() -> usize {
+    60
+}
+
+fn default_active_peers() -> usize {
+    15
 }
 
 fn default_established_peers() -> usize {
@@ -124,7 +148,19 @@ fn default_established_peers() -> usize {
 }
 
 fn default_known_peers() -> usize {
-    100
+    85
+}
+
+fn default_active_big_ledger_peers() -> usize {
+    5
+}
+
+fn default_established_big_ledger_peers() -> usize {
+    10
+}
+
+fn default_known_big_ledger_peers() -> usize {
+    15
 }
 
 fn default_min_severity() -> String {
@@ -252,9 +288,13 @@ impl Default for NodeConfig {
             alonzo_genesis_hash: None,
             conway_genesis_hash: None,
             enable_p2_p: true,
-            target_number_of_active_peers: 20,
+            target_number_of_root_peers: 60,
+            target_number_of_active_peers: 15,
             target_number_of_established_peers: 40,
-            target_number_of_known_peers: 100,
+            target_number_of_known_peers: 85,
+            target_number_of_active_big_ledger_peers: 5,
+            target_number_of_established_big_ledger_peers: 10,
+            target_number_of_known_big_ledger_peers: 15,
             trace_options: TraceOptions::default(),
             min_severity: "Info".to_string(),
             storage: None,

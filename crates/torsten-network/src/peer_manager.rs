@@ -339,11 +339,15 @@ pub struct PeerManagerConfig {
 }
 
 impl Default for PeerManagerConfig {
+    /// Defaults matching cardano-node: Active=15, Established=40, Known=85.
+    /// target_hot_peers maps to TargetNumberOfActivePeers (15),
+    /// target_warm_peers = established - active (25),
+    /// target_known_peers maps to TargetNumberOfKnownPeers (85).
     fn default() -> Self {
         PeerManagerConfig {
-            target_hot_peers: 20,
-            target_warm_peers: 20,
-            target_known_peers: 100,
+            target_hot_peers: 15,
+            target_warm_peers: 25,
+            target_known_peers: 85,
             max_inbound_peers: 100,
             peer_sharing_enabled: true,
             diffusion_mode: DiffusionMode::InitiatorAndResponder,
