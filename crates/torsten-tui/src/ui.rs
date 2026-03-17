@@ -8,18 +8,24 @@
 //! ============
 //! - **Labels left, values right** within each panel column. Values are
 //!   right-aligned to a fixed column so numbers form clean vertical stacks.
-//! - **Visual hierarchy**: bold + color for important values (block, epoch, tip
-//!   age), muted color for labels.
+//! - **Thousands separators** on all integer metrics (4,109,330 not 4109330).
+//! - **Human-readable bytes** (6.5 GB, 512.0 MB).
+//! - **No duplicate fields** — each metric appears in exactly one panel.
+//! - **Status pill** in header — colored background for sync status.
+//! - **Tip diff indicator** — green check / warning / red X per age bracket.
+//! - **RTT metrics** — Low/Avg/High derived from histogram _sum/_count.
+//! - **Duplex count** — shown in Connections panel; 0 if metric not populated.
+//! - **Visual hierarchy**: bold + color for important values, muted for labels.
 //! - **Consistent padding**: one character left/right inside every panel border.
-//! - **Header**: two-line combined status + epoch-progress-bar layout.
-//! - **Footer**: keyboard shortcuts as `[key] action` pairs, current theme pill.
-//! - **Epoch bar**: smooth 8-shade block-character fill with centered label.
+//! - **Footer**: keyboard shortcuts + current theme pill.
+//! - **Epoch bar**: smooth 8-shade block-character fill with centered label
+//!   (appears ONLY inside the Chain panel, not duplicated in the header).
 //! - **RTT bar**: per-band colored segments summing to panel inner width.
 //!
 //! Panel layout (Standard / Wide, >= 80 x 28):
 //!
 //! ```text
-//! ┌──────────────────────── Header (2 lines) ──────────────────────────────────┐
+//! ┌──────────────────────── Header (1 line) ───────────────────────────────────┐
 //! ├──────── Node ───────────┬──────────────────── Chain ─────────────────────── ┤
 //! ├──── Connections ────────┼─────────────────── Resources ──────────────────── ┤
 //! ├────────────────────────── Peers (full width) ──────────────────────────────── ┤
@@ -46,7 +52,7 @@ use ratatui::{
 /// Label column width (characters) inside a panel, including the trailing space.
 /// Values are right-aligned within each row so they all start at `LABEL_W + 2`
 /// (the 2 accounts for the 1-char left padding in `kv_line`).
-const LABEL_W: usize = 12;
+const LABEL_W: usize = 14;
 
 /// Width reserved for the value field (used for right-aligning numbers).
 const VALUE_W: usize = 12;
@@ -78,12 +84,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 // ---------------------------------------------------------------------------
-// Header (2 lines)
+// Header (1 line — status pill only, no epoch bar duplication)
 // ---------------------------------------------------------------------------
 
-/// Two-line header:
-/// - Line 1: logo | sync status | epoch | era | network | tip age | uptime
-/// - Line 2: epoch progress bar (full width)
+/// Single-line header:
+///   Logo | [STATUS PILL] | Epoch NNN | Era Conway | Net Preview | Tip Xs | Up Xh Xm
+///
+/// The epoch progress bar lives exclusively inside the Chain panel.
 fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if area.height < 1 || area.width < 20 {
         return;
@@ -98,7 +105,8 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let era = app.current_era();
     let network = app.network.label();
 
-    let status_color = if !app.metrics.connected {
+    // Status pill — colored background so it reads at a glance.
+    let status_bg = if !app.metrics.connected {
         theme.error
     } else if is_synced {
         theme.success
@@ -114,9 +122,17 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         format!(" {} {:.2}% ", status_label, pct)
     };
 
-    // Line 1: status pill | separators | metadata fields
-    let line1 = Line::from(vec![
-        // Logo
+    // Tip age indicator: check mark / warning / X based on age brackets.
+    // Requirements: green check <20s, warning 20-60s, red X >60s.
+    let (tip_icon, tip_age_col) = tip_age_indicator(theme, tip_age);
+    let tip_str = if tip_age == 0 {
+        format!("{} --", tip_icon)
+    } else {
+        format!("{} {}", tip_icon, format_tip_age(tip_age))
+    };
+
+    let line = Line::from(vec![
+        // Logo.
         Span::styled(
             " Torsten ",
             Style::default()
@@ -124,87 +140,60 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         sep(theme),
-        // Sync status — highlighted pill
+        // Sync status pill with colored background.
         Span::styled(
             &status_text,
             Style::default()
                 .fg(Color::Black)
-                .bg(status_color)
+                .bg(status_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         sep(theme),
-        // Epoch
+        // Epoch.
         Span::styled("  Epoch ", Style::default().fg(theme.muted)),
         Span::styled(
             App::format_number(epoch),
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
         sep_spaced(theme),
-        // Era
+        // Era.
         Span::styled("Era ", Style::default().fg(theme.muted)),
         Span::styled(
             era,
             Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         ),
         sep_spaced(theme),
-        // Network
+        // Network.
         Span::styled("Net ", Style::default().fg(theme.muted)),
         Span::styled(network, Style::default().fg(theme.accent)),
         sep_spaced(theme),
-        // Tip age
+        // Tip age with colored indicator icon.
         Span::styled("Tip ", Style::default().fg(theme.muted)),
         Span::styled(
-            format_tip_age(tip_age),
+            &tip_str,
             Style::default()
-                .fg(tip_age_color(theme, tip_age))
-                .add_modifier(if tip_age >= 120 {
+                .fg(tip_age_col)
+                .add_modifier(if tip_age >= 60 {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 }),
         ),
         sep_spaced(theme),
-        // Uptime
+        // Uptime.
         Span::styled("Up ", Style::default().fg(theme.muted)),
-        Span::styled(uptime, Style::default().fg(theme.muted)),
+        Span::styled(&uptime, Style::default().fg(theme.muted)),
     ]);
 
-    // Render line 1.
-    let line1_area = Rect {
+    // Render on the single header line.
+    let line_area = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
         height: 1,
     };
-    frame.render_widget(Paragraph::new(line1), line1_area);
-
-    // Line 2: epoch progress bar (only if there is room).
-    if area.height >= 2 {
-        let bar_area = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: 1,
-        };
-        // Use the EpochProgress widget which handles the smooth fill + centered label.
-        frame.render_widget(
-            EpochProgress::new(
-                app.slot_in_epoch,
-                app.epoch_length(),
-                app.epoch_time_remaining_secs,
-            )
-            .with_epoch(epoch)
-            .with_fill_color(if is_synced {
-                theme.success
-            } else if is_stalled {
-                theme.error
-            } else {
-                theme.gauge_fill
-            }),
-            bar_area,
-        );
-    }
+    frame.render_widget(Paragraph::new(line), line_area);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +225,10 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let era = app.current_era();
     let uptime_secs = app.metrics.get_u64("torsten_uptime_seconds");
     let uptime = App::format_uptime(uptime_secs);
-    let peers_total =
-        app.metrics.get_u64("torsten_peers_hot") + app.metrics.get_u64("torsten_peers_warm");
+    // Active peers: hot + warm (hot are active connections, warm are candidates).
+    let peers_hot = app.metrics.get_u64("torsten_peers_hot");
+    let peers_warm = app.metrics.get_u64("torsten_peers_warm");
+    let peers_total = peers_hot + peers_warm;
     let blocks_forged = app.metrics.get_u64("torsten_blocks_forged_total");
 
     let col_w = inner.width.saturating_sub(2) as usize; // subtract 1-char side padding each side
@@ -253,7 +244,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             col_w,
         ),
         kv_aligned("Era", era, theme.info, theme, col_w),
-        kv_aligned("Uptime", uptime, theme.fg, theme, col_w),
+        kv_aligned("Uptime", &uptime, theme.fg, theme, col_w),
         kv_aligned(
             "Peers",
             App::format_number(peers_total),
@@ -266,7 +257,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             col_w,
         ),
         kv_aligned(
-            "Forged",
+            "Blocks Forged",
             App::format_number(blocks_forged),
             if blocks_forged > 0 {
                 theme.warning
@@ -294,7 +285,9 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
-    // Row 0: epoch progress bar.
+    let (_, is_synced, is_stalled) = app.sync_status();
+
+    // Row 0: epoch progress bar (only here — NOT duplicated in header).
     let bar_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -308,7 +301,13 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             app.epoch_time_remaining_secs,
         )
         .with_epoch(app.metrics.get_u64("torsten_epoch_number"))
-        .with_fill_color(theme.gauge_fill),
+        .with_fill_color(if is_synced {
+            theme.success
+        } else if is_stalled {
+            theme.error
+        } else {
+            theme.gauge_fill
+        }),
         bar_area,
     );
 
@@ -330,7 +329,6 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let pending_tx = app.metrics.get_u64("torsten_mempool_tx_count");
     let density = app.metrics.get("torsten_chain_density");
     let forks = app.metrics.get_u64("torsten_rollback_count_total");
-    let tip_age_col = tip_age_color(theme, tip_age);
 
     let density_str = if density > 0.0 {
         format!("{:.4}", density)
@@ -340,15 +338,13 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let col_w = inner.width.saturating_sub(2) as usize;
 
-    // Tip age with status icon (Unicode, no emoji).
-    let tip_icon = if tip_age < 30 {
-        "OK"
-    } else if tip_age < 120 {
-        "!!"
+    // Tip age with indicator icon (<20s green check, 20-60s warning, >60s red X).
+    let (tip_icon, tip_age_col) = tip_age_indicator(theme, tip_age);
+    let tip_str = if tip_age == 0 {
+        format!("{} --", tip_icon)
     } else {
-        "XX"
+        format!("{} {}s", tip_icon, App::format_number(tip_age))
     };
-    let tip_str = format!("{}s [{}]", App::format_number(tip_age), tip_icon);
 
     let lines = vec![
         kv_aligned("Block", &block_num, theme.fg, theme, col_w),
@@ -360,7 +356,14 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             theme,
             col_w,
         ),
-        kv_aligned("Tip diff", &tip_str, tip_age_col, theme, col_w),
+        kv_line_custom_value(
+            "Tip Diff",
+            &tip_str,
+            tip_age_col,
+            theme,
+            col_w,
+            tip_age >= 60,
+        ),
         kv_aligned("Density", &density_str, theme.info, theme, col_w),
         kv_aligned(
             "Forks",
@@ -410,6 +413,7 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     let hot = app.metrics.get_u64("torsten_peers_hot");
     let unidir = app.metrics.get_u64("torsten_peers_unidirectional");
     let bidir = app.metrics.get_u64("torsten_peers_bidirectional");
+    // Duplex count — metric exists but may be 0 (not yet populated); show 0 explicitly.
     let duplex = app.metrics.get_u64("torsten_peers_duplex");
 
     let p2p_enabled = outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0;
@@ -433,6 +437,7 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     );
 
     // Uni / Bi / Duplex compact row.
+    // Duplex is shown as 0 (not N/A) since the metric is defined but not yet populated.
     let ubd_line = peer_state_row(
         &[
             ("Uni", unidir, theme.muted),
@@ -484,6 +489,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     let cpu_pct = app.metrics.get("torsten_cpu_percent");
     let mem_live = app.metrics.get_u64("torsten_mem_resident_bytes");
     let mem_rss = app.metrics.get_u64("torsten_mem_rss_bytes");
+    // Fallback: use live if RSS is unavailable.
     let mem_rss = if mem_rss > 0 { mem_rss } else { mem_live };
 
     let cpu_color = if cpu_pct > 80.0 {
@@ -534,7 +540,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     }
     lines.push(Line::from(cpu_spans));
 
-    // Memory (live) row.
+    // Memory (live/resident) row — human readable bytes with thousands separators.
     lines.push(kv_aligned(
         "Mem (live)",
         App::format_bytes(mem_live),
@@ -552,7 +558,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         col_w,
     ));
 
-    // Inline mem bar.
+    // Inline mem bar showing live/RSS ratio.
     let mem_ratio = if mem_rss > 0 {
         (mem_live as f64 / mem_rss as f64).clamp(0.0, 1.0)
     } else {
@@ -584,6 +590,7 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let rtt = &app.rtt_bands;
     let total = rtt.band_0_50 + rtt.band_50_100 + rtt.band_100_200 + rtt.band_200_plus;
 
+    // Format RTT value — derived from histogram _sum/_count for accuracy.
     let fmt_rtt = |ms: Option<f64>| -> String {
         match ms {
             Some(v) => format!("{:.0}ms", v),
@@ -596,7 +603,7 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // RTT distribution bar (colored segments).
+    // RTT distribution bar (colored segments per band).
     if total > 0 && bar_width >= 4 {
         let bar = build_rtt_colored_bar(
             rtt.band_0_50,
@@ -618,15 +625,15 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let half = inner.width.saturating_sub(2) / 2;
     let band_rows: &[(&str, u64, Color, &str, u64, Color)] = &[
         (
-            "0–50ms",
+            "0-50ms",
             rtt.band_0_50,
             theme.success,
-            "50–100ms",
+            "50-100ms",
             rtt.band_50_100,
             theme.info,
         ),
         (
-            "100–200ms",
+            "100-200ms",
             rtt.band_100_200,
             theme.warning,
             "200ms+",
@@ -640,10 +647,10 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         let val_b_str = App::format_number(*val_b);
         let half_w = half as usize;
 
-        // Left cell: label + right-aligned count.
+        // Left cell: label left-aligned, count right-aligned within half width.
         let left_label_w = half_w.saturating_sub(5); // reserve 5 for value
         let left = format!(" {:<lw$}{:>5}", lbl_a, val_a_str, lw = left_label_w.max(1));
-        // Right cell: label + right-aligned count.
+        // Right cell: label left-aligned, count right-aligned.
         let right_label_w = (inner.width.saturating_sub(2) as usize)
             .saturating_sub(half_w)
             .saturating_sub(5);
@@ -666,7 +673,8 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ]));
     }
 
-    // Min / Avg / Max line.
+    // Min / Avg / Max RTT line.
+    // Avg is computed from histogram _sum / _count for precision.
     let low_str = fmt_rtt(rtt.min_ms);
     let avg_str = fmt_rtt(rtt.avg_ms);
     let high_str = fmt_rtt(rtt.max_ms);
@@ -715,7 +723,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         key_span("[h]", theme),
         Span::styled(" Help  ", Style::default().fg(theme.muted)),
         Span::styled("\u{2502} ", Style::default().fg(theme.border)),
-        // Theme pill.
+        // Theme pill with colored background.
         Span::styled(
             format!(" {} ", theme_name),
             Style::default().fg(theme.bg).bg(theme.accent),
@@ -735,8 +743,8 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn render_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let overlay_width: u16 = 56;
-    let overlay_height: u16 = 18;
+    let overlay_width: u16 = 60;
+    let overlay_height: u16 = 20;
 
     let x = area.x + area.width.saturating_sub(overlay_width) / 2;
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
@@ -781,7 +789,12 @@ fn render_help_overlay(frame: &mut Frame, theme: &Theme, area: Rect) {
         )),
         Line::default(),
         Line::from(Span::styled(
-            "Metrics endpoint polled every 2 seconds.",
+            "Tip indicators: check <20s  ! 20-60s  X >60s",
+            Style::default().fg(theme.muted),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            "Metrics polled every 2 seconds (Prometheus :12798).",
             Style::default().fg(theme.muted),
         )),
         Line::default(),
@@ -852,6 +865,38 @@ fn kv_aligned(
     ])
 }
 
+/// Build a key-value line with optional BOLD modifier on the value.
+///
+/// Used for tip-diff where the value already contains the indicator icon and
+/// we want full control over the bold flag.
+fn kv_line_custom_value(
+    label: &str,
+    value: &str,
+    value_color: Color,
+    theme: &Theme,
+    col_w: usize,
+    bold: bool,
+) -> Line<'static> {
+    let label_w = col_w.saturating_sub(VALUE_W).max(LABEL_W);
+    let value_w = col_w.saturating_sub(label_w).max(1);
+    let label_s = format!("{:<label_w$}", label);
+    let value_s = format!("{:>value_w$}", value);
+
+    let val_style = if bold {
+        Style::default()
+            .fg(value_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(value_color)
+    };
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(label_s, Style::default().fg(theme.muted)),
+        Span::styled(value_s, val_style),
+    ])
+}
+
 /// Compact two-column peer-state row for Cold/Warm/Hot or Uni/Bi/Duplex.
 fn peer_state_row(items: &[(&str, u64, Color)], theme: &Theme) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
@@ -865,6 +910,7 @@ fn peer_state_row(items: &[(&str, u64, Color)], theme: &Theme) -> Line<'static> 
             Style::default().fg(theme.muted),
         ));
         spans.push(Span::raw(" "));
+        // Use thousands separators for peer counts.
         spans.push(Span::styled(
             format!("{:>4}", App::format_number(*value)),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
@@ -910,17 +956,25 @@ fn sep_spaced(theme: &Theme) -> Span<'static> {
 }
 
 // ---------------------------------------------------------------------------
-// Color helpers
+// Color and indicator helpers
 // ---------------------------------------------------------------------------
 
-/// Select color for tip-age display.
-fn tip_age_color(theme: &Theme, tip_age_secs: u64) -> Color {
-    if tip_age_secs < 30 {
-        theme.success
-    } else if tip_age_secs < 120 {
-        theme.warning
+/// Return (icon_str, color) for tip-age display.
+///
+/// Thresholds per requirements:
+///   - < 20s  => green check indicator
+///   - 20-60s => warning indicator
+///   - > 60s  => red X indicator
+fn tip_age_indicator(theme: &Theme, tip_age_secs: u64) -> (&'static str, Color) {
+    if tip_age_secs == 0 {
+        // No data yet — neutral display.
+        ("-", theme.muted)
+    } else if tip_age_secs < 20 {
+        ("OK", theme.success)
+    } else if tip_age_secs < 60 {
+        ("!!", theme.warning)
     } else {
-        theme.error
+        ("XX", theme.error)
     }
 }
 
@@ -965,7 +1019,7 @@ fn build_smooth_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) ->
         s.push(SMOOTH_BLOCKS[0]);
     }
 
-    // Split by character count (not byte index) since block chars are multi-byte UTF-8
+    // Split by character count (not byte index) since block chars are multi-byte UTF-8.
     let filled_chars = full_blocks.min(width)
         + if partial_eighths > 0 { 1 } else { 0 }.min(width.saturating_sub(full_blocks));
     let filled: String = s.chars().take(filled_chars).collect();
@@ -996,9 +1050,8 @@ fn build_mini_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) -> V
 
 /// Build a colored RTT distribution bar using distinct colors per band.
 ///
-/// Each band is drawn as a contiguous run of `▊` (U+258A) characters,
-/// colored by latency severity.  This gives much better visual differentiation
-/// than the old single-color shade approach.
+/// Each band is drawn as a contiguous run of full-block characters,
+/// colored by latency severity (success/info/warning/error).
 fn build_rtt_colored_bar<'a>(
     b0: u64,
     b1: u64,
@@ -1054,6 +1107,41 @@ mod tests {
     }
 
     #[test]
+    fn test_tip_age_indicator_thresholds() {
+        let theme = &crate::theme::THEME_MONOKAI;
+        // <20s => success (green check)
+        let (icon_0, col_0) = tip_age_indicator(theme, 0);
+        assert_eq!(icon_0, "-");
+        assert_eq!(col_0, theme.muted);
+
+        let (icon_5, col_5) = tip_age_indicator(theme, 5);
+        assert_eq!(icon_5, "OK");
+        assert_eq!(col_5, theme.success);
+
+        let (icon_19, col_19) = tip_age_indicator(theme, 19);
+        assert_eq!(icon_19, "OK");
+        assert_eq!(col_19, theme.success);
+
+        // 20-60s => warning
+        let (icon_20, col_20) = tip_age_indicator(theme, 20);
+        assert_eq!(icon_20, "!!");
+        assert_eq!(col_20, theme.warning);
+
+        let (icon_59, col_59) = tip_age_indicator(theme, 59);
+        assert_eq!(icon_59, "!!");
+        assert_eq!(col_59, theme.warning);
+
+        // >60s => error (red X)
+        let (icon_60, col_60) = tip_age_indicator(theme, 60);
+        assert_eq!(icon_60, "XX");
+        assert_eq!(col_60, theme.error);
+
+        let (icon_300, col_300) = tip_age_indicator(theme, 300);
+        assert_eq!(icon_300, "XX");
+        assert_eq!(col_300, theme.error);
+    }
+
+    #[test]
     fn test_build_rtt_colored_bar_zero_total() {
         let theme = &crate::theme::THEME_DEFAULT;
         let spans = build_rtt_colored_bar(0, 0, 0, 0, 40, theme);
@@ -1086,12 +1174,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_age_color() {
+    fn test_kv_aligned_right_aligns_value() {
         let theme = &crate::theme::THEME_DEFAULT;
-        assert_eq!(tip_age_color(theme, 0), theme.success);
-        assert_eq!(tip_age_color(theme, 29), theme.success);
-        assert_eq!(tip_age_color(theme, 30), theme.warning);
-        assert_eq!(tip_age_color(theme, 119), theme.warning);
-        assert_eq!(tip_age_color(theme, 120), theme.error);
+        let line = kv_aligned("Block", "4,109,330", theme.fg, theme, 30);
+        // Verify the line has exactly 3 spans: indent + label + value.
+        assert_eq!(line.spans.len(), 3);
+        // The value span should contain the formatted number.
+        assert!(line.spans[2].content.contains("4,109,330"));
+    }
+
+    #[test]
+    fn test_monokai_is_default_theme() {
+        let app = crate::app::App::new();
+        assert_eq!(app.theme().name, "Monokai");
     }
 }

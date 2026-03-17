@@ -4,7 +4,7 @@
 //!
 //! **Wide** (>= 120 cols, >= 30 rows):
 //! ```text
-//! ┌─────────────────────────────────────────────────── Header (2 lines) ──────────────────────────────────────────────────┐
+//! ┌─────────────────────────────────────────────────── Header (1 line) ───────────────────────────────────────────────────┐
 //! ├────────── Node (38%) ──────────────┬──────────────────────────── Chain (62%) ────────────────────────────────────────┤
 //! ├────── Connections (38%) ───────────┼──────────────────────────── Resources (62%) ──────────────────────────────────── ┤
 //! ├─────────────────────────────────────────────── Peers (full width) ───────────────────────────────────────────────────┤
@@ -14,13 +14,17 @@
 //!
 //! **Standard** (>= 80 cols, >= 28 rows — same two-column grid, narrower):
 //! ```text
-//! ┌──────────────── Header (2 lines) ─────────────────┐
+//! ┌──────────────── Header (1 line) ──────────────────┐
 //! ├── Node (38%) ──┬──────── Chain (62%) ──────────── ┤
 //! ├─ Connections ──┼──────── Resources ─────────────── ┤
 //! ├───────────────────── Peers (full width) ──────────┤
 //! │ (gap)                                             │
 //! ├──────────────── Footer (1 line) ──────────────────┘
 //! ```
+//!
+//! The epoch progress bar appears **only** inside the Chain panel — it is NOT
+//! duplicated in the header.  The header is a single line carrying the status
+//! pill, epoch number, era, network, tip-diff indicator, and uptime.
 //!
 //! **Compact** (< 80 cols or < 28 rows — single-column stacked):
 //! ```text
@@ -40,18 +44,19 @@ use ratatui::layout::{Constraint, Layout, Rect};
 // Fixed panel heights (lines including borders)
 // ---------------------------------------------------------------------------
 
-/// Node info panel: Role + Network + Version + Era + Uptime = 5 rows + 2 borders + 1 padding = 8
+/// Node panel: Role + Network + Version + Era + Uptime + Peers + Forged = 7 content rows + 2 borders = 9
 pub const PANEL_NODE_H: u16 = 9;
-/// Chain panel: epoch bar + 8 data rows + 2 borders + 1 padding = 12
-pub const PANEL_CHAIN_H: u16 = 13;
-/// Connections panel: P2P + In/Out + Cold/Warm/Hot + Uni/Bi/Duplex = 5 rows + 2 borders + 1 = 8
-pub const PANEL_CONNECTIONS_H: u16 = 8;
-/// Resources panel: CPU + Mem live + Mem RSS + CPU bar = 4 rows + 2 borders + 1 = 7
-pub const PANEL_RESOURCES_H: u16 = 7;
-/// Peers panel: RTT bands header + bar + min/avg/max + 1 row = 5 rows + 2 borders + 1 = 8
-pub const PANEL_PEERS_H: u16 = 8;
-/// Header area height: 2 lines (status line + epoch progress bar).
-pub const HEADER_H: u16 = 2;
+/// Chain panel: epoch bar (1) + 8 data rows + 2 borders = 11.
+/// The epoch progress bar lives here (not in the header).
+pub const PANEL_CHAIN_H: u16 = 11;
+/// Connections panel: P2P + Inbound + Outbound + Cold/Warm/Hot + Uni/Bi/Duplex = 5 content rows + 2 borders = 7
+pub const PANEL_CONNECTIONS_H: u16 = 7;
+/// Resources panel: CPU + Mem live + Mem RSS + mem bar = 4 content rows + 2 borders = 6
+pub const PANEL_RESOURCES_H: u16 = 6;
+/// Peers panel: RTT bar + 2 band rows + Low/Avg/High = 4 content rows + 2 borders = 6
+pub const PANEL_PEERS_H: u16 = 6;
+/// Header area height: 1 line (status pill + key metrics only; epoch bar is in Chain panel).
+pub const HEADER_H: u16 = 1;
 
 // ---------------------------------------------------------------------------
 // Layout mode
@@ -298,13 +303,15 @@ mod tests {
     }
 
     #[test]
-    fn test_header_is_two_lines() {
+    fn test_header_is_one_line() {
+        // Header is exactly 1 line — the epoch bar lives in the Chain panel, not here.
+        assert_eq!(HEADER_H, 1, "HEADER_H constant must be 1");
         for mode in [LayoutMode::Wide, LayoutMode::Standard] {
             let area = Rect::new(0, 0, 160, 60);
             let layout = compute_layout(area, Some(mode));
             assert_eq!(
                 layout.header.height, HEADER_H,
-                "header must be {HEADER_H} lines in {mode:?}"
+                "header must be {HEADER_H} line in {mode:?}"
             );
         }
     }

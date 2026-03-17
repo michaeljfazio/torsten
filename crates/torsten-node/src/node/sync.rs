@@ -926,59 +926,66 @@ impl Node {
                 }
                 *last_snapshot_epoch = current_epoch;
 
-                // Prune opcert counters to only keep active pools (prevents unbounded growth)
-                let active_pools: std::collections::HashSet<_> = self
-                    .ledger_state
-                    .read()
-                    .await
-                    .pool_params
-                    .keys()
-                    .copied()
-                    .collect();
-                self.consensus.prune_opcert_counters(&active_pools);
-
-                // Revalidate all mempool transactions against the new epoch's protocol
-                // parameters.  Protocol parameters can change at epoch boundaries (fee
-                // structure, max tx size, execution unit prices, etc.), so transactions
-                // that were valid in the previous epoch may now violate the new rules.
-                // This mirrors Haskell cardano-node's epoch-boundary revalidation and is
-                // critical for block producers: forging a block with transactions that
-                // violate the new parameters would produce an invalid block.
-                if !self.mempool.is_empty() {
+                // Single read acquisition to cover both opcert pruning and
+                // epoch-boundary mempool revalidation.  Combining these two
+                // read-lock acquisitions into one eliminates the unlock/relock
+                // round-trip and reduces contention with any concurrent writer
+                // (e.g. the ledger-apply path above).
+                //
+                // The guard is held for the duration of the mempool closure
+                // because the closure borrows `utxo_set` from it directly —
+                // avoiding a potentially large clone of the UTxO map.
+                {
                     let ledger = self.ledger_state.read().await;
-                    // Snapshot the scalar fields we need for the closure — these are
-                    // cheap copies (params and slot_config are both small structs).
-                    // We borrow utxo_set directly from the read-guard so we avoid
-                    // cloning the potentially large UTxO map.
-                    let new_params = ledger.protocol_params.clone();
-                    let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
-                    let slot_config = ledger.slot_config;
-                    let utxo_ref = &ledger.utxo_set;
-                    let evicted = self.mempool.revalidate_all(|tx| {
-                        let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
-                        torsten_ledger::validation::validate_transaction(
-                            tx,
-                            utxo_ref,
-                            &new_params,
-                            current_slot,
-                            tx_size,
-                            Some(&slot_config),
-                        )
-                        .is_ok()
-                    });
-                    drop(ledger);
-                    if !evicted.is_empty() {
-                        info!(
-                            epoch = current_epoch,
-                            evicted = evicted.len(),
-                            remaining = self.mempool.len(),
-                            "Epoch boundary: evicted mempool transactions that violate new protocol parameters",
-                        );
-                    } else {
-                        debug!(
-                            epoch = current_epoch,
-                            "Epoch boundary: all mempool transactions valid under new protocol parameters",
-                        );
+
+                    // Prune opcert counters to only keep active pools (prevents
+                    // unbounded growth as pools retire over epochs).
+                    let active_pools: std::collections::HashSet<_> =
+                        ledger.pool_params.keys().copied().collect();
+                    self.consensus.prune_opcert_counters(&active_pools);
+
+                    // Revalidate all mempool transactions against the new epoch's
+                    // protocol parameters.  Protocol parameters can change at epoch
+                    // boundaries (fee structure, max tx size, execution unit prices,
+                    // etc.), so transactions that were valid in the previous epoch may
+                    // now violate the new rules.  This mirrors Haskell cardano-node's
+                    // epoch-boundary revalidation and is critical for block producers:
+                    // forging a block with transactions that violate the new parameters
+                    // would produce an invalid block.
+                    if !self.mempool.is_empty() {
+                        // Snapshot the scalar fields we need for the closure — these are
+                        // cheap copies (params and slot_config are both small structs).
+                        // We borrow utxo_set directly from the read-guard so we avoid
+                        // cloning the potentially large UTxO map.
+                        let new_params = ledger.protocol_params.clone();
+                        let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                        let slot_config = ledger.slot_config;
+                        let utxo_ref = &ledger.utxo_set;
+                        let evicted = self.mempool.revalidate_all(|tx| {
+                            let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+                            torsten_ledger::validation::validate_transaction(
+                                tx,
+                                utxo_ref,
+                                &new_params,
+                                current_slot,
+                                tx_size,
+                                Some(&slot_config),
+                            )
+                            .is_ok()
+                        });
+                        if !evicted.is_empty() {
+                            info!(
+                                epoch = current_epoch,
+                                evicted = evicted.len(),
+                                remaining = self.mempool.len(),
+                                "Epoch boundary: evicted mempool transactions that violate new protocol parameters",
+                            );
+                        } else {
+                            debug!(
+                                epoch = current_epoch,
+                                "Epoch boundary: all mempool transactions valid under new protocol parameters",
+                            );
+                        }
                     }
                 }
             }
