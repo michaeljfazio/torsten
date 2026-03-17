@@ -10,12 +10,13 @@ use tracing::{debug, warn};
 
 // Re-export all public types for backwards compatibility
 pub use types::{
-    CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, DRepStakeEntry, EraBound, EraSummary,
-    GenesisConfigSnapshot, GovActionId, GovStateSnapshot, LedgerPeerEntry, MultiAssetSnapshot,
-    NodeStateSnapshot, NonMyopicRewardEntry, PoolParamsSnapshot, PoolRewardInfo,
-    PoolStakeSnapshotEntry, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult, RelaySnapshot,
-    ShelleyPParamsSnapshot, SnapshotStakeData, StakeAddressSnapshot, StakeDelegDepositEntry,
-    StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider, UtxoSnapshot, VoteDelegateeEntry,
+    CommitteeMemberSnapshot, CommitteeSnapshot, DRepDelegationEntry, DRepSnapshot, DRepStakeEntry,
+    EraBound, EraSummary, GenesisConfigSnapshot, GovActionId, GovStateSnapshot, LedgerPeerEntry,
+    MultiAssetSnapshot, NodeStateSnapshot, NonMyopicRewardEntry, PoolParamsSnapshot,
+    PoolRewardInfo, PoolStakeSnapshotEntry, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult,
+    RelaySnapshot, ShelleyPParamsSnapshot, SnapshotStakeData, StakeAddressSnapshot,
+    StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider,
+    UtxoSnapshot, VoteDelegateeEntry,
 };
 
 /// Handler for local state queries.
@@ -502,6 +503,11 @@ impl QueryHandler {
                 // Tag 38: GetMaxMajorProtocolVersion (V21+)
                 debug!("Query: GetMaxMajorProtocolVersion");
                 QueryResult::MaxMajorProtocolVersion(10)
+            }
+            39 => {
+                // Tag 39: GetDRepDelegations (V23+)
+                // Returns Map<Credential, DRep> for the requested stake credentials.
+                governance::handle_drep_delegations(&self.state, decoder)
             }
             _ => {
                 debug!("Unhandled Shelley query tag: {query_tag}");

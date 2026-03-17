@@ -168,9 +168,9 @@ impl Node {
     /// on-chain state.
     pub async fn update_query_state(&self) {
         use torsten_network::query_handler::{
-            CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, DRepStakeEntry,
-            GenesisConfigSnapshot, PoolParamsSnapshot, PoolStakeSnapshotEntry, ProposalSnapshot,
-            ShelleyPParamsSnapshot, StakeAddressSnapshot, StakeDelegDepositEntry,
+            CommitteeMemberSnapshot, CommitteeSnapshot, DRepDelegationEntry, DRepSnapshot,
+            DRepStakeEntry, GenesisConfigSnapshot, PoolParamsSnapshot, PoolStakeSnapshotEntry,
+            ProposalSnapshot, ShelleyPParamsSnapshot, StakeAddressSnapshot, StakeDelegDepositEntry,
             StakePoolSnapshot, StakeSnapshotsResult, VoteDelegateeEntry,
         };
 
@@ -641,6 +641,31 @@ impl Node {
                 .collect()
         };
 
+        // Build DRep delegation entries for GetDRepDelegations (tag 39, V23+).
+        // Uses the same source as vote_delegatees (ls.governance.vote_delegations) but
+        // produces DRepDelegationEntry values, keeping the two query types independent.
+        let drep_delegations: Vec<DRepDelegationEntry> = {
+            use torsten_primitives::transaction::DRep;
+            ls.governance
+                .vote_delegations
+                .iter()
+                .map(|(stake_cred, drep)| {
+                    let (drep_type, drep_hash) = match drep {
+                        DRep::KeyHash(h) => (0u8, Some(h.as_ref()[..28].to_vec())),
+                        DRep::ScriptHash(h) => (1u8, Some(h.as_ref().to_vec())),
+                        DRep::Abstain => (2u8, None),
+                        DRep::NoConfidence => (3u8, None),
+                    };
+                    DRepDelegationEntry {
+                        credential_hash: hash32_padded_to_28_bytes(stake_cred),
+                        credential_type: ls.script_stake_credentials.contains(stake_cred) as u8,
+                        drep_type,
+                        drep_hash,
+                    }
+                })
+                .collect()
+        };
+
         // Build ratify_enacted proposals from governance.last_ratified
         let ratify_enacted = ls
             .governance
@@ -756,6 +781,7 @@ impl Node {
             stake_deleg_deposits,
             drep_stake_distr,
             vote_delegatees,
+            drep_delegations,
             era_summaries: self.build_era_summaries(&ls),
             active_slots_coeff_num: self.shelley_genesis.as_ref().map_or(1, |g| {
                 let (n, _) = float_to_rational(g.active_slots_coeff);

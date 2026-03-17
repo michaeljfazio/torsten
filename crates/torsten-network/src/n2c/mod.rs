@@ -503,8 +503,9 @@ fn parse_handshake_magic(payload: &[u8]) -> Option<u64> {
 /// V16 = 32784, V17 = 32785, etc. Strip bit 15 to get the logical version.
 const N2C_VERSION_BIT: u32 = 1 << 15; // 0x8000
 
-/// Maximum N2C version we support
-const N2C_MAX_VERSION: u32 = 22;
+/// Maximum N2C version we support.
+/// V23 adds GetDRepDelegations (tag 39).
+const N2C_MAX_VERSION: u32 = 23;
 
 /// Minimum N2C version we support
 const N2C_MIN_VERSION: u32 = 16;

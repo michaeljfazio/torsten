@@ -162,6 +162,12 @@ pub enum QueryResult {
     },
     /// GetFuturePParams (tag 33): returns Nothing (no future params)
     NoFuturePParams,
+    /// GetDRepDelegations (tag 39, V23+): Map<Credential, DRep> for filtered credentials.
+    ///
+    /// Returns the current DRep delegation for each requested stake credential.
+    /// Identical wire format to FilteredVoteDelegatees (tag 28) but is a new
+    /// Conway-era query introduced with N2C protocol version 23.
+    DRepDelegations(Vec<DRepDelegationEntry>),
     Error(String),
 }
 
@@ -472,6 +478,24 @@ pub struct VoteDelegateeEntry {
     pub drep_hash: Option<Vec<u8>>,
 }
 
+/// DRep delegation entry for GetDRepDelegations (tag 39, V23+).
+///
+/// Maps a stake credential to its DRep delegation.
+/// Wire format: Map<Credential, DRep>
+///   Credential: array(2) [0|1, hash(28)]
+///   DRep: array(2) [0|1, hash(28)]  or  array(1) [2|3]  (AlwaysAbstain / AlwaysNoConfidence)
+#[derive(Debug, Clone)]
+pub struct DRepDelegationEntry {
+    /// Stake credential hash (28 bytes)
+    pub credential_hash: Vec<u8>,
+    /// Credential type: 0=KeyHash, 1=ScriptHash
+    pub credential_type: u8,
+    /// DRep type: 0=KeyHash, 1=ScriptHash, 2=AlwaysAbstain, 3=AlwaysNoConfidence
+    pub drep_type: u8,
+    /// DRep credential hash (28 bytes, None for AlwaysAbstain/AlwaysNoConfidence)
+    pub drep_hash: Option<Vec<u8>>,
+}
+
 /// CompactGenesis snapshot for GetGenesisConfig (tag 11).
 /// CBOR: array(15) matching ShelleyGenesis wire format.
 #[derive(Debug, Clone)]
@@ -759,6 +783,8 @@ pub struct NodeStateSnapshot {
     pub drep_stake_distr: Vec<DRepStakeEntry>,
     /// Vote delegatees for GetFilteredVoteDelegatees (tag 28)
     pub vote_delegatees: Vec<VoteDelegateeEntry>,
+    /// DRep delegations for GetDRepDelegations (tag 39, V23+)
+    pub drep_delegations: Vec<DRepDelegationEntry>,
     /// Era summaries for GetEraHistory query
     pub era_summaries: Vec<EraSummary>,
     /// Active slots coefficient as numerator/denominator
@@ -842,6 +868,7 @@ impl Default for NodeStateSnapshot {
             stake_deleg_deposits: Vec::new(),
             drep_stake_distr: Vec::new(),
             vote_delegatees: Vec::new(),
+            drep_delegations: Vec::new(),
             era_summaries: Vec::new(),
             active_slots_coeff_num: 1,
             active_slots_coeff_den: 20,

@@ -1,4 +1,4 @@
-//! Governance query handlers (tags 23, 24, 25, 26, 27, 28).
+//! Governance query handlers (tags 23, 24, 25, 26, 27, 28, 39).
 
 use tracing::debug;
 
@@ -169,10 +169,43 @@ pub(crate) fn handle_filtered_vote_delegatees(
     }
 }
 
+/// Handle GetDRepDelegations (tag 39, N2C V23+).
+///
+/// Argument: tag(258) Set<Credential> where Credential = array(2) [0|1, hash(28)]
+/// Returns: Map<Credential, DRep>
+///
+/// This query returns the current DRep delegation for each requested stake
+/// credential.  An empty filter set means "return all delegations".
+///
+/// Wire format is identical to GetFilteredVoteDelegatees (tag 28), but it is
+/// a distinct query introduced in V23 so that tooling can distinguish it from
+/// the older tag-28 query.
+pub(crate) fn handle_drep_delegations(
+    state: &NodeStateSnapshot,
+    decoder: &mut minicbor::Decoder<'_>,
+) -> QueryResult {
+    debug!("Query: GetDRepDelegations (tag 39)");
+    let filter_hashes = parse_credential_set(decoder);
+    if filter_hashes.is_empty() {
+        // No filter — return all known DRep delegations.
+        QueryResult::DRepDelegations(state.drep_delegations.to_vec())
+    } else {
+        let filtered = state
+            .drep_delegations
+            .iter()
+            .filter(|v| filter_hashes.iter().any(|h| h == &v.credential_hash))
+            .cloned()
+            .collect();
+        QueryResult::DRepDelegations(filtered)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_handler::types::{GovActionId, NodeStateSnapshot, ProposalSnapshot};
+    use crate::query_handler::types::{
+        DRepDelegationEntry, GovActionId, NodeStateSnapshot, ProposalSnapshot,
+    };
 
     fn make_state_with_proposals() -> NodeStateSnapshot {
         NodeStateSnapshot {
@@ -635,6 +668,153 @@ mod tests {
                 assert_eq!(entries[0].drep_type, 2);
             }
             _ => panic!("Expected FilteredVoteDelegatees"),
+        }
+    }
+
+    // ─── GetDRepDelegations (tag 39, V23+) ──────────────────────────────────
+
+    fn make_drep_delegations_state() -> NodeStateSnapshot {
+        NodeStateSnapshot {
+            drep_delegations: vec![
+                DRepDelegationEntry {
+                    credential_hash: vec![0xAA; 28],
+                    credential_type: 0, // KeyHash
+                    drep_type: 0,       // KeyHash DRep
+                    drep_hash: Some(vec![0xBB; 28]),
+                },
+                DRepDelegationEntry {
+                    credential_hash: vec![0xCC; 28],
+                    credential_type: 0, // KeyHash
+                    drep_type: 2,       // AlwaysAbstain
+                    drep_hash: None,
+                },
+                DRepDelegationEntry {
+                    credential_hash: vec![0xDD; 28],
+                    credential_type: 1, // ScriptHash
+                    drep_type: 3,       // AlwaysNoConfidence
+                    drep_hash: None,
+                },
+            ],
+            ..NodeStateSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn test_drep_delegations_no_filter_returns_all() {
+        let state = make_drep_delegations_state();
+        // Empty Set<Credential> → return all
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(0).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_drep_delegations(&state, &mut dec);
+        match result {
+            QueryResult::DRepDelegations(entries) => {
+                assert_eq!(entries.len(), 3);
+            }
+            _ => panic!("Expected DRepDelegations"),
+        }
+    }
+
+    #[test]
+    fn test_drep_delegations_filtered_by_credential() {
+        let state = make_drep_delegations_state();
+        // Filter for credential 0xAA (KeyHash) only
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(1).ok();
+            enc.array(2).ok();
+            enc.u8(0).ok(); // KeyHash
+            enc.bytes(&[0xAA; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_drep_delegations(&state, &mut dec);
+        match result {
+            QueryResult::DRepDelegations(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].credential_hash, vec![0xAA; 28]);
+                assert_eq!(entries[0].credential_type, 0);
+                assert_eq!(entries[0].drep_type, 0); // KeyHash DRep
+                assert_eq!(entries[0].drep_hash, Some(vec![0xBB; 28]));
+            }
+            _ => panic!("Expected DRepDelegations"),
+        }
+    }
+
+    #[test]
+    fn test_drep_delegations_filtered_returns_always_abstain() {
+        let state = make_drep_delegations_state();
+        // Filter for 0xCC — should return the AlwaysAbstain entry
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(1).ok();
+            enc.array(2).ok();
+            enc.u8(0).ok();
+            enc.bytes(&[0xCC; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_drep_delegations(&state, &mut dec);
+        match result {
+            QueryResult::DRepDelegations(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].drep_type, 2); // AlwaysAbstain
+                assert!(entries[0].drep_hash.is_none());
+            }
+            _ => panic!("Expected DRepDelegations"),
+        }
+    }
+
+    #[test]
+    fn test_drep_delegations_filtered_no_match_returns_empty() {
+        let state = make_drep_delegations_state();
+        // Filter for a credential that doesn't exist
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(1).ok();
+            enc.array(2).ok();
+            enc.u8(0).ok();
+            enc.bytes(&[0xFF; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_drep_delegations(&state, &mut dec);
+        match result {
+            QueryResult::DRepDelegations(entries) => {
+                assert!(entries.is_empty());
+            }
+            _ => panic!("Expected DRepDelegations"),
+        }
+    }
+
+    #[test]
+    fn test_drep_delegations_empty_state_no_filter() {
+        let state = NodeStateSnapshot::default(); // drep_delegations is empty
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.tag(minicbor::data::Tag::new(258)).ok();
+            enc.array(0).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_drep_delegations(&state, &mut dec);
+        match result {
+            QueryResult::DRepDelegations(entries) => {
+                assert!(entries.is_empty());
+            }
+            _ => panic!("Expected DRepDelegations"),
         }
     }
 }

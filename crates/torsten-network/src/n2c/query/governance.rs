@@ -11,6 +11,7 @@
 //!   - 32 GetRatifyState
 //!   - 33 GetFuturePParams
 //!   - 35 GetStakePoolDefaultVote
+//!   - 39 GetDRepDelegations (V23+)
 //!
 //! The actual CBOR serialization lives in `encoding.rs`; this module
 //! documents which `QueryResult` variants correspond to which protocol tags.
