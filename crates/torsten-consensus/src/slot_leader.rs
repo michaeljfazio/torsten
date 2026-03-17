@@ -21,6 +21,27 @@ pub fn is_slot_leader(vrf_output: &[u8], relative_stake: f64, active_slot_coeff:
     torsten_crypto::vrf::check_leader_value(&leader_value, relative_stake, active_slot_coeff)
 }
 
+/// Check if a pool is the slot leader using exact rational sigma.
+///
+/// Both sigma (pool_stake/total_active_stake) and f (f_num/f_den) are
+/// passed as exact rationals — no f64 precision loss.
+pub fn is_slot_leader_rational(
+    vrf_output: &[u8],
+    sigma_num: u64,
+    sigma_den: u64,
+    f_num: u64,
+    f_den: u64,
+) -> bool {
+    let leader_value = vrf_leader_value(vrf_output);
+    torsten_crypto::vrf::check_leader_value_full_rational(
+        &leader_value,
+        sigma_num,
+        sigma_den,
+        f_num,
+        f_den,
+    )
+}
+
 /// Construct the Praos VRF input (Conway era).
 ///
 /// VRF input = Blake2b-256(slot_u64_BE || epoch_nonce_bytes)

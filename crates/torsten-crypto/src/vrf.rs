@@ -116,6 +116,51 @@ pub fn check_leader_value_rational(
     )
 }
 
+/// Praos leader check with FULLY exact rational inputs (no f64 anywhere).
+///
+/// Both sigma (relative stake = pool_stake/total_active_stake) and f
+/// (active slot coefficient = f_num/f_den) are passed as exact rationals.
+/// This matches Haskell's `checkLeaderNatValue` which receives `Rational`
+/// for both sigma and the active slot coefficient.
+pub fn check_leader_value_full_rational(
+    vrf_output: &[u8],
+    sigma_num: u64,
+    sigma_den: u64,
+    active_slot_coeff_num: u64,
+    active_slot_coeff_den: u64,
+) -> bool {
+    leader_check::check_leader_value_all_rational(
+        vrf_output,
+        sigma_num,
+        sigma_den,
+        active_slot_coeff_num,
+        active_slot_coeff_den,
+        false, // Praos: 32-byte leader value, certNatMax = 2^256
+    )
+}
+
+/// TPraos leader check with FULLY exact rational inputs (no f64 anywhere).
+///
+/// Same as `check_leader_value_full_rational` but for Shelley-Alonzo eras
+/// (protocol versions 2-6) where certNatMax = 2^512 and the raw 64-byte
+/// VRF output is used directly.
+pub fn check_leader_value_tpraos_rational(
+    vrf_output: &[u8],
+    sigma_num: u64,
+    sigma_den: u64,
+    active_slot_coeff_num: u64,
+    active_slot_coeff_den: u64,
+) -> bool {
+    leader_check::check_leader_value_all_rational(
+        vrf_output,
+        sigma_num,
+        sigma_den,
+        active_slot_coeff_num,
+        active_slot_coeff_den,
+        true, // TPraos: 64-byte raw output, certNatMax = 2^512
+    )
+}
+
 /// Exact-precision VRF leader check matching Haskell's `checkLeaderNatValue`.
 ///
 /// Uses `dashu-int` (IBig) for 34-digit fixed-point arithmetic, matching the
@@ -560,6 +605,79 @@ mod leader_check {
         // Check: recip_q < exp(x)?
         // ref_exp_cmp returns GT if compare > exp(x), LT if compare < exp(x)
         // We want: recip_q < exp(x) → leader elected
+        match ref_exp_cmp(1000, &x, 3, &recip_q) {
+            ExpCmpResult::LT => true,       // recip_q < exp(x) → IS leader
+            ExpCmpResult::GT => false,      // recip_q >= exp(x) → NOT leader
+            ExpCmpResult::Unknown => false, // conservative: not leader
+        }
+    }
+
+    /// Fully exact VRF leader eligibility check with rational sigma AND rational f.
+    ///
+    /// No f64 conversions anywhere — both sigma (pool_stake/total_active_stake)
+    /// and f (active_slot_coeff_num/active_slot_coeff_den) are exact rationals.
+    ///
+    /// When `tpraos` is false: Praos mode (32-byte leader value, certNatMax = 2^256).
+    /// When `tpraos` is true: TPraos mode (64-byte raw VRF output, certNatMax = 2^512).
+    pub fn check_leader_value_all_rational(
+        vrf_output: &[u8],
+        sigma_num: u64,
+        sigma_den: u64,
+        f_num: u64,
+        f_den: u64,
+        tpraos: bool,
+    ) -> bool {
+        if sigma_num == 0 || sigma_den == 0 {
+            return false;
+        }
+        if f_den == 0 || f_num >= f_den {
+            return true;
+        }
+
+        let cert_nat_max = if tpraos {
+            IBig::from(2).pow(512)
+        } else {
+            cert_nat_max()
+        };
+
+        let cert_nat = if tpraos {
+            if vrf_output.len() >= 64 {
+                IBig::from(dashu_int::UBig::from_be_bytes(&vrf_output[..64]))
+            } else {
+                IBig::from(dashu_int::UBig::from_be_bytes(vrf_output))
+            }
+        } else if vrf_output.len() >= 32 {
+            IBig::from(dashu_int::UBig::from_be_bytes(&vrf_output[..32]))
+        } else {
+            IBig::from(dashu_int::UBig::from_be_bytes(vrf_output))
+        };
+
+        let q = &cert_nat_max - &cert_nat;
+        if q <= *ZERO {
+            return false;
+        }
+
+        // recip_q = certNatMax / q  (in fixed-point)
+        let mut recip_q = IBig::from(0);
+        fp_div(&mut recip_q, &cert_nat_max, &q);
+
+        // Compute (1-f) in exact fixed-point from rational:
+        // 1 - f_num/f_den = (f_den - f_num) / f_den
+        let one_minus_f_fp = IBig::from(f_den - f_num) * &*PRECISION / IBig::from(f_den);
+
+        // c = |ln(1 - f)| (positive, since ln(1-f) < 0 for f in (0,1))
+        let mut ln_one_minus_f = IBig::from(0);
+        ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
+        let c = -&ln_one_minus_f; // positive
+
+        // sigma in exact fixed-point from rational: sigma_num / sigma_den
+        let sigma_fp = IBig::from(sigma_num) * &*PRECISION / IBig::from(sigma_den);
+
+        // x = sigma * c (in fixed-point)
+        let mut x = &sigma_fp * &c;
+        fp_scale(&mut x);
+
+        // Check: recip_q < exp(x)?
         match ref_exp_cmp(1000, &x, 3, &recip_q) {
             ExpCmpResult::LT => true,       // recip_q < exp(x) → IS leader
             ExpCmpResult::GT => false,      // recip_q >= exp(x) → NOT leader

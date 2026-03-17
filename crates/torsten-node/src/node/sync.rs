@@ -506,10 +506,12 @@ impl Node {
 
                     pool_reg.map(|reg| {
                         if total_active_stake == 0 {
-                            // No snapshot data — just do VRF key binding, skip leader check
+                            // No snapshot data — just do VRF key binding, skip leader check.
+                            // Use 1/1 (= 100%) so the pool passes the threshold trivially.
                             return BlockIssuerInfo {
                                 vrf_keyhash: reg.vrf_keyhash,
-                                relative_stake: 1.0, // Assume eligible when no stake data
+                                pool_stake: 1,
+                                total_active_stake: 1,
                             };
                         }
                         let pool_stake = set_snapshot
@@ -518,7 +520,8 @@ impl Node {
                             .unwrap_or(0);
                         BlockIssuerInfo {
                             vrf_keyhash: reg.vrf_keyhash,
-                            relative_stake: pool_stake as f64 / total_active_stake as f64,
+                            pool_stake,
+                            total_active_stake,
                         }
                     })
                 } else {
@@ -1333,11 +1336,17 @@ impl Node {
                             let fetch_start = std::time::Instant::now();
                             let header_count = headers.len() as u64;
                             match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                Ok(blocks) => {
+                                Ok(result) => {
                                     let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                    if !result.failed_fetchers.is_empty() {
+                                        warn!(
+                                            failed = ?result.failed_fetchers,
+                                            "Some fetchers failed during batch fetch"
+                                        );
+                                    }
                                     if block_tx
                                         .send(PipelineMsg::Batch {
-                                            blocks,
+                                            blocks: result.blocks,
                                             tip,
                                             fetch_ms,
                                             header_count,
@@ -1366,12 +1375,12 @@ impl Node {
                         }) => {
                             // Fetch blocks for headers before the rollback point
                             if !headers.is_empty() {
-                                if let Ok(blocks) =
+                                if let Ok(result) =
                                     fetch_pool.fetch_blocks_concurrent(&headers).await
                                 {
                                     let _ = block_tx
                                         .send(PipelineMsg::Batch {
-                                            blocks,
+                                            blocks: result.blocks,
                                             tip,
                                             fetch_ms: 0.0,
                                             header_count: headers.len() as u64,
@@ -1407,11 +1416,17 @@ impl Node {
                                 let fetch_start = std::time::Instant::now();
                                 let header_count = headers.len() as u64;
                                 match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                    Ok(blocks) => {
+                                    Ok(result) => {
                                         let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                        if !result.failed_fetchers.is_empty() {
+                                            warn!(
+                                                failed = ?result.failed_fetchers,
+                                                "Some fetchers failed during at-tip batch fetch"
+                                            );
+                                        }
                                         if block_tx
                                             .send(PipelineMsg::Batch {
-                                                blocks,
+                                                blocks: result.blocks,
                                                 tip,
                                                 fetch_ms,
                                                 header_count,
@@ -1609,7 +1624,15 @@ impl Node {
                                                 client.fetch_blocks_by_points(&headers).await
                                             } else {
                                                 match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                                    Ok(blocks) => Ok(blocks),
+                                                    Ok(result) => {
+                                                        if !result.failed_fetchers.is_empty() {
+                                                            warn!(
+                                                                failed = ?result.failed_fetchers,
+                                                                "Some fetchers failed during sequential fetch"
+                                                            );
+                                                        }
+                                                        Ok(result.blocks)
+                                                    }
                                                     Err(e) => {
                                                         warn!("Pool fetch failed, falling back to primary peer: {e}");
                                                         client.fetch_blocks_by_points(&headers).await
@@ -1670,8 +1693,8 @@ impl Node {
                                         HeaderBatchResult::HeadersAndRollback { headers, tip, rollback_point, ebb_hashes, .. } => {
                                             if !headers.is_empty() {
                                                 match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                                    Ok(blocks) => {
-                                                        self.process_forward_blocks(blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                                    Ok(result) => {
+                                                        self.process_forward_blocks(result.blocks, &tip, &ebb_hashes, &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
                                                     }
                                                     Err(e) => { warn!("Pool fetch failed during rollback batch: {e}"); }
                                                 }
@@ -1690,7 +1713,15 @@ impl Node {
                                                     client.fetch_blocks_by_points(&headers).await
                                                 } else {
                                                     match fetch_pool.fetch_blocks_concurrent(&headers).await {
-                                                        Ok(blocks) => Ok(blocks),
+                                                        Ok(result) => {
+                                                            if !result.failed_fetchers.is_empty() {
+                                                                warn!(
+                                                                    failed = ?result.failed_fetchers,
+                                                                    "Some fetchers failed during at-tip fetch"
+                                                                );
+                                                            }
+                                                            Ok(result.blocks)
+                                                        }
                                                         Err(e) => {
                                                             warn!("Pool fetch failed, falling back to primary peer: {e}");
                                                             client.fetch_blocks_by_points(&headers).await

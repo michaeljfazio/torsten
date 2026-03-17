@@ -498,6 +498,16 @@ impl Node {
             }
         }
 
+        // After attaching the UTxO store, rebuild stake distribution and snapshot
+        // pool stakes so that block production has correct data immediately on restart.
+        // Without this, a block producer restored from snapshot may see pool_stake=0
+        // if the saved snapshot's incremental stake tracking was stale.
+        if ledger.tip.point != Point::Origin && !ledger.utxo_set.is_empty() {
+            info!("Rebuilding stake distribution from UTxO store for snapshot consistency");
+            ledger.rebuild_stake_distribution();
+            ledger.recompute_snapshot_pool_stakes();
+        }
+
         let ledger_state = Arc::new(RwLock::new(ledger));
 
         let consensus = if let Some(ref genesis) = shelley_genesis {
@@ -1423,8 +1433,15 @@ impl Node {
                     }
                     let target = addr.to_string();
                     let connect_start = std::time::Instant::now();
+                    // Use the same 5s TCP connect timeout as the primary peer
+                    // to avoid 20-120s stalls per unreachable fetcher candidate.
                     let connect_result = tokio::select! {
-                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        r = tokio::time::timeout(
+                            connect_timeout,
+                            NodeToNodeClient::connect(&*target, network_magic),
+                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
+                            format!("{target}: fetcher connection timed out after {}s", connect_timeout.as_secs()),
+                        ))),
                         _ = shutdown_rx.changed() => break,
                     };
                     match connect_result {
@@ -1445,6 +1462,7 @@ impl Node {
                             fetch_pool.add_fetcher(c);
                         }
                         Err(e) => {
+                            peer_manager.write().await.peer_failed(addr);
                             warn!("Failed to connect fetcher to {target}: {e}");
                         }
                     }
@@ -1455,7 +1473,12 @@ impl Node {
                 if fetch_pool.is_empty() && !*shutdown_rx.borrow() {
                     let target = peer_addr.to_string();
                     let connect_result = tokio::select! {
-                        r = NodeToNodeClient::connect(&*target, network_magic) => r,
+                        r = tokio::time::timeout(
+                            connect_timeout,
+                            NodeToNodeClient::connect(&*target, network_magic),
+                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
+                            format!("{target}: dedicated fetcher connection timed out after {}s", connect_timeout.as_secs()),
+                        ))),
                         _ = shutdown_rx.changed() => {
                             info!(fetchers = 0, "Block fetchers ready");
                             continue;

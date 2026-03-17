@@ -1135,7 +1135,7 @@ fn encode_committee_state(
                 enc.u32(0).ok();
                 if let Some(hot) = &member.hot_credential {
                     enc.array(2).ok();
-                    enc.u8(0).ok(); // KeyHashObj
+                    enc.u8(member.hot_credential_type).ok(); // 0=KeyHashObj, 1=ScriptHashObj
                     enc.bytes(hot).ok();
                 }
             }
@@ -2075,6 +2075,7 @@ mod tests {
                 cold_credential_type: 0,
                 hot_status: 0,
                 hot_credential: Some(vec![0x55; 28]),
+                hot_credential_type: 0,
                 member_status: 0,
                 expiry_epoch: Some(500),
             }],
@@ -2108,6 +2109,7 @@ mod tests {
                 cold_credential_type: 0,
                 hot_status: 0, // Authorized
                 hot_credential: Some(vec![0x77; 28]),
+                hot_credential_type: 0,
                 member_status: 0,
                 expiry_epoch: Some(500),
             }],

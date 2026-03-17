@@ -16,8 +16,8 @@ pub(crate) mod tcp;
 
 pub use bandwidth::TokenBucketRateLimiter;
 pub use client::{
-    BlockFetchPool, ChainSyncEvent, ClientError, EbbInfo, HeaderBatchResult, HeaderInfo,
-    NodeToNodeClient,
+    BlockFetchPool, ChainSyncEvent, ClientError, EbbInfo, FetchResult, HeaderBatchResult,
+    HeaderInfo, NodeToNodeClient,
 };
 pub use dns::DnsResolver;
 pub use miniprotocols::peersharing::{

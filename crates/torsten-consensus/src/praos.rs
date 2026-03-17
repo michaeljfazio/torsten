@@ -76,8 +76,22 @@ pub enum ConsensusError {
 pub struct BlockIssuerInfo {
     /// The pool's registered VRF key hash (Blake2b-256 of the VRF verification key)
     pub vrf_keyhash: Hash32,
-    /// The pool's relative stake (fraction of total active stake, 0.0 to 1.0)
-    pub relative_stake: f64,
+    /// The pool's stake (numerator of relative stake fraction).
+    /// Relative stake = pool_stake / total_active_stake, passed as exact
+    /// rational to avoid f64 precision loss at decision boundaries.
+    pub pool_stake: u64,
+    /// Total active stake across all pools (denominator of relative stake fraction).
+    pub total_active_stake: u64,
+}
+
+impl BlockIssuerInfo {
+    /// Relative stake as f64 (for logging/display only — NOT for VRF checks).
+    pub fn relative_stake_f64(&self) -> f64 {
+        if self.total_active_stake == 0 {
+            return 0.0;
+        }
+        self.pool_stake as f64 / self.total_active_stake as f64
+    }
 }
 
 /// Controls the level of header validation performed.
@@ -120,8 +134,12 @@ pub const SECURITY_PARAM: u64 = 2160;
 
 /// Ouroboros Praos consensus engine
 pub struct OuroborosPraos {
-    /// Active slot coefficient
+    /// Active slot coefficient (f64 for backward compat / logging)
     pub active_slot_coeff: f64,
+    /// Active slot coefficient as exact rational (numerator, denominator).
+    /// E.g., mainnet/preview f=0.05 is stored as (1, 20).
+    /// Used for VRF leader checks to avoid f64 precision loss.
+    pub active_slot_coeff_rational: (u64, u64),
     /// Security parameter
     pub security_param: u64,
     /// Epoch length in slots
@@ -154,8 +172,10 @@ pub struct OuroborosPraos {
 
 impl OuroborosPraos {
     pub fn new() -> Self {
+        let rational = torsten_primitives::protocol_params::f64_to_rational(ACTIVE_SLOT_COEFF);
         OuroborosPraos {
             active_slot_coeff: ACTIVE_SLOT_COEFF,
+            active_slot_coeff_rational: rational,
             security_param: SECURITY_PARAM,
             epoch_length: torsten_primitives::time::mainnet_epoch_length(),
             slots_per_kes_period: KES_PERIOD_SLOTS,
@@ -173,8 +193,10 @@ impl OuroborosPraos {
         security_param: u64,
         epoch_length: EpochLength,
     ) -> Self {
+        let rational = torsten_primitives::protocol_params::f64_to_rational(active_slot_coeff);
         OuroborosPraos {
             active_slot_coeff,
+            active_slot_coeff_rational: rational,
             security_param,
             epoch_length,
             slots_per_kes_period: KES_PERIOD_SLOTS,
@@ -194,8 +216,10 @@ impl OuroborosPraos {
         slots_per_kes_period: u64,
         max_kes_evolutions: u64,
     ) -> Self {
+        let rational = torsten_primitives::protocol_params::f64_to_rational(active_slot_coeff);
         OuroborosPraos {
             active_slot_coeff,
+            active_slot_coeff_rational: rational,
             security_param,
             epoch_length,
             slots_per_kes_period,
@@ -403,36 +427,44 @@ impl OuroborosPraos {
             // Praos threshold for this pool's relative stake.
             // Uses exact 34-digit fixed-point arithmetic (dashu IBig) matching
             // Haskell's taylorExpCmp / pallas-math implementation.
+            // Both sigma (relative stake) and f (active slot coeff) are passed
+            // as exact rationals to avoid f64 precision loss at boundaries.
             if header.vrf_result.output.len() == 64 {
                 // Praos (Babbage/Conway, protocol >= 7): Blake2b-256("L" || vrf_output), certNatMax = 2^256
                 // TPraos (Shelley-Alonzo, protocol < 7): raw 64-byte vrf_output, certNatMax = 2^512
                 let is_praos = header.protocol_version.major >= 7;
+                let (f_num, f_den) = self.active_slot_coeff_rational;
                 let is_leader = if is_praos {
                     let leader_value =
                         crate::slot_leader::vrf_leader_value(&header.vrf_result.output);
-                    torsten_crypto::vrf::check_leader_value(
+                    torsten_crypto::vrf::check_leader_value_full_rational(
                         &leader_value,
-                        info.relative_stake,
-                        self.active_slot_coeff,
+                        info.pool_stake,
+                        info.total_active_stake,
+                        f_num,
+                        f_den,
                     )
                 } else {
                     // TPraos: raw VRF output directly
-                    torsten_crypto::vrf::check_leader_value_tpraos(
+                    torsten_crypto::vrf::check_leader_value_tpraos_rational(
                         &header.vrf_result.output,
-                        info.relative_stake,
-                        self.active_slot_coeff,
+                        info.pool_stake,
+                        info.total_active_stake,
+                        f_num,
+                        f_den,
                     )
                 };
                 if !is_leader {
+                    let sigma_display = info.relative_stake_f64();
                     if self.strict_verification && self.snapshots_established {
                         return Err(ConsensusError::InvalidBlock(format!(
                             "VRF leader eligibility check failed: slot={}, sigma={}, proto={}",
-                            header.slot.0, info.relative_stake, header.protocol_version.major,
+                            header.slot.0, sigma_display, header.protocol_version.major,
                         )));
                     } else {
                         debug!(
                             slot = header.slot.0,
-                            relative_stake = info.relative_stake,
+                            relative_stake = sigma_display,
                             proto = header.protocol_version.major,
                             praos = is_praos,
                             "Praos: VRF leader eligibility check failed (non-strict, skipping)"
@@ -842,16 +874,30 @@ impl OuroborosPraos {
         }
     }
 
-    /// The stability window: 3k/f slots (using integer arithmetic for precision)
-    pub fn stability_window(&self) -> u64 {
-        let (f_num, f_den) =
-            torsten_primitives::protocol_params::f64_to_rational(self.active_slot_coeff);
+    /// The stability window in slots, using integer arithmetic for precision.
+    ///
+    /// The multiplier is era-dependent per the Ouroboros specifications:
+    /// - **Shelley through Babbage** (protocol major < 10): `3k/f`
+    /// - **Conway with Genesis** (protocol major >= 10): `4k/f`
+    ///
+    /// The `protocol_major` parameter is the current ledger protocol version.
+    /// When called without a specific version (e.g., during initialisation),
+    /// use `stability_window_default()` which applies the pre-Conway multiplier.
+    pub fn stability_window_for_version(&self, protocol_major: u64) -> u64 {
+        let multiplier = if protocol_major >= 10 { 4 } else { 3 };
+        let (f_num, f_den) = self.active_slot_coeff_rational;
         torsten_primitives::protocol_params::ceiling_div_by_rational(
-            3,
+            multiplier,
             self.security_param,
             f_num,
             f_den,
         )
+    }
+
+    /// Default stability window using pre-Conway multiplier (3k/f).
+    /// Use `stability_window_for_version()` when the current protocol version is known.
+    pub fn stability_window(&self) -> u64 {
+        self.stability_window_for_version(0)
     }
 
     /// Calculate which epoch a slot belongs to
@@ -1109,7 +1155,8 @@ mod tests {
     fn make_issuer_info(header: &BlockHeader) -> BlockIssuerInfo {
         BlockIssuerInfo {
             vrf_keyhash: blake2b_256(&header.vrf_vkey),
-            relative_stake: 1.0,
+            pool_stake: 1,
+            total_active_stake: 1,
         }
     }
 
@@ -1444,7 +1491,8 @@ mod tests {
         let wrong_hash = Hash32::from_bytes([99u8; 32]);
         let info = BlockIssuerInfo {
             vrf_keyhash: wrong_hash,
-            relative_stake: 1.0,
+            pool_stake: 1,
+            total_active_stake: 1,
         };
 
         let result =
@@ -1463,7 +1511,8 @@ mod tests {
         let wrong_hash = Hash32::from_bytes([99u8; 32]);
         let info = BlockIssuerInfo {
             vrf_keyhash: wrong_hash,
-            relative_stake: 1.0,
+            pool_stake: 1,
+            total_active_stake: 1,
         };
 
         assert!(praos
@@ -1481,7 +1530,8 @@ mod tests {
         let correct_hash = blake2b_256(&header.vrf_vkey);
         let info = BlockIssuerInfo {
             vrf_keyhash: correct_hash,
-            relative_stake: 1.0,
+            pool_stake: 1,
+            total_active_stake: 1,
         };
 
         // Should pass VRF key binding check (VRF proof may still fail, but key binding is OK)
@@ -1617,7 +1667,8 @@ mod tests {
         let correct_hash = blake2b_256(&header.vrf_vkey);
         let info = BlockIssuerInfo {
             vrf_keyhash: correct_hash,
-            relative_stake: 0.0, // Zero stake = never eligible
+            pool_stake: 0, // Zero stake = never eligible
+            total_active_stake: 1000,
         };
 
         // The VRF proof verification will fail first in strict mode with dummy data,
@@ -1634,9 +1685,10 @@ mod tests {
     fn test_block_issuer_info_construction() {
         let info = BlockIssuerInfo {
             vrf_keyhash: Hash32::from_bytes([42u8; 32]),
-            relative_stake: 0.05,
+            pool_stake: 5,
+            total_active_stake: 100,
         };
-        assert_eq!(info.relative_stake, 0.05);
+        assert!((info.relative_stake_f64() - 0.05).abs() < f64::EPSILON);
         assert_eq!(info.vrf_keyhash, Hash32::from_bytes([42u8; 32]));
     }
 
@@ -1858,7 +1910,8 @@ mod tests {
         let correct_hash = blake2b_256(&header.vrf_vkey);
         let info = BlockIssuerInfo {
             vrf_keyhash: correct_hash,
-            relative_stake: 0.5,
+            pool_stake: 1,
+            total_active_stake: 2,
         };
 
         let result =
@@ -1916,7 +1969,8 @@ mod tests {
         let correct_hash = blake2b_256(&header.vrf_vkey);
         let info = BlockIssuerInfo {
             vrf_keyhash: correct_hash,
-            relative_stake: 1.0,
+            pool_stake: 1,
+            total_active_stake: 1,
         };
 
         // With strict mode and dummy VRF data, VRF key binding check passes but

@@ -672,6 +672,8 @@ pub struct CommitteeMemberSnapshot {
     /// Hot credential authorization status: 0=Authorized(cred), 1=NotAuthorized, 2=Resigned
     pub hot_status: u8,
     pub hot_credential: Option<Vec<u8>>,
+    /// Hot credential type: 0=KeyHashObj, 1=ScriptHashObj
+    pub hot_credential_type: u8,
     /// 0=Active, 1=Expired, 2=Unrecognized
     pub member_status: u8,
     /// Term expiration epoch

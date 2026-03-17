@@ -3,8 +3,10 @@ use pallas_network::miniprotocols::chainsync::NextResponse;
 use pallas_network::miniprotocols::chainsync::Tip as PallasTip;
 use pallas_network::miniprotocols::Point as PallasPoint;
 use pallas_traverse::MultiEraHeader;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::net::ToSocketAddrs;
 use tokio::sync::Mutex;
@@ -26,6 +28,8 @@ pub enum ClientError {
     BlockFetch(String),
     #[error("block decode error: {0}")]
     BlockDecode(String),
+    #[error("operation timed out after {0}s")]
+    Timeout(u64),
     #[error("peer disconnected")]
     Disconnected,
 }
@@ -488,9 +492,17 @@ impl NodeToNodeClient {
         }
     }
 
+    /// Timeout for a single block-fetch operation (range or individual).
+    /// Stalled fetchers are detected after this duration instead of hanging
+    /// indefinitely on an unresponsive peer.
+    const BLOCK_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// Fetch blocks by a list of points using the blockfetch protocol.
     /// Each block is fetched individually by its exact point (slot + hash),
     /// ensuring hash-verified correctness regardless of which peer serves it.
+    ///
+    /// All network operations are wrapped in a 30-second timeout so that
+    /// stalled peers are detected quickly instead of blocking the pipeline.
     pub async fn fetch_blocks_by_points(
         &mut self,
         points: &[HeaderInfo],
@@ -509,7 +521,12 @@ impl NodeToNodeClient {
         let last_pt = points.last().expect("points is non-empty (checked above)");
         let last = PallasPoint::Specific(last_pt.slot, last_pt.hash.to_vec());
 
-        let range_result = self.peer.blockfetch().fetch_range((first, last)).await;
+        let range_result = tokio::time::timeout(
+            Self::BLOCK_FETCH_TIMEOUT,
+            self.peer.blockfetch().fetch_range((first, last)),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout(Self::BLOCK_FETCH_TIMEOUT.as_secs()))?;
 
         match range_result {
             Ok(bodies) if bodies.len() == points.len() => {
@@ -578,6 +595,8 @@ impl NodeToNodeClient {
     /// Fetch blocks one at a time by their exact point (slot + hash).
     /// Slower than range fetch but works across era boundaries and when
     /// the peer doesn't support the requested range.
+    ///
+    /// Each individual fetch is wrapped in a 30-second timeout.
     async fn fetch_individual_points(
         &mut self,
         points: &[HeaderInfo],
@@ -585,14 +604,15 @@ impl NodeToNodeClient {
     ) -> Result<(), ClientError> {
         for point in points {
             let p = PallasPoint::Specific(point.slot, point.hash.to_vec());
-            let single = self
-                .peer
-                .blockfetch()
-                .fetch_range((p.clone(), p))
-                .await
-                .map_err(|e| {
-                    ClientError::BlockFetch(format!("single fetch slot {}: {e}", point.slot))
-                })?;
+            let single = tokio::time::timeout(
+                Self::BLOCK_FETCH_TIMEOUT,
+                self.peer.blockfetch().fetch_range((p.clone(), p)),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout(Self::BLOCK_FETCH_TIMEOUT.as_secs()))?
+            .map_err(|e| {
+                ClientError::BlockFetch(format!("single fetch slot {}: {e}", point.slot))
+            })?;
             if let Some(body) = single.into_iter().next() {
                 out.push(body);
             } else {
@@ -666,6 +686,16 @@ pub enum HeaderBatchResult {
     HeadersAtTip(Vec<HeaderInfo>, Tip, Vec<EbbInfo>),
 }
 
+/// Result of a concurrent block fetch, reporting both the blocks and
+/// any fetcher indices that failed (so the caller can replace them).
+pub struct FetchResult {
+    /// Successfully fetched blocks in header order.
+    pub blocks: Vec<Block>,
+    /// Indices of fetchers that failed during this fetch round.
+    /// The caller should replace these with fresh connections.
+    pub failed_fetchers: Vec<usize>,
+}
+
 /// A pool of peer connections for concurrent block fetching.
 /// Headers are collected from a primary peer via ChainSync,
 /// then blocks are fetched from multiple peers in parallel.
@@ -692,6 +722,16 @@ impl BlockFetchPool {
         self.fetchers.push(Arc::new(Mutex::new(client)));
     }
 
+    /// Replace a failed fetcher at the given index with a new connection.
+    /// If the index is out of bounds, the client is appended instead.
+    pub fn replace_fetcher(&mut self, idx: usize, client: NodeToNodeClient) {
+        if idx < self.fetchers.len() {
+            self.fetchers[idx] = Arc::new(Mutex::new(client));
+        } else {
+            self.fetchers.push(Arc::new(Mutex::new(client)));
+        }
+    }
+
     /// Number of fetchers in the pool.
     pub fn len(&self) -> usize {
         self.fetchers.len()
@@ -703,15 +743,23 @@ impl BlockFetchPool {
     }
 
     /// Fetch blocks for the given headers using all fetchers in parallel.
+    ///
     /// Headers are split into chunks and fetched concurrently across fetchers,
-    /// then results are reassembled in order. This achieves near-linear speedup
-    /// with the number of fetchers.
+    /// then results are reassembled in order. When a chunk fails, it is retried
+    /// across ALL remaining healthy fetchers (not just one round-robin). The
+    /// batch only fails if every fetcher has been tried for a given chunk.
+    ///
+    /// Returns a `FetchResult` containing the blocks and a list of fetcher
+    /// indices that failed, so the caller can replace them with fresh connections.
     pub async fn fetch_blocks_concurrent(
         &self,
         headers: &[HeaderInfo],
-    ) -> Result<Vec<Block>, ClientError> {
+    ) -> Result<FetchResult, ClientError> {
         if headers.is_empty() {
-            return Ok(vec![]);
+            return Ok(FetchResult {
+                blocks: vec![],
+                failed_fetchers: vec![],
+            });
         }
 
         let num_fetchers = self.fetchers.len();
@@ -733,40 +781,81 @@ impl BlockFetchPool {
             }));
         }
 
-        // Collect results in order, retrying failed chunks on other fetchers
+        // Collect results in order, tracking failed chunks for retry
         let mut all_blocks = Vec::with_capacity(headers.len());
         let mut failed_chunks: Vec<(usize, Vec<HeaderInfo>)> = Vec::new();
+        let mut failed_fetcher_set: HashSet<usize> = HashSet::new();
 
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok(Ok(blocks)) => all_blocks.extend(blocks),
                 Ok(Err(e)) => {
-                    tracing::warn!("Fetcher {i} failed: {e}, will retry on another fetcher");
+                    tracing::warn!(fetcher = i, error = %e, "Fetcher failed, will retry on remaining fetchers");
                     let start = i * chunk_size;
                     let end = (start + chunk_size).min(headers.len());
                     failed_chunks.push((i, headers[start..end].to_vec()));
+                    failed_fetcher_set.insert(i);
                 }
                 Err(e) => {
-                    tracing::warn!("Fetcher {i} task panicked: {e}, will retry on another fetcher");
+                    tracing::warn!(fetcher = i, error = %e, "Fetcher task panicked, will retry on remaining fetchers");
                     let start = i * chunk_size;
                     let end = (start + chunk_size).min(headers.len());
                     failed_chunks.push((i, headers[start..end].to_vec()));
+                    failed_fetcher_set.insert(i);
                 }
             }
         }
 
-        // Retry failed chunks on the first available fetcher (round-robin)
+        // Retry failed chunks across ALL remaining healthy fetchers.
+        // For each failed chunk, try every fetcher that hasn't already failed,
+        // stopping at the first success.
         for (failed_idx, chunk) in failed_chunks {
-            let fallback_idx = (failed_idx + 1) % num_fetchers;
-            let fetcher = self.fetchers[fallback_idx].clone();
-            let mut client = fetcher.lock().await;
-            let blocks = client.fetch_blocks_by_points(&chunk).await.map_err(|e| {
-                ClientError::BlockFetch(format!("retry on fetcher {fallback_idx}: {e}"))
-            })?;
-            all_blocks.extend(blocks);
+            let mut succeeded = false;
+            // Build candidate list: all fetchers except the one that already failed
+            // for this chunk and any fetchers already known to be broken.
+            let mut tried: HashSet<usize> = HashSet::new();
+            tried.insert(failed_idx);
+
+            for candidate_idx in 0..num_fetchers {
+                if tried.contains(&candidate_idx) || failed_fetcher_set.contains(&candidate_idx) {
+                    continue;
+                }
+                tried.insert(candidate_idx);
+
+                let fetcher = self.fetchers[candidate_idx].clone();
+                let mut client = fetcher.lock().await;
+                match client.fetch_blocks_by_points(&chunk).await {
+                    Ok(blocks) => {
+                        all_blocks.extend(blocks);
+                        succeeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            fetcher = candidate_idx,
+                            error = %e,
+                            "Retry on fetcher {candidate_idx} also failed"
+                        );
+                        // Mark this fetcher as failed too so subsequent chunks
+                        // don't waste time trying it.
+                        failed_fetcher_set.insert(candidate_idx);
+                    }
+                }
+            }
+
+            if !succeeded {
+                return Err(ClientError::BlockFetch(format!(
+                    "all {} fetchers failed for chunk starting at slot {}",
+                    num_fetchers,
+                    chunk.first().map(|h| h.slot).unwrap_or(0)
+                )));
+            }
         }
 
-        Ok(all_blocks)
+        Ok(FetchResult {
+            blocks: all_blocks,
+            failed_fetchers: failed_fetcher_set.into_iter().collect(),
+        })
     }
 
     /// Disconnect all fetchers.
