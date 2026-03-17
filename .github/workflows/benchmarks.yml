@@ -88,6 +88,7 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add "benches/results/${DATE}-nightly.md" docs/src/reference/benchmarks.md
             git commit -m "Update nightly benchmark results (${DATE})" || echo "No changes to commit"
+            git pull --rebase origin main || true
             git push || echo "Push failed — results saved as artifact"
           fi
 
@@ -109,14 +110,14 @@ jobs:
             mkdir -p docs/book/benchmarks
             cp -r target/criterion/* docs/book/benchmarks/ 2>/dev/null || true
             # Add a redirect page
-            cat > docs/book/benchmarks/index.html <<'BENCHHTML'
-            <!DOCTYPE html>
-            <html><head><title>Torsten Benchmarks</title></head>
-            <body>
-            <h1>Torsten Criterion Benchmark Reports</h1>
-            <p>Interactive benchmark reports from the nightly CI run.</p>
-            <ul>
-            BENCHHTML
+            cat > docs/book/benchmarks/index.html <<BENCHHTML
+          <!DOCTYPE html>
+          <html><head><title>Torsten Benchmarks</title></head>
+          <body>
+          <h1>Torsten Criterion Benchmark Reports</h1>
+          <p>Interactive benchmark reports from the nightly CI run.</p>
+          <ul>
+          BENCHHTML
             for dir in docs/book/benchmarks/*/; do
               name=$(basename "$dir")
               if [ -f "$dir/report/index.html" ]; then
