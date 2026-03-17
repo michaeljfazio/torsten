@@ -1150,8 +1150,14 @@ impl Node {
                         pm.outbound_peer_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
-                    self.metrics.peers_inbound.store(
-                        pm.inbound_peer_count() as u64,
+                    let inbound_count = pm.inbound_peer_count() as u64;
+                    self.metrics
+                        .peers_inbound
+                        .store(inbound_count, std::sync::atomic::Ordering::Relaxed);
+                    // Duplex = outbound + inbound: total peers with bidirectional
+                    // mini-protocol bundles (InitiatorAndResponder diffusion mode).
+                    self.metrics.peers_duplex.store(
+                        pm.outbound_peer_count() as u64 + inbound_count,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     self.metrics.peers_cold.store(

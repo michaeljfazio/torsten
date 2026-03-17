@@ -512,9 +512,12 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     let cold = app.metrics.get_u64("torsten_peers_cold");
     let warm = app.metrics.get_u64("torsten_peers_warm");
     let hot = app.metrics.get_u64("torsten_peers_hot");
-    let unidir = app.metrics.get_u64("torsten_peers_unidirectional");
-    let bidir = app.metrics.get_u64("torsten_peers_bidirectional");
-    // Duplex count — metric exists but may be 0 (not yet populated); show 0 explicitly.
+    // Unidirectional = outbound-only connections (we dialled, they have not connected back).
+    // Bidirectional  = inbound-only connections (they dialled us).
+    // Duplex         = outbound + inbound (total peers with bidirectional capability);
+    //                  populated by the node when running in InitiatorAndResponder mode.
+    let unidir = app.metrics.get_u64("torsten_peers_outbound");
+    let bidir = app.metrics.get_u64("torsten_peers_inbound");
     let duplex = app.metrics.get_u64("torsten_peers_duplex");
 
     let p2p_enabled = outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0;
