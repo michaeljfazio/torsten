@@ -1938,6 +1938,7 @@ impl Node {
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
         let replay_dir = replay_dir.to_path_buf();
         let bel = self.byron_epoch_length;
+        let metrics = self.metrics.clone();
 
         let security_param = self
             .shelley_genesis
@@ -2025,6 +2026,11 @@ impl Node {
                             } else {
                                 0.0
                             };
+                            // Update Prometheus metric so TUI/monitoring can track replay progress
+                            metrics.set_sync_progress(pct);
+                            metrics.set_slot(slot);
+                            metrics.set_block_number(ls_guard.tip.block_number.0);
+                            metrics.set_epoch(ls_guard.epoch.0);
                             info!(
                                 progress = format_args!("{pct:>6.2}%"),
                                 blocks = replayed,
@@ -2196,6 +2202,11 @@ impl Node {
                                 } else {
                                     0.0
                                 };
+                                // Update Prometheus metric so TUI/monitoring can track replay progress
+                                self.metrics.set_sync_progress(pct);
+                                self.metrics.set_slot(slot.0);
+                                self.metrics.set_block_number(block_no);
+                                self.metrics.set_epoch(ls.epoch.0);
                                 info!(
                                     progress = format_args!("{pct:>6.2}%"),
                                     block = block_no,

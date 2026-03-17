@@ -19,6 +19,7 @@ use ratatui::{
 };
 
 /// A sync progress bar widget that renders a filled gauge with color-coded status.
+#[allow(dead_code)]
 pub struct SyncProgressBar {
     /// Progress ratio from 0.0 to 100.0 (percentage).
     progress: f64,
@@ -36,6 +37,7 @@ pub struct SyncProgressBar {
     color_empty: Color,
 }
 
+#[allow(dead_code)]
 impl SyncProgressBar {
     /// Create a new progress bar.
     ///
