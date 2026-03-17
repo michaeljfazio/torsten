@@ -441,7 +441,10 @@ impl QueryHandler {
             8 => protocol::handle_debug_epoch_state(&self.state),
             9 => self.handle_get_cbor(decoder),
             10 => stake::handle_filtered_delegations(&self.state, decoder),
-            11 => protocol::handle_genesis_config(&self.state),
+            // Version-gated encoding: V16-V20 array(18) flat ProtVer,
+            // V21+ array(17) bundled ProtVer. Version 0 = use legacy encoding.
+            // The correct n2c_version will be threaded through when PR #143 merges.
+            11 => protocol::handle_genesis_config(&self.state, 0),
             12 => protocol::handle_debug_new_epoch_state(&self.state),
             13 => protocol::handle_debug_chain_dep_state(&self.state),
             14 => protocol::handle_reward_provenance(&self.state),
