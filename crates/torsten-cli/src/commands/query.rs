@@ -405,13 +405,17 @@ impl QueryCmd {
                     100.0
                 };
 
+                let network_name = torsten_primitives::network::NetworkId::name_from_magic(
+                    testnet_magic.unwrap_or(764824073),
+                );
                 println!("{{");
                 println!("    \"slot\": {},", tip.slot);
                 println!("    \"hash\": \"{hash_hex}\",");
                 println!("    \"block\": {block_no},");
                 println!("    \"epoch\": {epoch},");
                 println!("    \"era\": \"{era_str}\",");
-                println!("    \"syncProgress\": \"{sync_progress:.2}\"");
+                println!("    \"syncProgress\": \"{sync_progress:.2}\",");
+                println!("    \"network\": \"{network_name}\"");
                 println!("}}");
                 Ok(())
             }
