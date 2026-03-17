@@ -1830,3 +1830,533 @@ fn encode_ledger_peer_snapshot(
     }
     enc.end().ok(); // end pool list
 }
+
+// ─── Hash-size regression tests ───────────────────────────────────────────────
+//
+// These tests verify that all credential/pool-ID/DRep hashes are encoded as
+// exactly 28 bytes in N2C query responses, matching the Cardano wire format.
+//
+// Background: internally the ledger stores Blake2b-224 (28-byte) hashes as
+// Hash32 (zero-padded to 32 bytes) for use as uniform HashMap keys.  When
+// building N2C responses these must be truncated back to 28 bytes.  Sending
+// 32-byte hashes causes cardano-cli to reject with "hash bytes wrong size".
+//
+// See GitHub issue #97.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_handler::{
+        CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, DRepStakeEntry,
+        PoolDefaultVoteEntry, PoolParamsSnapshot, PoolStakeSnapshotEntry, StakeAddressSnapshot,
+        StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, VoteDelegateeEntry,
+    };
+    use minicbor::Decoder;
+
+    // ── Helper: strip the MsgResult [4, [result]] wrappers from a full
+    //    encode_query_result() output and return just the inner payload. ──────
+    fn strip_wrappers(cbor: &[u8]) -> Vec<u8> {
+        let mut dec = Decoder::new(cbor);
+        // [4, [payload]]
+        dec.array().unwrap();
+        dec.u32().unwrap(); // 4 = MsgResult tag
+        dec.array().unwrap(); // HFC EitherMismatch Right wrapper
+        cbor[dec.position()..].to_vec()
+    }
+
+    // ─── Stake distribution (tags 5, 10, 30) — pool IDs must be 28 bytes ────
+
+    #[test]
+    fn test_stake_distribution_pool_id_is_28_bytes() {
+        // Build a query result with a pool ID stored as 28 bytes (normal path).
+        let result = QueryResult::StakeDistribution(vec![StakePoolSnapshot {
+            pool_id: vec![0xAB; 28],
+            stake: 1_000_000,
+            vrf_keyhash: vec![0u8; 32],
+            total_active_stake: 1_000_000,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { pool_id_bytes => array(2)[rational, vrf_hash] }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap(); // map header
+        let pool_id_bytes = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id_bytes.len(),
+            28,
+            "StakeDistribution pool_id must be 28 bytes, got {}",
+            pool_id_bytes.len()
+        );
+    }
+
+    #[test]
+    fn test_pool_distr_pool_id_is_28_bytes() {
+        let result = QueryResult::PoolDistr(vec![StakePoolSnapshot {
+            pool_id: vec![0xCD; 28],
+            stake: 500_000,
+            vrf_keyhash: vec![0u8; 32],
+            total_active_stake: 1_000_000,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        let pool_id_bytes = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id_bytes.len(),
+            28,
+            "PoolDistr pool_id must be 28 bytes, got {}",
+            pool_id_bytes.len()
+        );
+    }
+
+    // ─── DRep state (tag 25) — credential hashes must be 28 bytes ───────────
+
+    #[test]
+    fn test_drep_state_credential_hash_is_28_bytes() {
+        let result = QueryResult::DRepState(vec![DRepSnapshot {
+            credential_hash: vec![0x11; 28],
+            credential_type: 0,
+            deposit: 500_000_000,
+            anchor_url: None,
+            anchor_hash: None,
+            expiry_epoch: 200,
+            delegator_hashes: vec![],
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { [cred_type, cred_hash_bytes] => DRepState }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap(); // map header
+        dec.array().unwrap(); // Credential = array(2)
+        dec.u8().unwrap(); // cred type
+        let cred_hash_bytes = dec.bytes().unwrap();
+        assert_eq!(
+            cred_hash_bytes.len(),
+            28,
+            "DRepState credential_hash must be 28 bytes, got {}",
+            cred_hash_bytes.len()
+        );
+    }
+
+    #[test]
+    fn test_drep_state_delegator_hash_is_28_bytes() {
+        // A DRep with one delegator. The delegator credential hash must also be 28 bytes.
+        let result = QueryResult::DRepState(vec![DRepSnapshot {
+            credential_hash: vec![0x22; 28],
+            credential_type: 0,
+            deposit: 500_000_000,
+            anchor_url: None,
+            anchor_hash: None,
+            expiry_epoch: 200,
+            delegator_hashes: vec![vec![0x33; 28]],
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Skip past the outer map key (credential)
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        // Key: array(2) [type, hash]
+        dec.array().unwrap();
+        dec.u8().unwrap();
+        dec.bytes().unwrap();
+        // Value: DRepState array(4) [expiry, anchor, deposit, delegators_set]
+        dec.array().unwrap();
+        dec.u64().unwrap(); // expiry
+        dec.array().unwrap(); // anchor SNothing = array(0)
+        dec.u64().unwrap(); // deposit
+        dec.tag().unwrap(); // tag(258) set
+        dec.array().unwrap(); // array(1)
+                              // Delegator: array(2) [type, hash]
+        dec.array().unwrap();
+        dec.u8().unwrap();
+        let delegator_hash = dec.bytes().unwrap();
+        assert_eq!(
+            delegator_hash.len(),
+            28,
+            "DRep delegator credential hash must be 28 bytes, got {}",
+            delegator_hash.len()
+        );
+    }
+
+    // ─── Committee state (tag 27) — cold/hot credentials must be 28 bytes ───
+
+    #[test]
+    fn test_committee_state_cold_credential_is_28_bytes() {
+        let result = QueryResult::CommitteeState(CommitteeSnapshot {
+            members: vec![CommitteeMemberSnapshot {
+                cold_credential: vec![0x44; 28],
+                cold_credential_type: 0,
+                hot_status: 0,
+                hot_credential: Some(vec![0x55; 28]),
+                member_status: 0,
+                expiry_epoch: Some(500),
+            }],
+            threshold: Some((2, 3)),
+            current_epoch: 100,
+        });
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: array(3) [member_map, maybe_threshold, epoch]
+        let mut dec = Decoder::new(&inner);
+        dec.array().unwrap(); // array(3)
+        dec.map().unwrap(); // member_map(1)
+                            // Key: Credential array(2) [type, cold_hash]
+        dec.array().unwrap();
+        dec.u8().unwrap();
+        let cold_hash = dec.bytes().unwrap();
+        assert_eq!(
+            cold_hash.len(),
+            28,
+            "CommitteeState cold credential hash must be 28 bytes, got {}",
+            cold_hash.len()
+        );
+    }
+
+    #[test]
+    fn test_committee_state_hot_credential_is_28_bytes() {
+        let result = QueryResult::CommitteeState(CommitteeSnapshot {
+            members: vec![CommitteeMemberSnapshot {
+                cold_credential: vec![0x66; 28],
+                cold_credential_type: 0,
+                hot_status: 0, // Authorized
+                hot_credential: Some(vec![0x77; 28]),
+                member_status: 0,
+                expiry_epoch: Some(500),
+            }],
+            threshold: Some((2, 3)),
+            current_epoch: 100,
+        });
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        let mut dec = Decoder::new(&inner);
+        dec.array().unwrap(); // array(3)
+        dec.map().unwrap(); // member_map(1)
+                            // Skip map key (cold cred)
+        dec.array().unwrap(); // Credential array(2)
+        dec.u8().unwrap();
+        dec.bytes().unwrap(); // cold hash
+
+        // Value: CommitteeMemberState array(4)
+        dec.array().unwrap();
+        // [0] HotCredAuthStatus: MemberAuthorized = array(2) [0, credential]
+        dec.array().unwrap(); // array(2)
+        dec.u32().unwrap(); // 0 = Authorized
+                            // Inner credential: array(2) [type, hot_hash]
+        dec.array().unwrap();
+        dec.u8().unwrap();
+        let hot_hash = dec.bytes().unwrap();
+        assert_eq!(
+            hot_hash.len(),
+            28,
+            "CommitteeState hot credential hash must be 28 bytes, got {}",
+            hot_hash.len()
+        );
+    }
+
+    // ─── Stake address info (tag 10) — credential hashes must be 28 bytes ───
+
+    #[test]
+    fn test_stake_address_info_credential_is_28_bytes() {
+        let result = QueryResult::StakeAddressInfo(vec![StakeAddressSnapshot {
+            credential_hash: vec![0x88; 28],
+            delegated_pool: Some(vec![0x99; 28]),
+            reward_balance: 1_000_000,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: array(2) [delegations_map, rewards_map]
+        let mut dec = Decoder::new(&inner);
+        dec.array().unwrap(); // array(2)
+        dec.map().unwrap(); // delegations_map(1)
+                            // Key: Credential array(2) [type, hash]
+        dec.array().unwrap();
+        dec.u32().unwrap(); // 0 = KeyHashObj
+        let cred_hash = dec.bytes().unwrap();
+        assert_eq!(
+            cred_hash.len(),
+            28,
+            "StakeAddressInfo credential hash in delegations_map must be 28 bytes, got {}",
+            cred_hash.len()
+        );
+    }
+
+    // ─── Stake deleg deposits (tag 22) — credential hashes must be 28 bytes ─
+
+    #[test]
+    fn test_stake_deleg_deposits_credential_is_28_bytes() {
+        let result = QueryResult::StakeDelegDeposits(vec![StakeDelegDepositEntry {
+            credential_hash: vec![0xAA; 28],
+            credential_type: 0,
+            deposit: 2_000_000,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { array(2)[type, hash] => deposit }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        dec.array().unwrap(); // Credential array(2)
+        dec.u8().unwrap();
+        let cred_hash = dec.bytes().unwrap();
+        assert_eq!(
+            cred_hash.len(),
+            28,
+            "StakeDelegDeposits credential hash must be 28 bytes, got {}",
+            cred_hash.len()
+        );
+    }
+
+    // ─── DRep stake distribution (tag 26) — DRep hashes must be 28 bytes ────
+
+    #[test]
+    fn test_drep_stake_distr_keyhash_is_28_bytes() {
+        let result = QueryResult::DRepStakeDistr(vec![DRepStakeEntry {
+            drep_type: 0, // KeyHash
+            drep_hash: Some(vec![0xBB; 28]),
+            stake: 1_000_000,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { DRep => stake }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        // DRep: array(2) [0, hash]
+        dec.array().unwrap();
+        dec.u8().unwrap(); // 0 = KeyHash
+        let drep_hash = dec.bytes().unwrap();
+        assert_eq!(
+            drep_hash.len(),
+            28,
+            "DRepStakeDistr KeyHash DRep hash must be 28 bytes, got {}",
+            drep_hash.len()
+        );
+    }
+
+    // ─── Filtered vote delegatees (tag 28) — credential hashes must be 28 B ─
+
+    #[test]
+    fn test_filtered_vote_delegatees_credential_is_28_bytes() {
+        let result = QueryResult::FilteredVoteDelegatees(vec![VoteDelegateeEntry {
+            credential_hash: vec![0xCC; 28],
+            credential_type: 0,
+            drep_type: 0, // KeyHash DRep
+            drep_hash: Some(vec![0xDD; 28]),
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { Credential => DRep }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        // Key: Credential array(2) [type, hash]
+        dec.array().unwrap();
+        dec.u8().unwrap();
+        let cred_hash = dec.bytes().unwrap();
+        assert_eq!(
+            cred_hash.len(),
+            28,
+            "FilteredVoteDelegatees stake credential hash must be 28 bytes, got {}",
+            cred_hash.len()
+        );
+    }
+
+    #[test]
+    fn test_filtered_vote_delegatees_drep_hash_is_28_bytes() {
+        let result = QueryResult::FilteredVoteDelegatees(vec![VoteDelegateeEntry {
+            credential_hash: vec![0xEE; 28],
+            credential_type: 0,
+            drep_type: 0, // KeyHash DRep
+            drep_hash: Some(vec![0xFF; 28]),
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        // Skip map key (credential)
+        dec.array().unwrap(); // Credential array(2)
+        dec.u8().unwrap();
+        dec.bytes().unwrap();
+        // Value: DRep array(2) [type, hash]
+        dec.array().unwrap();
+        dec.u8().unwrap(); // 0 = KeyHash
+        let drep_hash = dec.bytes().unwrap();
+        assert_eq!(
+            drep_hash.len(),
+            28,
+            "FilteredVoteDelegatees DRep KeyHash must be 28 bytes, got {}",
+            drep_hash.len()
+        );
+    }
+
+    // ─── Stake pools set (tag 16) — pool IDs must be 28 bytes ───────────────
+
+    #[test]
+    fn test_stake_pools_set_pool_id_is_28_bytes() {
+        let result = QueryResult::StakePools(vec![vec![0x12; 28]]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: tag(258) array(1) [pool_id_bytes]
+        let mut dec = Decoder::new(&inner);
+        dec.tag().unwrap(); // tag(258)
+        dec.array().unwrap();
+        let pool_id = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id.len(),
+            28,
+            "StakePools pool ID must be 28 bytes, got {}",
+            pool_id.len()
+        );
+    }
+
+    // ─── Pool params (tag 17/19) — pool IDs and owner hashes must be 28 B ───
+
+    #[test]
+    fn test_pool_params_pool_id_is_28_bytes() {
+        let result = QueryResult::PoolParams(vec![PoolParamsSnapshot {
+            pool_id: vec![0x34; 28],
+            vrf_keyhash: vec![0u8; 32],
+            pledge: 100_000_000,
+            cost: 340_000_000,
+            margin_num: 5,
+            margin_den: 100,
+            reward_account: vec![0u8; 29],
+            owners: vec![vec![0x56; 28]],
+            relays: vec![],
+            metadata_url: None,
+            metadata_hash: None,
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { pool_id_bytes => PoolParams(array(9)) }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        let pool_id = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id.len(),
+            28,
+            "PoolParams map key (pool_id) must be 28 bytes, got {}",
+            pool_id.len()
+        );
+
+        // PoolParams array(9): [operator, vrf, pledge, cost, margin, reward_acct, owners, relays, metadata]
+        dec.array().unwrap(); // array(9)
+        let operator = dec.bytes().unwrap(); // operator = pool_id again
+        assert_eq!(
+            operator.len(),
+            28,
+            "PoolParams operator field must be 28 bytes, got {}",
+            operator.len()
+        );
+        dec.bytes().unwrap(); // vrf_keyhash (32 bytes — genuine hash)
+        dec.u64().unwrap(); // pledge
+        dec.u64().unwrap(); // cost
+        dec.tag().unwrap(); // tag(30) rational for margin
+        dec.array().unwrap();
+        dec.u64().unwrap();
+        dec.u64().unwrap();
+        dec.bytes().unwrap(); // reward_account
+        dec.tag().unwrap(); // tag(258) owners set
+        dec.array().unwrap(); // array(1)
+        let owner_hash = dec.bytes().unwrap();
+        assert_eq!(
+            owner_hash.len(),
+            28,
+            "PoolParams owner hash must be 28 bytes, got {}",
+            owner_hash.len()
+        );
+    }
+
+    // ─── PoolDistr2 (tags 36/37) — pool IDs must be 28 bytes ───────────────
+
+    #[test]
+    fn test_pool_distr2_pool_id_is_28_bytes() {
+        let result = QueryResult::PoolDistr2 {
+            pools: vec![StakePoolSnapshot {
+                pool_id: vec![0x78; 28],
+                stake: 1_000_000,
+                vrf_keyhash: vec![0u8; 32],
+                total_active_stake: 2_000_000,
+            }],
+            total_active_stake: 2_000_000,
+        };
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: array(2) [pool_map, total_active_stake]
+        let mut dec = Decoder::new(&inner);
+        dec.array().unwrap(); // array(2)
+        dec.map().unwrap(); // pool_map(1)
+        let pool_id = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id.len(),
+            28,
+            "PoolDistr2 pool_id must be 28 bytes, got {}",
+            pool_id.len()
+        );
+    }
+
+    // ─── Stake snapshots (tag 20) — pool IDs must be 28 bytes ───────────────
+
+    #[test]
+    fn test_stake_snapshots_pool_id_is_28_bytes() {
+        let result = QueryResult::StakeSnapshots(StakeSnapshotsResult {
+            pools: vec![PoolStakeSnapshotEntry {
+                pool_id: vec![0x9A; 28],
+                mark_stake: 100,
+                set_stake: 200,
+                go_stake: 300,
+            }],
+            total_mark_stake: 100,
+            total_set_stake: 200,
+            total_go_stake: 300,
+        });
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: array(4) [pool_map, mark_total, set_total, go_total]
+        let mut dec = Decoder::new(&inner);
+        dec.array().unwrap();
+        dec.map().unwrap(); // pool_map(1)
+        let pool_id = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id.len(),
+            28,
+            "StakeSnapshots pool_id must be 28 bytes, got {}",
+            pool_id.len()
+        );
+    }
+
+    // ─── Default vote (tag 35) — pool IDs must be 28 bytes ─────────────────
+
+    #[test]
+    fn test_stake_pool_default_vote_pool_id_is_28_bytes() {
+        let result = QueryResult::StakePoolDefaultVote(vec![PoolDefaultVoteEntry {
+            pool_id: vec![0xBC; 28],
+            default_vote: 1, // Abstain
+        }]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Inner: map(1) { pool_id_bytes => default_vote }
+        let mut dec = Decoder::new(&inner);
+        dec.map().unwrap();
+        let pool_id = dec.bytes().unwrap();
+        assert_eq!(
+            pool_id.len(),
+            28,
+            "StakePoolDefaultVote pool_id must be 28 bytes, got {}",
+            pool_id.len()
+        );
+    }
+}

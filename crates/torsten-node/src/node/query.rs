@@ -55,6 +55,25 @@ pub(crate) fn credential_to_bytes(
     }
 }
 
+/// Truncate a padded `Hash32` key back to 28 bytes for N2C wire encoding.
+///
+/// The ledger uses `Hash32` (32 bytes) as HashMap keys for stake credentials,
+/// DRep credential hashes, committee credential hashes, and pool voter keys.
+/// These are Blake2b-224 (28-byte) hashes that were zero-padded to 32 bytes
+/// to enable use as uniform HashMap keys (see `Hash28::to_hash32_padded()`).
+///
+/// The Cardano N2C wire format expects 28 bytes for all credential/pool-ID
+/// hashes.  Sending 32 bytes causes cardano-cli to reject the response with
+/// "hash bytes wrong size, expected 28 but got 32".
+///
+/// Only call this on `Hash32` values that are known to be padded 28-byte
+/// hashes (credentials, pool IDs, DRep keys).  Do NOT call it on genuine
+/// 32-byte hashes such as transaction IDs, block hashes, or VRF key hashes.
+#[inline]
+fn hash32_padded_to_28_bytes(h: &torsten_primitives::hash::Hash32) -> Vec<u8> {
+    h.as_ref()[..28].to_vec()
+}
+
 /// Build a `SnapshotStakeData` from a single `StakeSnapshot`.
 ///
 /// The `script_creds` set distinguishes script-hash credentials (type=1) from
@@ -204,10 +223,13 @@ impl Node {
                         }
                         _ => false,
                     })
-                    .map(|(stake_cred, _)| stake_cred.as_ref().to_vec())
+                    // stake_cred is a Hash32 padded from a 28-byte key hash;
+                    // truncate to 28 bytes for N2C wire format.
+                    .map(|(stake_cred, _)| hash32_padded_to_28_bytes(stake_cred))
                     .collect();
                 DRepSnapshot {
-                    credential_hash: hash.as_ref().to_vec(),
+                    // DRep hash keys are Hash32 padded from 28-byte credential hashes.
+                    credential_hash: hash32_padded_to_28_bytes(hash),
                     // DRepRegistration stores the full Credential enum, so we can derive the type
                     // directly: 0 = VerificationKey (KeyHashObj), 1 = Script (ScriptHashObj).
                     credential_type: drep.credential.is_script() as u8,
@@ -260,7 +282,9 @@ impl Node {
                 .map(|(cold, hot)| {
                     let is_resigned = resigned_set.contains(cold);
                     CommitteeMemberSnapshot {
-                        cold_credential: cold.as_ref().to_vec(),
+                        // Committee cold/hot credentials are stored as Hash32 (padded from
+                        // 28-byte Blake2b-224 hashes). Truncate to 28 bytes for N2C wire format.
+                        cold_credential: hash32_padded_to_28_bytes(cold),
                         // Use the script_committee_credentials set to correctly distinguish
                         // key credentials (0) from script credentials (1).
                         cold_credential_type: ls
@@ -271,7 +295,8 @@ impl Node {
                         hot_credential: if is_resigned {
                             None
                         } else {
-                            Some(hot.as_ref().to_vec())
+                            // Hot credential is also a Hash32 padded from a 28-byte hash.
+                            Some(hash32_padded_to_28_bytes(hot))
                         },
                         member_status: 0, // Active (simplified)
                         expiry_epoch: ls.governance.committee_expiration.get(cold).map(|e| e.0),
@@ -287,7 +312,9 @@ impl Node {
             current_epoch: ls.epoch.0,
         };
 
-        // Build stake address snapshots (delegations + rewards)
+        // Build stake address snapshots (delegations + rewards).
+        // `cred_hash` is a Hash32 padded from a 28-byte stake key hash; truncate to 28 bytes.
+        // `pool_id` from `delegations` is a Hash28, already the right size.
         let stake_addresses: Vec<StakeAddressSnapshot> = ls
             .reward_accounts
             .iter()
@@ -297,7 +324,8 @@ impl Node {
                     .get(cred_hash)
                     .map(|pool_id| pool_id.as_ref().to_vec());
                 StakeAddressSnapshot {
-                    credential_hash: cred_hash.as_ref().to_vec(),
+                    // reward_accounts keys are Hash32 padded from 28-byte credential hashes.
+                    credential_hash: hash32_padded_to_28_bytes(cred_hash),
                     delegated_pool,
                     reward_balance: rewards.0,
                 }
@@ -565,7 +593,10 @@ impl Node {
                 .collect()
         };
 
-        // Build vote delegatee entries
+        // Build vote delegatee entries.
+        // `stake_cred` is a Hash32 padded from a 28-byte stake key hash; truncate to 28 bytes.
+        // DRep::KeyHash contains a Hash32 padded from a 28-byte DRep key hash; also truncate.
+        // DRep::ScriptHash contains a Hash28 (ScriptHash); already correct size.
         let vote_delegatees: Vec<VoteDelegateeEntry> = {
             use torsten_primitives::transaction::DRep;
             ls.governance
@@ -573,13 +604,16 @@ impl Node {
                 .iter()
                 .map(|(stake_cred, drep)| {
                     let (drep_type, drep_hash) = match drep {
+                        // DRep::KeyHash stores the DRep key as Hash32 (padded from 28 bytes).
                         DRep::KeyHash(h) => (0u8, Some(h.as_ref()[..28].to_vec())),
+                        // DRep::ScriptHash stores the script hash as Hash28 (correct size).
                         DRep::ScriptHash(h) => (1u8, Some(h.as_ref().to_vec())),
                         DRep::Abstain => (2u8, None),
                         DRep::NoConfidence => (3u8, None),
                     };
                     VoteDelegateeEntry {
-                        credential_hash: stake_cred.as_ref().to_vec(),
+                        // vote_delegations keys are Hash32 padded from 28-byte stake key hashes.
+                        credential_hash: hash32_padded_to_28_bytes(stake_cred),
                         // Use the script_stake_credentials set to distinguish key (0) from script (1).
                         credential_type: ls.script_stake_credentials.contains(stake_cred) as u8,
                         drep_type,
