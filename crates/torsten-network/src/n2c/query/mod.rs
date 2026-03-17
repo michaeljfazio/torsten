@@ -46,7 +46,7 @@ pub use encoding::encode_query_result;
 pub(crate) async fn handle_state_query(
     payload: &[u8],
     query_handler: &Arc<RwLock<QueryHandler>>,
-    _negotiated_version: u16,
+    negotiated_version: u16,
 ) -> Result<Option<Segment>, N2CServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
 
@@ -95,7 +95,7 @@ pub(crate) async fn handle_state_query(
                 "LocalStateQuery: MsgQuery"
             );
             let handler = query_handler.read().await;
-            let result = handler.handle_query_cbor(payload);
+            let result = handler.handle_query_cbor_versioned(payload, negotiated_version);
             let response_cbor = encode_query_result(&result);
             debug!(
                 response_hex = %format!("{:02x?}", &response_cbor[..response_cbor.len().min(32)]),

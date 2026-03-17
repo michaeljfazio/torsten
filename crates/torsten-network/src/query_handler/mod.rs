@@ -25,6 +25,9 @@ pub use types::{
 pub struct QueryHandler {
     state: Arc<NodeStateSnapshot>,
     utxo_provider: Option<Arc<dyn UtxoQueryProvider>>,
+    /// Negotiated N2C protocol version for the current query (set per-dispatch).
+    /// Used to gate deprecated queries. 0 = no gating (tests, internal use).
+    n2c_version: std::sync::atomic::AtomicU16,
 }
 
 impl QueryHandler {
@@ -32,6 +35,7 @@ impl QueryHandler {
         QueryHandler {
             state: Arc::new(NodeStateSnapshot::default()),
             utxo_provider: None,
+            n2c_version: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -56,8 +60,28 @@ impl QueryHandler {
     /// The CBOR payload from MsgQuery is: [3, query]
     /// where query is a nested structure depending on the query type.
     /// For Shelley-based eras, it's typically: [era_tag, [query_tag, ...]]
+    /// Handle a CBOR-encoded query without version gating (backward compat).
     pub fn handle_query_cbor(&self, payload: &[u8]) -> QueryResult {
-        // Try to parse the query from the CBOR
+        self.handle_query_cbor_versioned(payload, 0)
+    }
+
+    /// Handle a CBOR-encoded query with version gating.
+    ///
+    /// `negotiated_version` is the N2C protocol version negotiated during
+    /// handshake (16–22). Deprecated queries are rejected for newer versions:
+    /// - Tag 4 (GetProposedPParamsUpdates): deprecated at V20+ (era < 12)
+    /// - Tag 5 (GetStakeDistribution): deprecated at V21+ (use tag 37)
+    /// - Tag 21 (GetPoolDistr): deprecated at V21+ (use tag 36)
+    pub fn handle_query_cbor_versioned(
+        &self,
+        payload: &[u8],
+        negotiated_version: u16,
+    ) -> QueryResult {
+        // Store version for use by shelley query dispatch.
+        self.dispatch_query_versioned(payload, negotiated_version)
+    }
+
+    fn dispatch_query_versioned(&self, payload: &[u8], negotiated_version: u16) -> QueryResult {
         let mut decoder = minicbor::Decoder::new(payload);
 
         // Skip the message envelope [3, query]
@@ -71,14 +95,26 @@ impl QueryHandler {
             Err(e) => return QueryResult::Error(format!("Invalid query tag: {e}")),
         }
 
-        // The query itself is wrapped in layers. Try to determine the query type.
-        // Shelley queries: [shelley_era_tag, [query_id, ...]]
-        // Hard-fork queries: [query_id, ...]
-        self.dispatch_query(&mut decoder)
+        self.dispatch_query_with_version(&mut decoder, negotiated_version)
     }
 
-    /// Dispatch a query based on its CBOR structure
-    fn dispatch_query(&self, decoder: &mut minicbor::Decoder<'_>) -> QueryResult {
+    /// Version-aware query dispatch. Threads `negotiated_version` through to
+    /// `handle_shelley_query` for deprecated query gating.
+    fn dispatch_query_with_version(
+        &self,
+        decoder: &mut minicbor::Decoder<'_>,
+        negotiated_version: u16,
+    ) -> QueryResult {
+        self.n2c_version
+            .store(negotiated_version, std::sync::atomic::Ordering::Relaxed);
+        self.dispatch_query_inner(decoder, negotiated_version)
+    }
+
+    fn dispatch_query_inner(
+        &self,
+        decoder: &mut minicbor::Decoder<'_>,
+        _negotiated_version: u16,
+    ) -> QueryResult {
         // The query structure varies. Try to detect common patterns.
         // GetSystemStart has no era wrapping: just the tag 2
         // GetCurrentEra has tag 0 at the top level
@@ -343,6 +379,40 @@ impl QueryHandler {
         query_tag: u32,
         decoder: &mut minicbor::Decoder<'_>,
     ) -> QueryResult {
+        // Version-gate deprecated queries per Haskell versionGate.
+        // When negotiated_version > 0 (real client), reject deprecated tags.
+        let version = self.n2c_version.load(std::sync::atomic::Ordering::Relaxed);
+        if version >= 20 && query_tag == 4 {
+            // GetProposedPParamsUpdates: deprecated at V20 (Conway governance replaces it)
+            debug!(
+                version,
+                "Rejecting deprecated GetProposedPParamsUpdates (tag 4) for N2C V{version}"
+            );
+            return QueryResult::Error(format!(
+                "GetProposedPParamsUpdates (tag 4) is deprecated for N2C version {version} (V20+). Use governance proposals instead."
+            ));
+        }
+        if version >= 21 && query_tag == 5 {
+            // GetStakeDistribution: deprecated at V21 (replaced by tag 37 GetStakeDistribution2)
+            debug!(
+                version,
+                "Rejecting deprecated GetStakeDistribution (tag 5) for N2C V{version}"
+            );
+            return QueryResult::Error(format!(
+                "GetStakeDistribution (tag 5) is deprecated for N2C version {version} (V21+). Use GetStakeDistribution2 (tag 37) instead."
+            ));
+        }
+        if version >= 21 && query_tag == 21 {
+            // GetPoolDistr: deprecated at V21 (replaced by tag 36 GetPoolDistr2)
+            debug!(
+                version,
+                "Rejecting deprecated GetPoolDistr (tag 21) for N2C V{version}"
+            );
+            return QueryResult::Error(format!(
+                "GetPoolDistr (tag 21) is deprecated for N2C version {version} (V21+). Use GetPoolDistr2 (tag 36) instead."
+            ));
+        }
+
         match query_tag {
             0 => {
                 // Tag 0: GetLedgerTip
