@@ -77,11 +77,12 @@ pub struct PeerSelectionConfig {
 }
 
 impl Default for PeerSelectionConfig {
+    /// Defaults matching cardano-node: Active=15, Established=40, Known=85
     fn default() -> Self {
         PeerSelectionConfig {
-            target_active_peers: 20,
+            target_active_peers: 15,
             target_established_peers: 40,
-            target_known_peers: 100,
+            target_known_peers: 85,
             max_inbound_peers: 100,
         }
     }

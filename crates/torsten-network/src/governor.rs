@@ -37,12 +37,17 @@ pub struct PeerTargets {
 }
 
 impl Default for PeerTargets {
+    /// Defaults matching cardano-node configuration:
+    /// TargetNumberOfRootPeers=60, TargetNumberOfKnownPeers=85,
+    /// TargetNumberOfEstablishedPeers=40, TargetNumberOfActivePeers=15,
+    /// TargetNumberOfKnownBigLedgerPeers=15, TargetNumberOfEstablishedBigLedgerPeers=10,
+    /// TargetNumberOfActiveBigLedgerPeers=5
     fn default() -> Self {
         PeerTargets {
-            root_peers: 10,
-            known_peers: 150,
-            established_peers: 30,
-            active_peers: 20,
+            root_peers: 60,
+            known_peers: 85,
+            established_peers: 40,
+            active_peers: 15,
             known_blp: 15,
             established_blp: 10,
             active_blp: 5,
@@ -54,9 +59,9 @@ impl Default for PeerTargets {
 impl PeerTargets {
     pub fn syncing() -> Self {
         PeerTargets {
-            root_peers: 5,
+            root_peers: 30,
             known_peers: 50,
-            established_peers: 15,
+            established_peers: 20,
             active_peers: 10,
             known_blp: 15,
             established_blp: 10,
@@ -589,7 +594,7 @@ mod tests {
         let mut gov = Governor::new(GovernorConfig::default());
 
         gov.set_sync_state(SyncState::CaughtUp);
-        assert_eq!(gov.active_targets().active_peers, 20);
+        assert_eq!(gov.active_targets().active_peers, 15);
 
         gov.set_sync_state(SyncState::Syncing);
         assert_eq!(gov.active_targets().active_peers, 10);
@@ -629,7 +634,7 @@ mod tests {
         let _events = gov.maybe_churn(&pm);
         assert!(gov.churn_active);
         let reduced_active = gov.active_targets().active_peers;
-        assert_eq!(reduced_active, 16); // 20 * 4/5 = 16
+        assert_eq!(reduced_active, 12); // 15 * 4/5 = 12
 
         // Force time forward again
         gov.last_churn = Instant::now() - Duration::from_secs(10);
@@ -637,7 +642,7 @@ mod tests {
         // Second churn call: should restore targets
         let _events = gov.maybe_churn(&pm);
         assert!(!gov.churn_active);
-        assert_eq!(gov.active_targets().active_peers, 20); // restored
+        assert_eq!(gov.active_targets().active_peers, 15); // restored
     }
 
     #[test]
