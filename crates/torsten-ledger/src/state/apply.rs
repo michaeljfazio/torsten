@@ -14,7 +14,9 @@ use super::{
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
-use crate::validation::{script_ref_byte_size, validate_transaction, ValidationError};
+use crate::validation::{
+    script_ref_byte_size, validate_transaction, ValidationError, MAX_REF_SCRIPT_SIZE_TIER_CAP,
+};
 use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
@@ -30,8 +32,11 @@ use tracing::{debug, trace, warn};
 /// (Conway PParams). This is not a protocol parameter that can be updated by
 /// governance — it is hardcoded in the implementation.
 ///
+/// Re-exported from [`MAX_REF_SCRIPT_SIZE_TIER_CAP`] to keep the block-body
+/// check and the tiered-fee short-circuit in sync with the same value.
+///
 /// The corresponding per-transaction limit is [`MAX_REF_SCRIPT_SIZE_PER_TX`].
-const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = 1024 * 1024; // 1 MiB
+const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = MAX_REF_SCRIPT_SIZE_TIER_CAP;
 
 /// Maximum total reference script size allowed in a single transaction.
 ///

@@ -209,115 +209,185 @@ pub(crate) fn script_ref_byte_size(script_ref: &ScriptRef) -> u64 {
 /// Conway ledger tiered reference script fee calculation.
 ///
 /// Divides the total script size into 25 KiB tiers, applying a 1.2× multiplier
-/// per tier. The entire accumulation is kept as an exact rational value (using
-/// numerator/denominator pairs with GCD reduction) and ceiled only once at the
-/// end — matching the Cardano Blueprint spec which states "you should take the
-/// ceiling as a last step".
+/// per tier. The result is the ceiling of the exact rational sum — matching
+/// the Cardano Blueprint spec which states "you should take the ceiling as a
+/// last step" and Haskell's `tierRefScriptFee` which uses `Data.Ratio.Rational`
+/// and `ceiling`.
 ///
-/// Haskell's `tierRefScriptFee` accumulates `Rational` values and then applies
-/// `ceiling` to produce the final integer lovelace amount. Using `floor` here
-/// would cause a 1-lovelace undercount on transactions where the fractional
-/// accumulation is non-zero.
+/// # Algorithm: scaled-integer accumulation
 ///
-/// # Overflow safety
+/// Naive rational accumulation (`acc_num / acc_den`) overflows u128 beyond
+/// tier ~25 because the cross-product denominator grows as `5^(n*(n-1)/2)`.
+/// GCD reduction is insufficient for `base_fee_per_byte` values not divisible
+/// by 5 (e.g., base = 1).
 ///
-/// The rational accumulation uses `checked_mul` at each step. If any
-/// intermediate product overflows `u128` (which can happen for pathologically
-/// large scripts far exceeding the 1 MiB block limit), the function falls back
-/// to a `f64`-based approximation.  At script sizes that trigger the block-limit
-/// rejection (`> 1 MiB`), the computed fee is already astronomically large
-/// (> 10^19 lovelace) so a rounding error of a few ULP is inconsequential —
-/// the transaction/block will be rejected regardless.
+/// This implementation avoids cross-products entirely by separating each tier's
+/// contribution into an integer part and a fractional remainder that is scaled
+/// to a common denominator known at entry:
+///
+/// 1. Pre-count tiers: `k = ceil(total_size / 25600)`.
+/// 2. Set common denominator `denom = 5^(k-1)`.
+///    At k=41 (the 1 MiB cap), `denom = 5^40 ≈ 9.1×10²⁷ < u128::MAX`.
+/// 3. Per tier `i` with `chunk` bytes:
+///    - `contribution = chunk * price_num`  (price = base * (6/5)^i, GCD-reduced)
+///    - `whole = contribution / price_den`  — exact integer quotient
+///    - `tier_rem = contribution % price_den`
+///    - `scaled_rem = tier_rem * (denom / price_den)` — always < denom since
+///      `price_den` always divides `denom` (both are powers of 5)
+/// 4. Accumulate: `acc_whole += whole`, `frac_scaled += scaled_rem`.
+///    Drain any whole units from `frac_scaled` into `acc_whole` when
+///    `frac_scaled >= denom`.
+/// 5. Single ceiling: `fee = acc_whole + (1 if frac_scaled > 0)`.
+///
+/// # Overflow proofs (within the 1 MiB cap)
+///
+/// - `denom = 5^40 < 10^28 < u128::MAX` ✓
+/// - `scaled_rem < denom < u128::MAX` per iteration ✓
+/// - `frac_scaled < 41 * denom < 4 × 10^29 < u128::MAX` ✓ (41 tiers × denom)
+/// - `chunk * price_num`: `price_num ≤ base * 6^40`. For realistic protocol
+///   params (base ≤ 10^9 lovelace/byte), `chunk * price_num ≤ 25600 × 10^9 ×
+///   2.23×10^31 ≈ 5.7×10^44` — would overflow for very large `base`.  All
+///   multiplications therefore use `checked_mul`; if they overflow (unreachable
+///   with realistic params), the function saturates to `u64::MAX`.
+///
+/// # Inputs beyond the cap
+///
+/// For `total_size > MAX_REF_SCRIPT_SIZE_TIER_CAP` (1 MiB), the function
+/// short-circuits immediately with `u64::MAX`. Such inputs are already rejected
+/// by the Conway block-body rule before fee calculation is invoked in
+/// production.
 pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size: u64) -> u64 {
     const TIER_SIZE: u64 = 25_600; // 25 KiB (= 25 * 1024)
-    const MULT_NUM: u128 = 6; // 1.2 = 6/5
-    const MULT_DEN: u128 = 5;
 
-    let mut remaining = total_size;
-    // Accumulator as rational: acc_num / acc_den
-    let mut acc_num: u128 = 0;
-    let mut acc_den: u128 = 1;
-    // Current tier price as rational: price_num / price_den
+    // Inputs beyond the Conway 1 MiB block-body limit are rejected before this
+    // function is called in production.  Saturate immediately so no floating-
+    // point arithmetic is ever needed for out-of-range inputs.
+    if total_size > MAX_REF_SCRIPT_SIZE_TIER_CAP {
+        return u64::MAX;
+    }
+    if total_size == 0 || base_fee_per_byte == 0 {
+        return 0;
+    }
+
+    // Pre-count tiers: ceil(total_size / TIER_SIZE).
+    let k = total_size.div_ceil(TIER_SIZE);
+
+    // Common denominator for all tier fractional parts: 5^(k-1).
+    // price_den at tier i = 5^i / gcd(base, 5^i), which always divides 5^(k-1)
+    // (since k-1 >= i), so scale_factor = denom / price_den is always exact.
+    let denom: u128 = pow5(k - 1); // 5^0 = 1 when k = 1 (single tier)
+
+    // Accumulated integer part of the sum.
+    let mut acc_whole: u128 = 0;
+    // Accumulated fractional part, scaled by `denom` (i.e., frac_scaled/denom ∈ [0,1)).
+    let mut frac_scaled: u128 = 0;
+
+    // Current tier price as exact rational price_num / price_den.
+    // Tier 0: base/1.  Each tier multiplies by 6/5; GCD is reduced immediately.
     let mut price_num: u128 = base_fee_per_byte as u128;
     let mut price_den: u128 = 1;
 
+    let mut remaining = total_size;
+
     while remaining > 0 {
-        let chunk = remaining.min(TIER_SIZE);
-        // acc += chunk * (price_num / price_den)
-        //
-        // Exact rational form:
-        //   new_num = old_acc_num * price_den + chunk * price_num * old_acc_den
-        //   new_den = old_acc_den * price_den
-        //
-        // Use checked arithmetic at every step to detect overflow. For pathologically
-        // large scripts (far beyond the 1 MiB block limit), intermediate products can
-        // overflow u128. When that happens, fall back to an f64 approximation — the
-        // result will be imprecise but the fee will already be astronomically large
-        // (≫ u64::MAX lovelace), so the transaction/block is rejected regardless.
-        let a = match acc_num.checked_mul(price_den) {
+        let chunk = remaining.min(TIER_SIZE) as u128;
+
+        // Tier contribution = chunk * price_num / price_den.
+        // checked_mul guards against overflow for very large base_fee_per_byte.
+        let contribution = match chunk.checked_mul(price_num) {
             Some(v) => v,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+            None => return u64::MAX,
         };
-        let b = (chunk as u128)
-            .checked_mul(price_num)
-            .and_then(|v| v.checked_mul(acc_den));
-        let b = match b {
+        // Exact integer quotient and remainder.
+        let whole = contribution / price_den;
+        let tier_rem = contribution % price_den; // in [0, price_den)
+
+        // Accumulate integer part.
+        acc_whole = match acc_whole.checked_add(whole) {
             Some(v) => v,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
-        };
-        acc_num = match a.checked_add(b) {
-            Some(v) => v,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
-        };
-        acc_den = match acc_den.checked_mul(price_den) {
-            Some(v) => v,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+            None => return u64::MAX,
         };
 
-        remaining -= chunk;
-
-        // price *= 6/5 (exact rational multiplication, reduce immediately to prevent overflow)
-        price_num = match price_num.checked_mul(MULT_NUM) {
-            Some(p) => p,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+        // Scale the fractional remainder to the common denominator.
+        // scale_factor = denom / price_den is always a whole number because
+        // price_den (a power of 5, after GCD reduction) divides denom = 5^(k-1).
+        // scaled_rem < price_den * scale_factor = denom, so no overflow.
+        let scale_factor = denom / price_den;
+        let scaled_rem = match tier_rem.checked_mul(scale_factor) {
+            Some(v) => v,
+            None => return u64::MAX, // unreachable: scaled_rem < denom < u128::MAX
         };
-        price_den = match price_den.checked_mul(MULT_DEN) {
+        frac_scaled = match frac_scaled.checked_add(scaled_rem) {
+            Some(v) => v,
+            None => return u64::MAX, // unreachable: sum < 41*denom < 4e29 < u128::MAX
+        };
+
+        // Carry any whole units that accumulated in the fractional bucket.
+        // This happens when multiple tiers each contribute close to 1 fractional unit.
+        if frac_scaled >= denom {
+            let carry = frac_scaled / denom;
+            frac_scaled %= denom;
+            acc_whole = match acc_whole.checked_add(carry) {
+                Some(v) => v,
+                None => return u64::MAX,
+            };
+        }
+
+        remaining -= chunk as u64;
+
+        // Advance price: multiply by 6/5 and immediately GCD-reduce to keep
+        // price_num and price_den as small as possible, and to preserve the
+        // invariant that price_den divides denom.
+        price_num = match price_num.checked_mul(6) {
             Some(p) => p,
-            None => return calculate_ref_script_tiered_fee_f64(base_fee_per_byte, total_size),
+            None => return u64::MAX,
+        };
+        price_den = match price_den.checked_mul(5) {
+            Some(p) => p,
+            None => return u64::MAX,
         };
         let g = gcd_u128(price_num, price_den);
         price_num /= g;
         price_den /= g;
-        let g2 = gcd_u128(acc_num, acc_den);
-        acc_num /= g2;
-        acc_den /= g2;
     }
-    // ceiling(acc_num / acc_den) — single ceiling at the end per spec.
-    // div_ceil is equivalent to (acc_num + acc_den - 1) / acc_den but overflow-safe.
-    acc_num.div_ceil(acc_den) as u64
+
+    // Single ceiling per the Blueprint spec: add 1 if any fractional remainder.
+    let ceil_bit: u128 = if frac_scaled > 0 { 1 } else { 0 };
+    let total = match acc_whole.checked_add(ceil_bit) {
+        Some(v) => v,
+        None => return u64::MAX,
+    };
+    // Saturate to u64::MAX if the fee exceeds u64 range (only possible for
+    // unrealistically large base_fee_per_byte values).
+    u64::try_from(total).unwrap_or(u64::MAX)
 }
 
-/// f64 fallback for `calculate_ref_script_tiered_fee` used when the exact
-/// rational accumulation would overflow `u128`.
+/// Compute `5^n` exactly as a u128.
 ///
-/// Only reachable for scripts far larger than the 1 MiB block limit; precision
-/// loss at this scale is acceptable because the fee will exceed `u64::MAX`
-/// lovelace anyway and the transaction will be rejected on other grounds.
-fn calculate_ref_script_tiered_fee_f64(base_fee_per_byte: u64, total_size: u64) -> u64 {
-    const TIER_SIZE: f64 = 25_600.0;
-    let mut remaining = total_size as f64;
-    let mut acc: f64 = 0.0;
-    let mut price: f64 = base_fee_per_byte as f64;
-
-    while remaining > 0.0 {
-        let chunk = remaining.min(TIER_SIZE);
-        acc += chunk * price;
-        remaining -= chunk;
-        price *= 1.2;
+/// Used by [`calculate_ref_script_tiered_fee`] to build the common denominator
+/// `denom = 5^(k-1)`.  At k=41 (the 1 MiB block cap), `5^40 ≈ 9.1×10²⁷`,
+/// safely within u128 range.  `5^54 ≈ 5.6×10³⁷ < u128::MAX`; `5^55` overflows.
+#[inline]
+fn pow5(n: u64) -> u128 {
+    let mut result: u128 = 1;
+    for _ in 0..n {
+        result = result
+            .checked_mul(5)
+            .expect("pow5: result overflows u128 — n must not exceed 54");
     }
-    // ceiling
-    acc.ceil() as u64
+    result
 }
+
+/// Upper bound on `total_size` for [`calculate_ref_script_tiered_fee`].
+///
+/// Any input exceeding this cap causes the function to immediately return
+/// `u64::MAX` — the transaction is rejected regardless of the precise fee.
+///
+/// This value equals the Conway `maxRefScriptSizePerBlock` hard limit (1 MiB)
+/// which is not a governance-updatable protocol parameter.  Exposed as
+/// `pub(crate)` so that `apply.rs` can reuse the same constant for the
+/// block-body check, keeping the two in sync.
+pub(crate) const MAX_REF_SCRIPT_SIZE_TIER_CAP: u64 = 1024 * 1024; // 1 MiB
 
 fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {

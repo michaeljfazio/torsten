@@ -24,6 +24,7 @@ mod tests {
     use super::super::scripts::{
         calculate_ref_script_tiered_fee, cbor_uint_size, compute_min_fee, compute_script_ref_hash,
         estimate_value_cbor_size, evaluate_native_script, script_ref_byte_size,
+        MAX_REF_SCRIPT_SIZE_TIER_CAP,
     };
 
     use torsten_primitives::hash::Hash28;
@@ -2894,6 +2895,119 @@ mod tests {
             fee,
             fee_smaller
         );
+    }
+
+    /// At exactly the block-body tier cap (1 MiB), the fee must be a finite positive
+    /// integer with no f64 arithmetic involved.
+    #[test]
+    fn test_ref_script_fee_at_tier_cap_exact() {
+        // 1 MiB = 1,048,576 bytes = 40 full 25 KiB tiers + one partial tier of 24,576 bytes.
+        // base_fee_per_byte = 15 (mainnet default for minFeeRefScriptCostPerByte).
+        let total = MAX_REF_SCRIPT_SIZE_TIER_CAP;
+        let fee = calculate_ref_script_tiered_fee(15, total);
+        assert!(fee > 0, "Fee at tier cap must be positive (got 0)");
+        assert_ne!(
+            fee,
+            u64::MAX,
+            "Fee at tier cap must not saturate to u64::MAX"
+        );
+        // Monotonicity: 1 MiB costs more than 1 MiB - 1 byte.
+        let fee_minus1 = calculate_ref_script_tiered_fee(15, total - 1);
+        assert!(
+            fee >= fee_minus1,
+            "Fee at cap ({fee}) must be >= fee at cap-1 ({fee_minus1})"
+        );
+    }
+
+    /// One byte over the tier cap must saturate to u64::MAX (no f64, no panic).
+    #[test]
+    fn test_ref_script_fee_over_tier_cap_saturates() {
+        let over_cap = MAX_REF_SCRIPT_SIZE_TIER_CAP + 1;
+        assert_eq!(
+            calculate_ref_script_tiered_fee(15, over_cap),
+            u64::MAX,
+            "Size one byte over cap must saturate to u64::MAX"
+        );
+    }
+
+    /// A script size of 1.25 MiB (the original overflow-triggering size from issue #115)
+    /// must return u64::MAX without panicking, not an f64-derived value.
+    #[test]
+    fn test_ref_script_fee_issue115_overflow_size() {
+        // 1.25 MiB = 1,310,720 bytes — the first size that triggered u128 overflow
+        // in the old code (tier 51/52 causes 6^51 to overflow u128).
+        let size_125_mib: u64 = 1_310_720;
+        assert!(
+            size_125_mib > MAX_REF_SCRIPT_SIZE_TIER_CAP,
+            "Test prerequisite: 1.25 MiB must exceed the tier cap"
+        );
+        let fee = calculate_ref_script_tiered_fee(15, size_125_mib);
+        assert_eq!(
+            fee,
+            u64::MAX,
+            "1.25 MiB script must saturate to u64::MAX, got {fee}"
+        );
+    }
+
+    /// Very large size (u64::MAX bytes) must saturate cleanly to u64::MAX.
+    #[test]
+    fn test_ref_script_fee_max_u64_size_saturates() {
+        let fee = calculate_ref_script_tiered_fee(15, u64::MAX);
+        assert_eq!(
+            fee,
+            u64::MAX,
+            "u64::MAX byte size must saturate fee to u64::MAX, got {fee}"
+        );
+    }
+
+    /// Verify the tier cap constant matches the hardcoded block-body rule value.
+    ///
+    /// This test exists to catch accidental changes to either the constant in
+    /// scripts.rs or the constant in apply.rs that would cause them to diverge.
+    #[test]
+    fn test_tier_cap_equals_block_body_limit() {
+        const EXPECTED_BLOCK_BODY_LIMIT: u64 = 1024 * 1024; // 1 MiB (from apply.rs)
+        assert_eq!(
+            MAX_REF_SCRIPT_SIZE_TIER_CAP, EXPECTED_BLOCK_BODY_LIMIT,
+            "MAX_REF_SCRIPT_SIZE_TIER_CAP must match the Conway block-body limit"
+        );
+    }
+
+    /// Verify that fee calculation at exactly each tier boundary is exact and consistent
+    /// with the geometric series formula.
+    ///
+    /// At N full tiers of TIER_SIZE bytes each:
+    ///   fee = base * TIER_SIZE * sum_{i=0}^{N-1} (6/5)^i
+    ///       = base * TIER_SIZE * 5 * ((6/5)^N - 1)
+    ///
+    /// For N=1, base=15: 15 * 25600 = 384,000 (exact, no fraction).
+    /// For N=2, base=15: 384,000 + 15*25600*(6/5) = 384,000 + 460,800 = 844,800.
+    /// For N=3, base=15: 844,800 + 15*25600*(6/5)^2 = 844,800 + 552,960 = 1,397,760.
+    #[test]
+    fn test_ref_script_fee_tier_boundaries_exact() {
+        // N=1: one full tier
+        assert_eq!(calculate_ref_script_tiered_fee(15, 25_600), 384_000);
+        // N=2: two full tiers
+        assert_eq!(calculate_ref_script_tiered_fee(15, 51_200), 844_800);
+        // N=3: three full tiers (also tested in test_ref_script_tiered_fee_calculation)
+        assert_eq!(calculate_ref_script_tiered_fee(15, 76_800), 1_397_760);
+    }
+
+    /// base_fee_per_byte = 1 (not divisible by 5): exercises worst-case GCD path
+    /// where the rational denominator grows more than for base=15.
+    ///
+    /// Verified values computed against Haskell tierRefScriptFee with base=1:
+    ///   tier 0: 25600 * 1 = 25600
+    ///   tier 1: 25600 * 6/5 = 30720  → total = 56320
+    ///   tier 2: 25600 * 36/25 = 36864 → total = 93184
+    #[test]
+    fn test_ref_script_fee_base1_worst_case_gcd() {
+        assert_eq!(calculate_ref_script_tiered_fee(1, 25_600), 25_600);
+        assert_eq!(calculate_ref_script_tiered_fee(1, 51_200), 56_320);
+        assert_eq!(calculate_ref_script_tiered_fee(1, 76_800), 93_184);
+        // At the tier cap, must not panic and must be a positive finite value.
+        let fee_at_cap = calculate_ref_script_tiered_fee(1, MAX_REF_SCRIPT_SIZE_TIER_CAP);
+        assert!(fee_at_cap > 0 && fee_at_cap < u64::MAX);
     }
 
     // ===================================================================
