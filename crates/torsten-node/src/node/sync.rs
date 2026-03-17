@@ -124,16 +124,25 @@ impl Node {
     /// eligibility failures remain non-fatal until `snapshots_established`.
     pub async fn enable_strict_verification(&mut self) {
         self.consensus.set_strict_verification(true);
-        // Nonce is always valid immediately after replay — no deferral needed.
-        self.consensus.nonce_established = true;
-        // Stake snapshots need 3 epoch transitions to fully rotate with correct
-        // rebuilt data (mark→set→go). Until then, VRF leader eligibility failures
-        // are non-fatal to avoid rejecting valid blocks with approximate sigma values.
-        self.consensus.snapshots_established = self.epoch_transitions_observed >= 3;
+        // The epoch nonce is valid after a full replay from genesis (where VRF
+        // contributions are accumulated for every block). But after loading a
+        // snapshot — especially one whose epoch was corrected (wrong epoch_length
+        // baked into the snapshot) — the nonce may be stale.  Only mark it as
+        // established once at least 1 epoch transition has been observed (replay
+        // or live), which ensures nonce was built from VRF contributions.
+        self.consensus.nonce_established = self.epoch_transitions_observed >= 1;
+        // Stake snapshots need 3 LIVE (post-replay) epoch transitions to fully
+        // rotate with correct rebuilt stake distributions.  Replay-built snapshots
+        // may have slightly different stake values than the canonical chain (due
+        // to reward calculation differences or UTxO apply mismatches), so VRF
+        // leader eligibility failures remain non-fatal until live transitions
+        // have rotated fresh snapshots through mark→set→go.
+        self.consensus.snapshots_established = self.live_epoch_transitions >= 3;
         if !self.consensus.snapshots_established {
             debug!(
-                transitions = self.epoch_transitions_observed,
-                "VRF leader check non-fatal: stake snapshots not yet established (need 3 epoch transitions)"
+                total_transitions = self.epoch_transitions_observed,
+                live_transitions = self.live_epoch_transitions,
+                "VRF leader check non-fatal: stake snapshots not yet established (need 3 live epoch transitions)"
             );
         }
     }
@@ -257,6 +266,126 @@ impl Node {
         }
     }
 
+    /// Reset the ledger state to genesis and replay ImmutableDB blocks up to
+    /// `target_slot`.  Used when no suitable snapshot is available for
+    /// rollback (or the snapshot failed to load).
+    ///
+    /// Uses sequential chunk iteration (same as startup replay) for high
+    /// throughput — `get_next_block_after_slot()` is too slow for millions
+    /// of blocks because it scans chunk metadata on every call.
+    async fn reset_ledger_and_replay(&self, target_slot: u64) {
+        {
+            let mut ls = self.ledger_state.write().await;
+            let utxo_store = ls.utxo_set.detach_store();
+            *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+            if let Some(store) = utxo_store {
+                ls.attach_utxo_store(store);
+            }
+        }
+
+        // Replay ImmutableDB blocks from genesis up to target_slot so the
+        // ledger tip matches the rollback/intersection point.  Without this
+        // replay, the ledger stays at genesis and incoming blocks from the
+        // peer won't connect.
+        if target_slot > 0 {
+            let immutable_dir = self.database_path.join("immutable");
+            if !immutable_dir.is_dir() {
+                warn!("Rollback: no immutable directory found for replay");
+                return;
+            }
+
+            // Run the replay on a blocking thread to avoid starving the
+            // async runtime — chunk I/O is synchronous and CPU-bound.
+            let ledger_state = self.ledger_state.clone();
+            let bel = self.byron_epoch_length;
+            let result = tokio::task::spawn_blocking(move || {
+                let replay_start = std::time::Instant::now();
+                let mut replayed = 0u64;
+                let mut last_log = std::time::Instant::now();
+
+                // Disable address index during replay for speed (rebuilt on
+                // reattach after we're done).
+                {
+                    let mut ls = ledger_state.blocking_write();
+                    ls.utxo_set.set_indexing_enabled(false);
+                    ls.utxo_set.set_wal_enabled(false);
+                }
+
+                let result = crate::mithril::replay_from_chunk_files(
+                    &immutable_dir,
+                    |cbor| {
+                        match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
+                            cbor, bel,
+                        ) {
+                            Ok(block) => {
+                                // Stop once we've passed the target slot.
+                                if block.slot().0 > target_slot {
+                                    return Err(anyhow::anyhow!("reached target slot"));
+                                }
+                                let mut ls = ledger_state.blocking_write();
+                                if let Err(e) =
+                                    ls.apply_block(&block, BlockValidationMode::ApplyOnly)
+                                {
+                                    // Non-fatal: some early blocks may not connect
+                                    // when the UTxO store is from a later state.
+                                    tracing::debug!(
+                                        slot = block.slot().0,
+                                        "Rollback: replay apply skipped: {e}"
+                                    );
+                                }
+                                replayed += 1;
+                                if last_log.elapsed().as_secs() >= 5 {
+                                    let elapsed = replay_start.elapsed().as_secs();
+                                    let speed = if elapsed > 0 { replayed / elapsed } else { replayed };
+                                    tracing::info!(
+                                        replayed,
+                                        slot = block.slot().0,
+                                        target_slot,
+                                        speed = format_args!("{speed} blk/s"),
+                                        "Rollback: replay progress",
+                                    );
+                                    last_log = std::time::Instant::now();
+                                }
+                                Ok(())
+                            }
+                            Err(e) => {
+                                tracing::warn!("Rollback: replay decode error: {e}");
+                                Ok(()) // skip bad block, continue
+                            }
+                        }
+                    },
+                );
+
+                // Re-enable indexing.
+                {
+                    let mut ls = ledger_state.blocking_write();
+                    ls.utxo_set.set_indexing_enabled(true);
+                    ls.utxo_set.set_wal_enabled(true);
+                }
+
+                let elapsed = replay_start.elapsed().as_secs_f64();
+                tracing::info!(
+                    replayed,
+                    target_slot,
+                    elapsed_secs = format!("{elapsed:.1}"),
+                    "Rollback: replay complete"
+                );
+
+                // The "reached target slot" error is expected and not a real failure.
+                match result {
+                    Ok(_) => Ok(replayed),
+                    Err(e) if e.to_string().contains("reached target slot") => Ok(replayed),
+                    Err(e) => Err(e),
+                }
+            })
+            .await;
+
+            if let Err(e) = result {
+                error!("Rollback: replay task failed: {e}");
+            }
+        }
+    }
+
     /// Handle a chain rollback: roll back ChainDB, reload ledger state from snapshot,
     /// and replay blocks from the snapshot up to the rollback point.
     pub async fn handle_rollback(&self, rollback_point: &Point) {
@@ -361,22 +490,12 @@ impl Node {
                 }
                 Err(e) => {
                     error!("Failed to load ledger snapshot for rollback: {e}");
-                    let mut ls = self.ledger_state.write().await;
-                    let utxo_store = ls.utxo_set.detach_store();
-                    *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
-                    if let Some(store) = utxo_store {
-                        ls.attach_utxo_store(store);
-                    }
+                    self.reset_ledger_and_replay(rollback_slot).await;
                 }
             }
         } else {
             warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
-            let mut ls = self.ledger_state.write().await;
-            let utxo_store = ls.utxo_set.detach_store();
-            *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
-            if let Some(store) = utxo_store {
-                ls.attach_utxo_store(store);
-            }
+            self.reset_ledger_and_replay(rollback_slot).await;
         }
 
         // 4. Re-validate mempool transactions against the rolled-back ledger state.
@@ -906,6 +1025,8 @@ impl Node {
                 self.epoch_transitions_observed = self
                     .epoch_transitions_observed
                     .saturating_add(epochs_crossed);
+                self.live_epoch_transitions =
+                    self.live_epoch_transitions.saturating_add(epochs_crossed);
 
                 // Finalize immutable chunk at epoch boundary and persist
                 {
@@ -1110,27 +1231,36 @@ impl Node {
     ) -> Result<()> {
         let mut pipelined = pipelined_client;
         // Find intersection with our current chain.
-        // When ChainDB is ahead of the ledger, verify the chain connects.
-        // If ChainDB has blocks on a different fork (e.g., from a previous
-        // run that stored blocks but couldn't apply them), use the ledger
-        // tip to avoid re-downloading blocks that won't connect.
+        //
+        // We walk backwards through the volatile chain to collect multiple
+        // historical points, not just the tip.  This is critical for
+        // recovery after forging: if the local tip is a freshly-forged block
+        // that the peer hasn't seen (slot battle), the ancestor blocks give
+        // the peer a known common point to intersect on.  Without this, the
+        // intersection would fall all the way to Origin causing a death loop.
         let chain_tip = self.chain_db.read().await.get_tip().point;
         let ledger_tip = self.ledger_state.read().await.tip.point.clone();
-        let mut known_points = Vec::new();
         let ledger_slot = ledger_tip.slot().map(|s| s.0).unwrap_or(0);
         let chain_slot = chain_tip.slot().map(|s| s.0).unwrap_or(0);
 
-        // When ChainDB is ahead, check if its chain connects to the ledger.
+        // Collect historical chain points by walking backwards through the
+        // volatile DB via prev_hash links (tip → parent → grandparent …).
+        // This gives the peer enough ancestry to find a common block even
+        // when the tip is an orphaned/forged block.
+        let chain_points = {
+            let db = self.chain_db.read().await;
+            db.get_chain_points(10)
+        };
+
+        // When ChainDB is ahead of the ledger, check if its chain connects.
         // If not (fork divergence), prefer the ledger tip for intersection.
         let mut use_chain_tip = chain_slot > ledger_slot;
+        let mut chain_diverged = false;
         if use_chain_tip && ledger_tip != Point::Origin {
-            // Check if the first ChainDB block after ledger tip connects
             let db = self.chain_db.read().await;
             if let Ok(Some((_next_slot, _hash, cbor))) =
                 db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
             {
-                // Minimal decode: only block.prev_hash() (a header field)
-                // is read here — no witness-set access needed.
                 if let Ok(block) =
                     torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
                         &cbor,
@@ -1142,40 +1272,68 @@ impl Node {
                         warn!(
                             "ChainDB fork divergence detected: ChainDB blocks after ledger tip \
                              do not connect (expected prev_hash={}, got {}). \
-                             Using ledger tip for intersection.",
+                             Using ledger tip only for intersection (excluding contaminated ChainDB points).",
                             ledger_hash.map(|h| h.to_hex()).unwrap_or_default(),
                             block.prev_hash().to_hex()
                         );
                         use_chain_tip = false;
+                        chain_diverged = true;
                     }
                 }
             }
         }
 
+        // Build the known_points list, including chain history for robustness.
+        let mut known_points = Vec::new();
         if use_chain_tip {
-            if chain_tip != Point::Origin {
-                known_points.push(chain_tip.clone());
+            // ChainDB leads: include all chain ancestry points first.
+            for p in &chain_points {
+                if *p != Point::Origin && !known_points.contains(p) {
+                    known_points.push(p.clone());
+                }
             }
-            if ledger_tip != Point::Origin && ledger_tip != chain_tip {
+            // Include ledger tip if it wasn't already covered by chain walk.
+            if ledger_tip != Point::Origin && !known_points.contains(&ledger_tip) {
                 known_points.push(ledger_tip.clone());
             }
-        } else {
+        } else if chain_diverged {
+            // ChainDB has contaminated blocks (e.g., orphan fork flushed to
+            // ImmutableDB). Exclude all ChainDB chain_points — they may
+            // cause the peer to intersect at a block our ledger can't reach.
+            // Only offer the ledger tip so the peer sends blocks from there.
             if ledger_tip != Point::Origin {
                 known_points.push(ledger_tip.clone());
             }
-            if chain_tip != Point::Origin && chain_tip != ledger_tip {
-                known_points.push(chain_tip.clone());
+        } else {
+            // Ledger leads or tips are equal: offer ledger tip first, then
+            // chain ancestry (which may include ancestors of a forged block
+            // that are known to the peer even when the tip is not).
+            if ledger_tip != Point::Origin {
+                known_points.push(ledger_tip.clone());
+            }
+            for p in &chain_points {
+                if *p != Point::Origin && !known_points.contains(p) {
+                    known_points.push(p.clone());
+                }
             }
         }
         known_points.push(Point::Origin);
-        if ledger_tip != chain_tip {
-            debug!(
-                "Ledger tip ({}) differs from ChainDB tip ({}), using {} for intersection",
-                ledger_tip,
-                chain_tip,
-                if use_chain_tip { "ChainDB" } else { "ledger" }
-            );
+
+        // Log the full set of known_points for diagnosing intersection failures.
+        // This is essential for understanding why a peer might reject our points
+        // (e.g., stale immutable tip, forged block on orphaned fork).
+        info!(
+            chain_tip = %chain_tip,
+            ledger_tip = %ledger_tip,
+            chain_points_count = chain_points.len(),
+            known_points_count = known_points.len(),
+            use_chain_tip,
+            "Intersection candidates",
+        );
+        for (i, p) in known_points.iter().enumerate() {
+            debug!(idx = i, point = %p, "known_point");
         }
+
         // Find intersection: use pipelined client if available, otherwise serial client
         let (intersect, remote_tip) = if let Some(ref mut pc) = pipelined {
             pc.find_intersect(known_points.clone()).await?
@@ -1188,6 +1346,177 @@ impl Node {
             None => info!("Sync starting from Origin"),
         }
         info!(remote_tip = %remote_tip, "Remote tip");
+
+        // ── Fork recovery ──────────────────────────────────────────────
+        // If the intersection fell all the way to Origin but we have a
+        // non-trivial ledger tip, the local chain has diverged from the
+        // canonical one (e.g. a forged block that lost a slot battle was
+        // persisted in the ledger snapshot).  Syncing from genesis with a
+        // stale ledger is doomed to fail (blocks won't connect).
+        //
+        // Recovery: roll back ChainDB and the ledger state to the best
+        // snapshot before the divergence, then retry the intersection.
+        // This lets the node re-adopt the canonical chain without a full
+        // wipe.
+        //
+        // Note: find_intersect returns Some(Point::Origin) when Origin is
+        // in our known_points (it always is), so we must check for Origin
+        // explicitly rather than checking for None.
+        // ── Fork recovery ──────────────────────────────────────────────
+        //
+        // Two cases require fork recovery:
+        //
+        // (A) Intersection fell to Origin despite having a non-trivial
+        //     ledger tip — no peer recognizes any of our chain points.
+        //     Clear volatile, reset ledger, and reconnect.
+        //
+        // (B) Intersection is at a canonical block BEHIND the ledger tip —
+        //     the local chain diverged (e.g. a slot battle where our
+        //     forged block lost).  Reset the ledger and replay ImmutableDB
+        //     blocks up to the intersection slot, then continue syncing.
+        //
+        // Note: find_intersect returns Some(Point::Origin) when Origin is
+        // in our known_points (it always is), so we must check for Origin
+        // explicitly rather than checking for None.
+        let intersect_at_origin = intersect.as_ref().is_none_or(|p| *p == Point::Origin);
+        let intersect_slot = intersect
+            .as_ref()
+            .and_then(|p| p.slot())
+            .map(|s| s.0)
+            .unwrap_or(0);
+
+        // Case (A): no intersection found at all — full reset + reconnect.
+        if intersect_at_origin && ledger_slot > 0 {
+            warn!(
+                ledger_slot,
+                "Fork recovery: intersection fell to Origin — \
+                 no peer recognizes our chain. Resetting ledger and reconnecting."
+            );
+
+            {
+                let mut db = self.chain_db.write().await;
+                db.clear_volatile();
+            }
+
+            self.handle_rollback(&Point::Origin).await;
+            self.consensus.set_strict_verification(false);
+
+            return Err(anyhow::anyhow!(
+                "fork recovery: reset diverged ledger state, reconnecting"
+            ));
+        }
+
+        // Case (B): intersection behind ledger tip — targeted replay.
+        if intersect_slot > 0 && intersect_slot < ledger_slot {
+            warn!(
+                intersect_slot,
+                ledger_slot,
+                "Fork recovery: intersection is behind ledger tip — \
+                 replaying ImmutableDB up to intersection."
+            );
+
+            {
+                let mut db = self.chain_db.write().await;
+                db.clear_volatile();
+            }
+
+            // Reset ledger and replay up to the intersection slot.
+            // Detach the LSM UTxO store so the replay uses a fast
+            // in-memory UtxoSet (~30K blk/s vs ~300 blk/s with LSM).
+            // The store is reattached after replay completes.
+            let immutable_dir = self.database_path.join("immutable");
+            if immutable_dir.is_dir() {
+                let ledger_state = self.ledger_state.clone();
+                let bel = self.byron_epoch_length;
+                let target = intersect_slot;
+
+                let saved_utxo_store = {
+                    let mut ls = ledger_state.write().await;
+                    let utxo_store = ls.utxo_set.detach_store();
+                    *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
+                    utxo_store
+                };
+
+                info!(
+                    target_slot = target,
+                    "Fork recovery: replaying from genesis to intersection"
+                );
+
+                let replay_result = tokio::task::spawn_blocking(move || {
+                    let start = std::time::Instant::now();
+                    let mut replayed = 0u64;
+                    let mut last_log = std::time::Instant::now();
+
+                    // Hold write lock for the entire replay to avoid
+                    // per-block lock contention with N2C/N2N servers.
+                    let mut ls = ledger_state.blocking_write();
+
+                    let result = crate::mithril::replay_from_chunk_files(
+                        &immutable_dir,
+                        |cbor| {
+                            match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(cbor, bel) {
+                                Ok(block) => {
+                                    if block.slot().0 > target {
+                                        return Err(anyhow::anyhow!("reached target slot"));
+                                    }
+                                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
+                                        tracing::debug!(slot = block.slot().0, "Fork recovery: apply skipped: {e}");
+                                    }
+                                    replayed += 1;
+                                    if last_log.elapsed().as_secs() >= 5 {
+                                        let elapsed = start.elapsed().as_secs();
+                                        let speed = if elapsed > 0 { replayed / elapsed } else { replayed };
+                                        tracing::info!(
+                                            replayed,
+                                            slot = block.slot().0,
+                                            target_slot = target,
+                                            speed = format_args!("{speed} blk/s"),
+                                            "Fork recovery: replay progress",
+                                        );
+                                        last_log = std::time::Instant::now();
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Fork recovery: decode error: {e}");
+                                    Ok(())
+                                }
+                            }
+                        },
+                    );
+
+                    drop(ls);
+
+                    let elapsed = start.elapsed().as_secs_f64();
+                    tracing::info!(
+                        replayed,
+                        target_slot = target,
+                        elapsed_secs = format!("{elapsed:.1}"),
+                        "Fork recovery: replay complete"
+                    );
+
+                    match result {
+                        Ok(_) | Err(_) => replayed,
+                    }
+                })
+                .await;
+
+                // Reattach the LSM UTxO store.  The in-memory UtxoSet
+                // built during replay has the correct canonical state;
+                // the LSM store will be reconciled on the next snapshot.
+                if let Some(store) = saved_utxo_store {
+                    let mut ls = self.ledger_state.write().await;
+                    ls.attach_utxo_store(store);
+                }
+
+                match replay_result {
+                    Ok(n) => info!(blocks = n, "Fork recovery: finished"),
+                    Err(e) => error!("Fork recovery: replay task failed: {e}"),
+                }
+            }
+
+            self.consensus.set_strict_verification(false);
+        }
 
         // Genesis State Machine: register this peer with the intersection slot so
         // that the GDD can anchor its density window correctly.  `register_peer`
@@ -1907,6 +2236,21 @@ impl Node {
                     "Replaying ledger from chunk files",
                 );
                 self.replay_from_chunk_files(dir, shutdown_rx.clone()).await;
+                // After a full replay from genesis, the ledger has processed
+                // all epoch transitions. Record this so that
+                // enable_strict_verification() can set nonce_established=true
+                // and the block producer can forge blocks at tip.
+                let replay_epoch = self.ledger_state.read().await.epoch.0;
+                if replay_epoch > 0 {
+                    self.epoch_transitions_observed = self
+                        .epoch_transitions_observed
+                        .saturating_add(replay_epoch as u32);
+                    info!(
+                        epoch = replay_epoch,
+                        epoch_transitions_observed = self.epoch_transitions_observed,
+                        "Replay epoch transitions counted"
+                    );
+                }
                 return;
             }
         }

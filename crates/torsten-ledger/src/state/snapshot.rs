@@ -205,12 +205,18 @@ impl LedgerState {
         // The #[serde(skip)] on indexing_enabled defaults to false after deserialization.
         state.utxo_set.set_indexing_enabled(true);
         // After loading a snapshot, incremental stake tracking may have drifted.
-        // Rebuild stake distribution from the full UTxO set immediately, then
-        // recompute pool_stake for all existing snapshots (mark/set/go).
-        // This ensures leader eligibility checks use correct sigma values
-        // even before the next epoch boundary rotates in fresh snapshots.
-        state.rebuild_stake_distribution();
-        state.recompute_snapshot_pool_stakes();
+        // Rebuild stake distribution from the full UTxO set, then recompute
+        // pool_stake for all existing snapshots (mark/set/go).
+        //
+        // IMPORTANT: Only run if the UTxO set is non-empty. When using an LSM-backed
+        // UTxO store, the store hasn't been attached yet at this point — the in-memory
+        // set is empty. Running rebuild_stake_distribution on an empty set would wipe
+        // all pool_stake values, causing block producers to see zero stake. The caller
+        // (torsten-node) runs rebuild + recompute again AFTER attaching the LSM store.
+        if !state.utxo_set.is_empty() {
+            state.rebuild_stake_distribution();
+            state.recompute_snapshot_pool_stakes();
+        }
         // Keep needs_stake_rebuild=true so every live epoch boundary rebuilds.
         state.needs_stake_rebuild = true;
         debug!(

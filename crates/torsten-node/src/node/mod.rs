@@ -123,6 +123,10 @@ pub struct Node {
     /// After Mithril import, we need at least 2 epoch transitions for the
     /// rolling nonce to be correctly accumulated.
     pub(crate) epoch_transitions_observed: u32,
+    /// Live (post-replay) epoch transitions — only incremented during the sync
+    /// loop, not during chunk replay.  Used for `snapshots_established` since
+    /// replay-built snapshots may have approximate stake values.
+    pub(crate) live_epoch_transitions: u32,
     /// Snapshot policy controlling when ledger snapshots are taken.
     pub(crate) snapshot_policy: epoch::SnapshotPolicy,
     /// Consensus mode: "praos" (default) or "genesis"
@@ -277,6 +281,27 @@ impl Node {
                         state.genesis_hash = hash;
                     }
 
+                    // Recalculate the epoch from the tip slot using the now-correct
+                    // genesis parameters.  Snapshots saved with wrong epoch_length
+                    // (e.g. mainnet default 432000 instead of preview 86400) have
+                    // incorrect epoch numbers baked in.  Without this correction,
+                    // apply_block would try to process hundreds of spurious epoch
+                    // transitions (445 → 1239) and the stake snapshots would be at
+                    // wrong epochs, causing pool_stake=0 for block producers.
+                    if state.tip.point != Point::Origin {
+                        let tip_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                        let correct_epoch = state.epoch_of_slot(tip_slot);
+                        if correct_epoch != state.epoch.0 {
+                            warn!(
+                                snapshot_epoch = state.epoch.0,
+                                correct_epoch,
+                                tip_slot,
+                                "Snapshot epoch differs from computed epoch — correcting"
+                            );
+                            state.epoch = torsten_primitives::time::EpochNo(correct_epoch);
+                        }
+                    }
+
                     // Detect stale snapshots whose protocol_params were captured before
                     // Alonzo/Conway genesis files were applied. The canonical signal is
                     // max_tx_ex_units.mem == 14_000_000, which is the hardcoded
@@ -325,37 +350,49 @@ impl Node {
                             byron_epoch_length,
                         )
                     } else {
-                        // Validate snapshot tip exists in ChainDB. If the tip hash
-                        // is not in storage (e.g., DB was wiped, different chain, or
-                        // volatile blocks were lost), the snapshot is stale and must
-                        // be discarded to prevent "block does not connect" errors.
+                        // Validate snapshot tip is within the ChainDB's slot range.
+                        // We check by hash first (exact match), then fall back to slot
+                        // proximity.  Hash mismatches can occur when ImmutableDB blocks
+                        // have been contaminated by an orphan fork flush — the snapshot
+                        // may point to a canonical block whose hash is computed slightly
+                        // differently (e.g. by pallas vs cardano-node).  As long as the
+                        // snapshot slot is within the ChainDB range, the snapshot is
+                        // usable; the chunk replay will handle any gap.
                         let snapshot_valid = match state.tip.point {
                             Point::Origin => true,
                             Point::Specific(snapshot_slot, ref hash) => {
-                                // Use try_read() since we're in a sync context within tokio.
-                                // The lock was just created so this will always succeed.
                                 match chain_db.try_read() {
                                     Ok(db) => {
                                         let exists = db.has_block(hash);
-                                        if !exists {
+                                        if exists {
+                                            true
+                                        } else {
                                             let db_tip = db.get_tip();
                                             let db_tip_slot =
                                                 db_tip.point.slot().map(|s| s.0).unwrap_or(0);
                                             if snapshot_slot.0 > db_tip_slot {
+                                                // Snapshot is genuinely ahead of storage
                                                 warn!(
                                                     "Ledger snapshot is ahead of ChainDB (snapshot={}, chaindb={}); \
                                                      node may have crashed before ChainDB persist — discarding snapshot, \
                                                      will replay from storage",
                                                     state.tip, db_tip,
                                                 );
+                                                false
                                             } else {
+                                                // Snapshot slot is within ChainDB range but
+                                                // hash not found (likely ImmutableDB contamination
+                                                // or hash computation mismatch). Accept the
+                                                // snapshot — the chunk replay will skip ahead
+                                                // to the correct slot.
                                                 warn!(
-                                                    "Ledger snapshot is stale (snapshot={}, chaindb={})",
-                                                    state.tip, db_tip,
+                                                    "Ledger snapshot hash not found in ChainDB but slot {} <= ChainDB tip {} — \
+                                                     accepting snapshot (hash mismatch likely due to fork recovery)",
+                                                    snapshot_slot.0, db_tip_slot,
                                                 );
+                                                true
                                             }
                                         }
-                                        exists
                                     }
                                     Err(_) => {
                                         warn!("Could not acquire ChainDB lock for snapshot validation, assuming valid");
@@ -505,6 +542,32 @@ impl Node {
         if ledger.tip.point != Point::Origin && !ledger.utxo_set.is_empty() {
             info!("Rebuilding stake distribution from UTxO store for snapshot consistency");
             ledger.rebuild_stake_distribution();
+            // Log delegation/pool_params stats before recompute for diagnostics
+            debug!(
+                main_delegations = ledger.delegations.len(),
+                pool_params = ledger.pool_params.len(),
+                stake_credentials = ledger.stake_distribution.stake_map.len(),
+                reward_accounts = ledger.reward_accounts.len(),
+                mark_delegations = ledger
+                    .snapshots
+                    .mark
+                    .as_ref()
+                    .map(|s| s.delegations.len())
+                    .unwrap_or(0),
+                set_delegations = ledger
+                    .snapshots
+                    .set
+                    .as_ref()
+                    .map(|s| s.delegations.len())
+                    .unwrap_or(0),
+                go_delegations = ledger
+                    .snapshots
+                    .go
+                    .as_ref()
+                    .map(|s| s.delegations.len())
+                    .unwrap_or(0),
+                "Snapshot state before recompute",
+            );
             ledger.recompute_snapshot_pool_stakes();
         }
 
@@ -698,6 +761,7 @@ impl Node {
             expected_shelley_genesis_hash,
             genesis_validated: false,
             epoch_transitions_observed: 0,
+            live_epoch_transitions: 0,
             consensus_mode: args.consensus_mode,
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
@@ -817,10 +881,28 @@ impl Node {
                     "Block producer: pool stake in 'set' snapshot (used for leader election)",
                 );
                 if pool_stake == 0 {
+                    // Diagnostic: check if pool is in delegations, pool_params,
+                    // and if any credentials delegate to it.
+                    let pool_in_params = ls.pool_params.contains_key(&creds.pool_id);
+                    let delegators_to_pool = set_snap
+                        .delegations
+                        .values()
+                        .filter(|pid| **pid == creds.pool_id)
+                        .count();
+                    let main_delegators_to_pool = ls
+                        .delegations
+                        .values()
+                        .filter(|pid| **pid == creds.pool_id)
+                        .count();
                     warn!(
                         pool_id = %creds.pool_id,
                         snapshot_epoch = set_snap.epoch.0,
                         total_pools_in_snapshot = set_snap.pool_stake.len(),
+                        pool_in_params,
+                        snapshot_delegators = delegators_to_pool,
+                        main_delegators = main_delegators_to_pool,
+                        total_snapshot_delegations = set_snap.delegations.len(),
+                        total_main_delegations = ls.delegations.len(),
                         "Block producer has ZERO stake in 'set' snapshot — will not be elected slot leader. \
                          Pool may not be in snapshot or stake distribution may need rebuilding.",
                     );

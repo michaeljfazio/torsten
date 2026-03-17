@@ -810,6 +810,48 @@ impl ImmutableDB {
         Ok(())
     }
 
+    /// Return up to `max_count` historical (slot, hash) points by sampling
+    /// the last entry of older chunks in reverse order.
+    ///
+    /// This is used for ChainSync intersection negotiation. When the
+    /// immutable tip itself is an orphaned block (e.g. a forged block that
+    /// was flushed via `flush_all_to_immutable` on graceful shutdown), the
+    /// older chunk tips provide canonical points the peer can intersect on.
+    pub fn get_historical_points(&self, max_count: usize) -> Vec<(u64, Hash32)> {
+        let mut points = Vec::new();
+        // Walk chunks in reverse (newest → oldest), reading the LAST
+        // secondary entry from each chunk to get its tip (slot, hash).
+        for chunk_meta in self.chunks.iter().rev() {
+            if points.len() >= max_count {
+                break;
+            }
+            let secondary_path = self
+                .dir
+                .join(format!("{:05}.secondary", chunk_meta.chunk_num));
+            let secondary_data = match fs::read(&secondary_path) {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+            if secondary_data.len() < SECONDARY_ENTRY_SIZE {
+                continue;
+            }
+            // Read the LAST entry in the secondary index.
+            let last_entry_offset =
+                (secondary_data.len() / SECONDARY_ENTRY_SIZE - 1) * SECONDARY_ENTRY_SIZE;
+            let data = &secondary_data[last_entry_offset..];
+            let mut header_hash = [0u8; 32];
+            header_hash.copy_from_slice(&data[16..48]);
+            if let Some(slot) = read_be_u64(&data[48..56]) {
+                let hash = Hash32::from_bytes(header_hash);
+                // Skip duplicates (same hash/slot as a previously added point).
+                if !points.iter().any(|(s, h)| *s == slot && *h == hash) {
+                    points.push((slot, hash));
+                }
+            }
+        }
+        points
+    }
+
     /// Whether this ImmutableDB is open for writing.
     pub fn is_writable(&self) -> bool {
         self.active_chunk.is_some()

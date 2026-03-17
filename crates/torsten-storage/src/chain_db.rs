@@ -341,6 +341,65 @@ impl ChainDB {
         }
     }
 
+    // -- Chain history ------------------------------------------------------
+
+    /// Walk backwards from the volatile tip through `prev_hash` links,
+    /// returning up to `max_count` [`Point`]s representing the recent chain
+    /// history.
+    ///
+    /// This is used for ChainSync intersection negotiation so the peer has
+    /// enough historical points to find a common ancestor — even when the
+    /// local tip is a freshly-forged block the peer hasn't seen yet.
+    ///
+    /// The returned list starts with the volatile tip (most recent) and
+    /// walks backwards.  Immutable historical points (sampled from older
+    /// chunk secondary indexes) are appended so that even if the immutable
+    /// tip was an orphaned forged block flushed on shutdown, older canonical
+    /// blocks are still offered to the peer.
+    pub fn get_chain_points(&self, max_count: usize) -> Vec<Point> {
+        let mut points = Vec::new();
+
+        // Walk backwards through volatile blocks via prev_hash links.
+        if let Some((_slot, tip_hash, _block_no)) = self.volatile.get_tip() {
+            let mut current_hash = tip_hash;
+            while points.len() < max_count {
+                if let Some(block) = self.volatile.get_block(&current_hash) {
+                    points.push(Point::Specific(SlotNo(block.slot), current_hash));
+                    if block.prev_hash == Hash32::ZERO {
+                        break; // genesis or legacy WAL entry
+                    }
+                    current_hash = block.prev_hash;
+                } else {
+                    break; // reached immutable boundary or missing block
+                }
+            }
+        }
+
+        // Include the in-memory immutable tip (covers the active/unflushed
+        // chunk whose secondary index hasn't been written to disk yet).
+        if let Some((slot, hash, _block_no)) = self.immutable_tip {
+            if !points.iter().any(|p| p.hash() == Some(&hash)) {
+                points.push(Point::Specific(slot, hash));
+            }
+        }
+
+        // Also sample older finalized chunks' last entries in reverse
+        // order. This is critical when the immutable tip itself is an
+        // orphaned block (e.g. a forged block flushed via
+        // flush_all_to_immutable on graceful shutdown): older canonical
+        // blocks from earlier chunks give the peer a valid ancestor.
+        let remaining = max_count.saturating_sub(points.len());
+        if remaining > 0 {
+            for (slot, hash) in self.immutable.get_historical_points(remaining) {
+                if !points.iter().any(|p| p.hash() == Some(&hash)) {
+                    points.push(Point::Specific(SlotNo(slot), hash));
+                }
+            }
+        }
+
+        points
+    }
+
     // -- Rollback -----------------------------------------------------------
 
     /// Take a rollback snapshot. No-op in the new architecture — rollback
@@ -1434,5 +1493,108 @@ mod tests {
         assert_eq!(hash, make_hash(2));
         assert_eq!(block_no, BlockNo(2));
         assert!(db.has_immutable());
+    }
+
+    // -- get_chain_points tests --------------------------------------------
+
+    #[test]
+    fn test_get_chain_points_empty_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ChainDB::open(dir.path()).unwrap();
+
+        let points = db.get_chain_points(10);
+        assert!(points.is_empty(), "empty DB should return no chain points");
+    }
+
+    #[test]
+    fn test_get_chain_points_walks_volatile_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Build a 5-block chain: h(0) <- h(1) <- h(2) <- h(3) <- h(4) <- h(5)
+        build_chain(&mut db, 5);
+
+        let points = db.get_chain_points(10);
+
+        // Should walk backwards from tip: h(5), h(4), h(3), h(2), h(1)
+        // h(0) is just a prev_hash reference, not stored as a block
+        assert_eq!(points.len(), 5);
+        assert_eq!(points[0], Point::Specific(SlotNo(5), make_hash(5)));
+        assert_eq!(points[1], Point::Specific(SlotNo(4), make_hash(4)));
+        assert_eq!(points[2], Point::Specific(SlotNo(3), make_hash(3)));
+        assert_eq!(points[3], Point::Specific(SlotNo(2), make_hash(2)));
+        assert_eq!(points[4], Point::Specific(SlotNo(1), make_hash(1)));
+    }
+
+    #[test]
+    fn test_get_chain_points_respects_max_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut db, 5);
+
+        let points = db.get_chain_points(3);
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0], Point::Specific(SlotNo(5), make_hash(5)));
+        assert_eq!(points[1], Point::Specific(SlotNo(4), make_hash(4)));
+        assert_eq!(points[2], Point::Specific(SlotNo(3), make_hash(3)));
+    }
+
+    #[test]
+    fn test_get_chain_points_includes_immutable_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Put a block in immutable
+        let imm_hash = make_hash(1);
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm")])
+            .unwrap();
+
+        // Put a volatile block on top (prev_hash = imm_hash, but imm block
+        // isn't in volatile, so the chain walk stops at the volatile block)
+        let vol_hash = make_hash(2);
+        db.add_block(vol_hash, SlotNo(200), BlockNo(2), imm_hash, b"vol".to_vec())
+            .unwrap();
+
+        let points = db.get_chain_points(10);
+
+        // Should have volatile tip + immutable tip (chain walk couldn't
+        // reach immutable via prev_hash because it's not in volatile)
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0], Point::Specific(SlotNo(200), vol_hash));
+        assert_eq!(points[1], Point::Specific(SlotNo(100), imm_hash));
+    }
+
+    #[test]
+    fn test_get_chain_points_forged_block_scenario() {
+        // Simulates the exact scenario: chain tip is a forged block that
+        // the peer won't know about, but the parent block IS on the
+        // canonical chain and should be included in known_points.
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Canonical chain: blocks 1..3
+        build_chain(&mut db, 3);
+
+        // Forged block 4 at slot 100 (built on top of block 3)
+        let forged_hash = make_hash(99);
+        db.add_block(
+            forged_hash,
+            SlotNo(100),
+            BlockNo(4),
+            make_hash(3), // prev_hash = block 3 (canonical)
+            b"forged_block".to_vec(),
+        )
+        .unwrap();
+
+        let points = db.get_chain_points(10);
+
+        // The forged block is the tip, but walking back gives us block 3
+        // (canonical, known to peer), then 2, then 1.
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[0], Point::Specific(SlotNo(100), forged_hash));
+        assert_eq!(points[1], Point::Specific(SlotNo(3), make_hash(3)));
+        assert_eq!(points[2], Point::Specific(SlotNo(2), make_hash(2)));
+        assert_eq!(points[3], Point::Specific(SlotNo(1), make_hash(1)));
     }
 }
