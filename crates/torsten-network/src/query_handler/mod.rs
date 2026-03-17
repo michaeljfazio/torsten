@@ -12,11 +12,10 @@ use tracing::{debug, warn};
 pub use types::{
     CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, DRepStakeEntry, EraBound, EraSummary,
     GenesisConfigSnapshot, GovActionId, GovStateSnapshot, LedgerPeerEntry, MultiAssetSnapshot,
-    NodeStateSnapshot, NonMyopicRewardEntry, PoolDefaultVoteEntry, PoolParamsSnapshot,
-    PoolRewardInfo, PoolStakeSnapshotEntry, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult,
-    RelaySnapshot, ShelleyPParamsSnapshot, SnapshotStakeData, StakeAddressSnapshot,
-    StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider,
-    UtxoSnapshot, VoteDelegateeEntry,
+    NodeStateSnapshot, NonMyopicRewardEntry, PoolParamsSnapshot, PoolRewardInfo,
+    PoolStakeSnapshotEntry, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult, RelaySnapshot,
+    ShelleyPParamsSnapshot, SnapshotStakeData, StakeAddressSnapshot, StakeDelegDepositEntry,
+    StakePoolSnapshot, StakeSnapshotsResult, UtxoQueryProvider, UtxoSnapshot, VoteDelegateeEntry,
 };
 
 /// Handler for local state queries.
