@@ -665,6 +665,7 @@ mod tests {
                     cold_credential_type: 0,
                     hot_status: 0,
                     hot_credential: Some(vec![0x02; 28]),
+                    hot_credential_type: 0,
                     member_status: 0,
                     expiry_epoch: Some(200),
                 }],
@@ -743,6 +744,7 @@ mod tests {
                         cold_credential_type: 0,
                         hot_status: 0,
                         hot_credential: Some(vec![0x02; 28]),
+                        hot_credential_type: 0,
                         member_status: 0,
                         expiry_epoch: Some(200),
                     },
@@ -751,6 +753,7 @@ mod tests {
                         cold_credential_type: 0,
                         hot_status: 2, // Resigned
                         hot_credential: None,
+                        hot_credential_type: 0,
                         member_status: 0,
                         expiry_epoch: Some(200),
                     },

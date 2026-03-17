@@ -492,6 +492,7 @@ mod tests {
                 cold_credential: vec![0x88; 28],
                 hot_status: 0, // Authorized
                 hot_credential: Some(vec![0x99; 28]),
+                hot_credential_type: 0,
                 member_status: 0, // Active
                 expiry_epoch: Some(300),
             }],

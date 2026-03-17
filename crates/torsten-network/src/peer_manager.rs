@@ -99,7 +99,9 @@ pub enum CircuitState {
 }
 
 /// Number of consecutive failures before the circuit opens.
-const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+/// Kept low (3) so that broken peers are blocked within seconds
+/// rather than accumulating 5+ failures over minutes.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 
 /// Initial cooldown duration when the circuit first opens.
 const CIRCUIT_BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(60);
@@ -299,9 +301,11 @@ impl PeerInfo {
             PeerSource::Ledger => score += 0.05,
         }
 
-        // Penalty for failure history
+        // Penalty for failure history — steeper penalty (0.15 per failure,
+        // max 0.6) so that peers with even 2-3 failures drop noticeably and
+        // healthy discovered peers get a chance over broken topology entries.
         if self.failure_count > 0 {
-            score -= (self.failure_count as f64 * 0.05).min(0.3);
+            score -= (self.failure_count as f64 * 0.15).min(0.6);
         }
 
         // Bonus for peers with known recent tip
@@ -683,6 +687,27 @@ impl PeerManager {
         }
     }
 
+    /// Check whether the circuit breaker for the given peer is currently open.
+    ///
+    /// This is a read-only check that does NOT transition Open → HalfOpen.
+    /// Use this in peer selection loops where you want to skip circuit-open
+    /// peers without mutating state.
+    pub fn is_circuit_open(&self, addr: &SocketAddr) -> bool {
+        match self.peers.get(addr) {
+            Some(info) => match &info.circuit_state {
+                CircuitState::Open {
+                    opened_at,
+                    cooldown,
+                } => {
+                    // Still within cooldown → circuit is open
+                    opened_at.elapsed() < *cooldown
+                }
+                _ => false,
+            },
+            None => false,
+        }
+    }
+
     /// Update a peer's remote tip
     pub fn update_tip(&mut self, addr: &SocketAddr, tip_slot: u64) {
         if let Some(info) = self.peers.get_mut(addr) {
@@ -775,11 +800,20 @@ impl PeerManager {
         // Collect (addr, tier, score) tuples.
         //   tier = 0 → trustable/bootstrap (always first)
         //   tier = 1 → non-trustable (subject to should_retry())
+        //   tier = 2 → trustable with high failures (demoted from tier 0)
         let mut candidates: Vec<(SocketAddr, u8, f64)> = self
             .cold_peers
             .iter()
             .filter_map(|addr| {
                 self.peers.get(addr).and_then(|p| {
+                    // Hard filter: circuit-open peers are never eligible,
+                    // even trustable ones.  They'll become eligible again
+                    // once the cooldown expires and the circuit transitions
+                    // to HalfOpen via should_attempt_connection().
+                    if self.is_circuit_open(addr) {
+                        return None;
+                    }
+
                     let is_primary = Self::is_primary_peer(p);
 
                     // Eligibility: trustable peers are always eligible.  Non-trustable
@@ -798,7 +832,19 @@ impl PeerManager {
                         score -= 0.2 * (count - Self::MAX_PEERS_PER_SUBNET + 1) as f64;
                     }
 
-                    let tier: u8 = if is_primary { 0 } else { 1 };
+                    // Trustable peers normally sort into tier 0 (always first).
+                    // However, if they've accumulated >= CIRCUIT_BREAKER_THRESHOLD
+                    // failures, demote them to tier 2 so healthy discovered peers
+                    // get a chance.  They recover to tier 0 on any success.
+                    let tier: u8 = if is_primary {
+                        if p.failure_count >= CIRCUIT_BREAKER_THRESHOLD {
+                            2
+                        } else {
+                            0
+                        }
+                    } else {
+                        1
+                    };
                     Some((*addr, tier, score))
                 })
             })
@@ -1820,9 +1866,9 @@ mod tests {
     /// returned by `peers_to_connect()` even when they have a high failure count
     /// (which would normally impose a 60-second backoff on non-trustable peers).
     ///
-    /// This is the regression test for the sync-pipeline-stalling bug: after a
-    /// disconnect, the reconnect loop must always see the bootstrap/trusted peers
-    /// first so it does not spend 30-60 s fishing through untried gossip peers.
+    /// With the tier demotion change, trustable peers with >= CIRCUIT_BREAKER_THRESHOLD
+    /// failures are demoted to tier 2 (behind healthy gossip peers at tier 1).
+    /// They still APPEAR in the list, but healthy discovered peers get priority.
     #[test]
     fn test_trustable_peer_bypasses_backoff_in_peers_to_connect() {
         let config = PeerManagerConfig {
@@ -1855,10 +1901,42 @@ mod tests {
              got: {to_connect:?}"
         );
 
-        // The trustable peer must rank FIRST due to its score bonus.
+        // With high failure count (>= CIRCUIT_BREAKER_THRESHOLD), the trustable
+        // peer is demoted to tier 2, so healthy gossip peers (tier 1) rank first.
+        // This ensures broken topology peers don't block sync when alternatives exist.
+        assert_eq!(
+            to_connect[0], gossip,
+            "Healthy gossip peer should rank ahead of high-failure trustable peer; got: {to_connect:?}"
+        );
+    }
+
+    /// Verify that trustable peers with LOW failure count still rank first.
+    /// Only peers with >= CIRCUIT_BREAKER_THRESHOLD failures get demoted.
+    #[test]
+    fn test_trustable_peer_ranks_first_with_low_failures() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            target_warm_peers: 1,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        let trustable = test_addr(3001);
+        let gossip = test_addr(3002);
+
+        pm.add_config_peer(trustable, true, false);
+        pm.add_ledger_peer(gossip);
+
+        // Only 2 failures — below CIRCUIT_BREAKER_THRESHOLD (3), so tier 0
+        if let Some(info) = pm.peers.get_mut(&trustable) {
+            info.failure_count = 2;
+            info.last_failed = Some(Instant::now());
+        }
+
+        let to_connect = pm.peers_to_connect();
         assert_eq!(
             to_connect[0], trustable,
-            "Trustable peer must be the first connection attempt; got: {to_connect:?}"
+            "Trustable peer with few failures must rank first; got: {to_connect:?}"
         );
     }
 
@@ -1868,7 +1946,8 @@ mod tests {
     /// Busy-loop protection is delegated to the outer reconnect loop's 500 ms
     /// post-disconnect delay and the OS TCP connect timeout, NOT to the peer
     /// manager's retry holdout.  The important invariant tested here is that
-    /// `failure_count` and `last_failed` never gate a trustable peer.
+    /// `failure_count` and `last_failed` never gate a trustable peer from the
+    /// list (they may be deprioritized via tier demotion, but they still appear).
     #[test]
     fn test_trustable_peer_min_retry_gap() {
         let config = PeerManagerConfig {
@@ -1883,7 +1962,8 @@ mod tests {
 
         // Simulate a peer that has failed many times and just failed again.
         // For a non-trustable peer, failure_count=10 would impose a 60-second
-        // backoff holdout.  For a trustable peer it should have no effect.
+        // backoff holdout.  For a trustable peer it should have no effect on
+        // eligibility (though it may affect ranking via tier demotion).
         if let Some(info) = pm.peers.get_mut(&trustable) {
             info.failure_count = 10;
             info.last_failed = Some(Instant::now());
@@ -1895,6 +1975,77 @@ mod tests {
             to_connect.contains(&trustable),
             "Trustable peer should be eligible even with very high failure_count; \
              got: {to_connect:?}"
+        );
+    }
+
+    /// Verify that circuit-open peers are excluded from peers_to_connect(),
+    /// even if they are trustable/primary peers.
+    #[test]
+    fn test_circuit_open_peers_excluded_from_peers_to_connect() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            target_warm_peers: 1,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        let trustable = test_addr(3001);
+        let gossip = test_addr(3002);
+
+        pm.add_config_peer(trustable, true, false);
+        pm.add_ledger_peer(gossip);
+
+        // Open the circuit breaker on the trustable peer
+        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+            pm.peer_failed(&trustable);
+        }
+        assert!(matches!(
+            pm.peers[&trustable].circuit_state,
+            CircuitState::Open { .. }
+        ));
+        assert!(pm.is_circuit_open(&trustable));
+
+        let to_connect = pm.peers_to_connect();
+        assert!(
+            !to_connect.contains(&trustable),
+            "Circuit-open trustable peer must be excluded; got: {to_connect:?}"
+        );
+        assert!(
+            to_connect.contains(&gossip),
+            "Healthy gossip peer must still appear; got: {to_connect:?}"
+        );
+    }
+
+    /// Verify is_circuit_open is read-only (doesn't transition state).
+    #[test]
+    fn test_is_circuit_open_read_only() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+
+        // Open circuit
+        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+            pm.peer_failed(&addr);
+        }
+        assert!(pm.is_circuit_open(&addr));
+
+        // Manually expire cooldown
+        if let Some(info) = pm.peers.get_mut(&addr) {
+            info.circuit_state = CircuitState::Open {
+                opened_at: Instant::now() - Duration::from_secs(120),
+                cooldown: CIRCUIT_BREAKER_INITIAL_COOLDOWN,
+            };
+        }
+
+        // is_circuit_open should return false (cooldown expired) but NOT
+        // transition to HalfOpen — that's should_attempt_connection's job.
+        assert!(
+            !pm.is_circuit_open(&addr),
+            "Expired cooldown should report circuit as not open"
+        );
+        assert!(
+            matches!(pm.peers[&addr].circuit_state, CircuitState::Open { .. }),
+            "is_circuit_open must not transition state"
         );
     }
 }

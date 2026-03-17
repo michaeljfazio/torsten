@@ -356,12 +356,12 @@ fn test_opcert_counter_tracking() {
     let vrf_keyhash = blake2b_256(&vrf_vkey);
     let issuer_info = BlockIssuerInfo {
         vrf_keyhash,
-        // 100% relative stake: the leader eligibility check will pass trivially
-        // since phi_f(1.0, 0.05) = 0.05, and any VRF leader value below that
-        // threshold passes. With all-zero VRF output the leader value
-        // blake2b_256("L"||[0;64]) is deterministic; we skip this check by
-        // setting snapshots_established = false so it is non-fatal during replay.
-        relative_stake: 1.0,
+        // 100% relative stake (1/1): the leader eligibility check will pass
+        // trivially. With all-zero VRF output the leader value is deterministic;
+        // we skip this check by setting snapshots_established = false so it is
+        // non-fatal during replay.
+        pool_stake: 1,
+        total_active_stake: 1,
     };
 
     // Use a fixed 32-byte issuer_vkey so all headers are attributed to the

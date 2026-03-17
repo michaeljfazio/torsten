@@ -271,16 +271,31 @@ impl Node {
             })
             .collect();
 
-        // Build committee snapshot
+        // Build committee snapshot.
+        // Iterate committee_expiration (the canonical member list) rather than
+        // committee_hot_keys, so that members without hot key authorization
+        // (MemberNotAuthorized) are included in the response.
         let resigned_set: std::collections::HashSet<_> =
             ls.governance.committee_resigned.keys().collect();
         let committee = CommitteeSnapshot {
             members: ls
                 .governance
-                .committee_hot_keys
+                .committee_expiration
                 .iter()
-                .map(|(cold, hot)| {
+                .map(|(cold, _expiry)| {
                     let is_resigned = resigned_set.contains(cold);
+                    let hot_key = ls.governance.committee_hot_keys.get(cold);
+
+                    // Determine hot credential authorization status:
+                    // 0 = MemberAuthorized (has hot key), 1 = MemberNotAuthorized, 2 = Resigned
+                    let hot_status = if is_resigned {
+                        2
+                    } else if hot_key.is_some() {
+                        0
+                    } else {
+                        1 // MemberNotAuthorized: in expiration map but no hot key
+                    };
+
                     CommitteeMemberSnapshot {
                         // Committee cold/hot credentials are stored as Hash32 (padded from
                         // 28-byte Blake2b-224 hashes). Truncate to 28 bytes for N2C wire format.
@@ -291,15 +306,18 @@ impl Node {
                             .governance
                             .script_committee_credentials
                             .contains(cold) as u8,
-                        hot_status: if is_resigned { 2 } else { 0 },
-                        hot_credential: if is_resigned {
-                            None
-                        } else {
-                            // Hot credential is also a Hash32 padded from a 28-byte hash.
-                            Some(hash32_padded_to_28_bytes(hot))
+                        hot_status,
+                        hot_credential: match hot_key {
+                            Some(hk) if !is_resigned => Some(hash32_padded_to_28_bytes(hk)),
+                            _ => None,
                         },
+                        // Hot credential type: 0=KeyHash, 1=Script.
+                        // TODO: Track hot credential types in governance state
+                        // when script-based CC hot keys are encountered. Currently
+                        // defaults to KeyHash (0) which covers all known deployments.
+                        hot_credential_type: 0,
                         member_status: 0, // Active (simplified)
-                        expiry_epoch: ls.governance.committee_expiration.get(cold).map(|e| e.0),
+                        expiry_epoch: Some(_expiry.0),
                     }
                 })
                 .collect(),
