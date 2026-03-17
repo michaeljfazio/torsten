@@ -3057,4 +3057,354 @@ mod tests {
             );
         }
     }
+
+    // ===================================================================
+    //  Issue #98: Within-block reference script resolution and fee counting
+    //  (spending inputs with script_ref contribute to txNonDistinctRefScriptsSize)
+    // ===================================================================
+
+    /// Verify that `calculate_ref_script_size` counts scripts from BOTH spending
+    /// inputs and reference inputs, matching Haskell's `txNonDistinctRefScriptsSize`.
+    ///
+    /// Before the fix, the function only iterated `reference_inputs` so any
+    /// `script_ref` carried on a spending-input UTxO was silently ignored.
+    #[test]
+    fn test_ref_script_size_counts_spending_inputs() {
+        use super::super::scripts::calculate_ref_script_size;
+
+        let mut utxo_set = UtxoSet::new();
+        let script_bytes: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF]; // 4-byte mock Plutus script
+
+        // Create a spending input whose UTxO carries a PlutusV2 script_ref (4 bytes).
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(script_bytes.clone())),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Spending input only — should count the script_ref from the spending UTxO.
+        let size_spend_only =
+            calculate_ref_script_size(std::slice::from_ref(&spending_input), &[], &utxo_set);
+        assert_eq!(
+            size_spend_only,
+            script_bytes.len() as u64,
+            "calculate_ref_script_size must count script_ref from spending inputs"
+        );
+
+        // Add a separate reference input with a different script (4 bytes).
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x22u8; 32]),
+            index: 0,
+        };
+        let ref_script_bytes: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04]; // 4-byte V1 script
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV1(ref_script_bytes.clone())),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Both spending input AND reference input — total must be the sum of both script sizes.
+        let size_both = calculate_ref_script_size(
+            std::slice::from_ref(&spending_input),
+            std::slice::from_ref(&ref_input),
+            &utxo_set,
+        );
+        assert_eq!(
+            size_both,
+            script_bytes.len() as u64 + ref_script_bytes.len() as u64,
+            "calculate_ref_script_size must sum scripts from both inputs and reference_inputs"
+        );
+
+        // Neither input — should be zero.
+        let size_empty = calculate_ref_script_size(&[], &[], &utxo_set);
+        assert_eq!(size_empty, 0, "Empty inputs must yield size 0");
+    }
+
+    /// Verify that `compute_min_fee` includes script_ref bytes from SPENDING inputs
+    /// in the tiered reference-script fee component.
+    ///
+    /// A transaction that SPENDS a UTxO carrying a PlutusV2 script_ref must pay a
+    /// tiered fee for those script bytes, even though the script is not in
+    /// `reference_inputs`.  The fix adds `tx.body.inputs` to the size scan.
+    #[test]
+    fn test_min_fee_includes_spending_input_script_ref() {
+        let mut utxo_set = UtxoSet::new();
+
+        // 500-byte PlutusV2 script embedded in the spending-input UTxO.
+        let script_bytes: Vec<u8> = vec![0xABu8; 500];
+
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x33u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(script_bytes)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Build a minimal transaction spending that input (no reference inputs).
+        let tx = make_simple_tx(spending_input, 9_500_000, 200_000);
+        // No reference_inputs — the script_ref lives on the spending UTxO.
+        assert!(tx.body.reference_inputs.is_empty());
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let fee_with_ref = compute_min_fee(&tx, &utxo_set, &params, 300).0;
+
+        // For comparison, compute the fee as if the spending input had no script_ref.
+        let mut utxo_set_no_script = UtxoSet::new();
+        let plain_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x44u8; 32]),
+            index: 0,
+        };
+        utxo_set_no_script.insert(
+            plain_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let tx_plain = make_simple_tx(plain_input, 9_500_000, 200_000);
+        let fee_without_ref = compute_min_fee(&tx_plain, &utxo_set_no_script, &params, 300).0;
+
+        assert!(
+            fee_with_ref > fee_without_ref,
+            "Min fee must be higher when the spending input carries a script_ref: \
+             fee_with_ref={fee_with_ref}, fee_without_ref={fee_without_ref}"
+        );
+    }
+
+    /// Verify that a minting transaction can succeed when the minting policy script
+    /// lives in a UTxO that was produced by a PRIOR transaction in the same block.
+    ///
+    /// This is the within-block reference-script scenario: tx[0] produces a UTxO
+    /// with a `script_ref`; tx[1] uses that UTxO as a `reference_input` to satisfy
+    /// the minting policy check in Rule 3c.  The sequential `apply_block` loop
+    /// ensures `self.utxo_set` contains tx[0]'s outputs when tx[1] is validated.
+    ///
+    /// We test the underlying mechanism directly: insert the script-bearing UTxO into
+    /// the UTxO set before running validation, confirming the lookup succeeds.
+    #[test]
+    fn test_within_block_ref_script_for_minting_resolution() {
+        let mut utxo_set = UtxoSet::new();
+
+        // The minting policy native script.
+        let signer_hash = Hash32::from_bytes([0x7Fu8; 32]);
+        let native_script = NativeScript::ScriptPubkey(signer_hash);
+        let script_hash = compute_script_ref_hash(&ScriptRef::NativeScript(native_script.clone()));
+
+        // Spending input — the UTxO that the minting transaction actually spends.
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // The script-bearing UTxO — this simulates a UTxO created by a prior tx in
+        // the same block and subsequently visible via `self.utxo_set`.
+        let script_utxo_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            script_utxo_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::NativeScript(native_script.clone())),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Build the minting transaction: mint 10 tokens under the policy,
+        // use the script UTxO as a reference input.
+        let asset = AssetName(b"MINTED".to_vec());
+        let mut mint_map: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint_map
+            .entry(script_hash)
+            .or_default()
+            .insert(asset.clone(), 10);
+
+        let mut tx = make_simple_tx(spending_input, 9_800_000, 200_000);
+        tx.body.mint = mint_map;
+        tx.body.reference_inputs = vec![script_utxo_input];
+        // Add the minted tokens to the output so multi-asset conservation holds.
+        tx.body.outputs[0]
+            .value
+            .multi_asset
+            .entry(script_hash)
+            .or_default()
+            .insert(asset, 10);
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+
+        assert!(
+            result.is_ok(),
+            "Minting with a reference-input script_ref from a within-block UTxO must succeed; \
+             errors: {:?}",
+            result.err()
+        );
+    }
+
+    /// Mirror of `test_within_block_ref_script_for_minting_resolution` but for
+    /// the failure case: the minting policy is NOT available (script_ref not found
+    /// in any witness or reference input) → `InvalidMint` must be returned.
+    #[test]
+    fn test_minting_without_available_script_fails_with_invalid_mint() {
+        let mut utxo_set = UtxoSet::new();
+
+        // Spending input — no script_ref.
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Use an arbitrary policy ID that has no backing script anywhere.
+        let phantom_policy = Hash28::from_bytes([0xFFu8; 28]);
+        let asset = AssetName(b"GHOST".to_vec());
+        let mut mint_map: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint_map
+            .entry(phantom_policy)
+            .or_default()
+            .insert(asset.clone(), 5);
+
+        let mut tx = make_simple_tx(spending_input, 9_800_000, 200_000);
+        tx.body.mint = mint_map;
+        // Add the minted tokens to the output so multi-asset conservation holds.
+        tx.body.outputs[0]
+            .value
+            .multi_asset
+            .entry(phantom_policy)
+            .or_default()
+            .insert(asset, 5);
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .map(|errs| errs
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::InvalidMint)))
+                .unwrap_or(false),
+            "Minting without any matching script must produce InvalidMint; result: {:?}",
+            result
+        );
+    }
+
+    /// Verify that `calculate_ref_script_size` correctly handles the non-distinct
+    /// (no deduplication) counting when the same script_ref appears in multiple UTxOs.
+    ///
+    /// Haskell: `txNonDistinctRefScriptsSize` — "non-distinct" means each UTxO
+    /// contributes its script size independently even if two UTxOs carry identical
+    /// script bytes.
+    #[test]
+    fn test_ref_script_size_non_distinct_no_dedup() {
+        use super::super::scripts::calculate_ref_script_size;
+
+        let script_bytes: Vec<u8> = vec![0x01u8; 100]; // 100-byte script
+
+        let mut utxo_set = UtxoSet::new();
+
+        // Two inputs that carry the SAME 100-byte Plutus V2 script.
+        let input_a = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        let input_b = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20u8; 32]),
+            index: 0,
+        };
+        for inp in [input_a.clone(), input_b.clone()] {
+            utxo_set.insert(
+                inp,
+                TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(1_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: Some(ScriptRef::PlutusV2(script_bytes.clone())),
+                    is_legacy: false,
+                    raw_cbor: None,
+                },
+            );
+        }
+
+        // Both inputs carry the same 100-byte script → total must be 200 (not 100).
+        let size = calculate_ref_script_size(&[input_a], &[input_b], &utxo_set);
+        assert_eq!(
+            size, 200,
+            "Non-distinct counting: identical scripts in two UTxOs must each contribute \
+             their full byte size (2 × 100 = 200)"
+        );
+    }
 }

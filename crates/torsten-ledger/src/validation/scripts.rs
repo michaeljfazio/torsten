@@ -158,21 +158,38 @@ pub(super) fn collect_available_script_hashes(
 // Reference script size + tiered fee (Conway ledger spec)
 // ---------------------------------------------------------------------------
 
-/// Calculate the total byte size of reference scripts used via reference inputs.
+/// Calculate the total byte size of reference scripts from all UTxOs touched by a
+/// transaction — both spending inputs and reference inputs.
 ///
-/// Matches Haskell's `txNonDistinctRefScriptsSize`, which sums the `originalBytesSize`
-/// of each reference script found in the transaction's inputs and reference inputs.
-/// Note: Haskell counts ALL reference scripts in the UTxO entries referenced, even if
-/// the same script appears multiple times — it is non-distinct (no deduplication).
+/// Matches Haskell's `txNonDistinctRefScriptsSize` from
+/// `Cardano.Ledger.Conway.Tx` (CIP-0112), which iterates over
+/// `(inputs txb <> referenceInputs txb)` and sums `originalBytesSize` for every
+/// UTxO that carries a `script_ref`.  The count is **non-distinct** — if the same
+/// script hash appears in multiple UTxOs it is counted each time.
+///
+/// The `inputs` and `reference_inputs` slices are provided separately so callers can
+/// supply the exact transaction body fields without allocating a merged vector.
+/// Pass an empty slice for either argument if only one set is applicable (e.g. the
+/// block-level pre-scan handles its own overlay and may call this differently).
+///
+/// # Within-block visibility
+///
+/// When called from `compute_min_fee` inside `validate_transaction`, `utxo_set` is
+/// `&self.utxo_set` which already contains UTxOs created by all prior transactions in
+/// the same block (applied sequentially by `apply_block`).  No separate overlay is
+/// needed for the per-transaction fee check path.
 pub(crate) fn calculate_ref_script_size(
+    inputs: &[TransactionInput],
     reference_inputs: &[TransactionInput],
     utxo_set: &UtxoSet,
 ) -> u64 {
     let mut total_size: u64 = 0;
-    for ref_input in reference_inputs {
-        if let Some(utxo) = utxo_set.lookup(ref_input) {
+    // Iterate both spending inputs and reference inputs, matching Haskell's
+    // `inputs txb <> referenceInputs txb` set union.
+    for inp in inputs.iter().chain(reference_inputs.iter()) {
+        if let Some(utxo) = utxo_set.lookup(inp) {
             if let Some(script_ref) = &utxo.script_ref {
-                total_size += script_ref_byte_size(script_ref);
+                total_size = total_size.saturating_add(script_ref_byte_size(script_ref));
             }
         }
     }
@@ -613,13 +630,19 @@ pub(super) fn has_plutus_scripts(tx: &Transaction) -> bool {
         || !tx.witness_set.redeemers.is_empty()
 }
 
-/// Return the fee to add for reference scripts (0 when no reference inputs).
+/// Return the tiered reference-script fee for a transaction.
+///
+/// Per Haskell's `txNonDistinctRefScriptsSize`, the fee is based on the total
+/// script bytes reachable from BOTH spending inputs and reference inputs.
+/// Passing an empty slice for either argument is valid when that class of inputs
+/// is absent from the transaction.
 pub(super) fn ref_script_fee(
+    inputs: &[TransactionInput],
     reference_inputs: &[TransactionInput],
     utxo_set: &UtxoSet,
     min_fee_ref_script_cost_per_byte: u64,
 ) -> u64 {
-    let size = calculate_ref_script_size(reference_inputs, utxo_set);
+    let size = calculate_ref_script_size(inputs, reference_inputs, utxo_set);
     if size > 0 {
         calculate_ref_script_tiered_fee(min_fee_ref_script_cost_per_byte, size)
     } else {
@@ -702,7 +725,11 @@ pub(super) fn compute_min_fee(
     params: &ProtocolParameters,
     tx_size: u64,
 ) -> Lovelace {
+    // Pass both spending inputs and reference inputs so that scripts embedded in
+    // spending-input UTxOs are counted in the tiered fee — matching Haskell's
+    // `txNonDistinctRefScriptsSize` which uses `inputs txb <> referenceInputs txb`.
     let rs_fee = ref_script_fee(
+        &tx.body.inputs,
         &tx.body.reference_inputs,
         utxo_set,
         params.min_fee_ref_script_cost_per_byte,

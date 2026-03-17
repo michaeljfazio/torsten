@@ -9166,3 +9166,453 @@ mod proptests {
         }
     }
 }
+
+// ─── Issue #113: Snapshot stake persistence tests ─────────────────────────────
+//
+// These tests reproduce the bug where pool_stake=0 appears in the set snapshot
+// after replay + 2 epoch transitions. The root cause: during fast replay with
+// needs_stake_rebuild=false, incremental stake tracking may not correctly populate
+// pool_stake in mark/set/go snapshots. The fix calls recompute_snapshot_pool_stakes()
+// at the end of replay (and before bulk snapshot saves) to correct any drift.
+
+/// Build a minimal stake-delegation block for testing epoch transitions.
+///
+/// Creates a block containing:
+/// 1. A stake registration for `cred`
+/// 2. A stake delegation from `cred` to `pool_id`
+/// 3. An output sending `amount` lovelace to a base address with `cred` as stake part
+fn make_delegation_block(
+    slot: u64,
+    block_no: u64,
+    prev_hash: Hash32,
+    cred: &Credential,
+    pool_id: Hash28,
+    amount: u64,
+) -> Block {
+    use torsten_primitives::address::BaseAddress;
+    use torsten_primitives::network::NetworkId;
+
+    let payment_cred = Credential::VerificationKey(Hash28::from_bytes([0xABu8; 28]));
+    let base_addr = Address::Base(BaseAddress {
+        network: NetworkId::Mainnet,
+        payment: payment_cred,
+        stake: cred.clone(),
+    });
+    let counter = UTXO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tx_id_bytes = [0u8; 32];
+    tx_id_bytes[..8].copy_from_slice(&counter.to_be_bytes());
+    let tx_hash = Hash32::from_bytes(tx_id_bytes);
+
+    let tx = Transaction {
+        hash: tx_hash,
+        body: TransactionBody {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                address: base_addr,
+                value: Value {
+                    coin: Lovelace(amount),
+                    multi_asset: Default::default(),
+                },
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            }],
+            fee: Lovelace(0),
+            ttl: None,
+            certificates: vec![
+                Certificate::StakeRegistration(cred.clone()),
+                Certificate::StakeDelegation {
+                    credential: cred.clone(),
+                    pool_hash: pool_id,
+                },
+            ],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    };
+    make_test_block(slot, block_no, prev_hash, vec![tx])
+}
+
+/// Register a pool (PoolRegistration cert) and return a block containing it.
+fn make_pool_registration_block(
+    slot: u64,
+    block_no: u64,
+    prev_hash: Hash32,
+    pool_id: Hash28,
+) -> Block {
+    use torsten_primitives::transaction::PoolParams;
+
+    let tx_hash = {
+        let mut bytes = [0u8; 32];
+        let counter = UTXO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bytes[..8].copy_from_slice(&counter.to_be_bytes());
+        Hash32::from_bytes(bytes)
+    };
+    let params = PoolParams {
+        operator: pool_id,
+        vrf_keyhash: Hash32::ZERO,
+        pledge: Lovelace(1_000_000_000),
+        cost: Lovelace(340_000_000),
+        margin: Rational {
+            numerator: 1,
+            denominator: 100,
+        },
+        reward_account: vec![0xe0u8; 29], // mainnet reward address prefix
+        pool_owners: vec![],
+        relays: vec![],
+        pool_metadata: None,
+    };
+    let tx = Transaction {
+        hash: tx_hash,
+        body: TransactionBody {
+            inputs: vec![],
+            outputs: vec![],
+            fee: Lovelace(0),
+            ttl: None,
+            certificates: vec![Certificate::PoolRegistration(params)],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    };
+    make_test_block(slot, block_no, prev_hash, vec![tx])
+}
+
+/// A simple, empty block used to advance the chain tip through a slot.
+fn make_empty_block(slot: u64, block_no: u64, prev_hash: Hash32) -> Block {
+    make_test_block(slot, block_no, prev_hash, vec![])
+}
+
+/// Verify that pool_stake in the mark snapshot is non-zero for a pool that has
+/// delegators, even when replay runs with needs_stake_rebuild=false.
+///
+/// Regression test for GitHub issue #113.
+#[test]
+fn test_mark_snapshot_pool_stake_nonzero_after_replay_mode() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    // Simulate the replay path: needs_stake_rebuild=false (epoch boundaries skip
+    // the full UTxO scan and use the incremental stake_distribution instead).
+    state.needs_stake_rebuild = false;
+    // Use short epochs (1000 slots each, matching test block slots below).
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x01u8; 28]);
+    let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x02u8; 28]));
+    let stake_amount = 10_000_000_000u64; // 10,000 ADA
+
+    // Epoch 0: register pool and delegate to it (slot 1)
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &delegator_cred, pool_id, stake_amount);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 1 transition (slot 1000): mark snapshot is built here.
+    // With needs_stake_rebuild=false, pool_stake is computed from the incremental map.
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // The mark snapshot should now exist and have non-zero pool_stake for our pool.
+    let mark = state
+        .snapshots
+        .mark
+        .as_ref()
+        .expect("mark snapshot should exist after epoch 1 transition");
+
+    let pool_stake_in_mark = mark
+        .pool_stake
+        .get(&pool_id)
+        .copied()
+        .unwrap_or(Lovelace(0));
+    assert!(
+        pool_stake_in_mark.0 >= stake_amount,
+        "mark snapshot pool_stake should be >= {stake_amount} after delegation, got {}",
+        pool_stake_in_mark.0
+    );
+}
+
+/// Verify that recompute_snapshot_pool_stakes() corrects pool_stake=0 in snapshots.
+///
+/// This simulates the scenario where the incremental stake_map had drift and
+/// the epoch boundary created a mark snapshot with incorrect (0) pool_stake.
+/// After rebuild_stake_distribution() + recompute_snapshot_pool_stakes(), the
+/// snapshot pool_stake should be corrected to the actual UTxO-backed stake amount.
+///
+/// Regression test for GitHub issue #113.
+#[test]
+fn test_recompute_snapshot_pool_stakes_corrects_zero_pool_stake() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x10u8; 28]);
+    let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x11u8; 28]));
+    let stake_amount = 5_000_000_000u64; // 5,000 ADA
+
+    // Register pool + delegate
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &delegator_cred, pool_id, stake_amount);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Trigger epoch 1 transition. needs_stake_rebuild=true so it runs rebuild.
+    // This builds a correct mark snapshot.
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Corrupt the mark snapshot pool_stake to simulate drift.
+    if let Some(ref mut snap) = state.snapshots.mark {
+        snap.pool_stake.clear();
+    }
+    let zero_stake = state
+        .snapshots
+        .mark
+        .as_ref()
+        .and_then(|s| s.pool_stake.get(&pool_id))
+        .copied()
+        .unwrap_or(Lovelace(0));
+    assert_eq!(
+        zero_stake.0, 0,
+        "pool_stake should be 0 after corruption (precondition)"
+    );
+
+    // Simulate what replay_from_chunk_files does at the end of replay:
+    // rebuild stake_distribution from full UTxO set, then recompute snapshots.
+    state.rebuild_stake_distribution();
+    state.recompute_snapshot_pool_stakes();
+
+    // Pool stake should be corrected in the mark snapshot.
+    let corrected_stake = state
+        .snapshots
+        .mark
+        .as_ref()
+        .and_then(|s| s.pool_stake.get(&pool_id))
+        .copied()
+        .unwrap_or(Lovelace(0));
+    assert!(
+        corrected_stake.0 >= stake_amount,
+        "pool_stake should be corrected to >= {stake_amount} after recompute, got {}",
+        corrected_stake.0
+    );
+}
+
+/// Verify that after replay + 2 live epoch transitions, the set snapshot
+/// has non-zero pool_stake for a pool that had delegators during replay.
+///
+/// This is the end-to-end reproduction of GitHub issue #113:
+/// After Mithril import + replay + 2 epoch transitions, set snapshot pool_stake
+/// must be non-zero for registered and delegated pools.
+#[test]
+fn test_set_snapshot_pool_stake_nonzero_after_two_epoch_transitions() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    // Replay mode: no full rebuild at epoch boundaries during replay
+    state.needs_stake_rebuild = false;
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x20u8; 28]);
+    let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x21u8; 28]));
+    let stake_amount = 8_000_000_000u64; // 8,000 ADA
+
+    // Epoch 0: register pool + delegate (slots 1-2)
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &delegator_cred, pool_id, stake_amount);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 1 transition (slot 1001): mark snapshot built from incremental stake_map
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 2 transition (slot 2001): set=mark(epoch1), new mark built
+    let b3 = make_empty_block(2001, 4, *b2.hash());
+    state
+        .apply_block(&b3, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 3 transition (slot 3001): go=set(epoch1), set=mark(epoch2), new mark
+    let b4 = make_empty_block(3001, 5, *b3.hash());
+    state
+        .apply_block(&b4, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Simulate what replay finalization does:
+    // rebuild_stake_distribution() + recompute_snapshot_pool_stakes()
+    state.needs_stake_rebuild = true;
+    state.rebuild_stake_distribution();
+    state.recompute_snapshot_pool_stakes();
+
+    // Now cross 2 live epoch transitions (epochs 4 and 5)
+    let b5 = make_empty_block(4001, 6, *b4.hash());
+    state
+        .apply_block(&b5, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    let b6 = make_empty_block(5001, 7, *b5.hash());
+    state
+        .apply_block(&b6, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // After 2 live epoch transitions, the "set" snapshot should be the mark
+    // built at the first live epoch boundary (epoch 4). Since needs_stake_rebuild=true
+    // after replay finalization, that mark was built with a freshly rebuilt stake_map.
+    let set_pool_stake = state
+        .snapshots
+        .set
+        .as_ref()
+        .and_then(|s| s.pool_stake.get(&pool_id))
+        .copied()
+        .unwrap_or(Lovelace(0));
+
+    assert!(
+        set_pool_stake.0 >= stake_amount,
+        "set snapshot pool_stake should be >= {stake_amount} after replay + 2 epoch transitions, got {}",
+        set_pool_stake.0
+    );
+}
+
+/// Verify that recompute_snapshot_pool_stakes() correctly handles reward account
+/// balances — they are included in pool_stake, not just UTxO-backed stake.
+///
+/// This ensures the fix correctly adds reward balances as per Cardano spec:
+/// total stake = UTxO stake + reward balance for each delegated credential.
+#[test]
+fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x30u8; 28]);
+    let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x31u8; 28]));
+    let cred_key = credential_to_hash(&delegator_cred);
+    let utxo_amount = 3_000_000_000u64; // 3,000 ADA
+    let reward_amount = 500_000_000u64; // 500 ADA
+
+    // Register pool + delegate with UTxO stake
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &delegator_cred, pool_id, utxo_amount);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Manually add a reward balance for the delegator (simulating earned rewards)
+    *std::sync::Arc::make_mut(&mut state.reward_accounts)
+        .entry(cred_key)
+        .or_insert(Lovelace(0)) = Lovelace(reward_amount);
+
+    // Trigger epoch 1 transition (this builds the mark snapshot)
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Now rebuild + recompute (simulating end-of-replay finalization)
+    state.rebuild_stake_distribution();
+    state.recompute_snapshot_pool_stakes();
+
+    // pool_stake should include BOTH utxo stake and reward balance
+    let expected_total = utxo_amount + reward_amount;
+    let pool_stake = state
+        .snapshots
+        .mark
+        .as_ref()
+        .and_then(|s| s.pool_stake.get(&pool_id))
+        .copied()
+        .unwrap_or(Lovelace(0));
+
+    assert!(
+        pool_stake.0 >= expected_total,
+        "pool_stake should include reward account balance: expected >= {expected_total}, got {}",
+        pool_stake.0
+    );
+}

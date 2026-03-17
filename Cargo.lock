@@ -3459,7 +3459,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "torsten-cli"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-conformance"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "hex",
  "serde",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-consensus"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "async-trait",
  "futures",
@@ -3503,6 +3503,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",
@@ -3516,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-crypto"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "criterion",
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
@@ -3554,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-integration-tests"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "anyhow",
  "hex",
@@ -3567,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-ledger"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "bincode",
  "criterion",
@@ -3592,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-lsm"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "byteorder",
  "crc32fast",
@@ -3606,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-mempool"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "criterion",
  "dashmap",
@@ -3621,7 +3622,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-network"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -3635,6 +3636,7 @@ dependencies = [
  "pallas-network",
  "pallas-traverse 1.0.0-alpha.5",
  "parking_lot",
+ "proptest",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",
@@ -3648,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-node"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -3694,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-primitives"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "bech32 0.11.1",
  "blake2",
@@ -3716,7 +3718,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-serialization"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "bincode",
  "bytes",
@@ -3738,7 +3740,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-storage"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3759,7 +3761,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-tui"
-version = "0.4.0-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "anyhow",
  "clap",

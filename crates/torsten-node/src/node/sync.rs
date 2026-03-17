@@ -2037,6 +2037,13 @@ impl Node {
                         }
 
                         if snapshot_policy.should_snapshot_bulk() {
+                            // Recompute snapshot pool_stake using the current incremental
+                            // stake_distribution before saving. This ensures mid-replay
+                            // bulk snapshots have correct pool_stake values even though
+                            // needs_stake_rebuild=false (no full UTxO scan at epoch boundaries).
+                            // The incremental stake_map is correct at this point since it is
+                            // maintained per-block during replay.
+                            ls_guard.recompute_snapshot_pool_stakes();
                             if let Err(e) = ls_guard.save_snapshot(&snapshot_path) {
                                 warn!("Failed to save ledger snapshot during replay: {e}");
                             }
@@ -2081,17 +2088,26 @@ impl Node {
                 ls.utxo_set.set_wal_enabled(true); // Re-enable WAL after replay
                 ls.utxo_set.set_indexing_enabled(true);
                 ls.utxo_set.rebuild_address_index();
-                // Rebuild the live stake distribution from the UTxO set so that
+                // Rebuild the live stake distribution from the full UTxO set so that
                 // live queries and the next epoch transition have correct values.
-                // Do NOT call recompute_snapshot_pool_stakes() here: snapshot
-                // pool_stake values are computed at epoch boundaries during replay
-                // using the full stake state (UTxO stake + reward accounts) at
-                // that boundary. Recomputing post-replay overwrites those correct
-                // values with UTxO-only stake that ignores reward account balances,
-                // zeroing out pools whose delegators have moved stake to rewards.
+                // needs_stake_rebuild=true causes every subsequent epoch boundary to
+                // rebuild stake_distribution instead of using incremental tracking.
                 ls.needs_stake_rebuild = true;
                 ls.rebuild_stake_distribution();
-                debug!("Rebuilt address index and stake distribution after chunk replay");
+                // After rebuilding stake_distribution from the full UTxO set, recompute
+                // pool_stake for all existing mark/set/go snapshots. This corrects any
+                // drift that accumulated during replay when needs_stake_rebuild=false caused
+                // epoch-boundary pool_stake to be computed from the incremental stake_map
+                // rather than a full UTxO scan. recompute_snapshot_pool_stakes() uses both
+                // the rebuilt stake_distribution and current reward_accounts, matching the
+                // Haskell semantics for snapshot pool_stake (UTxO stake + reward balance).
+                // Without this call, the saved final snapshot may have pool_stake=0 for
+                // pools whose delegators' UTxOs were present during replay but missed by
+                // the incremental tracking (e.g., due to UTxO apply failures on out-of-order
+                // inputs) — causing incorrect leader eligibility and empty rewards after
+                // two epoch transitions.
+                ls.recompute_snapshot_pool_stakes();
+                debug!("Rebuilt address index, stake distribution, and snapshot pool stakes after chunk replay");
             }
 
             // Save final snapshot (write lock to flush UTxO store — no WAL)
@@ -2193,6 +2209,13 @@ impl Node {
                             }
 
                             if self.snapshot_policy.should_snapshot_bulk() {
+                                // Recompute snapshot pool_stake before saving. During LSM
+                                // replay with needs_stake_rebuild=false, epoch boundaries
+                                // use the incremental stake_map rather than a full UTxO scan.
+                                // Calling recompute_snapshot_pool_stakes() here ensures the
+                                // bulk snapshot has correct pool_stake values using the
+                                // current incremental stake_distribution.
+                                ls.recompute_snapshot_pool_stakes();
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
                                 }
@@ -2234,11 +2257,18 @@ impl Node {
             ls.utxo_set.set_wal_enabled(true);
             ls.utxo_set.set_indexing_enabled(true);
             ls.utxo_set.rebuild_address_index();
-            // Rebuild the live stake distribution only — do NOT recompute snapshot
-            // pool_stake values. See chunk replay path above for the rationale.
+            // Rebuild the live stake distribution from the full UTxO set.
+            // needs_stake_rebuild=true causes every subsequent live epoch boundary
+            // to rebuild stake_distribution instead of using incremental tracking.
             ls.needs_stake_rebuild = true;
             ls.rebuild_stake_distribution();
-            debug!("Rebuilt address index and stake distribution after LSM replay");
+            // Recompute pool_stake for all mark/set/go snapshots using the freshly
+            // rebuilt stake_distribution and current reward_accounts. This corrects
+            // drift accumulated during replay when needs_stake_rebuild=false caused
+            // epoch-boundary pool_stake computations to use the incremental stake_map.
+            // See the chunk replay path comment above for the detailed rationale.
+            ls.recompute_snapshot_pool_stakes();
+            debug!("Rebuilt address index, stake distribution, and snapshot pool stakes after LSM replay");
         }
 
         // Save final snapshot after replay (write lock to flush UTxO store — no WAL)
