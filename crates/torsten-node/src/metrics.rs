@@ -210,6 +210,8 @@ pub struct NodeMetrics {
     /// Peak resident memory observed since node start, in bytes.
     /// Exposed as `torsten_mem_peak_bytes` Prometheus gauge.
     peak_mem_bytes: AtomicU64,
+    /// Network magic number (764824073=mainnet, 2=preview, 1=preprod).
+    pub network_magic: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -263,6 +265,7 @@ impl NodeMetrics {
             chainsync_idle_secs: AtomicU64::new(0),
             cpu_tracker: std::sync::Mutex::new(CpuTracker::new()),
             peak_mem_bytes: AtomicU64::new(0),
+            network_magic: AtomicU64::new(0),
         }
     }
 
@@ -413,6 +416,11 @@ impl NodeMetrics {
     /// Set the replay duration in seconds.
     pub fn set_replay_duration_secs(&self, secs: u64) {
         self.replay_duration_secs.store(secs, Ordering::Relaxed);
+    }
+
+    /// Set the network magic number.
+    pub fn set_network_magic(&self, magic: u64) {
+        self.network_magic.store(magic, Ordering::Relaxed);
     }
 
     /// Compute and store the chainsync idle time.
@@ -645,6 +653,11 @@ impl NodeMetrics {
                 "torsten_ledger_replay_duration_seconds",
                 "Duration of last ledger replay in seconds",
                 &self.replay_duration_secs,
+            ),
+            (
+                "torsten_network_magic",
+                "Network magic number (764824073=mainnet, 2=preview, 1=preprod)",
+                &self.network_magic,
             ),
         ];
 
