@@ -965,27 +965,109 @@ fn encode_gov_state(
     enc.array(1).ok();
     enc.u32(0).ok();
 
-    // [6] DRepPulsingState = DRComplete: array(2) [PulsingSnapshot(4), RatifyState(4)]
+    // [6] DRepPulsingState = DRComplete (Rec, no constructor tag): array(2)
+    //     [PulsingSnapshot, RatifyState]
     enc.array(2).ok();
-    // PulsingSnapshot = array(4) [Map<DRep,Coin>, Map<Credential,Vote>, Map<GASId,Gas>, Map<Pool,IndivPoolStake>]
+
+    // PulsingSnapshot = array(4):
+    //   [0] psProposals:  StrictSeq GovActionState (CBOR array, not map)
+    //   [1] psDRepDistr:  Map DRep (CompactForm Coin)
+    //   [2] psDRepState:  Map (Credential DRepRole) DRepState
+    //   [3] psPoolDistr:  Map (KeyHash StakePool) (CompactForm Coin)
     enc.array(4).ok();
-    enc.map(0).ok(); // drep stake distribution
-    enc.map(0).ok(); // drep votes (credential->vote)
-    enc.map(0).ok(); // proposals map
-    enc.map(0).ok(); // pool stake distribution
-                     // RatifyState = array(4) [enacted, expired, delayed_flag, future_pparams]
+    enc.array(0).ok(); // psProposals: empty StrictSeq (array, NOT map)
+    enc.map(0).ok(); // psDRepDistr
+    enc.map(0).ok(); // psDRepState
+    enc.map(0).ok(); // psPoolDistr
+
+    // RatifyState = array(4):
+    //   [0] rsEnactState:  EnactState (array(7))
+    //   [1] rsEnacted:     Seq GovActionState (plain array, no tag 258)
+    //   [2] rsExpired:     Set GovActionId (tag(258) + array)
+    //   [3] rsDelayed:     Bool
     enc.array(4).ok();
-    // enacted proposals (tag(258) set)
+
+    // [0] EnactState = array(7):
+    //   [0] ensCommittee       StrictMaybe Committee
+    //   [1] ensConstitution    Constitution
+    //   [2] ensCurPParams      PParams
+    //   [3] ensPrevPParams     PParams
+    //   [4] ensTreasury        Coin
+    //   [5] ensWithdrawals     Map (Credential Staking) Coin
+    //   [6] ensPrevGovActionIds GovRelation StrictMaybe (array(4))
+    enc.array(7).ok();
+
+    // ensCommittee: reuse committee from ConwayGovState
+    if gov.committee.members.is_empty() && gov.committee.threshold.is_none() {
+        enc.array(0).ok(); // SNothing
+    } else {
+        enc.array(1).ok(); // SJust
+        enc.array(2).ok();
+        // Map<ColdCredential, EpochNo>
+        enc.map(gov.committee.members.len() as u64).ok();
+        for m in &gov.committee.members {
+            enc.array(2).ok();
+            enc.u8(m.cold_credential_type).ok();
+            enc.bytes(&m.cold_credential).ok();
+            enc.u64(m.expiry_epoch.unwrap_or(0)).ok();
+        }
+        // Quorum threshold
+        if let Some((num, den)) = gov.committee.threshold {
+            encode_tagged_rational(enc, num, den);
+        } else {
+            encode_tagged_rational(enc, 2, 3);
+        }
+    }
+
+    // ensConstitution: array(2) [Anchor, StrictMaybe ScriptHash]
+    enc.array(2).ok();
+    enc.array(2).ok();
+    enc.str(&gov.constitution_url).ok();
+    enc.bytes(&gov.constitution_hash).ok();
+    if let Some(ref script) = gov.constitution_script {
+        enc.bytes(script).ok();
+    } else {
+        enc.null().ok();
+    }
+
+    // ensCurPParams
+    encode_protocol_params_cbor(enc, &gov.cur_pparams);
+    // ensPrevPParams
+    encode_protocol_params_cbor(enc, &gov.prev_pparams);
+    // ensTreasury
+    enc.u64(gov.treasury).ok();
+    // ensWithdrawals: empty map
+    enc.map(0).ok();
+    // ensPrevGovActionIds: GovRelation StrictMaybe = array(4) of StrictMaybe GovPurposeId
+    // Order: [PParamUpdate, HardFork, Committee, Constitution]
+    enc.array(4).ok();
+    let roots = [
+        &gov.enacted_pparam_update,
+        &gov.enacted_hard_fork,
+        &gov.enacted_committee,
+        &gov.enacted_constitution,
+    ];
+    for root in &roots {
+        match root {
+            Some((tx_hash, action_index)) => {
+                enc.array(1).ok(); // SJust
+                enc.array(2).ok(); // GovActionId
+                enc.bytes(tx_hash).ok();
+                enc.u32(*action_index).ok();
+            }
+            None => {
+                enc.array(0).ok(); // SNothing
+            }
+        }
+    }
+
+    // [1] rsEnacted: Seq GovActionState (plain array, NOT tagged set)
+    enc.array(0).ok();
+    // [2] rsExpired: Set GovActionId (tag(258) + array)
     enc.tag(minicbor::data::Tag::new(258)).ok();
     enc.array(0).ok();
-    // expired proposals (tag(258) set)
-    enc.tag(minicbor::data::Tag::new(258)).ok();
-    enc.array(0).ok();
-    // delayed flag (bool)
+    // [3] rsDelayed: Bool
     enc.bool(false).ok();
-    // future pparams: [0] = NoPParamsUpdate
-    enc.array(1).ok();
-    enc.u32(0).ok();
 }
 
 fn encode_drep_state(

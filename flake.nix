@@ -25,7 +25,7 @@
       imports =
         recursiveImports [
           ./flake
-          ./perSystem
+          ./per-system
         ]
         ++ [
           inputs.treefmt-nix.flakeModule

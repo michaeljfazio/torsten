@@ -30,6 +30,7 @@ pub(crate) fn handle_gov_state(state: &NodeStateSnapshot) -> QueryResult {
         enacted_hard_fork: state.enacted_hard_fork.clone(),
         enacted_committee: state.enacted_committee.clone(),
         enacted_constitution: state.enacted_constitution.clone(),
+        treasury: state.treasury,
     }))
 }
 

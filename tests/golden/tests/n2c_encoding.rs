@@ -395,6 +395,7 @@ fn make_gov_state() -> QueryResult {
         enacted_hard_fork: None,
         enacted_committee: None,
         enacted_constitution: None,
+        treasury: 14_000_000_000_000_000,
     }))
 }
 
@@ -456,36 +457,57 @@ fn test_gov_state_structure() {
     assert_eq!(fut, 1);
     assert_eq!(dec.u32().unwrap(), 0);
 
-    // [6] DRepPulsingState = array(2) [PulsingSnapshot(4), RatifyState(4)]
+    // [6] DRepPulsingState = DRComplete (Rec): array(2) [PulsingSnapshot, RatifyState]
     let pulse = dec.array().unwrap().unwrap();
     assert_eq!(pulse, 2);
-    // PulsingSnapshot = array(4)
+    // PulsingSnapshot = array(4): [proposals(array), drepDistr(map), drepState(map), poolDistr(map)]
     let snap = dec.array().unwrap().unwrap();
     assert_eq!(snap, 4);
-    // 4 empty maps
-    for _ in 0..4 {
+    // [0] psProposals: empty array (StrictSeq)
+    let proposals = dec.array().unwrap().unwrap();
+    assert_eq!(proposals, 0);
+    // [1-3] empty maps
+    for _ in 0..3 {
         let m = dec.map().unwrap().unwrap();
         assert_eq!(m, 0);
     }
-    // RatifyState = array(4)
+    // RatifyState = array(4): [EnactState, enacted, expired, delayed]
     let rat = dec.array().unwrap().unwrap();
     assert_eq!(rat, 4);
-    // enacted: tag(258) + array(0)
-    let tag258 = dec.tag().unwrap();
-    assert_eq!(tag258.as_u64(), 258);
+    // [0] EnactState = array(7)
+    let enact = dec.array().unwrap().unwrap();
+    assert_eq!(enact, 7, "EnactState = array(7)");
+    // ensCommittee: SNothing = array(0)
+    let comm2 = dec.array().unwrap().unwrap();
+    assert_eq!(comm2, 0);
+    // ensConstitution: array(2) — skip
+    dec.skip().unwrap();
+    // ensCurPParams: array(31) — skip
+    dec.skip().unwrap();
+    // ensPrevPParams: array(31) — skip
+    dec.skip().unwrap();
+    // ensTreasury: Coin
+    let _treasury = dec.u64().unwrap();
+    // ensWithdrawals: empty map
+    let wd = dec.map().unwrap().unwrap();
+    assert_eq!(wd, 0);
+    // ensPrevGovActionIds: array(4) of StrictMaybe
+    let prev_ids = dec.array().unwrap().unwrap();
+    assert_eq!(prev_ids, 4);
+    for _ in 0..4 {
+        let nothing = dec.array().unwrap().unwrap();
+        assert_eq!(nothing, 0);
+    }
+    // [1] rsEnacted: array(0) — empty Seq
     let enacted = dec.array().unwrap().unwrap();
     assert_eq!(enacted, 0);
-    // expired: tag(258) + array(0)
-    let tag258b = dec.tag().unwrap();
-    assert_eq!(tag258b.as_u64(), 258);
+    // [2] rsExpired: tag(258) + array(0) — empty Set
+    let tag258 = dec.tag().unwrap();
+    assert_eq!(tag258.as_u64(), 258);
     let expired = dec.array().unwrap().unwrap();
     assert_eq!(expired, 0);
-    // delayed = false
+    // [3] rsDelayed = false
     assert!(!dec.bool().unwrap());
-    // future pparams: [0]
-    let fut2 = dec.array().unwrap().unwrap();
-    assert_eq!(fut2, 1);
-    assert_eq!(dec.u32().unwrap(), 0);
 }
 
 // ===========================================================================

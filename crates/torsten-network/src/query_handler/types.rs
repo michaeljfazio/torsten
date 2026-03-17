@@ -584,6 +584,8 @@ pub struct GovStateSnapshot {
     pub enacted_hard_fork: Option<(Vec<u8>, u32)>,
     pub enacted_committee: Option<(Vec<u8>, u32)>,
     pub enacted_constitution: Option<(Vec<u8>, u32)>,
+    /// Treasury balance (lovelace) — needed for EnactState in DRepPulsingState
+    pub treasury: u64,
 }
 
 /// Vote entry: (credential_hash, credential_type, vote)

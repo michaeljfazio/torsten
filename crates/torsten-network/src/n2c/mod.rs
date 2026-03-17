@@ -1100,6 +1100,7 @@ mod tests {
             enacted_hard_fork: None,
             enacted_committee: None,
             enacted_constitution: None,
+            treasury: 0,
         }));
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
