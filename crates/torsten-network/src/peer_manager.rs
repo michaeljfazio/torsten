@@ -727,8 +727,41 @@ impl PeerManager {
     /// a diversity penalty is applied. Keeps connections spread across networks.
     const MAX_PEERS_PER_SUBNET: usize = 3;
 
+    /// Returns `true` if this peer is treated as a trustable/bootstrap peer for
+    /// failover purposes.  Trustable peers are those explicitly listed in the
+    /// topology file as local roots or bootstrap peers.
+    fn is_primary_peer(p: &PeerInfo) -> bool {
+        p.is_trustable
+            || matches!(
+                p.category,
+                PeerCategory::LocalRoot | PeerCategory::Bootstrap
+            )
+    }
+
     /// Get peers that should be connected to (cold peers that need promotion),
     /// ranked by selection score with subnet diversity bias (highest first).
+    ///
+    /// ## Trustable-first guarantee
+    ///
+    /// Peers marked `is_trustable = true` in the topology (`LocalRoot`,
+    /// `Bootstrap`) are ranked in their own tier that always sorts before any
+    /// non-trustable candidate.  This is implemented via a two-key comparator
+    /// `(tier, −score)` where `tier=0` is trustable and `tier=1` is everything
+    /// else.  A pure score comparison is insufficient because a trustable peer
+    /// with several failures can accumulate a score penalty large enough to
+    /// fall below an untried gossip peer's default score.
+    ///
+    /// Additionally, trustable peers bypass the `should_retry()` holdout
+    /// entirely.  That holdout imposes up to 60 s of exponential back-off after
+    /// repeated connection failures, which means a just-failed bootstrap peer
+    /// could be invisible to the reconnect loop for a full minute while fresh
+    /// ledger-gossip peers are offered instead.  Bypassing the holdout, combined
+    /// with the outer reconnect loop's 500 ms post-disconnect delay and the 5 s
+    /// OS TCP connect timeout, gives adequate anti-busy-loop protection while
+    /// guaranteeing sub-second failover to the next trustable peer.
+    ///
+    /// Non-trustable peers still go through `should_retry()` so that transiently
+    /// unreachable gossip peers back off gracefully without starving the list.
     pub fn peers_to_connect(&self) -> Vec<SocketAddr> {
         let connected = self.hot_peers.len() + self.warm_peers.len();
         let target = self.config.target_hot_peers + self.config.target_warm_peers;
@@ -739,32 +772,49 @@ impl PeerManager {
         let needed = target - connected;
         let subnet_counts = self.connected_subnet_counts();
 
-        let mut candidates: Vec<_> = self
+        // Collect (addr, tier, score) tuples.
+        //   tier = 0 → trustable/bootstrap (always first)
+        //   tier = 1 → non-trustable (subject to should_retry())
+        let mut candidates: Vec<(SocketAddr, u8, f64)> = self
             .cold_peers
             .iter()
             .filter_map(|addr| {
                 self.peers.get(addr).and_then(|p| {
-                    if p.should_retry() {
-                        let mut score = p.selection_score();
-                        // Apply diversity penalty if this subnet is already well-represented
-                        let subnet = Self::subnet_key(addr);
-                        let count = subnet_counts.get(&subnet).copied().unwrap_or(0);
-                        if count >= Self::MAX_PEERS_PER_SUBNET {
-                            score -= 0.2 * (count - Self::MAX_PEERS_PER_SUBNET + 1) as f64;
-                        }
-                        Some((*addr, score))
-                    } else {
-                        None
+                    let is_primary = Self::is_primary_peer(p);
+
+                    // Eligibility: trustable peers are always eligible.  Non-trustable
+                    // peers must pass should_retry() (exponential back-off gate).
+                    let eligible = is_primary || p.should_retry();
+                    if !eligible {
+                        return None;
                     }
+
+                    let mut score = p.selection_score();
+                    // Apply subnet diversity penalty if this /24 (IPv4) or /48 (IPv6)
+                    // is already heavily represented among connected peers.
+                    let subnet = Self::subnet_key(addr);
+                    let count = subnet_counts.get(&subnet).copied().unwrap_or(0);
+                    if count >= Self::MAX_PEERS_PER_SUBNET {
+                        score -= 0.2 * (count - Self::MAX_PEERS_PER_SUBNET + 1) as f64;
+                    }
+
+                    let tier: u8 = if is_primary { 0 } else { 1 };
+                    Some((*addr, tier, score))
                 })
             })
             .collect();
 
-        // Sort by score descending (best peers first)
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Two-key sort: tier ascending (trustable first), then score descending.
+        // This guarantees that every trustable peer precedes every non-trustable
+        // peer regardless of their absolute scores.
+        candidates.sort_by(|a, b| {
+            a.1.cmp(&b.1) // tier: 0 (trustable) before 1 (non-trustable)
+                .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
         candidates
             .into_iter()
-            .map(|(addr, _)| addr)
+            .map(|(addr, _, _)| addr)
             .take(needed)
             .collect()
     }
@@ -1764,5 +1814,87 @@ mod tests {
             }
             other => panic!("Expected Open, got {other:?}"),
         }
+    }
+
+    /// Verify that trustable peers bypass the `should_retry()` holdout and are
+    /// returned by `peers_to_connect()` even when they have a high failure count
+    /// (which would normally impose a 60-second backoff on non-trustable peers).
+    ///
+    /// This is the regression test for the sync-pipeline-stalling bug: after a
+    /// disconnect, the reconnect loop must always see the bootstrap/trusted peers
+    /// first so it does not spend 30-60 s fishing through untried gossip peers.
+    #[test]
+    fn test_trustable_peer_bypasses_backoff_in_peers_to_connect() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            target_warm_peers: 1,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        let trustable = test_addr(3001);
+        let gossip = test_addr(3002); // untried ledger/gossip peer
+
+        pm.add_config_peer(trustable, true, false); // is_trustable = true
+        pm.add_ledger_peer(gossip); // fresh, no failures
+
+        // Simulate the trustable peer having failed multiple times.
+        // With failure_count=6, should_retry() would impose a 60-second backoff —
+        // this would normally block the peer from appearing in peers_to_connect().
+        if let Some(info) = pm.peers.get_mut(&trustable) {
+            info.failure_count = 6;
+            info.last_failed = Some(Instant::now()); // failed just now
+        }
+
+        // Despite the fresh failure, the trustable peer must still appear in
+        // the connection list (it is critical infrastructure).
+        let to_connect = pm.peers_to_connect();
+        assert!(
+            to_connect.contains(&trustable),
+            "Trustable peer must appear in peers_to_connect() even after recent failures; \
+             got: {to_connect:?}"
+        );
+
+        // The trustable peer must rank FIRST due to its score bonus.
+        assert_eq!(
+            to_connect[0], trustable,
+            "Trustable peer must be the first connection attempt; got: {to_connect:?}"
+        );
+    }
+
+    /// Verify that trustable peers are always eligible in peers_to_connect()
+    /// even with an extremely high failure_count and a just-now failure.
+    ///
+    /// Busy-loop protection is delegated to the outer reconnect loop's 500 ms
+    /// post-disconnect delay and the OS TCP connect timeout, NOT to the peer
+    /// manager's retry holdout.  The important invariant tested here is that
+    /// `failure_count` and `last_failed` never gate a trustable peer.
+    #[test]
+    fn test_trustable_peer_min_retry_gap() {
+        let config = PeerManagerConfig {
+            target_hot_peers: 1,
+            target_warm_peers: 0,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+
+        let trustable = test_addr(3001);
+        pm.add_config_peer(trustable, true, false);
+
+        // Simulate a peer that has failed many times and just failed again.
+        // For a non-trustable peer, failure_count=10 would impose a 60-second
+        // backoff holdout.  For a trustable peer it should have no effect.
+        if let Some(info) = pm.peers.get_mut(&trustable) {
+            info.failure_count = 10;
+            info.last_failed = Some(Instant::now());
+        }
+
+        // The trustable peer must appear despite failure_count=10 and elapsed=0.
+        let to_connect = pm.peers_to_connect();
+        assert!(
+            to_connect.contains(&trustable),
+            "Trustable peer should be eligible even with very high failure_count; \
+             got: {to_connect:?}"
+        );
     }
 }

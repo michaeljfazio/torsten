@@ -283,16 +283,20 @@ impl PipelinedPeerClient {
                     // After AwaitReply, the server enters MustReply state and
                     // will send RollForward/RollBackward when a block arrives.
                     // We wait for that response with a timeout — if no block
-                    // arrives within 90 seconds, the connection is likely dead
-                    // (e.g., after machine sleep/hibernate). 90s is ~4.5x the
-                    // expected mainnet block interval (20s average).
-                    const AWAIT_REPLY_TIMEOUT: Duration = Duration::from_secs(90);
+                    // arrives within 30 seconds, the connection is likely dead
+                    // (e.g., after machine sleep/hibernate). 30s is 1.5x the
+                    // expected mainnet block interval (20s average), tight enough
+                    // to detect stale connections quickly but loose enough to
+                    // tolerate occasional slow-block periods. This was previously
+                    // 90 seconds which caused 2-3 minute outages when the peer
+                    // stalled at tip.
+                    const AWAIT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
                     let wait_response: Message<HeaderContent> =
                         tokio::time::timeout(AWAIT_REPLY_TIMEOUT, self.cs_buf.recv_full_msg())
                             .await
                             .map_err(|_| {
                                 ClientError::ChainSync(
-                                    "AwaitReply timeout: no block received in 90 seconds, \
+                                    "AwaitReply timeout: no block received in 30 seconds, \
                              connection may be stale"
                                         .into(),
                                 )
