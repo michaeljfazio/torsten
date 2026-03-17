@@ -370,20 +370,30 @@ fn compute_body_size(transactions: &[Transaction]) -> u64 {
     size
 }
 
-/// Check if we are the slot leader for a given slot
+/// Check if we are the slot leader for a given slot.
+///
+/// Uses exact rational arithmetic for both sigma (pool_stake/total_stake)
+/// and f (f_num/f_den) to avoid f64 precision loss at decision boundaries.
 pub fn check_slot_leadership(
     creds: &BlockProducerCredentials,
     slot: SlotNo,
     epoch_nonce: &Hash32,
-    relative_stake: f64,
-    active_slot_coeff: f64,
+    pool_stake: u64,
+    total_active_stake: u64,
+    active_slot_coeff_rational: (u64, u64),
 ) -> bool {
+    if total_active_stake == 0 || pool_stake == 0 {
+        return false;
+    }
     let vrf_seed = torsten_consensus::slot_leader::vrf_input(epoch_nonce, slot);
+    let (f_num, f_den) = active_slot_coeff_rational;
     match torsten_crypto::vrf::generate_vrf_proof(&creds.vrf_skey, &vrf_seed) {
-        Ok((_proof, output)) => torsten_consensus::slot_leader::is_slot_leader(
+        Ok((_proof, output)) => torsten_consensus::slot_leader::is_slot_leader_rational(
             &output,
-            relative_stake,
-            active_slot_coeff,
+            pool_stake,
+            total_active_stake,
+            f_num,
+            f_den,
         ),
         Err(e) => {
             debug!("VRF proof failed for slot {}: {e}", slot.0);
@@ -531,10 +541,11 @@ mod tests {
         let creds = make_test_credentials();
         let epoch_nonce = Hash32::from_bytes([42u8; 32]);
 
-        // With 100% stake, should be leader for some slots
+        // With 100% stake (pool=1000, total=1000), should be leader for some slots
+        // f = 1/20 = 0.05
         let mut leader_count = 0;
         for i in 0..100 {
-            if check_slot_leadership(&creds, SlotNo(i), &epoch_nonce, 1.0, 0.05) {
+            if check_slot_leadership(&creds, SlotNo(i), &epoch_nonce, 1000, 1000, (1, 20)) {
                 leader_count += 1;
             }
         }
@@ -554,7 +565,7 @@ mod tests {
 
         for i in 0..100 {
             assert!(
-                !check_slot_leadership(&creds, SlotNo(i), &epoch_nonce, 0.0, 0.05),
+                !check_slot_leadership(&creds, SlotNo(i), &epoch_nonce, 0, 1000, (1, 20)),
                 "Zero stake should never be leader"
             );
         }

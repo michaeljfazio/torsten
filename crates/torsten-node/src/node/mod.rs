@@ -1707,35 +1707,32 @@ impl Node {
             .unwrap_or(torsten_primitives::hash::Hash32::ZERO);
         let slots_per_kes_period = self.consensus.slots_per_kes_period;
 
-        // Calculate relative stake from the "set" snapshot (used for leader election)
-        let (relative_stake, pool_stake_lovelace) = if let Some(set_snapshot) = &ls.snapshots.set {
+        // Calculate stake from the "set" snapshot (used for leader election).
+        // Keep as raw u64 values to use exact rational arithmetic in the VRF check.
+        let (pool_stake, total_active_stake) = if let Some(set_snapshot) = &ls.snapshots.set {
             let total_stake: u64 = set_snapshot.pool_stake.values().map(|s| s.0).sum();
             let pool_stake = set_snapshot
                 .pool_stake
                 .get(&creds.pool_id)
                 .map(|s| s.0)
                 .unwrap_or(0);
-            if total_stake > 0 {
-                (pool_stake as f64 / total_stake as f64, pool_stake)
-            } else {
-                (0.0, 0)
-            }
+            (pool_stake, total_stake)
         } else {
             debug!(
                 pool_id = %creds.pool_id,
                 "Forge: skipping — no 'set' snapshot available"
             );
-            (0.0, 0)
+            (0, 0)
         };
         drop(ls);
 
-        if relative_stake == 0.0 {
+        if pool_stake == 0 || total_active_stake == 0 {
             // Log periodically so the operator knows stake hasn't activated yet
             if next_slot.0 % 100 == 0 {
                 debug!(
                     slot = next_slot.0,
                     pool_id = %creds.pool_id,
-                    pool_stake = pool_stake_lovelace,
+                    pool_stake = pool_stake,
                     "Forge: pool has zero relative stake in 'set' snapshot — waiting for delegation"
                 );
             }
@@ -1750,9 +1747,16 @@ impl Node {
             creds,
             next_slot,
             &epoch_nonce,
-            relative_stake,
-            self.consensus.active_slot_coeff,
+            pool_stake,
+            total_active_stake,
+            self.consensus.active_slot_coeff_rational,
         );
+
+        let relative_stake_display = if total_active_stake > 0 {
+            pool_stake as f64 / total_active_stake as f64
+        } else {
+            0.0
+        };
 
         if !is_leader {
             self.metrics
@@ -1761,7 +1765,7 @@ impl Node {
             debug!(
                 slot = next_slot.0,
                 pool_id = %creds.pool_id,
-                stake = format_args!("{relative_stake:.6}"),
+                stake = format_args!("{relative_stake_display:.6}"),
                 "Slot leader check: not elected"
             );
             return;
@@ -1770,7 +1774,7 @@ impl Node {
         info!(
             slot = next_slot.0,
             pool_id = %creds.pool_id,
-            stake = format_args!("{relative_stake:.6}"),
+            stake = format_args!("{relative_stake_display:.6}"),
             "Slot leader check: ELECTED — forging block",
         );
 
