@@ -1806,7 +1806,7 @@ mod tests {
             gen_delegs: Vec::new(),
         };
 
-        let result = QueryResult::GenesisConfig(Box::new(gc));
+        let result = QueryResult::GenesisConfig(Box::new(gc), 16);
         let encoded = encode_query_result(&result);
 
         // Decode and verify it's array(15) inside the HFC wrapper
