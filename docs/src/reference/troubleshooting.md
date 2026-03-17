@@ -185,6 +185,46 @@ kill -HUP $(pidof torsten-node)
 
 The node will log that the topology was reloaded and update the peer manager with the new configuration.
 
+## Block Producer Issues
+
+### Block producer shows ZERO stake
+
+**Cause:** Snapshot loaded before UTxO store was attached, corrupting `pool_stake` values.
+
+**Fix:** Automatic on restart — `rebuild_stake_distribution` runs after UTxO store attachment.
+
+**Verify:** Check the log for `"Block producer: pool stake in 'set' snapshot"` with a non-zero `pool_stake_lovelace` value.
+
+### Node enters reconnection loop after forging
+
+**Cause:** Forged block lost a slot battle and was persisted to ImmutableDB.
+
+**Symptoms:** Log shows `"intersection fell to Origin"` or the node repeatedly reconnects to upstream peers.
+
+**Fix:** The fork recovery mechanism now handles this automatically. If the issue persists, re-import from Mithril:
+
+```bash
+torsten-node mithril-import --network-magic <magic> --database-path <path>
+```
+
+See [Fork Recovery & ImmutableDB Contamination](../architecture/storage.md#fork-recovery--immutabledb-contamination) for details on how the recovery mechanism works.
+
+## Epoch & State Issues
+
+### Epoch number appears wrong (e.g., epoch 445 instead of 1239)
+
+**Cause:** Snapshot saved with incorrect `epoch_length` defaults (mainnet 432000 instead of preview 86400).
+
+**Fix:** Automatic correction on load — the epoch is recalculated from the tip slot using genesis parameters.
+
+**Log message:** `"Snapshot epoch differs from computed epoch — correcting"`
+
+### VRF verification failures after restart
+
+**Cause:** Epoch nonce in snapshot may be stale if saved with wrong epoch boundaries.
+
+**Fix:** VRF verification is non-fatal (`nonce_established=false`) until at least one epoch transition is observed. The node will sync normally; forging is enabled once the nonce is established.
+
 ## Getting Help
 
 If you encounter an issue not covered here:

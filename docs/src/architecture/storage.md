@@ -170,6 +170,38 @@ Profiles can also be set in the node configuration file:
 
 Resolution order: profile defaults < config file overrides < CLI overrides.
 
+## Fork Recovery & ImmutableDB Contamination
+
+### Problem
+
+When a forged block loses a slot battle, `flush_all_to_immutable` on graceful shutdown can persist orphaned blocks permanently in the ImmutableDB. Since the ImmutableDB is append-only and designed for finalized blocks, these orphaned blocks contaminate the canonical chain history and can cause intersection failures on reconnect.
+
+```mermaid
+sequenceDiagram
+    participant Node as Torsten Node
+    participant Vol as VolatileDB
+    participant Imm as ImmutableDB
+    participant Peer as Upstream Peer
+
+    Node->>Vol: Forge block at slot S
+    Peer->>Node: Competing block at slot S wins
+    Note over Vol: Orphaned forged block still in VolatileDB
+    Node->>Imm: flush_all_to_immutable (graceful shutdown)
+    Note over Imm: Orphaned block now persisted permanently
+    Node->>Peer: Restart — intersection negotiation fails
+```
+
+### Detection
+
+- **`ChainDB.get_chain_points()`** walks backwards through volatile blocks via `prev_hash` links, providing the peer with enough ancestry for intersection even when the tip is orphaned.
+- **`ImmutableDB.get_historical_points()`** samples older chunk secondary indexes in reverse order, providing canonical intersection points even when the immutable tip is contaminated.
+- When fork divergence is detected, contaminated ChainDB chain points are excluded from intersection negotiation, preventing the node from advertising orphaned blocks to peers.
+
+### Recovery
+
+- **Case A (Origin intersection):** The volatile DB is cleared, the ledger state is reset, and the node reconnects from genesis. This is the fallback when no valid intersection can be found.
+- **Case B (Intersection behind ledger):** A targeted ImmutableDB replay is performed up to the intersection slot using a detached LSM store, achieving approximately 50K blocks/second replay speed. This avoids a full resync while restoring the ledger to a consistent state.
+
 ## Benchmarks
 
 Run storage benchmarks with:

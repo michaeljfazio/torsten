@@ -126,50 +126,75 @@ N2C connections use Unix domain sockets and serve local clients (wallets, CLI to
 
 ### LocalStateQuery
 
-Supports a wide range of ledger queries:
+Supports all 39 Shelley BlockQuery tags (0-38) plus cross-era queries, providing full compatibility with cardano-node. The query protocol uses an acquire/query/release pattern:
 
-| Query | Tag | Description |
-|-------|-----|-------------|
-| Chain tip | 0 | Current slot, hash, block number |
-| Current epoch | 1 | Active epoch number |
-| Current era | -- | Active era (Byron through Conway) |
-| Block number | -- | Current chain height |
-| System start | -- | Network genesis time |
-| Protocol parameters | 2 | Live protocol parameters |
-| Proposed PP updates | 4 | Proposed parameter updates (empty in Conway) |
-| Stake distribution | 5 | Pool stake and pledge |
-| UTxO by address | 6 | UTxO set filtered by address |
-| Stake address info | 10 | Delegation and rewards |
-| Genesis config | 11 | System start, epoch length, slot length, security param |
-| UTxO by TxIn | 15 | UTxO set filtered by transaction inputs |
-| Stake pools | 16 | Set of registered pool key hashes |
-| Pool parameters | 17 | Registered pool parameters |
-| Pool state | 19 | Pool state (same as pool parameters) |
-| Stake snapshots | 20 | Mark/set/go snapshots |
-| Pool distribution | 21 | Pool stake distribution with VRF keys |
-| Stake deleg deposits | 22 | Deposit amounts per registered stake credential |
-| Constitution | 23 | Constitution anchor and guardrail script |
-| Governance state | 24 | Active proposals, committee, and voting state |
-| DRep state | 25 | Registered DReps with delegators |
-| DRep stake distr | 26 | Total delegated stake per DRep |
-| Committee state | 27 | Constitutional committee members |
-| Vote delegatees | 28 | Vote delegation map per credential |
-| Account state | 29 | Treasury and reserves |
-| SPO stake distribution | 30 | Per-pool stake distribution (filtered by pool IDs) |
-| Proposals | 31 | Active governance proposals (optional filter) |
-| Ratify state | 32 | Enacted/expired proposals and delayed flag |
-| Future PParams | 33 | Pending protocol parameter changes (if any) |
-| Ledger peer snapshot | 34 | SPO relays weighted by stake for peer discovery |
-| Pool default vote | 35 | Default vote per pool based on DRep delegation |
-| Pool distribution 2 | 36 | Extended pool distribution with total active stake |
-| Stake distribution 2 | 37 | Extended stake distribution with total active stake |
-| Max major proto ver | 38 | Maximum supported major protocol version |
-| Non-myopic rewards | 6* | Estimated rewards per pool for given stake amounts |
-
-The query protocol uses an acquire/query/release pattern:
 1. `MsgAcquire` -- Lock the ledger state at the current tip
 2. `MsgQuery` -- Execute queries against the locked state
 3. `MsgRelease` -- Release the lock
+
+All BlockQuery messages are wrapped in the Hard Fork Combinator (HFC) envelope. Results from era-specific `BlockQuery` tags are returned inside an `array(1)` success wrapper, while `QueryAnytime` and `QueryHardFork` results are returned unwrapped.
+
+#### Shelley BlockQuery Tags 0-38
+
+| Tag | Query | Description |
+|-----|-------|-------------|
+| 0 | GetLedgerTip | Current slot, hash, and block number |
+| 1 | GetEpochNo | Active epoch number |
+| 2 | GetCurrentPParams | Live protocol parameters (positional `array(31)` CBOR encoding matching Haskell `ConwayPParams EncCBOR`) |
+| 3 | GetProposedPParamsUpdates | Proposed parameter updates (empty map in Conway) |
+| 4 | GetStakeDistribution | Pool stake distribution with pledge |
+| 5 | GetNonMyopicMemberRewards | Estimated rewards per pool for given stake amounts |
+| 6 | GetUTxOByAddress | UTxO set filtered by address (Cardano wire format `Map<[tx_hash, index], {0: addr, 1: value, 2: datum}>`) |
+| 7 | GetUTxOWhole | Entire UTxO set (expensive; used by testing tools) |
+| 8 | DebugEpochState | Simplified epoch state summary (treasury, reserves, active stake totals) |
+| 9 | GetCBOR | Meta-query that wraps the result of an inner query in CBOR `tag(24)`, returning raw bytes |
+| 10 | GetFilteredDelegationsAndRewardAccounts | Delegation targets and reward balances for a set of stake credentials |
+| 11 | GetGenesisConfig | System start, epoch length, slot length, and security parameter |
+| 12 | DebugNewEpochState | Simplified new epoch state summary (epoch number, block count, snapshot state) |
+| 13 | DebugChainDepState | Chain-dependent state summary (last applied block, operational certificate counters) |
+| 14 | GetRewardProvenance | Reward calculation provenance: reward pot, treasury tax rate, total active stake, per-pool reward breakdown |
+| 15 | GetUTxOByTxIn | UTxO set filtered by transaction inputs |
+| 16 | GetStakePools | Set of all registered pool key hashes |
+| 17 | GetStakePoolParams | Registered pool parameters (owner, cost, margin, pledge, relays, metadata) |
+| 18 | GetRewardInfoPools | Per-pool reward breakdown: relative stake, leader and member reward splits, pool margin, fixed cost, and performance metrics |
+| 19 | GetPoolState | `QueryPoolStateResult` encoded as `array(4)`: `[poolParams, futurePoolParams, retiring, deposits]` |
+| 20 | GetStakeSnapshots | Mark/set/go stake snapshots used for leader schedule calculation |
+| 21 | GetPoolDistr | Pool stake distribution with VRF verification key hashes |
+| 22 | GetStakeDelegDeposits | Deposit amounts per registered stake credential |
+| 23 | GetConstitution | Constitution anchor (URL + hash) and optional guardrail script hash |
+| 24 | GetGovState | `ConwayGovState` encoded as `array(7)` CBOR: active proposals, committee state, constitution, current/previous protocol parameters, future parameters, and DRep pulse state |
+| 25 | GetDRepState | Registered DReps with their delegation counts and deposit balances (supports credential filter) |
+| 26 | GetDRepStakeDistr | Total delegated stake per DRep (lovelace) |
+| 27 | GetCommitteeMembersState | Constitutional committee members, iterating `committee_expiration` entries with `hot_credential_type` for each member |
+| 28 | GetFilteredVoteDelegatees | Vote delegation map per stake credential |
+| 29 | GetAccountState | Treasury and reserves balances |
+| 30 | GetSPOStakeDistr | Per-pool stake distribution filtered by a set of pool IDs |
+| 31 | GetProposals | Active governance proposals with optional governance action ID filter |
+| 32 | GetRatifyState | Enacted and expired proposals along with the `ratify_delayed` flag |
+| 33 | GetFuturePParams | Pending protocol parameter changes scheduled for the next epoch (if any) |
+| 34 | GetLedgerPeerSnapshot | SPO relay addresses weighted by relative stake, used for P2P ledger-based peer discovery |
+| 35 | QueryStakePoolDefaultVote | Default vote per pool derived from its DRep delegation (AlwaysAbstain, AlwaysNoConfidence, or specific DRep vote) |
+| 36 | GetPoolDistr2 | Extended pool distribution including `total_active_stake` alongside per-pool entries |
+| 37 | GetStakeDistribution2 | Extended stake distribution including `total_active_stake` |
+| 38 | GetMaxMajorProtocolVersion | Maximum supported major protocol version (returns 10) |
+
+#### Cross-Era Queries
+
+In addition to the Shelley BlockQuery tags, the following queries operate outside the HFC era-specific envelope:
+
+| Query | Description |
+|-------|-------------|
+| GetCurrentEra | Active era (Byron through Conway) |
+| GetChainBlockNo | Current chain height, `WithOrigin` encoded as `[1, blockNo]` for `At` or `[0]` for `Origin` |
+| GetChainPoint | Current tip point, encoded as `[]` for `Origin` or `[slot, hash]` for a specific point |
+| GetSystemStart | Network genesis time as `UTCTime` encoded `[year, dayOfYear, picosOfDay]` |
+| GetEraHistory | Indefinite array of `EraSummary` entries (Byron `safe_zone = k*2`, Shelley+ `safe_zone = 3k/f`) |
+
+#### CBOR Encoding Notes
+
+- **PParams** are encoded as a positional `array(31)` with integer keys 0-33, matching Haskell's `EncCBOR` instance (not JSON string keys).
+- **CBOR Sets** (e.g., pool IDs, stake key owners) use `tag(258)` and elements must be sorted for canonical encoding.
+- **Value encoding**: plain integer for ADA-only UTxOs, `[coin, multiasset_map]` for multi-asset UTxOs.
 
 ### LocalTxSubmission
 
@@ -228,7 +253,49 @@ Warm --> Cold (Disconnection)
 Peers are discovered through multiple channels:
 1. **Topology file** -- Bootstrap peers, local roots, and public roots
 2. **PeerSharing protocol** -- Gossip-based discovery from connected peers
-3. **Ledger-based discovery** -- SPO relay addresses extracted from pool registration certificates (enabled after `useLedgerAfterSlot`)
+3. **Ledger-based discovery** -- SPO relay addresses extracted from pool registration certificates
+
+#### Ledger-Based Peer Discovery
+
+Once the node has synced past the slot threshold configured by `useLedgerAfterSlot` in the topology file, it activates ledger-based peer discovery. This mechanism extracts SPO relay addresses directly from pool registration parameters (`pool_params`) stored in the ledger state.
+
+The discovery process runs on a periodic 5-minute interval and works as follows:
+
+1. **Slot check** -- The current ledger tip slot is compared against `useLedgerAfterSlot`. If the topology sets this value to a negative number or omits it entirely, ledger peer discovery remains disabled.
+2. **Relay extraction** -- All registered pool parameters are iterated, extracting relay entries of three types:
+   - `SingleHostAddr` -- IPv4 address and port
+   - `SingleHostName` -- DNS hostname and port
+   - `MultiHostName` -- DNS hostname with default port 3001
+3. **Sampling** -- A deterministic subset (up to 20 relays) is sampled from the full relay set to avoid resolving thousands of addresses at once. The sample offset rotates based on the current slot for coverage diversity.
+4. **DNS resolution** -- Hostnames are resolved to socket addresses via async DNS lookup.
+5. **Peer manager integration** -- Resolved addresses are added as cold peers with `PeerSource::Ledger` classification, alongside existing bootstrap and public root peers.
+
+As pool registrations change over time (new pools register, existing pools update relay addresses, pools retire), the ledger peer set evolves dynamically. This provides a protocol-native discovery mechanism that does not depend on any centralized directory.
+
+## Block Relay
+
+Torsten implements full relay node behavior, propagating blocks received from upstream peers to all downstream N2N connections. This ensures that blocks flow through the network without requiring every node to sync directly from the block producer.
+
+### Broadcast Architecture
+
+Block propagation uses a `tokio::sync::broadcast` channel with a capacity of 64 announcements. The architecture has three components:
+
+1. **Sender** -- The node core holds a `broadcast::Sender<BlockAnnouncement>` obtained from the N2N server at startup. When the sync pipeline processes new blocks or the forge module produces a new block, it sends an announcement containing the slot, block hash, and block number.
+2. **Receivers** -- Each N2N server connection spawns with its own `broadcast::Receiver` subscription. The connection handler uses `tokio::select!` to concurrently service mini-protocol messages and listen for block announcements.
+3. **Delivery** -- When a downstream peer is waiting at the tip (having received `MsgAwaitReply` from ChainSync), an incoming block announcement triggers a `MsgRollForward` message to that peer, along with the block header. The peer can then fetch the full block body via BlockFetch.
+
+### Relay vs. Forger Announcements
+
+Both synced and forged blocks flow through the same broadcast channel:
+
+- **Synced blocks** -- When the pipelined ChainSync client receives blocks from an upstream peer and the node is following the tip (strict mode), each batch's final block is announced to all downstream connections. This enables relay behavior where blocks received from one upstream peer propagate to all other connected peers.
+- **Forged blocks** -- When the block producer creates a new block, it is announced through the same channel after being written to ChainDB and applied to the ledger.
+
+A parallel `broadcast::Sender<RollbackAnnouncement>` handles chain rollbacks, sending `MsgRollBackward` to downstream peers when the node's chain selection switches to a different fork.
+
+### Lagged Receivers
+
+If a downstream peer falls behind (e.g., slow network or processing), the broadcast channel's bounded capacity means the receiver may lag. Lagged receivers skip missed announcements and log the gap, ensuring a slow peer does not block propagation to others.
 
 ## Multiplexer
 
