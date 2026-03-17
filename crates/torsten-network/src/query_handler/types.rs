@@ -136,9 +136,12 @@ pub enum QueryResult {
     /// GetLedgerPeerSnapshot (tag 34): ledger peer snapshot
     /// Versioned snapshot: array(2) [version, peers]
     LedgerPeerSnapshot(Vec<LedgerPeerEntry>),
-    /// QueryStakePoolDefaultVote (tag 35): per-pool default vote
-    /// Map<PoolId, DefaultVote> where DefaultVote = NoConfidence(0) | Abstain(1) | DRepVote(2)
-    StakePoolDefaultVote(Vec<PoolDefaultVoteEntry>),
+    /// QueryStakePoolDefaultVote (tag 35): single pool default vote
+    /// Haskell returns a bare word8: 0=DefaultNo, 1=DefaultAbstain, 2=DefaultNoConfidence
+    StakePoolDefaultVote(u8),
+    /// GetSPOStakeDistr (tag 30): Map<pool_hash, Coin>
+    /// SPO voting power per pool (lovelace), NOT IndividualPoolStake format
+    SPOStakeDistr(Vec<(Vec<u8>, u64)>),
     /// GetProposals (tag 31): returns Seq of GovActionState
     Proposals(Vec<ProposalSnapshot>),
     /// GetRatifyState (tag 32): ratification state
@@ -618,15 +621,6 @@ pub struct ProposalSnapshot {
     pub drep_votes: Vec<VoteEntry>,
     /// SPO votes: (pool_keyhash_28bytes, vote) — SPO uses bare KeyHash, no credential wrapper
     pub spo_votes: Vec<(Vec<u8>, u8)>,
-}
-
-/// Default vote entry for QueryStakePoolDefaultVote (tag 35)
-#[derive(Debug, Clone)]
-pub struct PoolDefaultVoteEntry {
-    /// Pool ID (28 bytes)
-    pub pool_id: Vec<u8>,
-    /// Default vote: 0=NoConfidence, 1=Abstain, 2=DRepVote
-    pub default_vote: u8,
 }
 
 /// Ledger peer entry for GetLedgerPeerSnapshot (tag 34)

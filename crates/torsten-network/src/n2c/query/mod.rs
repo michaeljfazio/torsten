@@ -831,28 +831,33 @@ mod tests {
         let buf = encode(&QueryResult::NoFuturePParams);
         let mut dec = decode_msg_result(&buf);
         strip_hfc(&mut dec);
-        // Maybe PParams = Nothing = [0]
+        // Maybe PParams = Nothing = empty array (0x80)
         let arr = dec.array().unwrap().unwrap();
-        assert_eq!(arr, 1);
-        assert_eq!(dec.u8().unwrap(), 0);
+        assert_eq!(arr, 0);
     }
 
     #[test]
     fn test_encode_pool_default_vote() {
-        let buf = encode(&QueryResult::StakePoolDefaultVote(vec![
-            PoolDefaultVoteEntry {
-                pool_id: vec![0xEE; 28],
-                default_vote: 1, // Abstain
-            },
-        ]));
+        // QueryStakePoolDefaultVote returns a bare word8
+        let buf = encode(&QueryResult::StakePoolDefaultVote(1)); // DefaultAbstain
         let mut dec = decode_msg_result(&buf);
         strip_hfc(&mut dec);
+        assert_eq!(dec.u8().unwrap(), 1); // DefaultAbstain
+    }
+
+    #[test]
+    fn test_encode_spo_stake_distr() {
+        let buf = encode(&QueryResult::SPOStakeDistr(vec![(
+            vec![0x33; 28],
+            1_000_000,
+        )]));
+        let mut dec = decode_msg_result(&buf);
+        strip_hfc(&mut dec);
+        // Map<pool_hash, Coin>
         let map_len = dec.map().unwrap().unwrap();
         assert_eq!(map_len, 1);
-        assert_eq!(dec.bytes().unwrap(), &[0xEE; 28]);
-        let arr = dec.array().unwrap().unwrap();
-        assert_eq!(arr, 1);
-        assert_eq!(dec.u32().unwrap(), 1); // Abstain
+        assert_eq!(dec.bytes().unwrap(), &[0x33; 28]);
+        assert_eq!(dec.u64().unwrap(), 1_000_000);
     }
 
     // -----------------------------------------------------------------------

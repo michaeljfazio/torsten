@@ -3,9 +3,7 @@
 use tracing::debug;
 
 use super::parse_credential_set;
-use super::types::{
-    LedgerPeerEntry, NodeStateSnapshot, PoolDefaultVoteEntry, PoolRewardInfo, QueryResult,
-};
+use super::types::{LedgerPeerEntry, NodeStateSnapshot, PoolRewardInfo, QueryResult};
 
 /// Handle GetFilteredDelegationsAndRewardAccounts (tag 10).
 ///
@@ -153,24 +151,33 @@ pub(crate) fn handle_pool_distr2(
 /// Handle GetSPOStakeDistr (tag 30) — filtered SPO stake distribution.
 ///
 /// Argument: tag(258) Set<KeyHash StakePool>
-/// Returns: Map<pool_hash, IndividualPoolStake> — same format as GetStakeDistribution (tag 5)
+/// Returns: Map<pool_hash(28), Coin> — SPO voting power per pool (lovelace).
+///
+/// NOTE: This is NOT the same as GetStakeDistribution (tag 5) which uses
+/// IndividualPoolStake (rational + VRF hash). GetSPOStakeDistr returns a plain
+/// map from pool key hash to absolute stake in lovelace, used for governance
+/// vote tallying.
 pub(crate) fn handle_spo_stake_distr(
     state: &NodeStateSnapshot,
     decoder: &mut minicbor::Decoder<'_>,
 ) -> QueryResult {
     debug!("Query: GetSPOStakeDistr");
     let filter_pools = parse_pool_id_set(decoder);
-    if filter_pools.is_empty() {
-        QueryResult::StakeDistribution(state.stake_pools.clone())
+    let entries: Vec<(Vec<u8>, u64)> = if filter_pools.is_empty() {
+        state
+            .stake_pools
+            .iter()
+            .map(|p| (p.pool_id.clone(), p.stake))
+            .collect()
     } else {
-        let filtered = state
+        state
             .stake_pools
             .iter()
             .filter(|p| filter_pools.iter().any(|h| h == &p.pool_id))
-            .cloned()
-            .collect();
-        QueryResult::StakeDistribution(filtered)
-    }
+            .map(|p| (p.pool_id.clone(), p.stake))
+            .collect()
+    };
+    QueryResult::SPOStakeDistr(entries)
 }
 
 /// Handle GetStakeSnapshots (tag 20).
@@ -298,22 +305,24 @@ pub(crate) fn handle_reward_info_pools(state: &NodeStateSnapshot) -> QueryResult
     QueryResult::RewardInfoPools(entries)
 }
 
-/// Handle QueryStakePoolDefaultVote (tag 35) — per-pool default vote.
+/// Handle QueryStakePoolDefaultVote (tag 35) — single pool default vote.
 ///
 /// Per CIP-1694, the default vote depends on the pool operator's DRep delegation:
-/// - AlwaysAbstain (drep_type=2) → DefaultVote::Abstain (1)
-/// - AlwaysNoConfidence (drep_type=3) → DefaultVote::NoConfidence (0)
-/// - Specific DRep (drep_type=0|1) → DefaultVote::DRepVote (2) — follows the DRep
-/// - No delegation → DefaultVote::Abstain (1)
+/// - AlwaysAbstain (drep_type=2) → DefaultAbstain = 1
+/// - AlwaysNoConfidence (drep_type=3) → DefaultNoConfidence = 2
+/// - Specific DRep (drep_type=0|1) → DefaultNo = 0
+/// - No delegation → DefaultNo = 0
 ///
-/// Argument: tag(258) Set<KeyHash StakePool>
-/// Returns: Map<PoolId, DefaultVote>
+/// Argument: single KeyHash StakePool (28 bytes) — NOT a Set
+/// Returns: bare word8 (DefaultVote)
 pub(crate) fn handle_pool_default_vote(
     state: &NodeStateSnapshot,
     decoder: &mut minicbor::Decoder<'_>,
 ) -> QueryResult {
     debug!("Query: QueryStakePoolDefaultVote");
-    let filter_pools = parse_pool_id_set(decoder);
+
+    // Parse single pool hash (28 bytes), NOT a Set
+    let pool_hash = decoder.bytes().map(|b| b.to_vec()).unwrap_or_default();
 
     // Build lookup: owner credential hash → DRep delegation type
     let vote_deleg_map: std::collections::HashMap<&[u8], u8> = state
@@ -322,32 +331,28 @@ pub(crate) fn handle_pool_default_vote(
         .map(|v| (v.credential_hash.as_slice(), v.drep_type))
         .collect();
 
-    let pool_iter = state
+    // Find the pool params for the requested pool
+    let default_vote = state
         .pool_params_entries
         .iter()
-        .filter(|pp| filter_pools.is_empty() || filter_pools.iter().any(|h| h == &pp.pool_id));
-
-    let entries: Vec<PoolDefaultVoteEntry> = pool_iter
+        .find(|pp| pp.pool_id == pool_hash)
         .map(|pp| {
             // Check if any pool owner has a vote delegation
-            let default_vote = pp
-                .owners
+            pp.owners
                 .iter()
                 .find_map(|owner| vote_deleg_map.get(owner.as_slice()))
                 .map(|drep_type| match drep_type {
-                    2 => 1, // AlwaysAbstain → Abstain
-                    3 => 0, // AlwaysNoConfidence → NoConfidence
-                    _ => 2, // Specific DRep → DRepVote (follow the DRep)
+                    // Haskell DefaultVote encoding:
+                    // 0 = DefaultNo, 1 = DefaultAbstain, 2 = DefaultNoConfidence
+                    2 => 1, // AlwaysAbstain → DefaultAbstain
+                    3 => 2, // AlwaysNoConfidence → DefaultNoConfidence
+                    _ => 0, // Specific DRep or other → DefaultNo
                 })
-                .unwrap_or(1); // No delegation → Abstain
-            PoolDefaultVoteEntry {
-                pool_id: pp.pool_id.clone(),
-                default_vote,
-            }
+                .unwrap_or(0) // No delegation → DefaultNo
         })
-        .collect();
+        .unwrap_or(0); // Pool not found → DefaultNo
 
-    QueryResult::StakePoolDefaultVote(entries)
+    QueryResult::StakePoolDefaultVote(default_vote)
 }
 
 /// Handle GetLedgerPeerSnapshot (tag 34) — relay peers from pool registrations.
@@ -539,10 +544,15 @@ mod tests {
         let mut dec = minicbor::Decoder::new(&cbor);
         let result = handle_spo_stake_distr(&state, &mut dec);
         match result {
-            QueryResult::StakeDistribution(pools) => {
-                assert_eq!(pools.len(), 2);
+            QueryResult::SPOStakeDistr(entries) => {
+                assert_eq!(entries.len(), 2);
+                // Should be (pool_hash, stake_lovelace) pairs
+                assert_eq!(entries[0].0, vec![1u8; 28]);
+                assert_eq!(entries[0].1, 600_000_000);
+                assert_eq!(entries[1].0, vec![2u8; 28]);
+                assert_eq!(entries[1].1, 400_000_000);
             }
-            _ => panic!("Expected StakeDistribution"),
+            _ => panic!("Expected SPOStakeDistr"),
         }
     }
 
@@ -560,11 +570,12 @@ mod tests {
         let mut dec = minicbor::Decoder::new(&cbor);
         let result = handle_spo_stake_distr(&state, &mut dec);
         match result {
-            QueryResult::StakeDistribution(pools) => {
-                assert_eq!(pools.len(), 1);
-                assert_eq!(pools[0].pool_id, vec![1u8; 28]);
+            QueryResult::SPOStakeDistr(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, vec![1u8; 28]);
+                assert_eq!(entries[0].1, 600_000_000);
             }
-            _ => panic!("Expected StakeDistribution"),
+            _ => panic!("Expected SPOStakeDistr"),
         }
     }
 
@@ -603,28 +614,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_default_vote_no_delegation() {
+    fn test_pool_default_vote_no_delegation_with_owners() {
         let mut state = make_state_with_pools();
-        // Give pools owners
+        // Give pools owners but no vote delegatees
         state.pool_params_entries[0].owners = vec![vec![10u8; 28]];
         state.pool_params_entries[1].owners = vec![vec![20u8; 28]];
-        // No vote delegatees
+        // Query pool 1: no delegation → DefaultNo (0)
         let cbor = {
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
-            enc.tag(minicbor::data::Tag::new(258)).ok();
-            enc.array(0).ok();
+            enc.bytes(&[1u8; 28]).ok();
             buf
         };
         let mut dec = minicbor::Decoder::new(&cbor);
         let result = handle_pool_default_vote(&state, &mut dec);
         match result {
-            QueryResult::StakePoolDefaultVote(entries) => {
-                assert_eq!(entries.len(), 2);
-                // No delegation → Abstain (1)
-                for e in &entries {
-                    assert_eq!(e.default_vote, 1, "Expected Abstain for undelegated pool");
-                }
+            QueryResult::StakePoolDefaultVote(vote) => {
+                assert_eq!(vote, 0, "No delegation → DefaultNo (0)");
             }
             _ => panic!("Expected StakePoolDefaultVote"),
         }
@@ -1041,25 +1047,78 @@ mod tests {
                 drep_hash: Some(vec![30u8; 28]),
             },
         ];
+
+        // Query pool 1 (owner delegates to AlwaysNoConfidence → DefaultNoConfidence = 2)
+        let cbor1 = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.bytes(&[1u8; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor1);
+        let result = handle_pool_default_vote(&state, &mut dec);
+        match result {
+            QueryResult::StakePoolDefaultVote(vote) => {
+                assert_eq!(
+                    vote, 2,
+                    "AlwaysNoConfidence delegation → DefaultNoConfidence (2)"
+                );
+            }
+            _ => panic!("Expected StakePoolDefaultVote"),
+        }
+
+        // Query pool 2 (owner delegates to specific DRep → DefaultNo = 0)
+        let cbor2 = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.bytes(&[2u8; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor2);
+        let result = handle_pool_default_vote(&state, &mut dec);
+        match result {
+            QueryResult::StakePoolDefaultVote(vote) => {
+                assert_eq!(vote, 0, "Specific DRep delegation → DefaultNo (0)");
+            }
+            _ => panic!("Expected StakePoolDefaultVote"),
+        }
+    }
+
+    #[test]
+    fn test_pool_default_vote_no_delegation() {
+        let state = make_state_with_pools();
+        // Pool 1 has no owners with vote delegation → DefaultNo = 0
         let cbor = {
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
-            enc.tag(minicbor::data::Tag::new(258)).ok();
-            enc.array(0).ok();
+            enc.bytes(&[1u8; 28]).ok();
             buf
         };
         let mut dec = minicbor::Decoder::new(&cbor);
         let result = handle_pool_default_vote(&state, &mut dec);
         match result {
-            QueryResult::StakePoolDefaultVote(entries) => {
-                assert_eq!(entries.len(), 2);
-                let pool1 = entries.iter().find(|e| e.pool_id == vec![1u8; 28]).unwrap();
-                let pool2 = entries.iter().find(|e| e.pool_id == vec![2u8; 28]).unwrap();
-                assert_eq!(
-                    pool1.default_vote, 0,
-                    "NoConfidence delegation → NoConfidence vote"
-                );
-                assert_eq!(pool2.default_vote, 2, "DRep delegation → DRepVote");
+            QueryResult::StakePoolDefaultVote(vote) => {
+                assert_eq!(vote, 0, "No delegation → DefaultNo (0)");
+            }
+            _ => panic!("Expected StakePoolDefaultVote"),
+        }
+    }
+
+    #[test]
+    fn test_pool_default_vote_unknown_pool() {
+        let state = make_state_with_pools();
+        // Unknown pool → DefaultNo = 0
+        let cbor = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.bytes(&[0xFFu8; 28]).ok();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_pool_default_vote(&state, &mut dec);
+        match result {
+            QueryResult::StakePoolDefaultVote(vote) => {
+                assert_eq!(vote, 0, "Unknown pool → DefaultNo (0)");
             }
             _ => panic!("Expected StakePoolDefaultVote"),
         }

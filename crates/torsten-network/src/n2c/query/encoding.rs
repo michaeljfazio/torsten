@@ -346,9 +346,8 @@ pub(crate) fn encode_query_result_value(
         }
         QueryResult::NoFuturePParams => {
             // GetFuturePParams result: Maybe PParams = Nothing
-            // Generic Serialise: Nothing = [0] (constructor 0)
-            enc.array(1).ok();
-            enc.u8(0).ok();
+            // Haskell encodeMaybe: Nothing = encodeListLen 0 = empty array (0x80)
+            enc.array(0).ok();
         }
         QueryResult::PoolDistr2 {
             pools,
@@ -363,14 +362,16 @@ pub(crate) fn encode_query_result_value(
         QueryResult::LedgerPeerSnapshot(peers) => {
             encode_ledger_peer_snapshot(enc, peers);
         }
-        QueryResult::StakePoolDefaultVote(entries) => {
-            // Map<PoolId, DefaultVote>
-            // DefaultVote: [0]=NoConfidence, [1]=Abstain, [2]=DRepVote
+        QueryResult::StakePoolDefaultVote(vote) => {
+            // Bare word8: 0=DefaultNo, 1=DefaultAbstain, 2=DefaultNoConfidence
+            enc.u8(*vote).ok();
+        }
+        QueryResult::SPOStakeDistr(entries) => {
+            // Map<pool_hash(28), Coin> — plain map from pool key hash to lovelace
             enc.map(entries.len() as u64).ok();
-            for entry in entries {
-                enc.bytes(&entry.pool_id).ok();
-                enc.array(1).ok();
-                enc.u32(entry.default_vote as u32).ok();
+            for (pool_id, stake) in entries {
+                enc.bytes(pool_id).ok();
+                enc.u64(*stake).ok();
             }
         }
         QueryResult::Error(msg) => {
@@ -1929,8 +1930,8 @@ mod tests {
     use super::*;
     use crate::query_handler::{
         CommitteeMemberSnapshot, CommitteeSnapshot, DRepSnapshot, DRepStakeEntry,
-        PoolDefaultVoteEntry, PoolParamsSnapshot, PoolStakeSnapshotEntry, StakeAddressSnapshot,
-        StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, VoteDelegateeEntry,
+        PoolParamsSnapshot, PoolStakeSnapshotEntry, StakeAddressSnapshot, StakeDelegDepositEntry,
+        StakePoolSnapshot, StakeSnapshotsResult, VoteDelegateeEntry,
     };
     use minicbor::Decoder;
 
@@ -2419,26 +2420,38 @@ mod tests {
         );
     }
 
-    // ─── Default vote (tag 35) — pool IDs must be 28 bytes ─────────────────
+    // ─── Default vote (tag 35) — bare word8 encoding ───────────────────────
 
     #[test]
-    fn test_stake_pool_default_vote_pool_id_is_28_bytes() {
-        let result = QueryResult::StakePoolDefaultVote(vec![PoolDefaultVoteEntry {
-            pool_id: vec![0xBC; 28],
-            default_vote: 1, // Abstain
-        }]);
+    fn test_stake_pool_default_vote_bare_word8() {
+        let result = QueryResult::StakePoolDefaultVote(1); // DefaultAbstain
         let encoded = encode_query_result(&result);
         let inner = strip_wrappers(&encoded);
 
-        // Inner: map(1) { pool_id_bytes => default_vote }
+        // Inner: bare word8 (0=DefaultNo, 1=DefaultAbstain, 2=DefaultNoConfidence)
         let mut dec = Decoder::new(&inner);
-        dec.map().unwrap();
-        let pool_id = dec.bytes().unwrap();
-        assert_eq!(
-            pool_id.len(),
-            28,
-            "StakePoolDefaultVote pool_id must be 28 bytes, got {}",
-            pool_id.len()
-        );
+        assert_eq!(dec.u8().unwrap(), 1);
+    }
+
+    // ─── SPO stake distribution (tag 30) — Map<pool_hash, Coin> ─────────
+
+    #[test]
+    fn test_spo_stake_distr_map_encoding() {
+        let result = QueryResult::SPOStakeDistr(vec![
+            (vec![0x33; 28], 1_000_000),
+            (vec![0x44; 28], 2_000_000),
+        ]);
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        let mut dec = Decoder::new(&inner);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 2);
+        // First entry
+        assert_eq!(dec.bytes().unwrap(), &[0x33; 28]);
+        assert_eq!(dec.u64().unwrap(), 1_000_000);
+        // Second entry
+        assert_eq!(dec.bytes().unwrap(), &[0x44; 28]);
+        assert_eq!(dec.u64().unwrap(), 2_000_000);
     }
 }
