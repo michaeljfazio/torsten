@@ -45,6 +45,18 @@ impl NetworkId {
         }
     }
 
+    /// Infer a human-readable network name from a network magic number.
+    ///
+    /// Returns "Mainnet", "Preview", "Pre-Production", or "Unknown (<magic>)".
+    pub fn name_from_magic(magic: u64) -> String {
+        match magic {
+            764824073 => "Mainnet".to_string(),
+            2 => "Preview".to_string(),
+            1 => "Pre-Production".to_string(),
+            other => format!("Unknown ({other})"),
+        }
+    }
+
     /// Default system start time for the network.
     /// For testnets, this returns the preprod start; use Shelley genesis for exact value.
     pub fn system_start(self) -> &'static str {
@@ -72,6 +84,14 @@ mod tests {
     fn test_network_magic() {
         assert_eq!(NetworkId::Mainnet.magic(), 764824073);
         assert_eq!(NetworkId::Testnet.magic(), 1);
+    }
+
+    #[test]
+    fn test_name_from_magic() {
+        assert_eq!(NetworkId::name_from_magic(764824073), "Mainnet");
+        assert_eq!(NetworkId::name_from_magic(2), "Preview");
+        assert_eq!(NetworkId::name_from_magic(1), "Pre-Production");
+        assert_eq!(NetworkId::name_from_magic(42), "Unknown (42)");
     }
 
     #[test]
