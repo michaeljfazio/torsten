@@ -18,3 +18,14 @@ checkpoints.json
 .monitoring-data/
 .claude/worktrees/
 .DS_Store
+
+# Nix
+result
+result-*
+
+# Direnv
+.direnv*
+
+# Claude
+
+.claude/settings.local.json
