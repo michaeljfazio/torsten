@@ -8,5 +8,6 @@
 - [project_state_2026_03_16.md](project_state_2026_03_16.md) — Tranche 6 planning: post-session-9 (v0.3.0-alpha), SPO live validation milestone
 - [feedback_testing_and_correctness.md](feedback_testing_and_correctness.md) — Always write comprehensive tests
 - [feedback_production_readiness_tone.md](feedback_production_readiness_tone.md) — Be honest: experimental, not production-ready
+- [project_state_2026_03_18.md](project_state_2026_03_18.md) — Soak test analysis: gap/compliance assessment, preview BP epoch 1239, ~1019 ADA
 - [capability_gaps.md](capability_gaps.md) — Known capability gaps and partial implementations
 - [dependency_status.md](dependency_status.md) — Current dependency versions and update status

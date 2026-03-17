@@ -25,10 +25,10 @@ type: project
 - Need a new full sync run from Mithril snapshot to verify 0 validation errors still hold
 - Affects: LocalStateQuery GetRewardAccountBalance, snapshot content, treasury accounting
 
-### Byron Ledger Validation (NOT IMPLEMENTED)
-- `ByronLedger` struct is a 12-line stub with no transaction validation
-- Byron-era blocks pass through `apply_block` without UTxO rule enforcement
-- Impact: genesis-from-Byron sync accumulates incorrect UTxO state; Mithril users unaffected
+### Byron Ledger Validation (DONE — 2026-03-18 confirmed)
+- `validate_byron_tx` and `apply_byron_block` fully implemented (834 lines, 9 tests)
+- Rules: min 1 input, all inputs present, ADA-only outputs, value conservation, min fee
+- `ByronApplyMode::ValidateAll` (live blocks) and `ApplyOnly` (replay) both implemented
 - File: `crates/torsten-ledger/src/eras/byron.rs`
 
 ### Ouroboros Genesis LoE Enforcement (PARTIAL)
