@@ -145,8 +145,12 @@ pub enum QueryResult {
     /// GetProposals (tag 31): returns Seq of GovActionState
     Proposals(Vec<ProposalSnapshot>),
     /// GetRatifyState (tag 32): ratification state
-    /// array(4) [enacted_seq, expired_seq, delayed_bool, future_pparam_update]
+    /// Haskell: array(4) [EnactState(array(7)), enacted_seq, expired_set, delayed_bool]
+    /// Carries the full GovStateSnapshot so the encoder can build the EnactState
+    /// field (committee, constitution, pparams, treasury, prev gov action IDs).
     RatifyState {
+        /// Full governance state for EnactState encoding
+        gov: Box<GovStateSnapshot>,
         /// Enacted GovActionStates (recently ratified)
         enacted: Vec<(ProposalSnapshot, GovActionId)>,
         /// Expired GovActionIds

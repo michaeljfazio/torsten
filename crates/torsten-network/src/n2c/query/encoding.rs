@@ -338,11 +338,12 @@ pub(crate) fn encode_query_result_value(
             }
         }
         QueryResult::RatifyState {
+            gov,
             enacted,
             expired,
             delayed,
         } => {
-            encode_ratify_state(enc, enacted, expired, *delayed);
+            encode_ratify_state(enc, gov, enacted, expired, *delayed);
         }
         QueryResult::NoFuturePParams => {
             // GetFuturePParams result: Maybe PParams = Nothing
@@ -1314,13 +1315,79 @@ fn encode_gov_action_tag(enc: &mut minicbor::Encoder<&mut Vec<u8>>, action_type:
 
 fn encode_ratify_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    gov: &crate::query_handler::GovStateSnapshot,
     enacted: &[(ProposalSnapshot, GovActionId)],
     expired: &[GovActionId],
     delayed: bool,
 ) {
-    // RatifyState = array(4) [enacted_seq, expired_seq, delayed_bool, future_pparam_update]
+    // Haskell RatifyState = array(4):
+    //   [0] EnactState(array(7))
+    //   [1] rsEnacted: Seq GovActionState (plain array)
+    //   [2] rsExpired: Set GovActionId (tag(258) + array)
+    //   [3] rsDelayed: Bool
     enc.array(4).ok();
-    // enacted: Seq of (GovActionState, GovActionId)
+
+    // [0] EnactState = array(7) — reuses the same encoding as the embedded
+    // version in encode_gov_state. See lines 991-1059 for the canonical
+    // EnactState field order.
+    enc.array(7).ok();
+    // ensCommittee: StrictMaybe Committee
+    if gov.committee.members.is_empty() && gov.committee.threshold.is_none() {
+        enc.array(0).ok(); // SNothing
+    } else {
+        enc.array(1).ok(); // SJust
+        enc.array(2).ok();
+        enc.map(gov.committee.members.len() as u64).ok();
+        for m in &gov.committee.members {
+            enc.array(2).ok();
+            enc.u8(m.cold_credential_type).ok();
+            enc.bytes(&m.cold_credential).ok();
+            enc.u64(m.expiry_epoch.unwrap_or(0)).ok();
+        }
+        if let Some((num, den)) = gov.committee.threshold {
+            encode_tagged_rational(enc, num, den);
+        } else {
+            encode_tagged_rational(enc, 2, 3);
+        }
+    }
+    // ensConstitution: array(2) [Anchor, StrictMaybe ScriptHash]
+    enc.array(2).ok();
+    enc.array(2).ok();
+    enc.str(&gov.constitution_url).ok();
+    enc.bytes(&gov.constitution_hash).ok();
+    if let Some(ref script) = gov.constitution_script {
+        enc.bytes(script).ok();
+    } else {
+        enc.null().ok();
+    }
+    // ensCurPParams
+    encode_protocol_params_cbor(enc, &gov.cur_pparams);
+    // ensPrevPParams
+    encode_protocol_params_cbor(enc, &gov.prev_pparams);
+    // ensTreasury
+    enc.u64(gov.treasury).ok();
+    // ensWithdrawals: empty map
+    enc.map(0).ok();
+    // ensPrevGovActionIds: GovRelation StrictMaybe = array(4)
+    enc.array(4).ok();
+    let roots = [
+        &gov.enacted_pparam_update,
+        &gov.enacted_hard_fork,
+        &gov.enacted_committee,
+        &gov.enacted_constitution,
+    ];
+    for root in &roots {
+        if let Some((tx_id, action_index)) = root {
+            enc.array(1).ok(); // SJust
+            enc.array(2).ok();
+            enc.bytes(tx_id).ok();
+            enc.u32(*action_index).ok();
+        } else {
+            enc.array(0).ok(); // SNothing
+        }
+    }
+
+    // [1] rsEnacted: Seq of GovActionState (plain array, no tag 258)
     enc.array(enacted.len() as u64).ok();
     for (proposal, action_id) in enacted {
         enc.array(2).ok();
@@ -1329,18 +1396,16 @@ fn encode_ratify_state(
         enc.bytes(&action_id.tx_id).ok();
         enc.u32(action_id.action_index).ok();
     }
-    // expired: Seq of GovActionId
+    // [2] rsExpired: Set of GovActionId (tag(258) + array per Haskell Set encoding)
+    enc.tag(minicbor::data::Tag::new(258)).ok();
     enc.array(expired.len() as u64).ok();
     for action_id in expired {
         enc.array(2).ok();
         enc.bytes(&action_id.tx_id).ok();
         enc.u32(action_id.action_index).ok();
     }
-    // delayed
+    // [3] rsDelayed
     enc.bool(delayed).ok();
-    // future pparams: NoPParamsUpdate [0]
-    enc.array(1).ok();
-    enc.u32(0).ok();
 }
 
 // ─── Relay encoding ───────────────────────────────────────────────────────────

@@ -543,6 +543,7 @@ mod tests {
     #[test]
     fn test_encode_ratify_state() {
         let buf = encode(&QueryResult::RatifyState {
+            gov: Box::new(crate::query_handler::GovStateSnapshot::default()),
             enacted: Vec::new(),
             expired: Vec::new(),
             delayed: false,
@@ -550,14 +551,23 @@ mod tests {
         let mut dec = decode_msg_result(&buf);
         strip_hfc(&mut dec);
         let arr = dec.array().unwrap().unwrap();
-        assert_eq!(arr, 4);
-        // enacted: Seq (array)
+        assert_eq!(arr, 4, "RatifyState must be array(4)");
+        // [0] EnactState = array(7) (from default GovStateSnapshot)
+        let enact = dec.array().unwrap().unwrap();
+        assert_eq!(enact, 7, "EnactState must be array(7)");
+        // Skip all 7 EnactState fields
+        for _ in 0..7 {
+            dec.skip().unwrap();
+        }
+        // [1] enacted: Seq (plain array)
         let enacted_len = dec.array().unwrap().unwrap();
         assert_eq!(enacted_len, 0);
-        // expired: Seq (array)
+        // [2] expired: Set (tag(258) + array)
+        let tag = dec.tag().unwrap();
+        assert_eq!(tag.as_u64(), 258);
         let expired_len = dec.array().unwrap().unwrap();
         assert_eq!(expired_len, 0);
-        // delayed
+        // [3] delayed
         assert!(!dec.bool().unwrap());
     }
 
@@ -589,6 +599,7 @@ mod tests {
             action_index: 3,
         };
         let buf = encode(&QueryResult::RatifyState {
+            gov: Box::new(crate::query_handler::GovStateSnapshot::default()),
             enacted: vec![(enacted_proposal, enacted_id)],
             expired: vec![expired_id],
             delayed: true,
@@ -597,7 +608,13 @@ mod tests {
         strip_hfc(&mut dec);
         let arr = dec.array().unwrap().unwrap();
         assert_eq!(arr, 4, "RatifyState must be array(4)");
-        // enacted: array(1) of (GovActionState, GovActionId)
+        // [0] EnactState = array(7)
+        let enact = dec.array().unwrap().unwrap();
+        assert_eq!(enact, 7, "EnactState must be array(7)");
+        for _ in 0..7 {
+            dec.skip().unwrap();
+        }
+        // [1] enacted: array(1) of (GovActionState, GovActionId)
         let enacted_len = dec.array().unwrap().unwrap();
         assert_eq!(enacted_len, 1);
         // Each entry is array(2) [GovActionState, GovActionId]
@@ -610,19 +627,17 @@ mod tests {
         assert_eq!(gaid, 2);
         assert_eq!(dec.bytes().unwrap(), &[0x11; 32]);
         assert_eq!(dec.u32().unwrap(), 0);
-        // expired: array(1) of GovActionId
+        // [2] expired: tag(258) + array(1) of GovActionId
+        let tag = dec.tag().unwrap();
+        assert_eq!(tag.as_u64(), 258);
         let expired_len = dec.array().unwrap().unwrap();
         assert_eq!(expired_len, 1);
         let gaid2 = dec.array().unwrap().unwrap();
         assert_eq!(gaid2, 2);
         assert_eq!(dec.bytes().unwrap(), &[0x22; 32]);
         assert_eq!(dec.u32().unwrap(), 3);
-        // delayed = true
+        // [3] delayed = true
         assert!(dec.bool().unwrap());
-        // future_pparams: NoPParamsUpdate [0]
-        let fp = dec.array().unwrap().unwrap();
-        assert_eq!(fp, 1);
-        assert_eq!(dec.u32().unwrap(), 0);
     }
 
     #[test]

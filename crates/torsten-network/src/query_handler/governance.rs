@@ -85,7 +85,23 @@ fn parse_gov_action_id_set(decoder: &mut minicbor::Decoder<'_>) -> Vec<(Vec<u8>,
 /// results from the most recent epoch transition's ratification pass.
 pub(crate) fn handle_ratify_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetRatifyState");
+    // Build a GovStateSnapshot from NodeStateSnapshot fields for EnactState encoding.
+    let gov = crate::query_handler::GovStateSnapshot {
+        proposals: state.governance_proposals.clone(),
+        committee: state.committee.clone(),
+        constitution_url: state.constitution_url.clone(),
+        constitution_hash: state.constitution_hash.clone(),
+        constitution_script: state.constitution_script.clone(),
+        cur_pparams: Box::new(state.protocol_params.clone()),
+        prev_pparams: Box::new(state.protocol_params.clone()), // best available
+        enacted_pparam_update: state.enacted_pparam_update.clone(),
+        enacted_hard_fork: state.enacted_hard_fork.clone(),
+        enacted_committee: state.enacted_committee.clone(),
+        enacted_constitution: state.enacted_constitution.clone(),
+        treasury: state.treasury,
+    };
     QueryResult::RatifyState {
+        gov: Box::new(gov),
         enacted: state.ratify_enacted.clone(),
         expired: state.ratify_expired.clone(),
         delayed: state.ratify_delayed,
@@ -252,6 +268,7 @@ mod tests {
         let result = handle_ratify_state(&state);
         match result {
             QueryResult::RatifyState {
+                gov: _,
                 enacted,
                 expired,
                 delayed,
@@ -300,6 +317,7 @@ mod tests {
         let result = handle_ratify_state(&state);
         match result {
             QueryResult::RatifyState {
+                gov: _,
                 enacted,
                 expired,
                 delayed,
