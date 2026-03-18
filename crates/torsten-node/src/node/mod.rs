@@ -127,6 +127,8 @@ pub struct Node {
     /// loop, not during chunk replay.  Used for `snapshots_established` since
     /// replay-built snapshots may have approximate stake values.
     pub(crate) live_epoch_transitions: u32,
+    /// Network timeout configuration (keepalive, await-reply, connection).
+    pub(crate) timeout_config: torsten_network::TimeoutConfig,
     /// Snapshot policy controlling when ledger snapshots are taken.
     pub(crate) snapshot_policy: epoch::SnapshotPolicy,
     /// Consensus mode: "praos" (default) or "genesis"
@@ -762,6 +764,7 @@ impl Node {
             genesis_validated: false,
             epoch_transitions_observed: 0,
             live_epoch_transitions: 0,
+            timeout_config: Default::default(),
             consensus_mode: args.consensus_mode,
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
@@ -1601,6 +1604,7 @@ impl Node {
                 match connect_result {
                     Ok(mut pc) => {
                         pc.set_byron_epoch_length(self.byron_epoch_length);
+                        pc.set_await_reply_timeout(self.timeout_config.await_reply_timeout());
                         debug!("Pipelined ChainSync client connected to {target}");
                         // Take the TxSubmission channel and spawn a background tx fetcher
                         if let Some(txsub_channel) = pc.take_txsub_channel() {
