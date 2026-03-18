@@ -38,6 +38,7 @@
 - [Storage](./architecture/storage.md)
 - [Consensus](./architecture/consensus.md)
 - [Networking](./architecture/networking.md)
+- [P2P Governor](./architecture/p2p-governor.md)
 - [Genesis Support](./architecture/genesis-support.md)
 
 # Reference
