@@ -73,6 +73,10 @@ pub struct RttBands {
     pub min_ms: Option<f64>,
     /// Average RTT across all samples (ms), or None if no samples.
     pub avg_ms: Option<f64>,
+    /// 50th-percentile RTT (median) interpolated from histogram buckets, or None.
+    pub p50_ms: Option<f64>,
+    /// 95th-percentile RTT interpolated from histogram buckets, or None.
+    pub p95_ms: Option<f64>,
     /// Highest RTT observed (ms), or None if no samples.
     pub max_ms: Option<f64>,
 }
@@ -142,6 +146,51 @@ impl RttBands {
             None
         };
 
+        // Interpolate a percentile from the cumulative histogram buckets.
+        //
+        // Uses standard Prometheus linear interpolation within the bucket that
+        // straddles the target rank: given that `prev_count` observations fall
+        // below `lower_bound` and `bucket_count` fall below `upper_bound`, the
+        // estimate is `lower + (target_rank - prev_count) / band_count * width`.
+        //
+        // The bucket boundaries available are: 50, 100, 200, 500, 1000, +Inf.
+        // For the +Inf bucket we cap the interpolation at 1500 ms as a
+        // representative upper bound (matching the max_approx logic below).
+        let interpolate_pct = |rank_frac: f64| -> Option<f64> {
+            if total == 0 {
+                return None;
+            }
+            let target = rank_frac * total as f64;
+            // Each tuple: (lower_bound_ms, upper_bound_ms, cumulative_count_at_upper)
+            let boundaries: &[(f64, f64, u64)] = &[
+                (0.0, 50.0, le50),
+                (50.0, 100.0, le100),
+                (100.0, 200.0, le200),
+                (200.0, 500.0, le500),
+                (500.0, 1000.0, le1000),
+                (1000.0, 1500.0, total), // treat +Inf as capped at 1500 ms
+            ];
+            let mut prev_count: f64 = 0.0;
+            for &(lower, upper, cum) in boundaries {
+                let cum_f = cum as f64;
+                if cum_f >= target || cum == total {
+                    // The target rank falls within [lower, upper].
+                    let band_count = cum_f - prev_count;
+                    if band_count <= 0.0 {
+                        // Empty bucket — return the lower bound.
+                        return Some(lower);
+                    }
+                    let frac = (target - prev_count) / band_count;
+                    return Some(lower + frac * (upper - lower));
+                }
+                prev_count = cum_f;
+            }
+            None
+        };
+
+        let p50_ms = interpolate_pct(0.50);
+        let p95_ms = interpolate_pct(0.95);
+
         // Prefer explicit _min / _max gauges if the node publishes them.
         // Otherwise approximate from the lowest / highest populated bucket midpoints.
         let min_approx: Option<f64> = if band_0_50 > 0 {
@@ -191,6 +240,8 @@ impl RttBands {
             band_200_plus,
             min_ms,
             avg_ms,
+            p50_ms,
+            p95_ms,
             max_ms,
         }
     }

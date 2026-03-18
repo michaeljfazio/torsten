@@ -795,30 +795,53 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ]));
     }
 
-    // Min / Avg / Max RTT line.
-    // Avg is computed from histogram _sum / _count for precision.
-    let low_str = fmt_rtt(rtt.min_ms);
+    // Single horizontal RTT breakpoint row:
+    //   min: 12ms | avg: 45ms | p50: 38ms | p95: 120ms | max: 250ms
+    //
+    // All five values sit on one line, separated by a muted ` | ` divider,
+    // so the panel row is not wasted on vertical stacking.
+    let min_str = fmt_rtt(rtt.min_ms);
     let avg_str = fmt_rtt(rtt.avg_ms);
-    let high_str = fmt_rtt(rtt.max_ms);
+    let p50_str = fmt_rtt(rtt.p50_ms);
+    let p95_str = fmt_rtt(rtt.p95_ms);
+    let max_str = fmt_rtt(rtt.max_ms);
 
+    let sep = Span::styled(" | ", Style::default().fg(theme.muted));
     lines.push(Line::from(vec![
-        Span::styled(" Low ", Style::default().fg(theme.muted)),
+        Span::raw(" "),
+        Span::styled("min:", Style::default().fg(theme.muted)),
         Span::styled(
-            &low_str,
+            min_str,
             Style::default()
                 .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("   Avg ", Style::default().fg(theme.muted)),
+        sep.clone(),
+        Span::styled("avg:", Style::default().fg(theme.muted)),
         Span::styled(
-            &avg_str,
+            avg_str,
             Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("   High ", Style::default().fg(theme.muted)),
+        sep.clone(),
+        Span::styled("p50:", Style::default().fg(theme.muted)),
         Span::styled(
-            &high_str,
+            p50_str,
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+        ),
+        sep.clone(),
+        Span::styled("p95:", Style::default().fg(theme.muted)),
+        Span::styled(
+            p95_str,
             Style::default()
                 .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        sep.clone(),
+        Span::styled("max:", Style::default().fg(theme.muted)),
+        Span::styled(
+            max_str,
+            Style::default()
+                .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
