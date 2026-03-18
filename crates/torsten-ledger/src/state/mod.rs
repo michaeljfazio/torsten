@@ -305,6 +305,11 @@ pub struct EpochSnapshots {
     pub go: Option<StakeSnapshot>,
 }
 
+/// Serde default helper for `Lovelace(0)` in snapshot fields.
+fn default_lovelace_zero() -> Lovelace {
+    Lovelace(0)
+}
+
 /// A snapshot of the stake distribution at an epoch boundary.
 /// Uses `Arc` for large HashMaps to avoid deep-cloning during epoch rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +324,18 @@ pub struct StakeSnapshot {
     /// Individual stake per credential (for reward distribution and pledge verification)
     #[serde(default)]
     pub stake_distribution: Arc<HashMap<Hash32, Lovelace>>,
+    /// Fee pot from the epoch this snapshot was captured (Haskell's _feeSS).
+    /// Used by `calculate_rewards` in the go snapshot for RUPD deltaT1.
+    #[serde(default = "default_lovelace_zero")]
+    pub epoch_fees: Lovelace,
+    /// Total blocks produced in the epoch this snapshot was captured.
+    /// Used for eta = actual_blocks / expected_blocks in reward calculation.
+    #[serde(default)]
+    pub epoch_block_count: u64,
+    /// Per-pool block production in the epoch this snapshot was captured.
+    /// Used for apparent performance in reward calculation.
+    #[serde(default)]
+    pub epoch_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

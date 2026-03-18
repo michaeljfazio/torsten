@@ -97,6 +97,12 @@ impl LedgerState {
             pool_stake,
             pool_params: Arc::clone(&self.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
+            // Capture the epoch that just ended's performance data.
+            // After three rotations this reaches "go" and is used by
+            // calculate_rewards() — matching Haskell's RUPD rule.
+            epoch_fees: self.epoch_fees,
+            epoch_block_count: self.epoch_block_count,
+            epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
         // Process pending pool retirements for this epoch
