@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-golden-tests"
-version = "0.1.0"
+version = "0.4.4-alpha"
 dependencies = [
  "hex",
  "memmap2",
