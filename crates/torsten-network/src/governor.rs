@@ -16,7 +16,7 @@ use crate::peer_manager::{PeerCategory, PeerManager};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Peer count targets for the governor decision loop.
 #[derive(Debug, Clone)]
@@ -563,6 +563,45 @@ impl Governor {
         self.evaluate(pm)
     }
 
+    /// Check for warm peers whose dwell time has elapsed and promote them to hot.
+    ///
+    /// This is a lightweight, fast-path evaluation that can be called more
+    /// frequently than the full `evaluate()` cycle (e.g., every second) so
+    /// that peers are promoted promptly once their dwell time expires rather
+    /// than having to wait up to 30 seconds for the next governor tick.
+    ///
+    /// Returns `Promote` events for any warm peers ready for promotion, capped
+    /// at the active-peer target deficit.
+    pub fn check_warm_promotions(&self, pm: &PeerManager) -> Vec<GovernorEvent> {
+        let targets = self.active_targets();
+        let hot = pm.hot_peer_count();
+        if hot >= targets.active_peers {
+            return Vec::new();
+        }
+        let deficit = targets.active_peers - hot;
+        let ready = pm.warm_peers_ready_to_promote();
+        if ready.is_empty() {
+            return Vec::new();
+        }
+        let events: Vec<GovernorEvent> = ready
+            .into_iter()
+            .take(deficit)
+            .inspect(|addr| {
+                trace!(%addr, "Governor warm-promotion check: promoting dwell-eligible peer to hot");
+            })
+            .map(GovernorEvent::Promote)
+            .collect();
+        if !events.is_empty() {
+            debug!(
+                count = events.len(),
+                hot,
+                target = targets.active_peers,
+                "Governor: promoting warm peers that have elapsed dwell time"
+            );
+        }
+        events
+    }
+
     /// Get current governor config (for testing/inspection)
     pub fn config(&self) -> &GovernorConfig {
         &self.config
@@ -608,12 +647,16 @@ mod tests {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
             pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+            // Backdate so the warm dwell time has already elapsed, making
+            // these peers immediately eligible for promotion in governor tests.
+            pm.backdate_warm_dwell(&addr);
             port += 1;
         }
         for _ in 0..hot {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
             pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+            pm.backdate_warm_dwell(&addr);
             pm.promote_to_hot(&addr);
             port += 1;
         }
@@ -1062,6 +1105,182 @@ mod tests {
         assert!(
             group_events.is_empty(),
             "No valency events should be emitted for a group already at target; got: {group_events:?}"
+        );
+    }
+
+    // ── Warm dwell time ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_warm_peers_not_promoted_before_dwell_elapsed() {
+        // Warm peers whose dwell has NOT elapsed must not appear in
+        // peers_to_promote() or trigger Promote events from evaluate().
+        let config = PeerManagerConfig {
+            target_hot_peers: 2,
+            target_warm_peers: 2,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+        let a1 = test_addr(6001);
+        let a2 = test_addr(6002);
+        pm.add_config_peer(a1, false, false);
+        pm.add_config_peer(a2, false, false);
+        // Connect peers — puts them in Warm with promoted_at = now.
+        // Do NOT call backdate_warm_dwell, so elapsed < WARM_DWELL_TIME.
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+
+        // peers_to_promote must return nothing because dwell hasn't elapsed.
+        let to_promote = pm.peers_to_promote();
+        assert!(
+            to_promote.is_empty(),
+            "peers_to_promote should be empty before dwell elapses, got: {to_promote:?}"
+        );
+
+        // The governor's evaluate() must also produce no Promote events.
+        let gov_config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(gov_config);
+        let events = gov.evaluate(&pm);
+        let promotes: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            promotes.is_empty(),
+            "evaluate() must not promote peers before dwell elapses, got: {promotes:?}"
+        );
+    }
+
+    #[test]
+    fn test_warm_peers_promoted_after_dwell_elapsed() {
+        // After backdate_warm_dwell(), peers must be eligible for promotion.
+        let config = PeerManagerConfig {
+            target_hot_peers: 2,
+            target_warm_peers: 2,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+        let a1 = test_addr(6001);
+        let a2 = test_addr(6002);
+        pm.add_config_peer(a1, false, false);
+        pm.add_config_peer(a2, false, false);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+        // Simulate dwell elapsed.
+        pm.backdate_warm_dwell(&a1);
+        pm.backdate_warm_dwell(&a2);
+
+        let to_promote = pm.peers_to_promote();
+        assert_eq!(
+            to_promote.len(),
+            2,
+            "Both dwell-elapsed warm peers should be promotion candidates"
+        );
+    }
+
+    #[test]
+    fn test_check_warm_promotions_returns_events_after_dwell() {
+        // check_warm_promotions() should emit Promote events for dwell-elapsed
+        // warm peers, capped by the hot-peer target deficit.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+        let a1 = test_addr(7001);
+        let a2 = test_addr(7002);
+        pm.add_config_peer(a1, false, false);
+        pm.add_config_peer(a2, false, false);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+        pm.backdate_warm_dwell(&a1);
+        pm.backdate_warm_dwell(&a2);
+
+        let gov_config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let gov = Governor::new(gov_config);
+        let events = gov.check_warm_promotions(&pm);
+        let promote_count = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::Promote(_)))
+            .count();
+        assert_eq!(
+            promote_count, 2,
+            "check_warm_promotions should promote both dwell-elapsed warm peers"
+        );
+    }
+
+    #[test]
+    fn test_check_warm_promotions_empty_before_dwell() {
+        // check_warm_promotions() must return nothing if no peers have elapsed dwell.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+        let a1 = test_addr(7001);
+        pm.add_config_peer(a1, false, false);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        // Do NOT backdate — dwell hasn't elapsed.
+
+        let gov = Governor::new(GovernorConfig::default());
+        let events = gov.check_warm_promotions(&pm);
+        assert!(
+            events.is_empty(),
+            "check_warm_promotions should be empty before dwell elapses"
+        );
+    }
+
+    #[test]
+    fn test_dwell_resets_on_demotion() {
+        // When a hot peer is demoted to warm, promoted_at resets so the full
+        // dwell time must elapse again before it can be re-promoted.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(8001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.backdate_warm_dwell(&addr);
+        pm.promote_to_hot(&addr);
+
+        // Peer is now hot — promoted_at is cleared.
+        let info = pm.peer_info_for_test(&addr).unwrap();
+        assert!(
+            info.promoted_at.is_none(),
+            "promoted_at should be None after promotion to hot"
+        );
+
+        // Demote back to warm — promoted_at should be reset to now.
+        pm.demote_to_warm(&addr);
+        let info = pm.peer_info_for_test(&addr).unwrap();
+        assert!(
+            info.promoted_at.is_some(),
+            "promoted_at should be set after demotion to warm"
+        );
+
+        // The freshly demoted peer must NOT be immediately eligible.
+        assert!(
+            !info.can_promote_to_hot(),
+            "freshly demoted peer must not pass can_promote_to_hot() immediately"
         );
     }
 }

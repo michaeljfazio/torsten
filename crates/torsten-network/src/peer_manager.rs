@@ -111,6 +111,12 @@ const CIRCUIT_BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(60);
 /// Maximum cooldown duration (5 minutes).
 const CIRCUIT_BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// Minimum time a peer must spend in the Warm state before being eligible
+/// for promotion to Hot.  This is intentionally short (5 seconds) — the
+/// primary goal is TUI visibility (so users can see the Warm state) rather
+/// than strict protocol compliance.  Haskell cardano-node uses ~30 s.
+pub const WARM_DWELL_TIME: Duration = Duration::from_secs(5);
+
 /// Tracked peer state
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
@@ -138,6 +144,13 @@ pub struct PeerInfo {
     pub circuit_state: CircuitState,
     /// Consecutive failures (resets on success)
     pub consecutive_failures: u32,
+    /// When this peer was last transitioned to the Warm state.
+    ///
+    /// Used to enforce `WARM_DWELL_TIME`: the governor will not promote a peer
+    /// from Warm to Hot until at least `WARM_DWELL_TIME` has elapsed since
+    /// `promoted_at`.  This keeps peers visible in the TUI during the Warm
+    /// phase rather than jumping straight to Hot on the first governor tick.
+    pub promoted_at: Option<Instant>,
 }
 
 /// Performance metrics tracked per peer for adaptive selection
@@ -269,6 +282,7 @@ impl PeerInfo {
             performance: PeerPerformance::default(),
             circuit_state: CircuitState::Closed,
             consecutive_failures: 0,
+            promoted_at: None,
         }
     }
 
@@ -285,6 +299,19 @@ impl PeerInfo {
                 t.elapsed() >= delay
             }
         }
+    }
+
+    /// Returns `true` if this peer has dwelled in the Warm state for at least
+    /// `WARM_DWELL_TIME` and is therefore eligible for promotion to Hot.
+    ///
+    /// A peer that has never been warm (i.e., `promoted_at` is `None`) is
+    /// **not** eligible — the caller must call `peer_connected()` first, which
+    /// stamps `promoted_at`.
+    pub fn can_promote_to_hot(&self) -> bool {
+        self.temperature == PeerTemperature::Warm
+            && self
+                .promoted_at
+                .is_some_and(|t| t.elapsed() >= WARM_DWELL_TIME)
     }
 
     /// Compute a selection score for ranking peers.
@@ -646,6 +673,9 @@ impl PeerManager {
     /// `direction` should be `Outbound` when we dialled the peer and `Inbound`
     /// when the peer connected to us.  Resets the circuit breaker to Closed and
     /// clears consecutive failures.
+    ///
+    /// Sets `promoted_at` to the current time so the governor can enforce
+    /// `WARM_DWELL_TIME` before promoting this peer to Hot.
     pub fn peer_connected(
         &mut self,
         addr: &SocketAddr,
@@ -655,6 +685,8 @@ impl PeerManager {
         if let Some(info) = self.peers.get_mut(addr) {
             info.temperature = PeerTemperature::Warm;
             info.last_connected = Some(Instant::now());
+            // Stamp the warm arrival time so the dwell timer starts now.
+            info.promoted_at = Some(Instant::now());
             info.failure_count = 0;
             info.consecutive_failures = 0;
             info.circuit_state = CircuitState::Closed;
@@ -669,11 +701,16 @@ impl PeerManager {
         }
     }
 
-    /// Promote a warm peer to hot (start syncing)
+    /// Promote a warm peer to hot (start syncing).
+    ///
+    /// Only transitions peers that are currently Warm.  Clears `promoted_at`
+    /// since the dwell timer is only relevant during the Warm phase.
     pub fn promote_to_hot(&mut self, addr: &SocketAddr) {
         if let Some(info) = self.peers.get_mut(addr) {
             if info.temperature == PeerTemperature::Warm {
                 info.temperature = PeerTemperature::Hot;
+                // Clear the warm-dwell timer — it is only used while Warm.
+                info.promoted_at = None;
                 self.warm_peers.remove(addr);
                 self.hot_peers.insert(*addr);
                 debug!(%addr, "Peer promoted to hot");
@@ -681,11 +718,17 @@ impl PeerManager {
         }
     }
 
-    /// Demote a hot peer to warm (stop syncing)
+    /// Demote a hot peer to warm (stop syncing).
+    ///
+    /// Resets `promoted_at` so the full `WARM_DWELL_TIME` must elapse again
+    /// before re-promotion.  This prevents an oscillating hot↔warm peer from
+    /// being immediately re-promoted on the very next governor tick.
     pub fn demote_to_warm(&mut self, addr: &SocketAddr) {
         if let Some(info) = self.peers.get_mut(addr) {
             if info.temperature == PeerTemperature::Hot {
                 info.temperature = PeerTemperature::Warm;
+                // Restart the dwell timer so the governor must wait again.
+                info.promoted_at = Some(Instant::now());
                 self.hot_peers.remove(addr);
                 self.warm_peers.insert(*addr);
                 debug!(%addr, "Peer demoted to warm");
@@ -974,6 +1017,10 @@ impl PeerManager {
     }
 
     /// Get warm peers that should be promoted to hot, ranked by selection score.
+    ///
+    /// Only peers that have dwelled in the Warm state for at least
+    /// `WARM_DWELL_TIME` are eligible.  This ensures each peer is visible as
+    /// Warm in the TUI for a minimum of 5 seconds before jumping to Hot.
     pub fn peers_to_promote(&self) -> Vec<SocketAddr> {
         if self.hot_peers.len() >= self.config.target_hot_peers {
             return vec![];
@@ -982,7 +1029,14 @@ impl PeerManager {
         let mut candidates: Vec<_> = self
             .warm_peers
             .iter()
-            .filter_map(|addr| self.peers.get(addr).map(|p| (*addr, p.selection_score())))
+            .filter_map(|addr| {
+                let p = self.peers.get(addr)?;
+                // Enforce warm dwell time before promotion.
+                if !p.can_promote_to_hot() {
+                    return None;
+                }
+                Some((*addr, p.selection_score()))
+            })
             .collect();
 
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1068,12 +1122,16 @@ impl PeerManager {
     /// Register an inbound peer that connected to our N2N server.
     /// Creates a warm peer entry with direction=Inbound so it appears in
     /// metrics and is available for peer sharing.
+    ///
+    /// Sets `promoted_at` so the warm-dwell timer starts immediately.
     pub fn register_inbound_peer(&mut self, addr: SocketAddr) {
+        let now = Instant::now();
         let is_new = !self.peers.contains_key(&addr);
         if is_new {
             let mut info = PeerInfo::new(addr, PeerSource::Inbound);
             info.temperature = PeerTemperature::Warm;
             info.direction = Some(ConnectionDirection::Inbound);
+            info.promoted_at = Some(now);
             self.peers.insert(addr, info);
             self.warm_peers.insert(addr);
         } else if let Some(peer) = self.peers.get_mut(&addr) {
@@ -1082,6 +1140,7 @@ impl PeerManager {
             peer.direction = Some(ConnectionDirection::Inbound);
             if peer.temperature == PeerTemperature::Cold {
                 peer.temperature = PeerTemperature::Warm;
+                peer.promoted_at = Some(now);
                 self.cold_peers.remove(&addr);
                 self.warm_peers.insert(addr);
             }
@@ -1131,6 +1190,27 @@ impl PeerManager {
     /// Get performance info for a peer (for display/metrics)
     pub fn peer_performance(&self, addr: &SocketAddr) -> Option<&PeerPerformance> {
         self.peers.get(addr).map(|p| &p.performance)
+    }
+
+    /// Return all warm peers whose dwell time has elapsed and are ready for
+    /// promotion to Hot, ranked by selection score (best first).
+    ///
+    /// This is the read-only counterpart to `peers_to_promote()` used by the
+    /// governor's dedicated warm-promotion evaluation pass.
+    pub fn warm_peers_ready_to_promote(&self) -> Vec<SocketAddr> {
+        let mut candidates: Vec<_> = self
+            .warm_peers
+            .iter()
+            .filter_map(|addr| {
+                let p = self.peers.get(addr)?;
+                if !p.can_promote_to_hot() {
+                    return None;
+                }
+                Some((*addr, p.selection_score()))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.into_iter().map(|(addr, _)| addr).collect()
     }
 
     /// Get the list of hot peer addresses
@@ -1248,6 +1328,26 @@ impl std::fmt::Display for PeerManagerStats {
 }
 
 #[cfg(test)]
+impl PeerManager {
+    /// Test helper: backdate a peer's `promoted_at` timestamp so that
+    /// `WARM_DWELL_TIME` appears to have already elapsed.  This allows
+    /// tests that manipulate warm/hot state to call `peers_to_promote()`
+    /// and `check_warm_promotions()` without sleeping.
+    pub fn backdate_warm_dwell(&mut self, addr: &SocketAddr) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            // Set to a point well before the dwell threshold so elapsed() > WARM_DWELL_TIME.
+            info.promoted_at = Some(Instant::now() - WARM_DWELL_TIME - Duration::from_secs(1));
+        }
+    }
+
+    /// Test helper: read-only access to a peer's full `PeerInfo`.
+    /// Used by governor tests to inspect fields like `promoted_at`.
+    pub fn peer_info_for_test(&self, addr: &SocketAddr) -> Option<&PeerInfo> {
+        self.peers.get(addr)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1328,6 +1428,10 @@ mod tests {
         pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
         pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
         pm.peer_connected(&a3, 14, ConnectionDirection::Outbound);
+        // Simulate warm dwell time having elapsed so all three are eligible.
+        pm.backdate_warm_dwell(&a1);
+        pm.backdate_warm_dwell(&a2);
+        pm.backdate_warm_dwell(&a3);
 
         let to_promote = pm.peers_to_promote();
         assert_eq!(to_promote.len(), 2); // target_hot = 2
@@ -1564,6 +1668,9 @@ mod tests {
         pm.add_config_peer(slow_peer, false, false);
         pm.peer_connected(&fast_peer, 14, ConnectionDirection::Outbound);
         pm.peer_connected(&slow_peer, 14, ConnectionDirection::Outbound);
+        // Simulate warm dwell time having elapsed for both peers.
+        pm.backdate_warm_dwell(&fast_peer);
+        pm.backdate_warm_dwell(&slow_peer);
 
         // Give fast peer better latency
         pm.record_handshake_rtt(&fast_peer, 20.0);

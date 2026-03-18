@@ -1334,31 +1334,50 @@ impl Node {
         }
 
         // Spawn the P2P governor task — periodically evaluates peer targets
-        // and emits connect/disconnect/promote/demote events
+        // and emits connect/disconnect/promote/demote events.
+        //
+        // Two timer loops run concurrently in the same task:
+        //
+        //  • Full evaluation (30 s): runs evaluate() + maybe_churn() to handle
+        //    all deficits/surpluses, churn rotation, and BLP promotion.
+        //
+        //  • Warm-promotion check (2 s): runs check_warm_promotions() so that
+        //    peers are promoted to Hot promptly once their WARM_DWELL_TIME
+        //    (5 s) has elapsed, rather than waiting up to 30 s for the next
+        //    full evaluation cycle.  This keeps peers visible as Warm in the
+        //    TUI for the intended dwell period without adding latency.
         {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
                 let mut governor = Governor::new(Default::default());
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                interval.tick().await; // skip first immediate tick
+                // Full evaluation every 30 s; skip the first immediate tick so
+                // the node has time to connect peers before the first evaluation.
+                let mut full_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                full_interval.tick().await; // skip first tick
+                                            // Warm-promotion check every 2 s — no initial skip; we want to
+                                            // pick up newly-warm peers as soon as their dwell time expires.
+                let mut warm_interval = tokio::time::interval(std::time::Duration::from_secs(2));
                 let mut shutdown = governor_shutdown;
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {}
-                        _ = shutdown.changed() => { break; }
-                    }
 
-                    // Run governor evaluation
-                    let events = {
-                        let pm = governor_pm.read().await;
-                        let mut all_events = governor.evaluate(&pm);
-                        // Also check churn
-                        all_events.extend(governor.maybe_churn(&pm));
-                        all_events
+                loop {
+                    // Collect events from whichever timer fires next, or exit
+                    // immediately on shutdown.
+                    let events: Vec<GovernorEvent> = tokio::select! {
+                        _ = full_interval.tick() => {
+                            let pm = governor_pm.read().await;
+                            let mut all_events = governor.evaluate(&pm);
+                            all_events.extend(governor.maybe_churn(&pm));
+                            all_events
+                        }
+                        _ = warm_interval.tick() => {
+                            let pm = governor_pm.read().await;
+                            governor.check_warm_promotions(&pm)
+                        }
+                        _ = shutdown.changed() => { break; }
                     };
 
-                    // Execute governor events
+                    // Apply events to the peer manager.
                     if !events.is_empty() {
                         let mut pm = governor_pm.write().await;
                         for event in &events {
@@ -1373,8 +1392,8 @@ impl Node {
                                     pm.peer_disconnected(addr);
                                 }
                                 GovernorEvent::Connect(_) => {
-                                    // Connection events are handled by the main loop
-                                    // via peers_to_connect()
+                                    // Connection events are handled by the main
+                                    // loop via peers_to_connect(); no action here.
                                 }
                             }
                         }
@@ -1440,15 +1459,18 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
+                            // Transition peer to Warm.  Promotion to Hot is deferred
+                            // to the governor's warm-promotion check (every 2 s) so
+                            // that the peer is visible as Warm in the TUI for at
+                            // least WARM_DWELL_TIME (5 s) before jumping to Hot.
                             pm.peer_connected(
                                 addr,
                                 14,
                                 torsten_network::ConnectionDirection::Outbound,
                             );
                             pm.record_handshake_rtt(addr, rtt_ms);
-                            pm.promote_to_hot(addr);
                             drop(pm);
-                            info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected");
+                            info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected (warm, dwell pending)");
                             client = Some((c, *addr));
                             break;
                         }
@@ -1588,15 +1610,16 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
+                            // Same deferral as the primary peer: land in Warm
+                            // first and let the governor promote after dwell time.
                             pm.peer_connected(
                                 addr,
                                 14,
                                 torsten_network::ConnectionDirection::Outbound,
                             );
                             pm.record_handshake_rtt(addr, rtt_ms);
-                            pm.promote_to_hot(addr);
                             drop(pm);
-                            debug!("Connected block fetcher to {target} ({rtt_ms:.0}ms)");
+                            debug!("Connected block fetcher to {target} ({rtt_ms:.0}ms, dwell pending)");
                             fetch_pool.add_fetcher(c);
                         }
                         Err(e) => {
