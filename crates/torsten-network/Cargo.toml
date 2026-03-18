@@ -30,3 +30,7 @@ parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
+
+[[test]]
+name = "cddl_conformance"
+path = "tests/cddl_conformance.rs"
