@@ -1,0 +1,513 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Monitoring - Torsten Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../quickstart.html"><strong aria-hidden="true">2.</strong> Quick Start</a></li><li class="chapter-item expanded affix "><li class="part-title">Running a Node</li><li class="chapter-item expanded "><a href="../running/configuration.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../running/topology.html"><strong aria-hidden="true">4.</strong> Topology</a></li><li class="chapter-item expanded "><a href="../running/networks.html"><strong aria-hidden="true">5.</strong> Networks</a></li><li class="chapter-item expanded "><a href="../running/mithril.html"><strong aria-hidden="true">6.</strong> Mithril Snapshot Import</a></li><li class="chapter-item expanded "><a href="../running/logging.html"><strong aria-hidden="true">7.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../running/monitoring.html" class="active"><strong aria-hidden="true">8.</strong> Monitoring</a></li><li class="chapter-item expanded "><a href="../running/relay.html"><strong aria-hidden="true">9.</strong> Relay Node</a></li><li class="chapter-item expanded "><a href="../running/block-producer.html"><strong aria-hidden="true">10.</strong> Block Producer</a></li><li class="chapter-item expanded "><a href="../running/kubernetes.html"><strong aria-hidden="true">11.</strong> Kubernetes Deployment</a></li><li class="chapter-item expanded affix "><li class="part-title">CLI Reference</li><li class="chapter-item expanded "><a href="../cli/overview.html"><strong aria-hidden="true">12.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../cli/torsten-node.html"><strong aria-hidden="true">13.</strong> torsten-node</a></li><li class="chapter-item expanded "><a href="../cli/key-generation.html"><strong aria-hidden="true">14.</strong> Key Generation</a></li><li class="chapter-item expanded "><a href="../cli/transactions.html"><strong aria-hidden="true">15.</strong> Transactions</a></li><li class="chapter-item expanded "><a href="../cli/queries.html"><strong aria-hidden="true">16.</strong> Queries</a></li><li class="chapter-item expanded "><a href="../cli/stake-address.html"><strong aria-hidden="true">17.</strong> Stake Address</a></li><li class="chapter-item expanded "><a href="../cli/stake-pool.html"><strong aria-hidden="true">18.</strong> Stake Pool</a></li><li class="chapter-item expanded "><a href="../cli/node-commands.html"><strong aria-hidden="true">19.</strong> Node Commands</a></li><li class="chapter-item expanded "><a href="../cli/governance.html"><strong aria-hidden="true">20.</strong> Governance</a></li><li class="chapter-item expanded affix "><li class="part-title">Architecture</li><li class="chapter-item expanded "><a href="../architecture/overview.html"><strong aria-hidden="true">21.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../architecture/sync-pipeline.html"><strong aria-hidden="true">22.</strong> Sync Pipeline</a></li><li class="chapter-item expanded "><a href="../architecture/storage.html"><strong aria-hidden="true">23.</strong> Storage</a></li><li class="chapter-item expanded "><a href="../architecture/consensus.html"><strong aria-hidden="true">24.</strong> Consensus</a></li><li class="chapter-item expanded "><a href="../architecture/networking.html"><strong aria-hidden="true">25.</strong> Networking</a></li><li class="chapter-item expanded "><a href="../architecture/genesis-support.html"><strong aria-hidden="true">26.</strong> Genesis Support</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/protocol-parameters.html"><strong aria-hidden="true">27.</strong> Protocol Parameters</a></li><li class="chapter-item expanded "><a href="../reference/benchmarks.html"><strong aria-hidden="true">28.</strong> Benchmarks</a></li><li class="chapter-item expanded "><a href="../reference/third-party-licenses.html"><strong aria-hidden="true">29.</strong> Third-Party Licenses</a></li><li class="chapter-item expanded "><a href="../reference/troubleshooting.html"><strong aria-hidden="true">30.</strong> Troubleshooting</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Torsten Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten/edit/main/docs/src/running/monitoring.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="monitoring"><a class="header" href="#monitoring">Monitoring</a></h1>
+<p>Torsten exposes a Prometheus-compatible metrics endpoint for monitoring node health and sync progress.</p>
+<h2 id="metrics-endpoint"><a class="header" href="#metrics-endpoint">Metrics Endpoint</a></h2>
+<p>The metrics server runs on <strong>port 12798</strong> by default and responds to any HTTP request with Prometheus exposition format metrics:</p>
+<pre><code>http://localhost:12798/metrics
+</code></pre>
+<p>Example response:</p>
+<pre><code># HELP torsten_blocks_received_total Total blocks received from peers
+# TYPE torsten_blocks_received_total gauge
+torsten_blocks_received_total 1523847
+
+# HELP torsten_blocks_applied_total Total blocks applied to ledger
+# TYPE torsten_blocks_applied_total gauge
+torsten_blocks_applied_total 1523845
+
+# HELP torsten_slot_number Current slot number
+# TYPE torsten_slot_number gauge
+torsten_slot_number 142857392
+
+# HELP torsten_block_number Current block number
+# TYPE torsten_block_number gauge
+torsten_block_number 11283746
+
+# HELP torsten_epoch_number Current epoch number
+# TYPE torsten_epoch_number gauge
+torsten_epoch_number 512
+
+# HELP torsten_sync_progress_percent Chain sync progress (0-10000, divide by 100 for %)
+# TYPE torsten_sync_progress_percent gauge
+torsten_sync_progress_percent 9542
+
+# HELP torsten_utxo_count Number of entries in the UTxO set
+# TYPE torsten_utxo_count gauge
+torsten_utxo_count 15234892
+
+# HELP torsten_mempool_tx_count Number of transactions in the mempool
+# TYPE torsten_mempool_tx_count gauge
+torsten_mempool_tx_count 42
+
+# HELP torsten_peers_connected Number of connected peers
+# TYPE torsten_peers_connected gauge
+torsten_peers_connected 8
+</code></pre>
+<h2 id="health-endpoint"><a class="header" href="#health-endpoint">Health Endpoint</a></h2>
+<p>The metrics server exposes a <code>/health</code> endpoint for monitoring node status:</p>
+<pre><code>GET http://localhost:12798/health
+</code></pre>
+<p>Returns JSON with three possible statuses:</p>
+<ul>
+<li><strong>healthy</strong>: Sync progress &gt;= 99.9%</li>
+<li><strong>syncing</strong>: Actively catching up to chain tip</li>
+<li><strong>stalled</strong>: No blocks received for &gt; 5 minutes AND sync &lt; 99%</li>
+</ul>
+<pre><code class="language-json">{
+  "status": "healthy",
+  "uptime_seconds": 3421,
+  "slot": 142857392,
+  "block": 11283746,
+  "epoch": 512,
+  "sync_progress": 99.95,
+  "peers": 8,
+  "last_block_received": "2026-03-14T12:34:56.789Z"
+}
+</code></pre>
+<h2 id="readiness-endpoint"><a class="header" href="#readiness-endpoint">Readiness Endpoint</a></h2>
+<p>For Kubernetes readiness probes:</p>
+<pre><code>GET http://localhost:12798/ready
+</code></pre>
+<p>Returns <strong>200 OK</strong> when <code>sync_progress &gt;= 99.9%</code>, <strong>503 Service Unavailable</strong> otherwise:</p>
+<pre><code class="language-json">{"ready": true}
+</code></pre>
+<p>or:</p>
+<pre><code class="language-json">{"ready": false, "sync_progress": 75.42}
+</code></pre>
+<h2 id="available-metrics"><a class="header" href="#available-metrics">Available Metrics</a></h2>
+<h3 id="counters"><a class="header" href="#counters">Counters</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>torsten_blocks_received_total</code></td><td>Total blocks received from peers</td></tr>
+<tr><td><code>torsten_blocks_applied_total</code></td><td>Total blocks successfully applied to the ledger</td></tr>
+<tr><td><code>torsten_transactions_received_total</code></td><td>Total transactions received</td></tr>
+<tr><td><code>torsten_transactions_validated_total</code></td><td>Total transactions validated</td></tr>
+<tr><td><code>torsten_transactions_rejected_total</code></td><td>Total transactions rejected</td></tr>
+<tr><td><code>torsten_rollback_count_total</code></td><td>Total number of chain rollbacks</td></tr>
+<tr><td><code>torsten_blocks_forged_total</code></td><td>Total blocks forged by this node</td></tr>
+<tr><td><code>torsten_leader_checks_total</code></td><td>Total VRF leader checks performed</td></tr>
+<tr><td><code>torsten_leader_checks_not_elected_total</code></td><td>Leader checks where node was not elected</td></tr>
+<tr><td><code>torsten_forge_failures_total</code></td><td>Block forge attempts that failed</td></tr>
+<tr><td><code>torsten_blocks_announced_total</code></td><td>Blocks successfully announced to peers</td></tr>
+<tr><td><code>torsten_n2n_connections_total</code></td><td>Total N2N (peer-to-peer) connections accepted</td></tr>
+<tr><td><code>torsten_n2c_connections_total</code></td><td>Total N2C (client) connections accepted</td></tr>
+<tr><td><code>torsten_validation_errors_total{error="..."}</code></td><td>Transaction validation errors, broken down by error type</td></tr>
+<tr><td><code>torsten_protocol_errors_total{error="..."}</code></td><td>Protocol-level errors by type (e.g. handshake failures, connection errors)</td></tr>
+</tbody></table>
+</div>
+<h3 id="gauges"><a class="header" href="#gauges">Gauges</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>torsten_peers_connected</code></td><td>Number of connected peers</td></tr>
+<tr><td><code>torsten_peers_cold</code></td><td>Number of cold (known but unconnected) peers</td></tr>
+<tr><td><code>torsten_peers_warm</code></td><td>Number of warm (connected, not syncing) peers</td></tr>
+<tr><td><code>torsten_peers_hot</code></td><td>Number of hot (actively syncing) peers</td></tr>
+<tr><td><code>torsten_sync_progress_percent</code></td><td>Chain sync progress (0-10000; divide by 100 for percentage)</td></tr>
+<tr><td><code>torsten_slot_number</code></td><td>Current slot number</td></tr>
+<tr><td><code>torsten_block_number</code></td><td>Current block number</td></tr>
+<tr><td><code>torsten_epoch_number</code></td><td>Current epoch number</td></tr>
+<tr><td><code>torsten_utxo_count</code></td><td>Number of entries in the UTxO set</td></tr>
+<tr><td><code>torsten_mempool_tx_count</code></td><td>Number of transactions in the mempool</td></tr>
+<tr><td><code>torsten_mempool_bytes</code></td><td>Size of the mempool in bytes</td></tr>
+<tr><td><code>torsten_delegation_count</code></td><td>Number of active stake delegations</td></tr>
+<tr><td><code>torsten_treasury_lovelace</code></td><td>Total lovelace in the treasury</td></tr>
+<tr><td><code>torsten_drep_count</code></td><td>Number of registered DReps</td></tr>
+<tr><td><code>torsten_proposal_count</code></td><td>Number of active governance proposals</td></tr>
+<tr><td><code>torsten_pool_count</code></td><td>Number of registered stake pools</td></tr>
+<tr><td><code>torsten_uptime_seconds</code></td><td>Seconds since node startup</td></tr>
+<tr><td><code>torsten_disk_available_bytes</code></td><td>Available disk space on the database volume</td></tr>
+<tr><td><code>torsten_n2n_connections_active</code></td><td>Currently active N2N connections</td></tr>
+<tr><td><code>torsten_n2c_connections_active</code></td><td>Currently active N2C connections</td></tr>
+<tr><td><code>torsten_tip_age_seconds</code></td><td>Seconds since the tip slot time</td></tr>
+<tr><td><code>torsten_chainsync_idle_seconds</code></td><td>Seconds since last ChainSync RollForward event</td></tr>
+<tr><td><code>torsten_ledger_replay_duration_seconds</code></td><td>Duration of last ledger replay in seconds</td></tr>
+<tr><td><code>torsten_mem_resident_bytes</code></td><td>Resident set size (RSS) in bytes</td></tr>
+</tbody></table>
+</div>
+<h3 id="histograms"><a class="header" href="#histograms">Histograms</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Buckets (ms)</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>torsten_peer_handshake_rtt_ms</code></td><td>1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000</td><td>Peer N2N handshake round-trip time</td></tr>
+<tr><td><code>torsten_peer_block_fetch_ms</code></td><td>(same)</td><td>Per-block fetch latency</td></tr>
+</tbody></table>
+</div>
+<p>Histograms expose <code>_bucket</code>, <code>_count</code>, and <code>_sum</code> suffixes for standard Prometheus histogram queries.</p>
+<h2 id="prometheus-configuration"><a class="header" href="#prometheus-configuration">Prometheus Configuration</a></h2>
+<p>Add the Torsten node as a scrape target in your <code>prometheus.yml</code>:</p>
+<pre><code class="language-yaml">scrape_configs:
+  - job_name: 'torsten'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:12798']
+        labels:
+          network: 'mainnet'
+          node: 'relay-1'
+</code></pre>
+<h2 id="grafana-dashboard"><a class="header" href="#grafana-dashboard">Grafana Dashboard</a></h2>
+<p>Torsten ships with a pre-built Grafana dashboard at <code>config/grafana-dashboard.json</code>. The dashboard covers all node metrics organized into nine sections:</p>
+<ul>
+<li><strong>Overview</strong> — Sync progress gauge, block height, epoch, slot, connected peers, blocks forged</li>
+<li><strong>Node Health</strong> — Uptime, disk available (stat + time series)</li>
+<li><strong>Sync &amp; Throughput</strong> — Sync progress over time, block apply/receive rate (blk/s), block height, rollbacks</li>
+<li><strong>Peers</strong> — Connected peer count over time, peer state breakdown (hot/warm/cold stacked)</li>
+<li><strong>Mempool &amp; Transactions</strong> — Mempool tx count, mempool size (bytes), transaction rate (received/validated/rejected)</li>
+<li><strong>Ledger State</strong> — UTxO set size, stake delegations, treasury balance (ADA), registered stake pools</li>
+<li><strong>Governance</strong> — Registered DReps, active governance proposals</li>
+<li><strong>Block Production</strong> — Total blocks forged, block forge rate (blk/h)</li>
+<li><strong>Network Latency</strong> — Handshake RTT and block fetch latency percentiles (p50/p95/p99), request counts</li>
+<li><strong>Validation Errors</strong> — Error breakdown by type (stacked bars), error totals (bar chart)</li>
+</ul>
+<h3 id="quick-start-docker"><a class="header" href="#quick-start-docker">Quick Start (Docker)</a></h3>
+<p>The fastest way to start a local monitoring stack is with the included script:</p>
+<pre><code class="language-bash"># Start Prometheus + Grafana
+./scripts/start-monitoring.sh
+
+# Open the dashboard (admin/admin)
+open http://localhost:3000/d/torsten-node/torsten-node
+
+# Check status
+./scripts/start-monitoring.sh status
+
+# Stop
+./scripts/start-monitoring.sh stop
+</code></pre>
+<p>The script starts Prometheus (port 9090) and Grafana (port 3000) as Docker containers, auto-configures the Prometheus datasource, and imports the Torsten dashboard. Prometheus data is persisted in <code>.monitoring-data/</code> so metrics survive restarts.</p>
+<p>Environment variables for port customization:</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>PROMETHEUS_PORT</code></td><td>9090</td><td>Prometheus web UI port</td></tr>
+<tr><td><code>GRAFANA_PORT</code></td><td>3000</td><td>Grafana web UI port</td></tr>
+<tr><td><code>TORSTEN_METRICS_PORT</code></td><td>12798</td><td>Port where Torsten exposes metrics</td></tr>
+</tbody></table>
+</div>
+<h3 id="importing-the-dashboard"><a class="header" href="#importing-the-dashboard">Importing the Dashboard</a></h3>
+<ol>
+<li>Open Grafana and go to <strong>Dashboards &gt; Import</strong></li>
+<li>Click <strong>Upload JSON file</strong> and select <code>config/grafana-dashboard.json</code></li>
+<li>Select your Prometheus data source when prompted</li>
+<li>Click <strong>Import</strong></li>
+</ol>
+<p>The dashboard includes an <code>instance</code> template variable so you can monitor multiple Torsten nodes (relays + block producer) from a single dashboard. It auto-refreshes every 30 seconds.</p>
+<h3 id="provisioning"><a class="header" href="#provisioning">Provisioning</a></h3>
+<p>To auto-provision the dashboard, copy it into your Grafana provisioning directory:</p>
+<pre><code class="language-bash">cp config/grafana-dashboard.json /etc/grafana/provisioning/dashboards/torsten.json
+</code></pre>
+<p>Add a dashboard provider in <code>/etc/grafana/provisioning/dashboards/torsten.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: 1
+providers:
+  - name: Torsten
+    folder: Cardano
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
+</code></pre>
+<h3 id="quick-start-macos"><a class="header" href="#quick-start-macos">Quick Start (macOS)</a></h3>
+<p>To quickly preview the dashboard locally with Homebrew:</p>
+<pre><code class="language-bash"># Install Prometheus and Grafana
+brew install prometheus grafana
+
+# Configure Prometheus to scrape Torsten
+cat &gt; /opt/homebrew/etc/prometheus.yml &lt;&lt; 'EOF'
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: torsten
+    static_configs:
+      - targets: ['localhost:12798']
+EOF
+
+# Provision the datasource
+cat &gt; "$(brew --prefix)/opt/grafana/share/grafana/conf/provisioning/datasources/torsten.yaml" &lt;&lt; 'EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    uid: DS_PROMETHEUS
+EOF
+
+# Provision the dashboard
+cat &gt; "$(brew --prefix)/opt/grafana/share/grafana/conf/provisioning/dashboards/torsten.yaml" &lt;&lt; 'EOF'
+apiVersion: 1
+providers:
+  - name: Torsten
+    folder: Cardano
+    type: file
+    options:
+      path: /opt/homebrew/var/lib/grafana/dashboards
+EOF
+
+mkdir -p /opt/homebrew/var/lib/grafana/dashboards
+sed 's/${DS_PROMETHEUS}/DS_PROMETHEUS/g' config/grafana-dashboard.json \
+  &gt; /opt/homebrew/var/lib/grafana/dashboards/torsten.json
+
+# Start services
+brew services start prometheus
+brew services start grafana
+
+# Open the dashboard (default login: admin/admin)
+open "http://localhost:3000/d/torsten-node/torsten-node"
+</code></pre>
+<p>To stop:</p>
+<pre><code class="language-bash">brew services stop prometheus grafana
+</code></pre>
+<h3 id="key-queries"><a class="header" href="#key-queries">Key Queries</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Panel</th><th>PromQL</th></tr></thead><tbody>
+<tr><td>Sync progress</td><td><code>torsten_sync_progress_percent / 100</code></td></tr>
+<tr><td>Block throughput</td><td><code>rate(torsten_blocks_applied_total[5m])</code></td></tr>
+<tr><td>Transaction rejection rate</td><td><code>rate(torsten_transactions_rejected_total[5m])</code></td></tr>
+<tr><td>Treasury balance (ADA)</td><td><code>torsten_treasury_lovelace / 1e6</code></td></tr>
+<tr><td>Block forge rate (per hour)</td><td><code>rate(torsten_blocks_forged_total[1h]) * 3600</code></td></tr>
+<tr><td>Handshake RTT p95</td><td><code>histogram_quantile(0.95, rate(torsten_peer_handshake_rtt_ms_bucket[5m]))</code></td></tr>
+<tr><td>Block fetch latency p95</td><td><code>histogram_quantile(0.95, rate(torsten_peer_block_fetch_ms_bucket[5m]))</code></td></tr>
+<tr><td>Validation errors by type</td><td><code>rate(torsten_validation_errors_total[5m])</code></td></tr>
+<tr><td>Protocol errors by type</td><td><code>rate(torsten_protocol_errors_total[5m])</code></td></tr>
+<tr><td>Leader election rate</td><td><code>rate(torsten_leader_checks_total[5m])</code></td></tr>
+<tr><td>Active N2N connections</td><td><code>torsten_n2n_connections_active</code></td></tr>
+<tr><td>Disk available</td><td><code>torsten_disk_available_bytes</code></td></tr>
+</tbody></table>
+</div>
+<h2 id="console-logging"><a class="header" href="#console-logging">Console Logging</a></h2>
+<p>In addition to the Prometheus endpoint, Torsten logs sync progress to the console every 5 seconds. The log output includes:</p>
+<ul>
+<li>Current slot and block number</li>
+<li>Epoch number</li>
+<li>UTxO count</li>
+<li>Sync percentage</li>
+<li>Blocks-per-second throughput</li>
+</ul>
+<p>Example log line:</p>
+<pre><code>2026-03-12T12:34:56.789Z  INFO torsten_node::node: Syncing progress="95.42%" epoch=512 block=11283746 tip=11300000 remaining=16254 speed="312 blk/s" utxos=15234892
+</code></pre>
+<p>Log output can be directed to stdout, file, or systemd journal. See <a href="./logging.html">Logging</a> for full details on output targets, file rotation, and log level configuration.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../running/logging.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../running/relay.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../running/logging.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../running/relay.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

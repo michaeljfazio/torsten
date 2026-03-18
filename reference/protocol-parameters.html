@@ -1,0 +1,327 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Protocol Parameters - Torsten Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../quickstart.html"><strong aria-hidden="true">2.</strong> Quick Start</a></li><li class="chapter-item expanded affix "><li class="part-title">Running a Node</li><li class="chapter-item expanded "><a href="../running/configuration.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../running/topology.html"><strong aria-hidden="true">4.</strong> Topology</a></li><li class="chapter-item expanded "><a href="../running/networks.html"><strong aria-hidden="true">5.</strong> Networks</a></li><li class="chapter-item expanded "><a href="../running/mithril.html"><strong aria-hidden="true">6.</strong> Mithril Snapshot Import</a></li><li class="chapter-item expanded "><a href="../running/logging.html"><strong aria-hidden="true">7.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../running/monitoring.html"><strong aria-hidden="true">8.</strong> Monitoring</a></li><li class="chapter-item expanded "><a href="../running/relay.html"><strong aria-hidden="true">9.</strong> Relay Node</a></li><li class="chapter-item expanded "><a href="../running/block-producer.html"><strong aria-hidden="true">10.</strong> Block Producer</a></li><li class="chapter-item expanded "><a href="../running/kubernetes.html"><strong aria-hidden="true">11.</strong> Kubernetes Deployment</a></li><li class="chapter-item expanded affix "><li class="part-title">CLI Reference</li><li class="chapter-item expanded "><a href="../cli/overview.html"><strong aria-hidden="true">12.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../cli/torsten-node.html"><strong aria-hidden="true">13.</strong> torsten-node</a></li><li class="chapter-item expanded "><a href="../cli/key-generation.html"><strong aria-hidden="true">14.</strong> Key Generation</a></li><li class="chapter-item expanded "><a href="../cli/transactions.html"><strong aria-hidden="true">15.</strong> Transactions</a></li><li class="chapter-item expanded "><a href="../cli/queries.html"><strong aria-hidden="true">16.</strong> Queries</a></li><li class="chapter-item expanded "><a href="../cli/stake-address.html"><strong aria-hidden="true">17.</strong> Stake Address</a></li><li class="chapter-item expanded "><a href="../cli/stake-pool.html"><strong aria-hidden="true">18.</strong> Stake Pool</a></li><li class="chapter-item expanded "><a href="../cli/node-commands.html"><strong aria-hidden="true">19.</strong> Node Commands</a></li><li class="chapter-item expanded "><a href="../cli/governance.html"><strong aria-hidden="true">20.</strong> Governance</a></li><li class="chapter-item expanded affix "><li class="part-title">Architecture</li><li class="chapter-item expanded "><a href="../architecture/overview.html"><strong aria-hidden="true">21.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../architecture/sync-pipeline.html"><strong aria-hidden="true">22.</strong> Sync Pipeline</a></li><li class="chapter-item expanded "><a href="../architecture/storage.html"><strong aria-hidden="true">23.</strong> Storage</a></li><li class="chapter-item expanded "><a href="../architecture/consensus.html"><strong aria-hidden="true">24.</strong> Consensus</a></li><li class="chapter-item expanded "><a href="../architecture/networking.html"><strong aria-hidden="true">25.</strong> Networking</a></li><li class="chapter-item expanded "><a href="../architecture/genesis-support.html"><strong aria-hidden="true">26.</strong> Genesis Support</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/protocol-parameters.html" class="active"><strong aria-hidden="true">27.</strong> Protocol Parameters</a></li><li class="chapter-item expanded "><a href="../reference/benchmarks.html"><strong aria-hidden="true">28.</strong> Benchmarks</a></li><li class="chapter-item expanded "><a href="../reference/third-party-licenses.html"><strong aria-hidden="true">29.</strong> Third-Party Licenses</a></li><li class="chapter-item expanded "><a href="../reference/troubleshooting.html"><strong aria-hidden="true">30.</strong> Troubleshooting</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Torsten Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten/edit/main/docs/src/reference/protocol-parameters.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="protocol-parameters-reference"><a class="header" href="#protocol-parameters-reference">Protocol Parameters Reference</a></h1>
+<p>Cardano protocol parameters control the behavior of the network, including fees, block sizes, staking mechanics, and governance. These parameters can be queried from a running node and updated through governance actions.</p>
+<h2 id="querying-parameters"><a class="header" href="#querying-parameters">Querying Parameters</a></h2>
+<pre><code class="language-bash">torsten-cli query protocol-parameters \
+  --socket-path ./node.sock \
+  --out-file protocol-params.json
+</code></pre>
+<h2 id="fee-parameters"><a class="header" href="#fee-parameters">Fee Parameters</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>JSON Key</th><th>Description</th><th>Mainnet Default</th></tr></thead><tbody>
+<tr><td>Min fee coefficient</td><td><code>txFeePerByte</code> / <code>minFeeA</code></td><td>Fee per byte of transaction size</td><td>44</td></tr>
+<tr><td>Min fee constant</td><td><code>txFeeFixed</code> / <code>minFeeB</code></td><td>Fixed fee component</td><td>155381</td></tr>
+<tr><td>Min UTxO value per byte</td><td><code>utxoCostPerByte</code> / <code>adaPerUtxoByte</code></td><td>Minimum lovelace per byte of UTxO</td><td>4310</td></tr>
+</tbody></table>
+</div>
+<p>The transaction fee formula is:</p>
+<pre><code>fee = txFeePerByte * tx_size_in_bytes + txFeeFixed
+</code></pre>
+<h2 id="block-size-parameters"><a class="header" href="#block-size-parameters">Block Size Parameters</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>JSON Key</th><th>Description</th><th>Mainnet Default</th></tr></thead><tbody>
+<tr><td>Max block body size</td><td><code>maxBlockBodySize</code></td><td>Maximum block body size in bytes</td><td>90112</td></tr>
+<tr><td>Max transaction size</td><td><code>maxTxSize</code></td><td>Maximum transaction size in bytes</td><td>16384</td></tr>
+<tr><td>Max block header size</td><td><code>maxBlockHeaderSize</code></td><td>Maximum block header size in bytes</td><td>1100</td></tr>
+</tbody></table>
+</div>
+<h2 id="staking-parameters"><a class="header" href="#staking-parameters">Staking Parameters</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>JSON Key</th><th>Description</th><th>Mainnet Default</th></tr></thead><tbody>
+<tr><td>Stake address deposit</td><td><code>stakeAddressDeposit</code> / <code>keyDeposit</code></td><td>Deposit for stake key registration (lovelace)</td><td>2000000</td></tr>
+<tr><td>Pool deposit</td><td><code>stakePoolDeposit</code> / <code>poolDeposit</code></td><td>Deposit for pool registration (lovelace)</td><td>500000000</td></tr>
+<tr><td>Pool retire max epoch</td><td><code>poolRetireMaxEpoch</code> / <code>eMax</code></td><td>Maximum future epochs for pool retirement</td><td>18</td></tr>
+<tr><td>Pool target count</td><td><code>stakePoolTargetNum</code> / <code>nOpt</code></td><td>Target number of pools (k parameter)</td><td>500</td></tr>
+<tr><td>Min pool cost</td><td><code>minPoolCost</code></td><td>Minimum fixed pool cost (lovelace)</td><td>170000000</td></tr>
+</tbody></table>
+</div>
+<h2 id="monetary-policy"><a class="header" href="#monetary-policy">Monetary Policy</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Description</th></tr></thead><tbody>
+<tr><td>Monetary expansion (rho)</td><td>Rate of new ADA creation from reserves per epoch</td></tr>
+<tr><td>Treasury cut (tau)</td><td>Fraction of rewards directed to the treasury</td></tr>
+<tr><td>Pledge influence (a0)</td><td>How pledge affects reward calculations</td></tr>
+</tbody></table>
+</div>
+<h2 id="plutus-execution-parameters"><a class="header" href="#plutus-execution-parameters">Plutus Execution Parameters</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>JSON Key</th><th>Description</th><th>Mainnet Default</th></tr></thead><tbody>
+<tr><td>Max tx execution units</td><td><code>maxTxExecutionUnits</code></td><td><code>{memory, steps}</code> per transaction</td><td><code>{14000000, 10000000000}</code></td></tr>
+<tr><td>Max block execution units</td><td><code>maxBlockExecutionUnits</code></td><td><code>{memory, steps}</code> per block</td><td><code>{62000000, 40000000000}</code></td></tr>
+<tr><td>Max value size</td><td><code>maxValueSize</code></td><td>Maximum serialized value size in bytes</td><td>5000</td></tr>
+<tr><td>Collateral percentage</td><td><code>collateralPercentage</code></td><td>Collateral % of total tx fee for Plutus txs</td><td>150</td></tr>
+<tr><td>Max collateral inputs</td><td><code>maxCollateralInputs</code></td><td>Maximum collateral inputs per tx</td><td>3</td></tr>
+</tbody></table>
+</div>
+<h2 id="governance-parameters-conway"><a class="header" href="#governance-parameters-conway">Governance Parameters (Conway)</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>JSON Key</th><th>Description</th><th>Mainnet Default</th></tr></thead><tbody>
+<tr><td>DRep deposit</td><td><code>drepDeposit</code></td><td>Deposit for DRep registration (lovelace)</td><td>500000000</td></tr>
+<tr><td>Gov action deposit</td><td><code>govActionDeposit</code></td><td>Deposit for governance action submission (lovelace)</td><td>100000000000</td></tr>
+<tr><td>Gov action lifetime</td><td><code>govActionLifetime</code></td><td>Governance action expiry (epochs)</td><td>6</td></tr>
+</tbody></table>
+</div>
+<h3 id="voting-thresholds"><a class="header" href="#voting-thresholds">Voting Thresholds</a></h3>
+<p>Different governance action types require different voting thresholds from DReps, SPOs, and the Constitutional Committee:</p>
+<div class="table-wrapper"><table><thead><tr><th>Action Type</th><th>DRep Threshold</th><th>SPO Threshold</th><th>CC Threshold</th></tr></thead><tbody>
+<tr><td>No Confidence</td><td>dvtMotionNoConfidence</td><td>pvtMotionNoConfidence</td><td>Required</td></tr>
+<tr><td>Update Committee (normal)</td><td>dvtCommitteeNormal</td><td>pvtCommitteeNormal</td><td>N/A</td></tr>
+<tr><td>Update Committee (no confidence)</td><td>dvtCommitteeNoConfidence</td><td>pvtCommitteeNoConfidence</td><td>N/A</td></tr>
+<tr><td>New Constitution</td><td>dvtUpdateToConstitution</td><td>N/A</td><td>Required</td></tr>
+<tr><td>Hard Fork Initiation</td><td>dvtHardForkInitiation</td><td>pvtHardForkInitiation</td><td>Required</td></tr>
+<tr><td>Protocol Parameter Update (network)</td><td>dvtPPNetworkGroup</td><td>N/A</td><td>Required</td></tr>
+<tr><td>Protocol Parameter Update (economic)</td><td>dvtPPEconomicGroup</td><td>pvtPPEconomicGroup</td><td>Required</td></tr>
+<tr><td>Protocol Parameter Update (technical)</td><td>dvtPPTechnicalGroup</td><td>N/A</td><td>Required</td></tr>
+<tr><td>Protocol Parameter Update (governance)</td><td>dvtPPGovGroup</td><td>N/A</td><td>Required</td></tr>
+<tr><td>Treasury Withdrawal</td><td>dvtTreasuryWithdrawal</td><td>N/A</td><td>Required</td></tr>
+</tbody></table>
+</div>
+<h2 id="cbor-field-numbers"><a class="header" href="#cbor-field-numbers">CBOR Field Numbers</a></h2>
+<p>When encoding protocol parameter updates in governance actions, each parameter maps to a CBOR field number:</p>
+<div class="table-wrapper"><table><thead><tr><th>CBOR Key</th><th>Parameter</th></tr></thead><tbody>
+<tr><td>0</td><td>txFeePerByte / minFeeA</td></tr>
+<tr><td>1</td><td>txFeeFixed / minFeeB</td></tr>
+<tr><td>2</td><td>maxBlockBodySize</td></tr>
+<tr><td>3</td><td>maxTxSize</td></tr>
+<tr><td>4</td><td>maxBlockHeaderSize</td></tr>
+<tr><td>5</td><td>stakeAddressDeposit / keyDeposit</td></tr>
+<tr><td>6</td><td>stakePoolDeposit / poolDeposit</td></tr>
+<tr><td>7</td><td>poolRetireMaxEpoch / eMax</td></tr>
+<tr><td>8</td><td>stakePoolTargetNum / nOpt</td></tr>
+<tr><td>16</td><td>minPoolCost</td></tr>
+<tr><td>17</td><td>utxoCostPerByte / adaPerUtxoByte</td></tr>
+<tr><td>20</td><td>maxTxExecutionUnits</td></tr>
+<tr><td>21</td><td>maxBlockExecutionUnits</td></tr>
+<tr><td>22</td><td>maxValueSize</td></tr>
+<tr><td>23</td><td>collateralPercentage</td></tr>
+<tr><td>24</td><td>maxCollateralInputs</td></tr>
+<tr><td>30</td><td>drepDeposit</td></tr>
+<tr><td>31</td><td>govActionDeposit</td></tr>
+<tr><td>32</td><td>govActionLifetime</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/genesis-support.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/benchmarks.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/genesis-support.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/benchmarks.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
