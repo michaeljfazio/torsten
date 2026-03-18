@@ -1719,20 +1719,20 @@ fn test_governance_proposal_expiry() {
         },
     );
 
-    // Submit at epoch 0 → expires at epoch 6
+    // Submit at epoch 0 → expires at epoch 7 (0 + 6 + 1, per Haskell gasExpiresAfter)
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Advance to epoch 6 — should still be active (expires_epoch = 6, active through epoch 6)
+    // Advance to epoch 7 — should still be active (expires_epoch = 7, active through epoch 7)
     // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — proposals are active
     // through their expiresAfter epoch.
-    for e in 1..=6 {
+    for e in 1..=7 {
         state.process_epoch_transition(EpochNo(e));
     }
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Advance to epoch 7 — should expire (6 < 7)
-    state.process_epoch_transition(EpochNo(7));
+    // Advance to epoch 8 — should expire (7 < 8)
+    state.process_epoch_transition(EpochNo(8));
     assert_eq!(state.governance.proposals.len(), 0);
 }
 
@@ -1859,7 +1859,7 @@ fn test_ratify_state_tracks_expired_proposals() {
         },
     };
 
-    // Submit at epoch 0 — expires at epoch 2
+    // Submit at epoch 0 — expires at epoch 3 (0 + 2 + 1, per Haskell gasExpiresAfter)
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(state.governance.proposals.len(), 1);
 
@@ -1869,15 +1869,21 @@ fn test_ratify_state_tracks_expired_proposals() {
     assert!(state.governance.last_ratified.is_empty());
     assert!(state.governance.last_expired.is_empty());
 
-    // Epoch 2: still active (expires_epoch = 2, active through epoch 2)
-    // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — 2 < 2 is false
+    // Epoch 2: still active (expires_epoch = 3, active through epoch 3)
+    // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — 3 < 2 is false
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(state.governance.proposals.len(), 1);
     assert!(state.governance.last_ratified.is_empty());
     assert!(state.governance.last_expired.is_empty());
 
-    // Epoch 3: proposal expires (2 < 3)
+    // Epoch 3: still active (3 < 3 is false)
     state.process_epoch_transition(EpochNo(3));
+    assert_eq!(state.governance.proposals.len(), 1);
+    assert!(state.governance.last_ratified.is_empty());
+    assert!(state.governance.last_expired.is_empty());
+
+    // Epoch 4: proposal expires (3 < 4)
+    state.process_epoch_transition(EpochNo(4));
     assert_eq!(state.governance.proposals.len(), 0);
     assert!(state.governance.last_ratified.is_empty());
     assert_eq!(state.governance.last_expired.len(), 1);
@@ -3156,7 +3162,7 @@ fn test_gov_action_lifetime_from_protocol_params() {
         action_index: 0,
     };
     let ps = &state.governance.proposals[&action_id];
-    assert_eq!(ps.expires_epoch, EpochNo(15)); // epoch 5 + lifetime 10
+    assert_eq!(ps.expires_epoch, EpochNo(16)); // epoch 5 + lifetime 10 + 1
 }
 
 #[test]
@@ -9791,6 +9797,144 @@ fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
     assert!(
         pool_stake.0 >= expected_total,
         "pool_stake should include reward account balance: expected >= {expected_total}, got {}",
+        pool_stake.0
+    );
+}
+
+// -----------------------------------------------------------------------
+// Issue #171. recompute_snapshot_pool_stakes must NOT replace snapshot
+// delegations with current delegations.
+// -----------------------------------------------------------------------
+//
+// The previous implementation replaced a snapshot's delegation map with the
+// current (live) delegation map whenever the current map had significantly
+// more entries. This over-corrects: delegations registered AFTER the
+// snapshot epoch are included retroactively, inflating sigma values used
+// for historical reward calculations.
+//
+// The correct behaviour: each snapshot's delegation map is preserved exactly
+// as it was captured at the time the epoch boundary was crossed. Only the
+// pool_stake values (ADA amounts) are recalculated using the current
+// (rebuilt) stake_distribution — the set of which pools are visible in
+// each snapshot must remain epoch-accurate.
+
+/// Verify that recompute_snapshot_pool_stakes() does NOT inject post-epoch
+/// delegations into historical snapshots.
+///
+/// Scenario:
+///   - Epoch 0: pool A registered, delegator X delegates to pool A.
+///   - Epoch 1 transition: mark snapshot captured with delegation X -> A.
+///   - Epoch 2: delegator Y registers and delegates to pool A (AFTER the
+///     mark snapshot was taken).
+///   - recompute_snapshot_pool_stakes() is called.
+///   - The mark snapshot must still use only delegator X's delegation;
+///     delegator Y must NOT appear in the mark snapshot.
+///
+/// Regression test for GitHub issue #171.
+#[test]
+fn test_recompute_snapshot_pool_stakes_preserves_snapshot_delegations() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x40u8; 28]);
+    // Delegator X: present at the mark snapshot epoch boundary.
+    let cred_x = Credential::VerificationKey(Hash28::from_bytes([0x41u8; 28]));
+    let amount_x = 10_000_000_000u64; // 10,000 ADA
+                                      // Delegator Y: joins AFTER the mark snapshot is captured (post-epoch).
+    let cred_y = Credential::VerificationKey(Hash28::from_bytes([0x42u8; 28]));
+    let amount_y = 5_000_000_000u64; // 5,000 ADA
+
+    // Epoch 0: register pool and have delegator X delegate to it.
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &cred_x, pool_id, amount_x);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 1 transition: mark snapshot is captured here with X's delegation only.
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Delegator X must appear in the mark snapshot delegation map.
+    {
+        let mark = state.snapshots.mark.as_ref().expect("mark must exist");
+        let cred_x_key = credential_to_hash(&cred_x);
+        assert!(
+            mark.delegations.contains_key(&cred_x_key),
+            "mark snapshot must contain delegator X"
+        );
+        assert_eq!(
+            mark.delegations.len(),
+            1,
+            "mark snapshot must have exactly 1 delegation (X only), got {}",
+            mark.delegations.len()
+        );
+    }
+
+    // Delegator Y joins in epoch 1 (AFTER the mark snapshot boundary).
+    let b3 = make_delegation_block(1002, 4, *b2.hash(), &cred_y, pool_id, amount_y);
+    state
+        .apply_block(&b3, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // The current (live) delegation map now has both X and Y.
+    assert_eq!(
+        state.delegations.len(),
+        2,
+        "live delegations must have both X and Y before recompute"
+    );
+
+    // Call recompute_snapshot_pool_stakes() — this is the function under test.
+    // It must NOT inject Y's delegation into the mark snapshot.
+    state.rebuild_stake_distribution();
+    state.recompute_snapshot_pool_stakes();
+
+    // The mark snapshot delegation map must still have only X.
+    let mark = state
+        .snapshots
+        .mark
+        .as_ref()
+        .expect("mark must exist after recompute");
+    let cred_y_key = credential_to_hash(&cred_y);
+    assert!(
+        !mark.delegations.contains_key(&cred_y_key),
+        "mark snapshot must NOT contain delegator Y (joined after snapshot epoch)"
+    );
+    assert_eq!(
+        mark.delegations.len(),
+        1,
+        "mark snapshot delegation count must be unchanged (1), got {}",
+        mark.delegations.len()
+    );
+
+    // The pool_stake in the mark snapshot must reflect only X's stake.
+    // amount_x is present in the UTxO set so it must appear.
+    let pool_stake = mark
+        .pool_stake
+        .get(&pool_id)
+        .copied()
+        .unwrap_or(Lovelace(0));
+    assert!(
+        pool_stake.0 >= amount_x,
+        "mark snapshot pool_stake must be >= amount_x ({amount_x}), got {}",
+        pool_stake.0
+    );
+    // Y's stake must not be counted in the mark snapshot's pool_stake.
+    // If the delegation replacement bug were present, pool_stake would be
+    // amount_x + amount_y. We assert strictly less to catch that regression.
+    assert!(
+        pool_stake.0 < amount_x + amount_y,
+        "mark snapshot pool_stake must be < amount_x+amount_y ({}), got {} — \
+         delegation replacement bug would inflate this value",
+        amount_x + amount_y,
         pool_stake.0
     );
 }

@@ -422,37 +422,23 @@ impl LedgerState {
     ///
     /// After rebuilding stake_distribution from the UTxO set, this updates
     /// each snapshot's pool_stake map using the current (rebuilt) stake
-    /// distribution, reward accounts, and delegation map.
+    /// distribution and reward accounts.  Crucially, each snapshot's own
+    /// delegation map is preserved — it reflects the delegations that were
+    /// active at the time the snapshot epoch boundary was crossed.  Replacing
+    /// snapshot delegations with the current map would incorrectly include
+    /// delegations that became active AFTER the snapshot epoch, producing
+    /// inflated sigma values for historical snapshots (issue #171).
     ///
-    /// If a snapshot's delegation map is stale (e.g., captured at wrong epoch
-    /// boundaries due to incorrect epoch numbering), it is replaced with the
-    /// current delegation map before recomputing pool stakes.  This ensures
-    /// block producers see correct sigma values immediately on restart.
+    /// The zero-stake bug (issue #113) is handled separately by the
+    /// `rebuild_stake_distribution` + `recompute_snapshot_pool_stakes` call
+    /// in node startup code after the UTxO store is attached.
     pub fn recompute_snapshot_pool_stakes(&mut self) {
-        // Clone the authoritative delegation map once for snapshot repair.
-        let current_delegations = Arc::clone(&self.delegations);
-
         for (name, snapshot) in [
             ("mark", &mut self.snapshots.mark),
             ("set", &mut self.snapshots.set),
             ("go", &mut self.snapshots.go),
         ] {
             if let Some(snap) = snapshot {
-                // Detect stale snapshot delegations: if the current delegation
-                // map has significantly more entries, the snapshot was captured
-                // at a wrong epoch boundary. Replace it with the current state.
-                if current_delegations.len() > snap.delegations.len()
-                    && (current_delegations.len() - snap.delegations.len()) > 10
-                {
-                    debug!(
-                        snapshot = name,
-                        snapshot_delegations = snap.delegations.len(),
-                        current_delegations = current_delegations.len(),
-                        "Snapshot delegations stale — updating from current state"
-                    );
-                    snap.delegations = Arc::clone(&current_delegations);
-                }
-
                 let old_total: u64 = snap
                     .pool_stake
                     .values()
