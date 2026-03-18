@@ -1371,8 +1371,10 @@ impl Node {
                             all_events
                         }
                         _ = warm_interval.tick() => {
+                            // Fast-path warm promotion: run a lightweight
+                            // evaluate to promote dwell-eligible warm peers.
                             let pm = governor_pm.read().await;
-                            governor.check_warm_promotions(&pm)
+                            governor.evaluate(&pm)
                         }
                         _ = shutdown.changed() => { break; }
                     };
@@ -1391,9 +1393,12 @@ impl Node {
                                 GovernorEvent::Disconnect(addr) => {
                                     pm.peer_disconnected(addr);
                                 }
-                                GovernorEvent::Connect(_) => {
-                                    // Connection events are handled by the main
-                                    // loop via peers_to_connect(); no action here.
+                                GovernorEvent::EvictColdPeer(addr) => {
+                                    pm.peer_disconnected(addr);
+                                }
+                                GovernorEvent::Connect(_) | GovernorEvent::RequestPeerSharing(_, _) => {
+                                    // Connection and peer-sharing events are handled
+                                    // asynchronously by other tasks.
                                 }
                             }
                         }
