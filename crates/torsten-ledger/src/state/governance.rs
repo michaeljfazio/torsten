@@ -76,9 +76,22 @@ impl LedgerState {
             action_index,
         };
 
-        // Governance action lifetime from protocol parameters
+        // Governance action lifetime from protocol parameters.
+        //
+        // `expires_epoch` is set to `proposed_epoch + govActionLifetime + 1`, matching
+        // Haskell's `gasExpiresAfter = proposedIn + govActionLifetime + 1`.  With the
+        // expiry filter `expires_epoch <= currentEpoch` (in epoch.rs), a proposal
+        // submitted at epoch E with lifetime L is active through epoch E+L and is
+        // removed at the E+L+1 epoch boundary — which is consistent with CIP-1694
+        // section 2.6: "active for govActionLifetime subsequent epochs after the one
+        // in which it was submitted".
         let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
-        let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
+        let expires_epoch = EpochNo(
+            self.epoch
+                .0
+                .saturating_add(gov_action_lifetime)
+                .saturating_add(1),
+        );
 
         let state = ProposalState {
             procedure: proposal.clone(),
@@ -2505,9 +2518,9 @@ mod tests {
             },
         );
 
-        // expires_epoch = 0 + 3 = 3
-        // Active through epoch 3, expires at epoch 4
-        for e in 1..=3 {
+        // expires_epoch = 0 + 3 + 1 = 4 (per Haskell gasExpiresAfter)
+        // Active through epoch 4, expires at epoch 5
+        for e in 1..=4 {
             state.process_epoch_transition(EpochNo(e));
             assert_eq!(
                 state.governance.proposals.len(),
@@ -2517,7 +2530,7 @@ mod tests {
             );
         }
 
-        state.process_epoch_transition(EpochNo(4));
+        state.process_epoch_transition(EpochNo(5));
         assert_eq!(state.governance.proposals.len(), 0); // Expired
     }
 
@@ -2579,11 +2592,14 @@ mod tests {
             },
         );
 
-        // Expire at epoch 2 (expires_epoch = 0 + 1 = 1, expired when 1 < 2)
+        // Expire at epoch 3 (expires_epoch = 0 + 1 + 1 = 2, expired when 2 < 3)
         state.process_epoch_transition(EpochNo(1));
         assert_eq!(state.governance.proposals.len(), 1); // Still active at epoch 1
 
         state.process_epoch_transition(EpochNo(2));
+        assert_eq!(state.governance.proposals.len(), 1); // Still active at epoch 2
+
+        state.process_epoch_transition(EpochNo(3));
         assert_eq!(state.governance.proposals.len(), 0); // Expired
 
         // Deposit should be refunded

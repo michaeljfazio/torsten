@@ -676,8 +676,15 @@ pub type VoteEntry = (Vec<u8>, u8, u8);
 pub struct ProposalSnapshot {
     pub tx_id: Vec<u8>,
     pub action_index: u32,
+    /// Human-readable action type string (e.g. "InfoAction", "ParameterChange").
+    /// Used for logging and display only.  The canonical CBOR encoding uses
+    /// `gov_action` below, which carries all structured action data.
     pub action_type: String,
     pub proposed_epoch: u64,
+    /// `gasExpiresAfter`: the first epoch at which the proposal is no longer
+    /// active.  Matches Haskell's `gasExpiresAfter = proposedIn + govActionLifetime + 1`.
+    /// The expiry filter is `expires_epoch <= currentEpoch`, so a proposal submitted
+    /// at epoch E with lifetime L expires at the E+L+1 epoch boundary.
     pub expires_epoch: u64,
     pub yes_votes: u64,
     pub no_votes: u64,
@@ -690,6 +697,11 @@ pub struct ProposalSnapshot {
     pub anchor_url: String,
     /// Anchor data hash (32 bytes)
     pub anchor_hash: Vec<u8>,
+    /// Full governance action with all structured data.
+    /// Used by the CBOR encoder to faithfully reproduce the GovAction body on
+    /// the wire — prevents the information loss that would occur if only the
+    /// `action_type` string were stored.
+    pub gov_action: torsten_primitives::transaction::GovAction,
     /// Per-credential committee votes: (credential_hash, cred_type, vote)
     pub committee_votes: Vec<VoteEntry>,
     /// Per-credential DRep votes: (credential_hash, cred_type, vote)

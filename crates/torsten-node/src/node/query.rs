@@ -242,7 +242,12 @@ impl Node {
             })
             .collect();
 
-        // Build governance proposal snapshots
+        // Build governance proposal snapshots.
+        // ALL governance action types (InfoAction, ParameterChange, HardForkInitiation,
+        // UpdateCommittee, NewConstitution, NoConfidence, TreasuryWithdrawals) are stored
+        // in governance.proposals by process_proposal().  We faithfully convert every
+        // one of them here, carrying the full GovAction enum so the CBOR encoder can
+        // reproduce the complete action body on the wire (fixes issue #172).
         let governance_proposals: Vec<ProposalSnapshot> = ls
             .governance
             .proposals
@@ -264,6 +269,7 @@ impl Node {
                     return_addr: state.procedure.return_addr.clone(),
                     anchor_url: state.procedure.anchor.url.clone(),
                     anchor_hash: state.procedure.anchor.data_hash.as_ref().to_vec(),
+                    gov_action: state.procedure.gov_action.clone(),
                     committee_votes,
                     drep_votes,
                     spo_votes,
@@ -673,7 +679,9 @@ impl Node {
                 .collect()
         };
 
-        // Build ratify_enacted proposals from governance.last_ratified
+        // Build ratify_enacted proposals from governance.last_ratified.
+        // Include the full GovAction so the CBOR encoder can faithfully reproduce
+        // the action body in GetRatifyState responses (same fix as for governance_proposals).
         let ratify_enacted = ls
             .governance
             .last_ratified
@@ -694,6 +702,7 @@ impl Node {
                     return_addr: state.procedure.return_addr.clone(),
                     anchor_url: state.procedure.anchor.url.clone(),
                     anchor_hash: state.procedure.anchor.data_hash.as_ref().to_vec(),
+                    gov_action: state.procedure.gov_action.clone(),
                     committee_votes,
                     drep_votes,
                     spo_votes,
