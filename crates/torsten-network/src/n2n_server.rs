@@ -18,6 +18,26 @@ use crate::peer_manager::PeerManager;
 use crate::query_handler::QueryHandler;
 use torsten_primitives::mempool::MempoolProvider;
 
+/// RAII guard that deregisters an inbound peer from the PeerManager when the
+/// connection handler exits (connection dropped, error, or clean shutdown).
+struct InboundPeerGuard {
+    peer_manager: Option<Arc<RwLock<PeerManager>>>,
+    addr: SocketAddr,
+}
+
+impl Drop for InboundPeerGuard {
+    fn drop(&mut self) {
+        if let Some(ref pm) = self.peer_manager {
+            // Use try_write to avoid blocking in the Drop path.
+            // If the lock is contended, the peer will be cleaned up
+            // on the next governor evaluation cycle.
+            if let Ok(mut pm_guard) = pm.try_write() {
+                pm_guard.deregister_inbound_peer(&self.addr);
+            }
+        }
+    }
+}
+
 /// Notification sent when a new block is forged and should be announced to peers
 #[derive(Debug, Clone)]
 pub struct BlockAnnouncement {
@@ -500,6 +520,20 @@ async fn handle_n2n_connection(
     mut rollback_rx: broadcast::Receiver<RollbackAnnouncement>,
     max_blockfetch_range: u64,
 ) -> Result<(), N2NServerError> {
+    // Register the inbound peer with the PeerManager so it appears in
+    // metrics (inbound_peer_count, peers_connected) and is available for
+    // peer sharing.  The peer is removed when this function returns
+    // (connection dropped).
+    if let Some(ref pm) = peer_manager {
+        let mut pm_guard = pm.write().await;
+        pm_guard.register_inbound_peer(peer_addr);
+    }
+    // Ensure the peer is deregistered when the connection handler exits.
+    let _inbound_guard = InboundPeerGuard {
+        peer_manager: peer_manager.clone(),
+        addr: peer_addr,
+    };
+
     let mut buf = vec![0u8; 65536];
     let mut partial = Vec::new();
     let mut peer_state = PeerState::new();

@@ -54,6 +54,8 @@ pub enum PeerSource {
     PeerSharing,
     /// From ledger-based peer discovery
     Ledger,
+    /// Inbound connection (they connected to our N2N server)
+    Inbound,
 }
 
 /// Peer category for governor-driven target management.
@@ -249,6 +251,7 @@ impl PeerInfo {
             PeerSource::Config => PeerCategory::PublicRoot,
             PeerSource::PeerSharing => PeerCategory::Shared,
             PeerSource::Ledger => PeerCategory::LedgerPeer,
+            PeerSource::Inbound => PeerCategory::Shared,
         };
         PeerInfo {
             address,
@@ -299,6 +302,7 @@ impl PeerInfo {
             PeerSource::Config => score += 0.1,
             PeerSource::PeerSharing => {}
             PeerSource::Ledger => score += 0.05,
+            PeerSource::Inbound => score += 0.02,
         }
 
         // Penalty for failure history — steeper penalty (0.15 per failure,
@@ -1059,6 +1063,42 @@ impl PeerManager {
             .values()
             .filter(|p| p.direction == Some(ConnectionDirection::Inbound))
             .count()
+    }
+
+    /// Register an inbound peer that connected to our N2N server.
+    /// Creates a warm peer entry with direction=Inbound so it appears in
+    /// metrics and is available for peer sharing.
+    pub fn register_inbound_peer(&mut self, addr: SocketAddr) {
+        let is_new = !self.peers.contains_key(&addr);
+        if is_new {
+            let mut info = PeerInfo::new(addr, PeerSource::Inbound);
+            info.temperature = PeerTemperature::Warm;
+            info.direction = Some(ConnectionDirection::Inbound);
+            self.peers.insert(addr, info);
+            self.warm_peers.insert(addr);
+        } else if let Some(peer) = self.peers.get_mut(&addr) {
+            // Peer already known (e.g., from ledger discovery) — just
+            // update direction without overwriting source or category.
+            peer.direction = Some(ConnectionDirection::Inbound);
+            if peer.temperature == PeerTemperature::Cold {
+                peer.temperature = PeerTemperature::Warm;
+                self.cold_peers.remove(&addr);
+                self.warm_peers.insert(addr);
+            }
+        }
+    }
+
+    /// Deregister an inbound peer when its connection drops.
+    pub fn deregister_inbound_peer(&mut self, addr: &SocketAddr) {
+        if let Some(peer) = self.peers.get_mut(addr) {
+            if peer.direction == Some(ConnectionDirection::Inbound) {
+                peer.temperature = PeerTemperature::Cold;
+                peer.direction = None;
+                self.warm_peers.remove(addr);
+                self.hot_peers.remove(addr);
+                self.cold_peers.insert(*addr);
+            }
+        }
     }
 
     /// Get the best N peers by reputation for block fetching.
