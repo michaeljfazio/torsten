@@ -5,12 +5,31 @@
 //! RTT histogram buckets, and UI navigation state (active theme, etc).
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::metrics::MetricsSnapshot;
 use crate::theme::{cycle_theme, THEMES};
 
 /// Maximum number of blocks-applied samples retained for the sparkline history.
 const BLOCK_HISTORY_LEN: usize = 60;
+
+/// Connection status of the metrics endpoint.
+///
+/// Tracks whether the TUI can currently reach the node's Prometheus endpoint,
+/// and distinguishes between "never connected" (no data at all) and "was
+/// connected but lost the link" (stale data available for display).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    /// TUI has not yet completed its first successful poll.
+    Unknown,
+    /// Last poll succeeded — the node is reachable.
+    Online,
+    /// Last poll failed — the node is not reachable.
+    ///
+    /// Values from the last successful poll are still available and are shown
+    /// with a stale indicator in the UI.
+    Offline,
+}
 
 /// Network name derived from the `torsten_network_magic` metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,8 +268,24 @@ impl RttBands {
 
 /// Full application state for the TUI dashboard.
 pub struct App {
-    /// Latest scraped metrics.
+    /// Latest successfully scraped metrics.
+    ///
+    /// When the node goes offline this field retains the last good snapshot so
+    /// that panels can display stale-but-useful values rather than blank zeros.
+    /// The `node_status` field tells the UI when to add a stale indicator.
     pub metrics: MetricsSnapshot,
+    /// Current node reachability status.
+    pub node_status: NodeStatus,
+    /// Instant at which the node transitioned to [`NodeStatus::Offline`].
+    ///
+    /// `None` when the node is online or has never been polled.
+    pub offline_since: Option<Instant>,
+    /// Human-readable description of the last connection error.
+    ///
+    /// Cleared when the node comes back online.  Displayed in the Node panel
+    /// when the node is offline so the operator can see why the connection
+    /// failed (e.g. "Connection refused", "timeout").
+    pub last_error: Option<String>,
     /// Network inferred from `torsten_network_magic`.
     pub network: Network,
     /// Epoch slot position.
@@ -289,6 +324,9 @@ impl App {
         let monokai_idx = THEMES.iter().position(|t| t.name == "Monokai").unwrap_or(0);
         Self {
             metrics: MetricsSnapshot::default(),
+            node_status: NodeStatus::Unknown,
+            offline_since: None,
+            last_error: None,
             network: Network::Unknown,
             slot_in_epoch: 0,
             epoch_progress_pct: 0.0,
@@ -304,7 +342,38 @@ impl App {
     }
 
     /// Update the app state with a new metrics snapshot.
+    ///
+    /// When the snapshot indicates the node is unreachable (`connected == false`)
+    /// the existing metric values are **preserved** so panels can continue to
+    /// display last-known data with a stale indicator.  Only the connectivity
+    /// status and error message are updated in that case.
+    ///
+    /// When the node comes back online the stale flag is cleared and all derived
+    /// state (epoch progress, RTT bands, sparkline history) is recomputed from
+    /// the fresh snapshot.
     pub fn update_metrics(&mut self, snapshot: MetricsSnapshot) {
+        if !snapshot.connected {
+            // Node is unreachable: update reachability state only, keep last-good
+            // metric values in place so the UI can show them with a stale indicator.
+            if self.node_status != NodeStatus::Offline {
+                // Transition Online/Unknown → Offline: record the moment we lost contact.
+                self.offline_since = Some(Instant::now());
+            }
+            self.node_status = NodeStatus::Offline;
+            self.last_error = snapshot.error.clone();
+            // Propagate the disconnected flag into the stored snapshot so that
+            // widgets which read `self.metrics.connected` see the right status,
+            // while the metric values themselves remain from the last good poll.
+            self.metrics.connected = false;
+            self.metrics.error = snapshot.error;
+            return;
+        }
+
+        // Successful poll: clear offline state.
+        self.node_status = NodeStatus::Online;
+        self.offline_since = None;
+        self.last_error = None;
+
         // Resolve network from magic.
         let magic = snapshot.get_u64("torsten_network_magic");
         if magic > 0 {
@@ -339,6 +408,26 @@ impl App {
         }
 
         self.metrics = snapshot;
+    }
+
+    /// How long the node has been continuously offline, or `None` if online.
+    pub fn offline_duration(&self) -> Option<Duration> {
+        self.offline_since.map(|t| t.elapsed())
+    }
+
+    /// Whether any metric data is available (from the last successful poll).
+    ///
+    /// Returns `false` only before the very first successful connection.
+    pub fn has_data(&self) -> bool {
+        self.node_status != NodeStatus::Unknown || !self.metrics.values.is_empty()
+    }
+
+    /// Whether currently displaying stale (last-known) metric values.
+    ///
+    /// True when the node is offline but at least one successful poll has been
+    /// completed, meaning `self.metrics` contains real (if outdated) data.
+    pub fn is_stale(&self) -> bool {
+        self.node_status == NodeStatus::Offline && !self.metrics.values.is_empty()
     }
 
     fn epoch_slots_remaining_inner(&mut self, epoch_length: u64, slot_in_epoch: u64) {
@@ -403,7 +492,14 @@ impl App {
     /// Determine current sync status.
     ///
     /// Returns (label, is_synced, is_stalled).
+    ///
+    /// When the node is offline this always returns `("Offline", false, false)`
+    /// regardless of the last-known metric values — the header renders the
+    /// offline pill separately.
     pub fn sync_status(&self) -> (&'static str, bool, bool) {
+        if self.node_status == NodeStatus::Offline {
+            return ("Offline", false, false);
+        }
         let pct_raw = self.metrics.get("torsten_sync_progress_percent");
         let pct = pct_raw / 100.0;
         let tip_age = self.metrics.get_u64("torsten_tip_age_seconds");
@@ -582,6 +678,8 @@ mod tests {
     #[test]
     fn test_sync_status() {
         let mut app = App::new();
+        // Place the app in Online state so sync_status reads from metrics.
+        app.node_status = NodeStatus::Online;
 
         // Synced
         app.metrics = make_snapshot(vec![
@@ -612,6 +710,123 @@ mod tests {
         assert_eq!(label, "Stalled");
         assert!(!synced);
         assert!(stalled);
+    }
+
+    /// A disconnected snapshot: no values, connected=false.
+    fn make_disconnected_snapshot(error: &str) -> MetricsSnapshot {
+        MetricsSnapshot {
+            values: HashMap::new(),
+            histogram_buckets: HashMap::new(),
+            connected: false,
+            error: Some(error.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_offline_preserves_last_known_values() {
+        let mut app = App::new();
+
+        // First: a successful poll with real metric data.
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_block_number", 4_000_000.0),
+            ("torsten_slot_number", 100_000.0),
+        ]));
+        assert_eq!(app.node_status, NodeStatus::Online);
+        assert_eq!(app.metrics.get_u64("torsten_block_number"), 4_000_000);
+
+        // Second: node goes offline.
+        app.update_metrics(make_disconnected_snapshot("Connection refused"));
+        assert_eq!(app.node_status, NodeStatus::Offline);
+        // Last-known values must still be accessible.
+        assert_eq!(
+            app.metrics.get_u64("torsten_block_number"),
+            4_000_000,
+            "last-known block number preserved while offline"
+        );
+        assert!(!app.metrics.connected);
+        assert_eq!(app.last_error.as_deref(), Some("Connection refused"));
+        assert!(app.offline_since.is_some());
+        assert!(app.is_stale());
+    }
+
+    #[test]
+    fn test_offline_then_online_clears_stale_state() {
+        let mut app = App::new();
+
+        // Establish a good baseline.
+        app.update_metrics(make_snapshot(vec![("torsten_block_number", 100.0)]));
+        // Go offline.
+        app.update_metrics(make_disconnected_snapshot("timeout"));
+        assert_eq!(app.node_status, NodeStatus::Offline);
+        assert!(app.offline_since.is_some());
+
+        // Come back online with updated data.
+        app.update_metrics(make_snapshot(vec![("torsten_block_number", 200.0)]));
+        assert_eq!(app.node_status, NodeStatus::Online);
+        assert!(
+            app.offline_since.is_none(),
+            "offline_since cleared on reconnect"
+        );
+        assert!(app.last_error.is_none(), "error cleared on reconnect");
+        assert!(!app.is_stale());
+        assert!(app.metrics.connected);
+        assert_eq!(app.metrics.get_u64("torsten_block_number"), 200);
+    }
+
+    #[test]
+    fn test_has_data_before_first_successful_poll() {
+        let app = App::new();
+        // A fresh App with no polls has no data.
+        assert!(!app.has_data(), "no data before first poll");
+    }
+
+    #[test]
+    fn test_has_data_after_failed_first_poll() {
+        let mut app = App::new();
+        // If the very first poll fails we still have no data.
+        app.update_metrics(make_disconnected_snapshot("refused"));
+        assert_eq!(app.node_status, NodeStatus::Offline);
+        assert!(
+            !app.is_stale(),
+            "no stale data if we never had a successful poll"
+        );
+    }
+
+    #[test]
+    fn test_sync_status_while_offline() {
+        let mut app = App::new();
+        // Successful poll first so there are real metric values.
+        app.update_metrics(make_snapshot(vec![
+            ("torsten_sync_progress_percent", 9990.0),
+            ("torsten_tip_age_seconds", 5.0),
+        ]));
+        // Now go offline.
+        app.update_metrics(make_disconnected_snapshot("refused"));
+        // sync_status must report Offline, not Synced.
+        let (label, is_synced, is_stalled) = app.sync_status();
+        assert_eq!(label, "Offline");
+        assert!(!is_synced);
+        assert!(!is_stalled);
+    }
+
+    #[test]
+    fn test_offline_duration_is_none_when_online() {
+        let mut app = App::new();
+        app.update_metrics(make_snapshot(vec![("torsten_block_number", 1.0)]));
+        assert!(app.offline_duration().is_none());
+    }
+
+    #[test]
+    fn test_offline_duration_increases_after_disconnect() {
+        let mut app = App::new();
+        app.update_metrics(make_snapshot(vec![("torsten_block_number", 1.0)]));
+        app.update_metrics(make_disconnected_snapshot("refused"));
+        // Duration should be non-zero (elapsed since offline_since was set).
+        assert!(app.offline_duration().is_some());
+        // We cannot assert the exact value in a unit test without sleep, but
+        // we can assert it is a non-negative finite Duration.
+        let dur = app.offline_duration().unwrap();
+        assert!(dur.as_secs() < 60, "elapsed should be well under 1 minute");
     }
 
     #[test]

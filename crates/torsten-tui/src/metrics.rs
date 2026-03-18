@@ -19,7 +19,9 @@ pub struct MetricsSnapshot {
     /// Whether the last scrape succeeded.
     pub connected: bool,
     /// Error message from the last failed scrape, if any.
-    #[allow(dead_code)]
+    ///
+    /// Shown in the Node panel when the node is offline so the operator can
+    /// see why the connection failed (e.g. "Connection refused").
     pub error: Option<String>,
 }
 

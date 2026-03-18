@@ -33,7 +33,7 @@
 //! ├──────────────────────── Footer (1 line) ───────────────────────────────────┘
 //! ```
 
-use crate::app::App;
+use crate::app::{App, NodeStatus};
 use crate::layout::{compute_layout, LayoutMode};
 use crate::theme::Theme;
 use crate::widgets::epoch_progress::EpochProgress;
@@ -100,6 +100,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// Single-line header:
 ///   Logo | [STATUS PILL] | Epoch NNN | Era Conway | Net Preview | Tip Xs | Up Xh Xm
 ///
+/// When the node is offline the status pill shows "Node Offline Xm Ys" with
+/// the time elapsed since contact was lost.  When data from a previous poll is
+/// still available it is shown in the data panels with a stale indicator; the
+/// header notes this with a "(stale)" suffix.
+///
 /// The epoch progress bar lives exclusively inside the Chain panel.
 fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if area.height < 1 || area.width < 20 {
@@ -115,8 +120,10 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let era = app.current_era();
     let network = app.network.label();
 
+    let is_offline = app.node_status == NodeStatus::Offline;
+
     // Status pill — colored background so it reads at a glance.
-    let status_bg = if !app.metrics.connected {
+    let status_bg = if is_offline {
         theme.error
     } else if is_synced {
         theme.success
@@ -126,8 +133,20 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         theme.warning
     };
 
-    let status_text = if !app.metrics.connected {
-        " Disconnected ".to_string()
+    let status_text = if is_offline {
+        // Include time since last contact so the operator knows how long the
+        // node has been unreachable.
+        match app.offline_duration() {
+            Some(dur) => {
+                let secs = dur.as_secs();
+                if secs < 60 {
+                    format!(" Node Offline {}s ", secs)
+                } else {
+                    format!(" Node Offline {}m {}s ", secs / 60, secs % 60)
+                }
+            }
+            None => " Node Offline ".to_string(),
+        }
     } else {
         format!(" {} {:.2}% ", status_label, pct)
     };
@@ -141,7 +160,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         format!("{} {}", tip_icon, format_tip_age(tip_age))
     };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         // Logo.
         Span::styled(
             " Torsten ",
@@ -152,14 +171,30 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         sep(theme),
         // Sync status pill with colored background.
         Span::styled(
-            &status_text,
+            status_text,
             Style::default()
                 .fg(Color::Black)
                 .bg(status_bg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        sep(theme),
+    ];
+
+    // "(stale)" notice — visible only when offline with last-known data.
+    if app.is_stale() {
+        spans.push(Span::styled(
+            " (stale)",
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    spans.push(Span::raw(" "));
+    spans.push(sep(theme));
+
+    // Epoch, era, network, tip age, uptime — shown with last-known values
+    // even when offline so the operator can see the state at last contact.
+    spans.extend([
         // Epoch.
         Span::styled("  Epoch ", Style::default().fg(theme.muted)),
         Span::styled(
@@ -181,7 +216,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         // Tip age with colored indicator icon.
         Span::styled("Tip ", Style::default().fg(theme.muted)),
         Span::styled(
-            &tip_str,
+            tip_str,
             Style::default()
                 .fg(tip_age_col)
                 .add_modifier(if tip_age >= 120 {
@@ -193,7 +228,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         sep_spaced(theme),
         // Uptime.
         Span::styled("Up ", Style::default().fg(theme.muted)),
-        Span::styled(&uptime, Style::default().fg(theme.muted)),
+        Span::styled(uptime, Style::default().fg(theme.muted)),
     ]);
 
     // Render on the single header line.
@@ -203,7 +238,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         width: area.width,
         height: 1,
     };
-    frame.render_widget(Paragraph::new(line), line_area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +268,10 @@ fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
         tip_age,
         uptime: App::format_uptime(uptime_secs),
         epoch_progress: app.epoch_progress_pct / 100.0,
-        connected: app.metrics.connected,
+        // Use the NodeStatus-derived connectivity flag so that the HeaderBar
+        // widget shows "Disconnected" whenever the node cannot be reached,
+        // matching the behaviour of the standard (wide) header pill.
+        connected: app.node_status != NodeStatus::Offline,
         theme,
     };
     header.render(area, frame.buffer_mut());
@@ -244,7 +282,12 @@ fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
 // ---------------------------------------------------------------------------
 
 fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let block = panel_block("Node", theme);
+    // Title: "Node" normally; "Node *" with warning color when stale data is shown.
+    let block = if app.is_stale() {
+        panel_block_stale("Node", theme)
+    } else {
+        panel_block("Node", theme)
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -252,6 +295,78 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
+    let col_w = inner.width.saturating_sub(2) as usize;
+    let is_offline = app.node_status == NodeStatus::Offline;
+
+    // Top row: node connectivity status.
+    // When offline this is the most important information — show it prominently.
+    let (status_str, status_color) = match app.node_status {
+        NodeStatus::Online => ("Online", theme.success),
+        NodeStatus::Offline => ("Offline", theme.error),
+        NodeStatus::Unknown => ("Connecting...", theme.muted),
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // "Status" row — always the first line.
+    lines.push(kv_aligned("Status", status_str, status_color, theme, col_w));
+
+    // When offline: show how long the node has been unreachable and why.
+    if is_offline {
+        if let Some(dur) = app.offline_duration() {
+            let secs = dur.as_secs();
+            let offline_str = if secs < 60 {
+                format!("{}s ago", secs)
+            } else {
+                format!("{}m {}s ago", secs / 60, secs % 60)
+            };
+            lines.push(kv_aligned(
+                "Last seen",
+                offline_str,
+                theme.warning,
+                theme,
+                col_w,
+            ));
+        }
+
+        // Show the connection error (truncated to fit the column width).
+        if let Some(ref err) = app.last_error {
+            // Strip verbose prefix text from reqwest errors to keep it short.
+            let short_err = err
+                .split(':')
+                .next()
+                .unwrap_or(err.as_str())
+                .trim()
+                .to_string();
+            // Truncate to available column width minus label.
+            let max_err_w = col_w.saturating_sub(LABEL_W + 2);
+            let truncated = if short_err.len() > max_err_w && max_err_w > 3 {
+                format!("{}...", &short_err[..max_err_w.saturating_sub(3)])
+            } else {
+                short_err
+            };
+            lines.push(kv_aligned("Error", truncated, theme.error, theme, col_w));
+        }
+
+        // When offline with no prior data, show a helpful waiting message.
+        if !app.is_stale() {
+            lines.push(Line::from(Span::styled(
+                " Waiting for node...",
+                Style::default().fg(theme.muted),
+            )));
+            lines.truncate(inner.height as usize);
+            frame.render_widget(Paragraph::new(lines), inner);
+            return;
+        }
+
+        // When stale: add a visual separator before the last-known data.
+        lines.push(Line::from(Span::styled(
+            " -- last known values --",
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    // Node metrics — shown with live values when online, stale values when offline.
     let role = if app.is_block_producer() {
         "Block Producer"
     } else {
@@ -268,61 +383,64 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let era = app.current_era();
     let uptime_secs = app.metrics.get_u64("torsten_uptime_seconds");
     let uptime = App::format_uptime(uptime_secs);
-    // Active peers: hot + warm (hot are active connections, warm are candidates).
     let peers_hot = app.metrics.get_u64("torsten_peers_hot");
     let peers_warm = app.metrics.get_u64("torsten_peers_warm");
     let peers_total = peers_hot + peers_warm;
     let blocks_forged = app.metrics.get_u64("torsten_blocks_forged_total");
 
-    let col_w = inner.width.saturating_sub(2) as usize; // subtract 1-char side padding each side
+    // When no data has ever been received, use placeholder dashes rather than zeros.
+    let no_data = !app.has_data();
 
-    // All rows available for text content (sync progress shown in header).
-    let text_row_count = inner.height as usize;
+    lines.push(kv_aligned("Role", role, role_color, theme, col_w));
+    lines.push(kv_aligned("Network", network, theme.accent, theme, col_w));
+    lines.push(kv_aligned(
+        "Version",
+        format!("v{}", version),
+        theme.muted,
+        theme,
+        col_w,
+    ));
+    lines.push(kv_aligned("Era", era, theme.info, theme, col_w));
+    lines.push(kv_aligned(
+        "Uptime",
+        if no_data { "--".to_string() } else { uptime },
+        theme.fg,
+        theme,
+        col_w,
+    ));
+    lines.push(kv_aligned(
+        "Peers",
+        if no_data {
+            "--".to_string()
+        } else {
+            App::format_number(peers_total)
+        },
+        if no_data || peers_total == 0 {
+            theme.error
+        } else {
+            theme.success
+        },
+        theme,
+        col_w,
+    ));
+    lines.push(kv_aligned(
+        "Blocks Forged",
+        if no_data {
+            "--".to_string()
+        } else {
+            App::format_number(blocks_forged)
+        },
+        if blocks_forged > 0 {
+            theme.warning
+        } else {
+            theme.muted
+        },
+        theme,
+        col_w,
+    ));
 
-    let mut lines = vec![
-        kv_aligned("Role", role, role_color, theme, col_w),
-        kv_aligned("Network", network, theme.accent, theme, col_w),
-        kv_aligned(
-            "Version",
-            format!("v{}", version),
-            theme.muted,
-            theme,
-            col_w,
-        ),
-        kv_aligned("Era", era, theme.info, theme, col_w),
-        kv_aligned("Uptime", &uptime, theme.fg, theme, col_w),
-        kv_aligned(
-            "Peers",
-            App::format_number(peers_total),
-            if peers_total > 0 {
-                theme.success
-            } else {
-                theme.error
-            },
-            theme,
-            col_w,
-        ),
-        kv_aligned(
-            "Blocks Forged",
-            App::format_number(blocks_forged),
-            if blocks_forged > 0 {
-                theme.warning
-            } else {
-                theme.muted
-            },
-            theme,
-            col_w,
-        ),
-    ];
-
-    lines.truncate(text_row_count);
-    let text_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: text_row_count as u16,
-    };
-    frame.render_widget(Paragraph::new(lines), text_area);
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1174,34 @@ fn panel_block<'a>(title: &'a str, theme: &'a Theme) -> Block<'a> {
             Span::styled(" ", Style::default()),
         ]))
         // 1-char horizontal padding; vertical padding handled by row content.
+        .padding(Padding::new(1, 1, 0, 0))
+}
+
+/// Create a bordered panel block whose title includes a stale-data indicator.
+///
+/// Used when the panel is displaying last-known values because the node is
+/// currently unreachable.  The `*` suffix on the title is rendered in the
+/// warning color so the operator can identify stale panels at a glance.
+fn panel_block_stale<'a>(title: &'a str, theme: &'a Theme) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warning))
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " *",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
         .padding(Padding::new(1, 1, 0, 0))
 }
 
