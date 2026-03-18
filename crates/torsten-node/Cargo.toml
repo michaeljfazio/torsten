@@ -58,5 +58,8 @@ crc32fast = { workspace = true }
 fs2 = { workspace = true }
 rayon = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
