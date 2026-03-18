@@ -668,9 +668,8 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     // Bidirectional  = inbound-only connections (they dialled us).
     // Duplex         = outbound + inbound (total peers with bidirectional capability);
     //                  populated by the node when running in InitiatorAndResponder mode.
-    let unidir = app.metrics.get_u64("torsten_peers_outbound");
-    let bidir = app.metrics.get_u64("torsten_peers_inbound");
-    let duplex = app.metrics.get_u64("torsten_peers_duplex");
+    // Note: torsten_peers_outbound/inbound/duplex metrics exist but we use
+    // the already-fetched outbound/inbound values above for the summary row.
 
     let p2p_enabled = outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0;
     let p2p_color = if p2p_enabled {
@@ -692,11 +691,15 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         theme,
     );
 
+    // Total connected = outbound + inbound. This replaces the misleading
+    // "Uni/Bi/Duplex" row — those terms describe Haskell's connection-type
+    // negotiation (DataFlow), not direction. We already show In/Out above.
+    let total_connected = outbound + inbound;
     let ubd_line = peer_state_row(
         &[
-            ("Uni:", unidir, theme.muted),
-            ("Bi:", bidir, theme.info),
-            ("Duplex:", duplex, theme.accent),
+            ("Out:", outbound, theme.info),
+            ("In:", inbound, theme.accent),
+            ("Total:", total_connected, theme.success),
         ],
         theme,
     );
