@@ -442,10 +442,11 @@ impl QueryHandler {
             8 => protocol::handle_debug_epoch_state(&self.state),
             9 => self.handle_get_cbor(decoder),
             10 => stake::handle_filtered_delegations(&self.state, decoder),
-            // Version-gated encoding: V16-V20 array(18) flat ProtVer,
-            // V21+ array(17) bundled ProtVer. Version 0 = use legacy encoding.
-            // The correct n2c_version will be threaded through when PR #143 merges.
-            11 => protocol::handle_genesis_config(&self.state, 0),
+            // Tag 11: GetGenesisConfig — CompactGenesis with version-gated ProtVer encoding.
+            // V16-V20: array(18) with flat ProtocolVersion fields [major] [minor].
+            // V21+:    array(17) with ProtocolVersion as a single array(2) [major, minor].
+            // Pass the negotiated N2C version so encode_genesis_config selects the right layout.
+            11 => protocol::handle_genesis_config(&self.state, version),
             12 => protocol::handle_debug_new_epoch_state(&self.state),
             13 => protocol::handle_debug_chain_dep_state(&self.state),
             14 => protocol::handle_reward_provenance(&self.state),
@@ -1332,6 +1333,80 @@ mod tests {
                 assert!(msg.contains("99"));
             }
             other => panic!("Expected Error, got {other:?}"),
+        }
+    }
+
+    /// Helper: encode a full MsgQuery CBOR for a Shelley tag-11 (GetGenesisConfig) query.
+    ///
+    /// The simplified BlockQuery format accepted by `dispatch_era_query`:
+    ///   [3, [0, [11]]]
+    ///   ^^^^  ^^^^^
+    ///   MsgQ  BlockQuery outer tag 0 → [query_tag]
+    ///
+    /// `dispatch_query_inner` strips `[3, ...]`, sees outer tag 0 → calls
+    /// `dispatch_era_query`. `dispatch_era_query` sees `array(1)` → reads
+    /// `query_tag = 11` → `handle_shelley_query(11, ...)`.
+    fn encode_genesis_config_query() -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap(); // MsgQuery envelope [3, X]
+        enc.u32(3).unwrap(); // tag 3 = MsgQuery
+        enc.array(2).unwrap(); // BlockQuery outer [0, Y]
+        enc.u32(0).unwrap(); // outer tag 0 = BlockQuery
+        enc.array(1).unwrap(); // Y = [query_tag]
+        enc.u32(11).unwrap(); // tag 11 = GetGenesisConfig
+        buf
+    }
+
+    /// Verify that the negotiated N2C version is correctly threaded through to
+    /// the GenesisConfig result for version-gated CompactGenesis encoding.
+    ///
+    /// V16-V20: QueryResult::GenesisConfig(_, 16) — legacy array(18) ProtVer
+    /// V21+:    QueryResult::GenesisConfig(_, 21) — array(17) bundled ProtVer
+    #[test]
+    fn test_genesis_config_version_threaded_v16() {
+        let handler = QueryHandler::new();
+        let cbor = encode_genesis_config_query();
+        let result = handler.handle_query_cbor_versioned(&cbor, 16);
+        match result {
+            QueryResult::GenesisConfig(_, version) => {
+                assert_eq!(
+                    version, 16,
+                    "N2C V16 must be forwarded to GenesisConfig for legacy ProtVer encoding"
+                );
+            }
+            other => panic!("Expected GenesisConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_genesis_config_version_threaded_v21() {
+        let handler = QueryHandler::new();
+        let cbor = encode_genesis_config_query();
+        let result = handler.handle_query_cbor_versioned(&cbor, 21);
+        match result {
+            QueryResult::GenesisConfig(_, version) => {
+                assert_eq!(
+                    version, 21,
+                    "N2C V21 must be forwarded to GenesisConfig for bundled ProtVer encoding"
+                );
+            }
+            other => panic!("Expected GenesisConfig, got {other:?}"),
+        }
+    }
+
+    /// Confirm that the unversioned path (used by tests and internal callers)
+    /// passes version 0, selecting the fallback (legacy) encoding.
+    #[test]
+    fn test_genesis_config_version_unversioned_uses_zero() {
+        let handler = QueryHandler::new();
+        let cbor = encode_genesis_config_query();
+        let result = handler.handle_query_cbor(&cbor);
+        match result {
+            QueryResult::GenesisConfig(_, version) => {
+                assert_eq!(version, 0, "unversioned query path must use version 0");
+            }
+            other => panic!("Expected GenesisConfig, got {other:?}"),
         }
     }
 }
