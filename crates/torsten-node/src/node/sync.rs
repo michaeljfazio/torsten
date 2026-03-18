@@ -1206,8 +1206,12 @@ impl Node {
                 self.metrics
                     .treasury_lovelace
                     .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+                // Report only active DReps (active=true) to match what external
+                // tools like Koios expose.  Inactive DReps remain registered in
+                // `self.dreps` (they can reactivate) but are excluded from voting
+                // power and from the count that operators care about.
                 self.metrics.drep_count.store(
-                    ls.governance.dreps.len() as u64,
+                    ls.governance.active_drep_count() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.metrics.proposal_count.store(
