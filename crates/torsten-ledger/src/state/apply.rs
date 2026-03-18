@@ -15,7 +15,8 @@ use super::{
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::validation::{
-    script_ref_byte_size, validate_transaction, ValidationError, MAX_REF_SCRIPT_SIZE_TIER_CAP,
+    script_ref_byte_size, validate_transaction_with_pools, ValidationError,
+    MAX_REF_SCRIPT_SIZE_TIER_CAP,
 };
 use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
@@ -446,13 +447,21 @@ impl LedgerState {
                     //
                     // Use tx raw_cbor size as tx_size (approximate, sufficient for validation).
                     let tx_size = tx.raw_cbor.as_ref().map_or(0, |c| c.len() as u64);
-                    let result = validate_transaction(
+                    // Build the registered pools set so that pool re-registrations
+                    // (parameter updates) are not charged an additional deposit.
+                    // Without this, validate_transaction treats ALL pool registrations
+                    // as new, causing ValueNotConserved for re-registration txs.
+                    let registered_pool_ids: std::collections::HashSet<
+                        torsten_primitives::hash::Hash28,
+                    > = self.pool_params.keys().copied().collect();
+                    let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
                         &self.protocol_params,
                         block.slot().0,
                         tx_size,
                         Some(&self.slot_config),
+                        Some(&registered_pool_ids),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.
