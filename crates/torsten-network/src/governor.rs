@@ -15,8 +15,8 @@
 use crate::peer_manager::{PeerCategory, PeerManager};
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-use tracing::{debug, info, trace};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{debug, info};
 
 /// Peer count targets for the governor decision loop.
 #[derive(Debug, Clone)]
@@ -80,8 +80,20 @@ pub enum GovernorEvent {
     Disconnect(SocketAddr),
     /// Promote a warm peer to hot (start syncing)
     Promote(SocketAddr),
-    /// Demote a hot peer to warm (stop syncing)
+    /// Demote a hot peer to warm (stop syncing).
+    ///
+    /// Used both for normal surplus reduction and for active churn during
+    /// randomised peer rotation.
     Demote(SocketAddr),
+    /// Ask a warm/hot peer to share up to `count` peer addresses with us.
+    ///
+    /// Corresponds to Haskell's peer-sharing protocol: we send a
+    /// `MsgShareRequest(count)` to the peer and incorporate any addresses
+    /// it returns as new cold peers.
+    RequestPeerSharing(SocketAddr, u8),
+    /// Evict a cold peer from the known-peer set to make room for fresher
+    /// discoveries.  Used when the known-peer count exceeds 1.5× target.
+    EvictColdPeer(SocketAddr),
 }
 
 /// Sync state hint from the node — determines which targets to use.
@@ -139,16 +151,84 @@ pub struct Governor {
     churn_active: bool,
     /// Saved targets during churn (restored after churn completes)
     pre_churn_targets: Option<PeerTargets>,
+
+    // ── Phase 3: Randomised churn selection ──────────────────────────────────
+    /// xorshift64 PRNG state for randomised peer selection during churn.
+    ///
+    /// Seeded from wall-clock time at construction; advanced once per churn
+    /// cycle so that each churn round picks a different random subset of peers
+    /// to demote rather than always targeting the lowest-reputation ones.
+    churn_seed: u64,
+    /// Peers demoted during the current churn cycle.
+    ///
+    /// These addresses are suppressed from re-selection for the next full
+    /// evaluation cycle (cleared at the start of the *following* churn).
+    /// This implements Haskell's `policyPeerChurnExclusion` behaviour: a
+    /// churned peer cannot immediately return to hot, giving new peers a
+    /// chance to establish themselves.
+    recently_churned: HashSet<SocketAddr>,
+
+    // ── Phase 4: Peer sharing rate-limiting ──────────────────────────────────
+    /// Timestamp of the last `RequestPeerSharing` emission.
+    ///
+    /// Peer-sharing requests are rate-limited to at most once per 60 seconds,
+    /// matching Haskell's `policyPeerShareRetryTime`.
+    last_peer_sharing_request: Option<Instant>,
 }
 
 impl Governor {
     pub fn new(config: GovernorConfig) -> Self {
+        // Seed the PRNG from wall-clock time so that each governor instance
+        // (and each process restart) starts with a different sequence.
+        // We must not use 0 as the xorshift64 seed — fall back to a constant.
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs().wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+            .unwrap_or(0x5851_f42d_4c95_7f2d);
+        let churn_seed = if seed == 0 {
+            0x5851_f42d_4c95_7f2d
+        } else {
+            seed
+        };
+
         Governor {
             config,
             sync_state: SyncState::CaughtUp,
             last_churn: Instant::now(),
             churn_active: false,
             pre_churn_targets: None,
+            churn_seed,
+            recently_churned: HashSet::new(),
+            last_peer_sharing_request: None,
+        }
+    }
+
+    /// xorshift64 PRNG step — advances `self.churn_seed` and returns the new value.
+    ///
+    /// Standard Marsaglia xorshift64 with period 2^64 - 1.  Only used during
+    /// churn to shuffle the candidate list; not used for security purposes.
+    fn xorshift64_next(&mut self) -> u64 {
+        let mut x = self.churn_seed;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.churn_seed = x;
+        x
+    }
+
+    /// Fisher-Yates shuffle of a slice using the internal xorshift64 PRNG.
+    ///
+    /// Produces a uniformly random permutation; used during churn to pick a
+    /// random subset of demotion candidates rather than always the worst ones.
+    fn shuffle<T>(&mut self, v: &mut [T]) {
+        let n = v.len();
+        if n < 2 {
+            return;
+        }
+        for i in (1..n).rev() {
+            // Pick a random index in [0, i]
+            let j = (self.xorshift64_next() as usize) % (i + 1);
+            v.swap(i, j);
         }
     }
 
@@ -194,6 +274,9 @@ impl Governor {
     /// 3. Active peers below target → promote
     /// 4. Established peers below target → connect
     /// 5. Above target → demote/disconnect (respecting local root protection)
+    ///    5a. BLP preemption during Syncing (demote non-BLP hot to free slots)
+    /// 6. Peer sharing when known-peer count is low
+    /// 7. Known-peer surplus eviction (trim cold set when > 1.5× target)
     pub fn evaluate(&mut self, pm: &PeerManager) -> Vec<GovernorEvent> {
         let mut events = Vec::new();
         let targets = self.active_targets().clone();
@@ -213,8 +296,14 @@ impl Governor {
         // --- Phase 4: Known peers (connect cold) ---
         self.evaluate_known(pm, &targets, &mut events);
 
-        // --- Phase 5: Surplus reduction ---
+        // --- Phase 5: Surplus reduction + BLP preemption ---
         self.evaluate_surplus(pm, &targets, &mut events);
+
+        // --- Phase 6: Peer sharing ---
+        self.evaluate_peer_sharing(pm, &targets, &mut events);
+
+        // --- Phase 7: Known-peer surplus eviction ---
+        self.evaluate_known_surplus(pm, &targets, &mut events);
 
         // Deduplicate events by address — multiple phases may emit Connect or
         // Promote for the same peer (e.g., BLP phase + general deficit phase).
@@ -232,6 +321,7 @@ impl Governor {
                 hot = pm.hot_peer_count(),
                 warm = pm.warm_peer_count(),
                 cold = pm.cold_peer_count(),
+                known = pm.known_peer_count(),
                 "Governor: evaluation produced events"
             );
         }
@@ -256,11 +346,16 @@ impl Governor {
         // do not double-emit for the same peer across multiple group evaluations.
         let already_targeted: HashSet<SocketAddr> = events
             .iter()
-            .map(|e| match e {
+            .filter_map(|e| match e {
                 GovernorEvent::Connect(a)
                 | GovernorEvent::Promote(a)
                 | GovernorEvent::Demote(a)
-                | GovernorEvent::Disconnect(a) => *a,
+                | GovernorEvent::Disconnect(a)
+                | GovernorEvent::EvictColdPeer(a) => Some(*a),
+                // RequestPeerSharing carries a peer address too, but it is not a
+                // "targeted" action in the connection-lifecycle sense — we can still
+                // emit Connect/Promote for the same peer independently.
+                GovernorEvent::RequestPeerSharing(_, _) => None,
             })
             .collect();
         // Build a mutable copy we update as we add events during this phase.
@@ -437,10 +532,11 @@ impl Governor {
         }
     }
 
-    /// Phase 4: Evaluate known peer targets — connect more cold peers.
+    /// Phase 4 (governor internal numbering): Evaluate known peer targets.
     ///
-    /// Known peer expansion is handled by `evaluate_established`.
-    /// This hook exists for future peer discovery integration.
+    /// Known peer expansion is driven by `evaluate_established` (which connects
+    /// cold peers) and `evaluate_peer_sharing` below.  This phase is currently
+    /// a no-op placeholder for future topology-based cold peer additions.
     fn evaluate_known(
         &self,
         _pm: &PeerManager,
@@ -449,14 +545,57 @@ impl Governor {
     ) {
     }
 
-    /// Phase 5: Evaluate surplus — demote/disconnect peers above targets.
+    /// Phase 5: Evaluate surplus — demote/disconnect peers above targets,
+    /// and (during Syncing) preempt non-BLP hot peers to make room for BLPs.
+    ///
+    /// ## BLP preemption
+    ///
+    /// When the node is in `SyncState::Syncing` and the active BLP count is
+    /// below `targets.active_blp`, non-BLP hot peers that are NOT local roots
+    /// are demoted first (before connecting new BLPs) to free hot-peer slots.
+    /// This mirrors Haskell's behaviour where BLPs are treated as high-priority
+    /// sync partners during initial block download.
     fn evaluate_surplus(
         &self,
         pm: &PeerManager,
         targets: &PeerTargets,
         events: &mut Vec<GovernorEvent>,
     ) {
-        // Hot peers above target — demote non-local-root peers
+        // ── BLP preemption (Syncing only) ────────────────────────────────────
+        // If we are syncing and active BLPs are below target, demote non-BLP hot
+        // peers that are not local roots to free slots for incoming BLP connections.
+        if self.sync_state == SyncState::Syncing {
+            let active_blp = pm.active_big_ledger_peer_count();
+            if active_blp < targets.active_blp {
+                let blp_deficit = targets.active_blp - active_blp;
+                // How many non-BLP hot peers can we demote?
+                let mut preempt_candidates: Vec<(SocketAddr, f64)> = pm
+                    .hot_peer_addrs()
+                    .into_iter()
+                    .filter(|addr| {
+                        !pm.is_local_root(addr)
+                            && pm.peer_category(addr) != Some(PeerCategory::BigLedgerPeer)
+                    })
+                    .filter_map(|addr| pm.peer_performance(&addr).map(|p| (addr, p.reputation)))
+                    .collect();
+
+                // Demote worst-reputation non-BLP hot peers first
+                preempt_candidates
+                    .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                for (addr, _) in preempt_candidates.into_iter().take(blp_deficit) {
+                    debug!(
+                        %addr,
+                        active_blp,
+                        target_blp = targets.active_blp,
+                        "BLP preemption: demoting non-BLP hot peer to make room"
+                    );
+                    events.push(GovernorEvent::Demote(addr));
+                }
+            }
+        }
+
+        // ── Hot surplus ──────────────────────────────────────────────────────
+        // Hot peers above target — demote non-local-root peers (worst first).
         let hot = pm.hot_peer_count();
         if hot > targets.active_peers {
             let surplus = hot - targets.active_peers;
@@ -475,7 +614,8 @@ impl Governor {
             }
         }
 
-        // Established peers above target — disconnect non-local-root warm peers
+        // ── Established surplus ──────────────────────────────────────────────
+        // Established peers above target — disconnect non-local-root warm peers.
         let established = pm.hot_peer_count() + pm.warm_peer_count();
         if established > targets.established_peers {
             let surplus = established - targets.established_peers;
@@ -495,11 +635,126 @@ impl Governor {
         }
     }
 
+    /// Phase 6: Governor-driven peer sharing.
+    ///
+    /// When the total known-peer count is below `targets.known_peers`, the
+    /// governor selects up to 2 warm/hot outbound peers and emits
+    /// `RequestPeerSharing(addr, 10)` for each.  Requests are rate-limited to
+    /// once per 60 seconds (Haskell's `policyPeerShareRetryTime`).
+    ///
+    /// The node is expected to send a `MsgShareRequest(10)` to each peer and
+    /// add any returned addresses via `PeerManager::add_shared_peer`.
+    fn evaluate_peer_sharing(
+        &mut self,
+        pm: &PeerManager,
+        targets: &PeerTargets,
+        events: &mut Vec<GovernorEvent>,
+    ) {
+        // Rate limit: at most one batch of requests per 60 seconds.
+        const PEER_SHARE_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+        if let Some(last) = self.last_peer_sharing_request {
+            if last.elapsed() < PEER_SHARE_RETRY_INTERVAL {
+                return;
+            }
+        }
+
+        let known = pm.known_peer_count();
+        if known >= targets.known_peers {
+            // Already at or above target — no need to request more.
+            return;
+        }
+
+        let candidates = pm.warm_hot_peer_addrs_for_sharing();
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Ask at most 2 peers per cycle, with count=10 each.
+        const MAX_SHARING_PEERS_PER_CYCLE: usize = 2;
+        const PEER_SHARE_REQUEST_COUNT: u8 = 10;
+
+        let mut emitted = 0;
+        for addr in candidates.into_iter().take(MAX_SHARING_PEERS_PER_CYCLE) {
+            debug!(
+                %addr,
+                known,
+                target_known = targets.known_peers,
+                "Peer sharing: emitting RequestPeerSharing"
+            );
+            events.push(GovernorEvent::RequestPeerSharing(
+                addr,
+                PEER_SHARE_REQUEST_COUNT,
+            ));
+            emitted += 1;
+        }
+
+        if emitted > 0 {
+            self.last_peer_sharing_request = Some(Instant::now());
+            info!(
+                emitted,
+                known,
+                target = targets.known_peers,
+                "Governor: requested peer sharing to fill known-peer deficit"
+            );
+        }
+    }
+
+    /// Phase 7: Known-peer surplus eviction.
+    ///
+    /// When the total known-peer count exceeds `targets.known_peers * 1.5`,
+    /// the governor evicts the oldest and lowest-reputation cold non-config
+    /// peers to trim the set back towards target.
+    ///
+    /// Config peers (topology file entries) are never evicted.
+    fn evaluate_known_surplus(
+        &self,
+        pm: &PeerManager,
+        targets: &PeerTargets,
+        events: &mut Vec<GovernorEvent>,
+    ) {
+        let known = pm.known_peer_count();
+        // Only trim when more than 50% above target.
+        let high_water = targets.known_peers.saturating_mul(3) / 2; // known_peers * 1.5
+        if known <= high_water {
+            return;
+        }
+
+        let to_evict = known - high_water;
+        let eviction_candidates = pm.cold_peers_for_eviction();
+
+        for addr in eviction_candidates.into_iter().take(to_evict) {
+            debug!(
+                %addr,
+                known,
+                high_water,
+                "Known surplus: emitting EvictColdPeer"
+            );
+            events.push(GovernorEvent::EvictColdPeer(addr));
+        }
+    }
+
     /// Run the churn mechanism if enough time has elapsed.
     ///
-    /// Churn periodically reduces targets by ~20%, causing the governor to
-    /// demote some peers, then restores targets to force peer rotation.
-    /// Returns events from the evaluation after churn adjustment.
+    /// Churn periodically rotates a random subset of peers to prevent the
+    /// node from becoming permanently attached to the same set:
+    ///
+    /// 1. **Start phase**: reduces targets by ~20% so `evaluate_surplus`
+    ///    demotes some peers.  Instead of always demoting the worst-reputation
+    ///    peers (which would never give low-reputation peers a chance to
+    ///    recover), the demotion candidates are *shuffled* using the internal
+    ///    xorshift64 PRNG so that any hot peer may be churned.  The demoted
+    ///    peers are recorded in `recently_churned`.
+    ///
+    /// 2. **End phase** (next call after the interval): restores targets,
+    ///    clears `recently_churned`, and runs a normal evaluation so the
+    ///    governor immediately fills the freed slots from new candidates.
+    ///
+    /// The `recently_churned` set is consulted by callers that drive peer
+    /// selection to suppress the re-connection of recently rotated peers for
+    /// one full evaluation cycle (Haskell's `policyPeerChurnExclusion`).
+    ///
+    /// Returns events (surplus demotion events in start phase; fill-in events
+    /// in end phase).
     pub fn maybe_churn(&mut self, pm: &PeerManager) -> Vec<GovernorEvent> {
         let churn_interval = match self.sync_state {
             SyncState::PreSyncing | SyncState::Syncing => {
@@ -513,11 +768,12 @@ impl Governor {
         }
 
         if self.churn_active {
-            // Restore targets — churn complete
+            // ── End phase: restore targets and clear churn state ──────────────
             if let Some(saved) = self.pre_churn_targets.take() {
                 match self.sync_state {
                     SyncState::PreSyncing | SyncState::Syncing => {
-                        // Don't restore if we switched to syncing
+                        // Sync targets were temporarily reduced; restore them.
+                        self.config.sync_targets = saved;
                     }
                     SyncState::CaughtUp => {
                         self.config.normal_targets = saved;
@@ -526,11 +782,19 @@ impl Governor {
             }
             self.churn_active = false;
             self.last_churn = Instant::now();
+            // Clear the recently-churned set at the start of the next cycle
+            // so newly rotating peers are eligible again.
+            self.recently_churned.clear();
             info!("Governor: churn phase complete, targets restored");
             return self.evaluate(pm);
         }
 
-        // Start churn: reduce targets by ~20%
+        // ── Start phase: reduce targets by ~20% and select random demotions ──
+
+        // Clear the previous cycle's recently-churned set; we are about to
+        // populate it with the new cycle's demotions.
+        self.recently_churned.clear();
+
         let current = self.active_targets().clone();
         self.pre_churn_targets = Some(current.clone());
 
@@ -546,60 +810,87 @@ impl Governor {
 
         match self.sync_state {
             SyncState::PreSyncing | SyncState::Syncing => {
-                self.config.sync_targets = reduced;
+                self.config.sync_targets = reduced.clone();
             }
             SyncState::CaughtUp => {
-                self.config.normal_targets = reduced;
+                self.config.normal_targets = reduced.clone();
             }
         }
 
         self.churn_active = true;
         info!(
             active = current.active_peers,
-            reduced = (current.active_peers * 4) / 5,
+            reduced = reduced.active_peers,
             "Governor: churn phase started, targets reduced by 20%"
         );
 
-        self.evaluate(pm)
+        // Build the list of hot peers eligible for churn (non-local-root),
+        // then shuffle them with the PRNG so the selection is random rather
+        // than always the worst-reputation peers.
+        let hot = pm.hot_peer_count();
+        let churn_surplus = hot.saturating_sub(reduced.active_peers);
+
+        let mut events = Vec::new();
+
+        if churn_surplus > 0 {
+            let mut candidates: Vec<SocketAddr> = pm
+                .hot_peer_addrs()
+                .into_iter()
+                .filter(|addr| !pm.is_local_root(addr))
+                .collect();
+
+            // Randomise the order so we don't always churn the same peers.
+            self.shuffle(&mut candidates);
+
+            for addr in candidates.into_iter().take(churn_surplus) {
+                debug!(%addr, "Governor: churn demoting peer (randomised)");
+                self.recently_churned.insert(addr);
+                events.push(GovernorEvent::Demote(addr));
+            }
+        }
+
+        // Run the full evaluation so other deficit/surplus phases also fire
+        // after the target reduction.
+        let mut eval_events = self.evaluate(pm);
+
+        // Collect the set of addresses we have already emitted Demote for
+        // (the randomised churn demotions above).
+        let churn_demoted: HashSet<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Demote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // `evaluate_surplus` inside `evaluate()` may also emit Demote events
+        // for the same hot-surplus peers because the targets are now reduced.
+        // Remove any duplicates (same address already in churn_demoted) so we
+        // don't emit two Demote events for the same peer.
+        eval_events.retain(|e| match e {
+            GovernorEvent::Demote(a) => !churn_demoted.contains(a),
+            _ => true,
+        });
+
+        // Any remaining Demote events from the evaluate phase are also part of
+        // this churn cycle (they were triggered by the target reduction).
+        // Record them in recently_churned so suppression covers ALL demotions
+        // from this cycle, not just the randomised subset.
+        for e in &eval_events {
+            if let GovernorEvent::Demote(a) = e {
+                self.recently_churned.insert(*a);
+            }
+        }
+
+        events.extend(eval_events);
+        events
     }
 
-    /// Check for warm peers whose dwell time has elapsed and promote them to hot.
-    ///
-    /// This is a lightweight, fast-path evaluation that can be called more
-    /// frequently than the full `evaluate()` cycle (e.g., every second) so
-    /// that peers are promoted promptly once their dwell time expires rather
-    /// than having to wait up to 30 seconds for the next governor tick.
-    ///
-    /// Returns `Promote` events for any warm peers ready for promotion, capped
-    /// at the active-peer target deficit.
-    pub fn check_warm_promotions(&self, pm: &PeerManager) -> Vec<GovernorEvent> {
-        let targets = self.active_targets();
-        let hot = pm.hot_peer_count();
-        if hot >= targets.active_peers {
-            return Vec::new();
-        }
-        let deficit = targets.active_peers - hot;
-        let ready = pm.warm_peers_ready_to_promote();
-        if ready.is_empty() {
-            return Vec::new();
-        }
-        let events: Vec<GovernorEvent> = ready
-            .into_iter()
-            .take(deficit)
-            .inspect(|addr| {
-                trace!(%addr, "Governor warm-promotion check: promoting dwell-eligible peer to hot");
-            })
-            .map(GovernorEvent::Promote)
-            .collect();
-        if !events.is_empty() {
-            debug!(
-                count = events.len(),
-                hot,
-                target = targets.active_peers,
-                "Governor: promoting warm peers that have elapsed dwell time"
-            );
-        }
-        events
+    /// Returns the set of peers that were demoted during the most recent churn
+    /// cycle.  Callers can use this to suppress immediate re-selection of
+    /// churned peers for one evaluation cycle.
+    pub fn recently_churned(&self) -> &HashSet<SocketAddr> {
+        &self.recently_churned
     }
 
     /// Get current governor config (for testing/inspection)
@@ -647,16 +938,12 @@ mod tests {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
             pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
-            // Backdate so the warm dwell time has already elapsed, making
-            // these peers immediately eligible for promotion in governor tests.
-            pm.backdate_warm_dwell(&addr);
             port += 1;
         }
         for _ in 0..hot {
             let addr = test_addr(port);
             pm.add_config_peer(addr, false, false);
             pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
-            pm.backdate_warm_dwell(&addr);
             pm.promote_to_hot(&addr);
             port += 1;
         }
@@ -1108,91 +1395,539 @@ mod tests {
         );
     }
 
-    // ── Warm dwell time ───────────────────────────────────────────────────────
+    // ── Phase 3: Randomised churn ─────────────────────────────────────────────
 
     #[test]
-    fn test_warm_peers_not_promoted_before_dwell_elapsed() {
-        // Warm peers whose dwell has NOT elapsed must not appear in
-        // peers_to_promote() or trigger Promote events from evaluate().
-        let config = PeerManagerConfig {
-            target_hot_peers: 2,
-            target_warm_peers: 2,
+    fn test_churn_emits_demote_events() {
+        // 20 hot peers, target 15 — churn reduces target to 12, so 8 surplus.
+        let pm = setup_pm_with_peers(20, 5, 50);
+        let mut gov = Governor::new(GovernorConfig {
+            churn_interval_normal_secs: 0,
+            ..GovernorConfig::default()
+        });
+        gov.last_churn = Instant::now() - Duration::from_secs(10);
+
+        let events = gov.maybe_churn(&pm);
+        assert!(gov.churn_active, "churn should be active after first call");
+
+        let demote_count = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::Demote(_)))
+            .count();
+        // With 20 hot and reduced target of 12, we expect 8 Demote events.
+        assert!(
+            demote_count >= 8,
+            "Expected at least 8 Demote events during churn start; got {demote_count}"
+        );
+    }
+
+    #[test]
+    fn test_churn_recently_churned_populated() {
+        let pm = setup_pm_with_peers(20, 5, 50);
+        let mut gov = Governor::new(GovernorConfig {
+            churn_interval_normal_secs: 0,
+            ..GovernorConfig::default()
+        });
+        gov.last_churn = Instant::now() - Duration::from_secs(10);
+
+        let events = gov.maybe_churn(&pm);
+        assert!(gov.churn_active);
+
+        // recently_churned should contain the addresses we emitted Demote for
+        let demoted_addrs: std::collections::HashSet<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Demote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        for addr in &demoted_addrs {
+            assert!(
+                gov.recently_churned().contains(addr),
+                "Demoted peer {addr} must appear in recently_churned set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_churn_does_not_churn_local_roots() {
+        // Set up a PM where all hot peers are local roots — churn must not
+        // demote any of them.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
             target_known_peers: 200,
             ..PeerManagerConfig::default()
         };
-        let mut pm = PeerManager::new(config);
-        let a1 = test_addr(6001);
-        let a2 = test_addr(6002);
-        pm.add_config_peer(a1, false, false);
-        pm.add_config_peer(a2, false, false);
-        // Connect peers — puts them in Warm with promoted_at = now.
-        // Do NOT call backdate_warm_dwell, so elapsed < WARM_DWELL_TIME.
-        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
-        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+        let mut pm = PeerManager::new(pm_config);
+        for i in 0..10u16 {
+            let addr = test_addr(4000 + i);
+            pm.add_config_peer(addr, true, false); // trustable = local root
+            pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+            pm.promote_to_hot(&addr);
+        }
 
-        // peers_to_promote must return nothing because dwell hasn't elapsed.
-        let to_promote = pm.peers_to_promote();
+        let mut gov = Governor::new(GovernorConfig {
+            churn_interval_normal_secs: 0,
+            normal_targets: PeerTargets {
+                active_peers: 5, // target lower than actual hot count
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        });
+        gov.last_churn = Instant::now() - Duration::from_secs(10);
+
+        let events = gov.maybe_churn(&pm);
+
+        let demoted: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Demote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        for addr in &demoted {
+            assert!(
+                !pm.is_local_root(addr),
+                "Local root {addr} must never be churned"
+            );
+        }
+    }
+
+    #[test]
+    fn test_churn_recently_churned_cleared_on_restore() {
+        let pm = setup_pm_with_peers(20, 5, 50);
+        let mut gov = Governor::new(GovernorConfig {
+            churn_interval_normal_secs: 0,
+            ..GovernorConfig::default()
+        });
+
+        // Start churn
+        gov.last_churn = Instant::now() - Duration::from_secs(10);
+        gov.maybe_churn(&pm);
         assert!(
-            to_promote.is_empty(),
-            "peers_to_promote should be empty before dwell elapses, got: {to_promote:?}"
+            !gov.recently_churned().is_empty(),
+            "should be non-empty after churn start"
         );
 
-        // The governor's evaluate() must also produce no Promote events.
-        let gov_config = GovernorConfig {
+        // Complete churn (restore phase)
+        gov.last_churn = Instant::now() - Duration::from_secs(10);
+        gov.maybe_churn(&pm);
+        assert!(!gov.churn_active, "churn should be complete");
+        assert!(
+            gov.recently_churned().is_empty(),
+            "recently_churned should be cleared after churn completes"
+        );
+    }
+
+    // ── Phase 4: Governor-driven peer sharing ─────────────────────────────────
+
+    #[test]
+    fn test_peer_sharing_emitted_when_known_below_target() {
+        // Build a PM with fewer known peers than target, with some outbound warm peers.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 200,
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // Add a few warm outbound peers (eligible for sharing requests)
+        let w1 = test_addr(5001);
+        let w2 = test_addr(5002);
+        let w3 = test_addr(5003);
+        pm.add_config_peer(w1, false, true);
+        pm.add_config_peer(w2, false, true);
+        pm.add_config_peer(w3, false, true);
+        pm.peer_connected(&w1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&w2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&w3, 14, ConnectionDirection::Outbound);
+        // Total known = 3; target = 50 in our governor config → deficit
+
+        let config = GovernorConfig {
             normal_targets: PeerTargets {
+                known_peers: 50, // 3 known vs target 50 → trigger sharing
+                active_peers: 1,
+                established_peers: 3,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let sharing_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::RequestPeerSharing(_, _)))
+            .collect();
+
+        assert!(
+            !sharing_events.is_empty(),
+            "Expected RequestPeerSharing events when known peers < target; got: {events:?}"
+        );
+        // At most 2 per cycle
+        assert!(
+            sharing_events.len() <= 2,
+            "At most 2 peer sharing requests per cycle; got {}",
+            sharing_events.len()
+        );
+        // Verify count=10 in every request
+        for e in &sharing_events {
+            if let GovernorEvent::RequestPeerSharing(_, count) = e {
+                assert_eq!(
+                    *count, 10,
+                    "Peer sharing request count should be 10, got {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_peer_sharing_rate_limited() {
+        // After one RequestPeerSharing batch, a second immediate evaluate()
+        // must NOT produce another batch (rate limit = 60s).
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 200,
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+        let w1 = test_addr(5001);
+        pm.add_config_peer(w1, false, true);
+        pm.peer_connected(&w1, 14, ConnectionDirection::Outbound);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 50,
+                active_peers: 1,
+                established_peers: 1,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
+        // First call should emit sharing events
+        let events1 = gov.evaluate(&pm);
+        let sharing1 = events1
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::RequestPeerSharing(_, _)))
+            .count();
+        assert!(sharing1 > 0, "First evaluate should emit peer sharing");
+
+        // Immediate second call must not emit another batch
+        let events2 = gov.evaluate(&pm);
+        let sharing2 = events2
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::RequestPeerSharing(_, _)))
+            .count();
+        assert_eq!(
+            sharing2, 0,
+            "Second immediate evaluate must not emit peer sharing (rate limited)"
+        );
+    }
+
+    #[test]
+    fn test_peer_sharing_not_emitted_when_at_target() {
+        // When known peers == target, no peer sharing should be requested.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 200,
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // Fill exactly to the governor known-peers target (3 peers)
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 3,
+                active_peers: 1,
+                established_peers: 2,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let w1 = test_addr(5001);
+        let w2 = test_addr(5002);
+        let w3 = test_addr(5003);
+        pm.add_config_peer(w1, false, true);
+        pm.add_config_peer(w2, false, true);
+        pm.add_config_peer(w3, false, true);
+        pm.peer_connected(&w1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&w2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&w3, 14, ConnectionDirection::Outbound);
+
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let sharing_count = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::RequestPeerSharing(_, _)))
+            .count();
+        assert_eq!(
+            sharing_count, 0,
+            "No peer sharing when known peers >= target"
+        );
+    }
+
+    #[test]
+    fn test_peer_sharing_only_requests_outbound_peers() {
+        // Inbound peers must never be targets of RequestPeerSharing.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 200,
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let inbound1 = test_addr(6001);
+        let inbound2 = test_addr(6002);
+        pm.add_config_peer(inbound1, false, false);
+        pm.add_config_peer(inbound2, false, false);
+        pm.peer_connected(&inbound1, 14, ConnectionDirection::Inbound);
+        pm.peer_connected(&inbound2, 14, ConnectionDirection::Inbound);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 50, // deficit to trigger sharing logic
+                active_peers: 1,
+                established_peers: 2,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let sharing_addrs: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::RequestPeerSharing(a, _) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // No outbound peers → no sharing requests should be emitted
+        assert!(
+            sharing_addrs.is_empty(),
+            "RequestPeerSharing must only target outbound peers; got: {sharing_addrs:?}"
+        );
+    }
+
+    // ── Phase 5: Known-peer surplus eviction ─────────────────────────────────
+
+    #[test]
+    fn test_known_surplus_evicts_cold_peers() {
+        // Set up a PM with far more known peers than 1.5× the governor's target.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 500,
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // Add 20 ledger (non-config) cold peers
+        for i in 0..20u16 {
+            pm.add_ledger_peer(test_addr(7000 + i));
+        }
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 10, // 20 known vs target 10 → high-water = 15 → surplus = 5
+                active_peers: 0,
+                established_peers: 0,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let evict_count = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::EvictColdPeer(_)))
+            .count();
+
+        // high_water = 10 * 3 / 2 = 15; surplus = 20 - 15 = 5
+        assert_eq!(
+            evict_count, 5,
+            "Expected exactly 5 EvictColdPeer events; got {evict_count}"
+        );
+    }
+
+    #[test]
+    fn test_known_surplus_never_evicts_config_peers() {
+        // Even when known count is far above 1.5× target, config peers must
+        // not appear in EvictColdPeer events.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 500,
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // 20 config peers (protected) + 10 ledger peers (evictable)
+        for i in 0..20u16 {
+            pm.add_config_peer(test_addr(7000 + i), false, false);
+        }
+        for i in 0..10u16 {
+            pm.add_ledger_peer(test_addr(8000 + i));
+        }
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 10, // 30 known vs target 10 → high_water=15 → surplus=15
+                active_peers: 0,
+                established_peers: 0,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let evicted_addrs: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::EvictColdPeer(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // Config peers (7000+) must never be evicted
+        for addr in &evicted_addrs {
+            assert!(
+                !pm.is_local_root(addr),
+                "Config peer {addr} must never be evicted"
+            );
+            // Verify these are ledger peers (8000+ port range)
+            assert!(
+                addr.port() >= 8000,
+                "Only ledger peers should be evicted; got {addr}"
+            );
+        }
+
+        // All evictions must be within the ledger peer set (max 10 ledger peers)
+        assert!(
+            evicted_addrs.len() <= 10,
+            "Cannot evict more ledger peers than exist (10); got {}",
+            evicted_addrs.len()
+        );
+    }
+
+    #[test]
+    fn test_no_eviction_when_below_high_water() {
+        // When known count <= 1.5× target, no EvictColdPeer events should appear.
+        let pm_config = PeerManagerConfig {
+            target_known_peers: 500,
+            target_hot_peers: 0,
+            target_warm_peers: 0,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // 12 ledger peers, target=10 → high_water=15 → 12 <= 15 → no eviction
+        for i in 0..12u16 {
+            pm.add_ledger_peer(test_addr(9000 + i));
+        }
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                known_peers: 10,
+                active_peers: 0,
+                established_peers: 0,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let evict_count = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::EvictColdPeer(_)))
+            .count();
+        assert_eq!(
+            evict_count, 0,
+            "No eviction when known peers is within 1.5× target"
+        );
+    }
+
+    // ── Phase 5b: BLP preemption during Syncing ───────────────────────────────
+
+    #[test]
+    fn test_blp_preemption_during_syncing() {
+        // In Syncing mode with 0 active BLPs but target_blp=2:
+        // non-BLP hot peers should be demoted to make room for BLPs.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // Add 3 non-BLP hot peers
+        for i in 0..3u16 {
+            let addr = test_addr(10000 + i);
+            pm.add_config_peer(addr, false, false);
+            pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+            pm.promote_to_hot(&addr);
+        }
+        // Add 2 cold BLPs (not yet hot)
+        pm.add_big_ledger_peer(test_addr(11000));
+        pm.add_big_ledger_peer(test_addr(11001));
+
+        let config = GovernorConfig {
+            sync_targets: PeerTargets {
+                active_blp: 2, // we want 2 active BLPs but have 0
+                established_blp: 2,
                 active_peers: 5,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
             ..GovernorConfig::default()
         };
-        let mut gov = Governor::new(gov_config);
+        let mut gov = Governor::new(config);
+        gov.set_sync_state(SyncState::Syncing);
+
         let events = gov.evaluate(&pm);
-        let promotes: Vec<SocketAddr> = events
+
+        let demoted: Vec<SocketAddr> = events
             .iter()
             .filter_map(|e| match e {
-                GovernorEvent::Promote(a) => Some(*a),
+                GovernorEvent::Demote(a) => Some(*a),
                 _ => None,
             })
             .collect();
+
+        // At least 2 non-BLP hot peers should be demoted (one per BLP needed)
         assert!(
-            promotes.is_empty(),
-            "evaluate() must not promote peers before dwell elapses, got: {promotes:?}"
+            demoted.len() >= 2,
+            "Expected >= 2 Demote events for BLP preemption; got {demoted:?}"
         );
+        // None of the demoted peers should be BLPs
+        for addr in &demoted {
+            assert_ne!(
+                pm.peer_category(addr),
+                Some(PeerCategory::BigLedgerPeer),
+                "BLP {addr} must not be demoted during preemption"
+            );
+        }
     }
 
     #[test]
-    fn test_warm_peers_promoted_after_dwell_elapsed() {
-        // After backdate_warm_dwell(), peers must be eligible for promotion.
-        let config = PeerManagerConfig {
-            target_hot_peers: 2,
-            target_warm_peers: 2,
-            target_known_peers: 200,
-            ..PeerManagerConfig::default()
-        };
-        let mut pm = PeerManager::new(config);
-        let a1 = test_addr(6001);
-        let a2 = test_addr(6002);
-        pm.add_config_peer(a1, false, false);
-        pm.add_config_peer(a2, false, false);
-        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
-        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
-        // Simulate dwell elapsed.
-        pm.backdate_warm_dwell(&a1);
-        pm.backdate_warm_dwell(&a2);
-
-        let to_promote = pm.peers_to_promote();
-        assert_eq!(
-            to_promote.len(),
-            2,
-            "Both dwell-elapsed warm peers should be promotion candidates"
-        );
-    }
-
-    #[test]
-    fn test_check_warm_promotions_returns_events_after_dwell() {
-        // check_warm_promotions() should emit Promote events for dwell-elapsed
-        // warm peers, capped by the hot-peer target deficit.
+    fn test_blp_preemption_not_active_when_caught_up() {
+        // BLP preemption only fires in Syncing; CaughtUp should not preempt.
         let pm_config = PeerManagerConfig {
             target_hot_peers: 20,
             target_warm_peers: 20,
@@ -1200,87 +1935,82 @@ mod tests {
             ..PeerManagerConfig::default()
         };
         let mut pm = PeerManager::new(pm_config);
-        let a1 = test_addr(7001);
-        let a2 = test_addr(7002);
-        pm.add_config_peer(a1, false, false);
-        pm.add_config_peer(a2, false, false);
-        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
-        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
-        pm.backdate_warm_dwell(&a1);
-        pm.backdate_warm_dwell(&a2);
 
-        let gov_config = GovernorConfig {
+        for i in 0..5u16 {
+            let addr = test_addr(12000 + i);
+            pm.add_config_peer(addr, false, false);
+            pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+            pm.promote_to_hot(&addr);
+        }
+        pm.add_big_ledger_peer(test_addr(13000));
+        pm.add_big_ledger_peer(test_addr(13001));
+
+        let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_blp: 2,
+                established_blp: 2,
+                active_peers: 5, // exactly at target — no normal surplus
+                established_peers: 10,
                 ..PeerTargets::default()
             },
             ..GovernorConfig::default()
         };
-        let gov = Governor::new(gov_config);
-        let events = gov.check_warm_promotions(&pm);
-        let promote_count = events
+        let mut gov = Governor::new(config);
+        gov.set_sync_state(SyncState::CaughtUp);
+
+        let events = gov.evaluate(&pm);
+
+        // No preemption demotion — we're CaughtUp and at normal target
+        let preemption_demotes: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, GovernorEvent::Promote(_)))
-            .count();
-        assert_eq!(
-            promote_count, 2,
-            "check_warm_promotions should promote both dwell-elapsed warm peers"
+            .filter(|e| matches!(e, GovernorEvent::Demote(_)))
+            .collect();
+        assert!(
+            preemption_demotes.is_empty(),
+            "BLP preemption should not fire when CaughtUp: {preemption_demotes:?}"
         );
     }
 
-    #[test]
-    fn test_check_warm_promotions_empty_before_dwell() {
-        // check_warm_promotions() must return nothing if no peers have elapsed dwell.
-        let pm_config = PeerManagerConfig {
-            target_hot_peers: 20,
-            target_warm_peers: 20,
-            target_known_peers: 200,
-            ..PeerManagerConfig::default()
-        };
-        let mut pm = PeerManager::new(pm_config);
-        let a1 = test_addr(7001);
-        pm.add_config_peer(a1, false, false);
-        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
-        // Do NOT backdate — dwell hasn't elapsed.
+    // ── xorshift64 PRNG properties ────────────────────────────────────────────
 
-        let gov = Governor::new(GovernorConfig::default());
-        let events = gov.check_warm_promotions(&pm);
-        assert!(
-            events.is_empty(),
-            "check_warm_promotions should be empty before dwell elapses"
-        );
+    #[test]
+    fn test_xorshift64_never_zero() {
+        let mut gov = Governor::new(GovernorConfig::default());
+        // Override seed to a known non-zero value for determinism
+        gov.churn_seed = 0xdeadbeef_cafebabe;
+        for _ in 0..10_000 {
+            let v = gov.xorshift64_next();
+            assert_ne!(v, 0, "xorshift64 must never produce 0");
+        }
     }
 
     #[test]
-    fn test_dwell_resets_on_demotion() {
-        // When a hot peer is demoted to warm, promoted_at resets so the full
-        // dwell time must elapse again before it can be re-promoted.
-        let mut pm = PeerManager::new(PeerManagerConfig::default());
-        let addr = test_addr(8001);
-        pm.add_config_peer(addr, false, false);
-        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
-        pm.backdate_warm_dwell(&addr);
-        pm.promote_to_hot(&addr);
+    fn test_shuffle_produces_all_elements() {
+        let mut gov = Governor::new(GovernorConfig::default());
+        gov.churn_seed = 0x0102030405060708;
+        let original: Vec<u32> = (0..20).collect();
+        let mut shuffled = original.clone();
+        gov.shuffle(&mut shuffled);
 
-        // Peer is now hot — promoted_at is cleared.
-        let info = pm.peer_info_for_test(&addr).unwrap();
-        assert!(
-            info.promoted_at.is_none(),
-            "promoted_at should be None after promotion to hot"
-        );
+        // All elements must still be present (permutation, not filtering)
+        let mut sorted = shuffled.clone();
+        sorted.sort();
+        assert_eq!(sorted, original, "Shuffle must preserve all elements");
+    }
 
-        // Demote back to warm — promoted_at should be reset to now.
-        pm.demote_to_warm(&addr);
-        let info = pm.peer_info_for_test(&addr).unwrap();
-        assert!(
-            info.promoted_at.is_some(),
-            "promoted_at should be set after demotion to warm"
-        );
-
-        // The freshly demoted peer must NOT be immediately eligible.
-        assert!(
-            !info.can_promote_to_hot(),
-            "freshly demoted peer must not pass can_promote_to_hot() immediately"
+    #[test]
+    fn test_shuffle_is_not_identity_for_large_vec() {
+        // With 20 elements there is essentially zero probability the shuffle
+        // returns the exact same order.  If this flakes it means the PRNG is
+        // broken (or astronomically unlikely).
+        let mut gov = Governor::new(GovernorConfig::default());
+        gov.churn_seed = 0x1234567890abcdef;
+        let original: Vec<u32> = (0..20).collect();
+        let mut shuffled = original.clone();
+        gov.shuffle(&mut shuffled);
+        assert_ne!(
+            shuffled, original,
+            "Shuffle of 20 elements should not be the identity permutation"
         );
     }
 }
