@@ -1355,7 +1355,10 @@ impl Node {
         {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
-            let gov_network_magic = network_magic;
+            // Capture fields needed by governor-initiated connect tasks.
+            let gov_network_magic = self.network_magic;
+            let gov_metrics = self.metrics.clone();
+            let gov_byron_epoch_length = self.byron_epoch_length;
             let gov_config = {
                 use torsten_network::{GovernorConfig, PeerTargets};
                 let cfg = &self.config;
@@ -1383,6 +1386,24 @@ impl Node {
                 let mut warm_interval = tokio::time::interval(std::time::Duration::from_secs(2));
                 let mut shutdown = governor_shutdown;
 
+                // Track in-flight governor-initiated connections so that we
+                // never spawn two concurrent tasks for the same address.
+                //
+                // When a spawned task finishes (success or failure) it sends
+                // the peer address back on this channel so we can remove it
+                // from the set.  The channel is unbounded so sends never block.
+                let (connect_done_tx, mut connect_done_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<std::net::SocketAddr>();
+                // Set of addresses for which a connect task is currently running.
+                let mut connecting_peers: std::collections::HashSet<std::net::SocketAddr> =
+                    std::collections::HashSet::new();
+                // Maximum concurrent governor-initiated outbound connections.
+                // This prevents a burst of `Connect` events from opening dozens
+                // of TCP connections simultaneously.
+                const MAX_CONCURRENT_GOV_CONNECTS: usize = 8;
+                // TCP connect timeout for governor-initiated connections.
+                const GOV_CONNECT_TIMEOUT_SECS: u64 = 5;
+
                 loop {
                     // Collect events from whichever timer fires next, or exit
                     // immediately on shutdown.
@@ -1402,8 +1423,21 @@ impl Node {
                         _ = shutdown.changed() => { break; }
                     };
 
+                    // Drain completed-connection notifications before processing
+                    // new events, so that connect slots are freed as soon as
+                    // possible and the per-peer duplicate guard stays accurate.
+                    while let Ok(addr) = connect_done_rx.try_recv() {
+                        connecting_peers.remove(&addr);
+                    }
+
                     // Apply events to the peer manager.
                     if !events.is_empty() {
+                        // Collect Connect events that need spawning before
+                        // acquiring the write lock, so we can check circuit state
+                        // and temperature under the lock and then release it
+                        // before doing async I/O.
+                        let mut addrs_to_connect: Vec<std::net::SocketAddr> = Vec::new();
+
                         let mut pm = governor_pm.write().await;
                         for event in &events {
                             match event {
@@ -1420,68 +1454,114 @@ impl Node {
                                     pm.peer_disconnected(addr);
                                 }
                                 GovernorEvent::Connect(addr) => {
-                                    // Spawn an async connection task so the governor
-                                    // loop isn't blocked by TCP handshakes.
-                                    let connect_pm = governor_pm.clone();
-                                    let connect_addr = *addr;
-                                    let magic = gov_network_magic;
-                                    tokio::spawn(async move {
-                                        let target = connect_addr.to_string();
-                                        let result = tokio::time::timeout(
-                                            std::time::Duration::from_secs(5),
-                                            torsten_network::NodeToNodeClient::connect(
-                                                &*target, magic,
-                                            ),
-                                        )
-                                        .await;
-                                        match result {
-                                            Ok(Ok(_client)) => {
-                                                let version = 14; // N2N V14 default
-                                                let mut pm = connect_pm.write().await;
-                                                pm.peer_connected(
-                                                    &connect_addr,
-                                                    version,
-                                                    torsten_network::ConnectionDirection::Outbound,
-                                                );
-                                                debug!(
-                                                    addr = %connect_addr,
-                                                    "Governor: connected to peer"
-                                                );
-                                                // Client is dropped here — the connection
-                                                // was established to register the peer as
-                                                // warm. The main sync loop will use it for
-                                                // block fetching when promoted to hot.
-                                            }
-                                            Ok(Err(e)) => {
-                                                let mut pm = connect_pm.write().await;
-                                                pm.peer_failed(&connect_addr);
-                                                tracing::trace!(
-                                                    addr = %connect_addr,
-                                                    error = %e,
-                                                    "Governor: connection failed"
-                                                );
-                                            }
-                                            Err(_) => {
-                                                let mut pm = connect_pm.write().await;
-                                                pm.peer_failed(&connect_addr);
-                                                tracing::trace!(
-                                                    addr = %connect_addr,
-                                                    "Governor: connection timed out (5s)"
-                                                );
-                                            }
-                                        }
-                                    });
+                                    // Skip if we already have an in-flight
+                                    // connect attempt for this address.
+                                    if connecting_peers.contains(addr) {
+                                        continue;
+                                    }
+                                    // Skip if the connection cap is reached.
+                                    if connecting_peers.len() >= MAX_CONCURRENT_GOV_CONNECTS {
+                                        debug!(
+                                            %addr,
+                                            in_flight = connecting_peers.len(),
+                                            "Governor: Connect skipped — concurrent limit reached"
+                                        );
+                                        continue;
+                                    }
+                                    // Skip if the circuit breaker is open for
+                                    // this peer (transitions Open→HalfOpen as a
+                                    // side-effect when the cooldown has expired).
+                                    if !pm.should_attempt_connection(addr) {
+                                        continue;
+                                    }
+                                    // Skip peers that are already warm or hot —
+                                    // they are already connected.
+                                    if pm.connected_peer_addrs().contains(addr) {
+                                        continue;
+                                    }
+                                    connecting_peers.insert(*addr);
+                                    addrs_to_connect.push(*addr);
                                 }
                                 GovernorEvent::RequestPeerSharing(addr, count) => {
+                                    // Phase 4+: full peer-sharing client integration.
+                                    // For now emit a debug trace so the event is
+                                    // visible in logs without any protocol I/O.
                                     debug!(
-                                        addr = %addr,
+                                        %addr,
                                         count,
-                                        "Governor: peer sharing request (not yet implemented)"
+                                        "Governor: RequestPeerSharing (deferred — Phase 4)"
                                     );
                                 }
                             }
                         }
                         pm.recompute_reputations();
+                        // Release the write lock before spawning async tasks.
+                        drop(pm);
+
+                        // Spawn one fire-and-forget connect task per address.
+                        // Each task:
+                        //   1. Attempts TCP + Ouroboros handshake with a 5 s timeout.
+                        //   2. On success, marks the peer Warm in the peer manager
+                        //      (governor will promote to Hot after the dwell period).
+                        //   3. On failure, calls peer_failed() to update the circuit
+                        //      breaker so the governor backs off future attempts.
+                        //   4. Always sends the address back on connect_done_tx so the
+                        //      outer loop removes it from connecting_peers.
+                        for addr in addrs_to_connect {
+                            let task_pm = governor_pm.clone();
+                            let task_metrics = gov_metrics.clone();
+                            let task_magic = gov_network_magic;
+                            let task_byron = gov_byron_epoch_length;
+                            let task_done_tx = connect_done_tx.clone();
+                            tokio::spawn(async move {
+                                let target = addr.to_string();
+                                debug!(%addr, "Governor: initiating outbound connection");
+                                let connect_start = std::time::Instant::now();
+                                let connect_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(GOV_CONNECT_TIMEOUT_SECS),
+                                    NodeToNodeClient::connect(&*target, task_magic),
+                                )
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(torsten_network::ClientError::Connection(format!(
+                                        "{target}: connection timed out after {GOV_CONNECT_TIMEOUT_SECS}s"
+                                    )))
+                                });
+                                match connect_result {
+                                    Ok(mut c) => {
+                                        c.set_byron_epoch_length(task_byron);
+                                        let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+                                        task_metrics.record_handshake_rtt(rtt_ms);
+                                        let mut pm = task_pm.write().await;
+                                        // Land in Warm; the governor's 2 s warm-promotion
+                                        // check will promote to Hot after WARM_DWELL_TIME.
+                                        pm.peer_connected(
+                                            &addr,
+                                            14,
+                                            torsten_network::ConnectionDirection::Outbound,
+                                        );
+                                        pm.record_handshake_rtt(&addr, rtt_ms);
+                                        drop(pm);
+                                        info!(
+                                            peer = %target,
+                                            rtt_ms = format_args!("{rtt_ms:.0}"),
+                                            "Governor: peer connected (warm, dwell pending)"
+                                        );
+                                        // The NodeToNodeClient is intentionally dropped here.
+                                        // This connection is solely for peer-manager bookkeeping
+                                        // (warm→hot state tracking).  The main sync loop and
+                                        // BlockFetchPool manage their own independent connections
+                                        // to hot peers for ChainSync and BlockFetch traffic.
+                                    }
+                                    Err(e) => {
+                                        task_pm.write().await.peer_failed(&addr);
+                                        debug!(%addr, "Governor: failed to connect — {e}");
+                                    }
+                                }
+                                // Always notify the outer loop that this slot is free.
+                                let _ = task_done_tx.send(addr);
+                            });
+                        }
                     }
                 }
             });
