@@ -563,6 +563,109 @@ mod tests {
         }
     }
 
+    /// Issue #157: When a CC member uses a script hot key, `hot_credential_type`
+    /// must be 1 (ScriptHash), not 0 (KeyHash).  The query handler reads the
+    /// value directly from `CommitteeMemberSnapshot.hot_credential_type`; the
+    /// node query builder (query.rs) is responsible for populating it correctly
+    /// from `GovernanceState.script_committee_hot_credentials`.
+    ///
+    /// This test verifies that the query handler faithfully propagates whatever
+    /// `hot_credential_type` value the node placed in the snapshot.
+    #[test]
+    fn test_committee_state_script_hot_credential_type_propagated() {
+        use crate::query_handler::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
+
+        // Member 1: key cold + script hot (the fix: hot_credential_type = 1)
+        // Member 2: key cold + key hot (hot_credential_type = 0, unchanged)
+        let state = NodeStateSnapshot {
+            committee: CommitteeSnapshot {
+                members: vec![
+                    CommitteeMemberSnapshot {
+                        cold_credential: vec![0xAA; 28],
+                        cold_credential_type: 0, // KeyHash cold
+                        hot_status: 0,           // Authorized
+                        hot_credential: Some(vec![0xCC; 28]),
+                        hot_credential_type: 1, // ScriptHash hot — must survive round-trip
+                        member_status: 0,
+                        expiry_epoch: Some(300),
+                    },
+                    CommitteeMemberSnapshot {
+                        cold_credential: vec![0xBB; 28],
+                        cold_credential_type: 0, // KeyHash cold
+                        hot_status: 0,           // Authorized
+                        hot_credential: Some(vec![0xDD; 28]),
+                        hot_credential_type: 0, // KeyHash hot
+                        member_status: 0,
+                        expiry_epoch: Some(400),
+                    },
+                ],
+                threshold: Some((3, 5)),
+                current_epoch: 100,
+            },
+            ..NodeStateSnapshot::default()
+        };
+
+        let result = handle_committee_state(&state);
+        match result {
+            QueryResult::CommitteeState(committee) => {
+                assert_eq!(committee.members.len(), 2);
+
+                // First member: script hot key — hot_credential_type must be 1
+                let m0 = &committee.members[0];
+                assert_eq!(m0.cold_credential, vec![0xAA; 28]);
+                assert_eq!(
+                    m0.hot_credential_type, 1,
+                    "script hot key must have hot_credential_type = 1"
+                );
+                assert_eq!(m0.hot_credential, Some(vec![0xCC; 28]));
+
+                // Second member: key hot key — hot_credential_type must be 0
+                let m1 = &committee.members[1];
+                assert_eq!(m1.cold_credential, vec![0xBB; 28]);
+                assert_eq!(
+                    m1.hot_credential_type, 0,
+                    "key hot key must have hot_credential_type = 0"
+                );
+            }
+            _ => panic!("Expected CommitteeState"),
+        }
+    }
+
+    /// `hot_credential_type` for a resigned member (hot_status = 2) must be 0
+    /// and hot_credential must be None (no hot key to report).
+    #[test]
+    fn test_committee_state_resigned_member_no_hot_type() {
+        use crate::query_handler::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
+
+        let state = NodeStateSnapshot {
+            committee: CommitteeSnapshot {
+                members: vec![CommitteeMemberSnapshot {
+                    cold_credential: vec![0xAA; 28],
+                    cold_credential_type: 0,
+                    hot_status: 2, // Resigned
+                    hot_credential: None,
+                    hot_credential_type: 0,
+                    member_status: 0,
+                    expiry_epoch: Some(200),
+                }],
+                threshold: Some((1, 1)),
+                current_epoch: 10,
+            },
+            ..NodeStateSnapshot::default()
+        };
+
+        let result = handle_committee_state(&state);
+        match result {
+            QueryResult::CommitteeState(committee) => {
+                let m = &committee.members[0];
+                assert_eq!(m.hot_status, 2, "resigned member must have hot_status = 2");
+                assert!(m.hot_credential.is_none());
+                assert_eq!(m.hot_credential_type, 0);
+            }
+            _ => panic!("Expected CommitteeState"),
+        }
+    }
+
     #[test]
     fn test_drep_stake_distr() {
         use crate::query_handler::types::DRepStakeEntry;

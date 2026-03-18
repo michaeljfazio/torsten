@@ -257,9 +257,21 @@ impl LedgerState {
                 gov.committee_hot_keys.insert(cold_key, hot_key);
                 // Remove from resigned if re-authorizing
                 gov.committee_resigned.remove(&cold_key);
-                // Track script cold credentials for correct credential_type in N2C responses.
+                // Track script cold credentials for correct cold_credential_type in N2C responses.
                 if matches!(cold_credential, Credential::Script(_)) {
                     gov.script_committee_credentials.insert(cold_key);
+                }
+                // Track script hot credentials for correct hot_credential_type in N2C responses
+                // (GetCommitteeState tag 27).
+                //
+                // The set is keyed by hot credential hash.  When querying, we resolve the
+                // current hot key for a cold key via committee_hot_keys, then probe this set.
+                // Therefore stale entries from a superseded hot key can never be reached:
+                // once committee_hot_keys[cold_key] points to a new hot key hash, the old
+                // hash is simply never looked up again.  There is no need to remove the
+                // displaced hash here.
+                if matches!(hot_credential, Credential::Script(_)) {
+                    gov.script_committee_hot_credentials.insert(hot_key);
                 }
                 debug!(
                     "Committee hot key authorized: {} -> {}",

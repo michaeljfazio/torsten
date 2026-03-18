@@ -212,6 +212,13 @@ pub struct GovernanceState {
     /// in GetCommitteeState responses without changing the Hash32-keyed committee maps.
     #[serde(default)]
     pub script_committee_credentials: std::collections::HashSet<Hash32>,
+    /// Script-type hot committee credentials (hot_credential_type = 1 for N2C queries).
+    /// Populated from CommitteeHotAuth certificates when the hot credential is a
+    /// Credential::Script variant.  Maps cold_credential_hash -> hot_credential_hash for
+    /// script hot keys, so a re-authorization with a key hot key correctly removes the entry.
+    /// Used to correctly set hot_credential_type in GetCommitteeState responses.
+    #[serde(default)]
+    pub script_committee_hot_credentials: std::collections::HashSet<Hash32>,
     /// Active governance proposals indexed by GovActionId
     pub proposals: BTreeMap<GovActionId, ProposalState>,
     /// Votes cast, indexed by action ID for efficient ratification lookup

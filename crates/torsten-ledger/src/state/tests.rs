@@ -1496,6 +1496,139 @@ fn test_committee_cold_resign() {
     assert!(state.governance.committee_resigned.contains_key(&cold_key));
 }
 
+/// Issue #157: script-based CC hot key type must be tracked and reported correctly.
+/// When a committee member authorizes a Credential::Script hot key via CommitteeHotAuth,
+/// `script_committee_hot_credentials` must contain the hot key hash so that
+/// GetCommitteeState (tag 27) returns `hot_credential_type = 1` (ScriptHash).
+#[test]
+fn test_committee_hot_auth_script_hot_key_tracked() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Authorize with a script hot key — the fix must record this in
+    // script_committee_hot_credentials keyed by the hot credential hash.
+    let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let hot_script = Credential::Script(Hash28::from_bytes([30u8; 28]));
+    let hot_key = credential_to_hash(&hot_script);
+
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold,
+        hot_credential: hot_script,
+    });
+
+    assert!(
+        state
+            .governance
+            .script_committee_hot_credentials
+            .contains(&hot_key),
+        "script hot key must be recorded in script_committee_hot_credentials"
+    );
+}
+
+/// Key hot key authorization must NOT pollute script_committee_hot_credentials.
+#[test]
+fn test_committee_hot_auth_key_hot_key_not_tracked() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let hot_key_cred = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
+    let hot_key_hash = credential_to_hash(&hot_key_cred);
+
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold,
+        hot_credential: hot_key_cred,
+    });
+
+    assert!(
+        !state
+            .governance
+            .script_committee_hot_credentials
+            .contains(&hot_key_hash),
+        "key hot credential must NOT appear in script_committee_hot_credentials"
+    );
+}
+
+/// Re-authorization: replacing a script hot key with a key hot key.
+/// The new (key) hot key hash must not appear in the script set; the
+/// stale script hot key entry from the old authorization is unreachable
+/// (committee_hot_keys no longer points to it) so the correct type is returned.
+#[test]
+fn test_committee_hot_auth_reauth_script_to_key() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let hot_script = Credential::Script(Hash28::from_bytes([30u8; 28]));
+    let hot_key_cred = Credential::VerificationKey(Hash28::from_bytes([40u8; 28]));
+    let cold_key = credential_to_hash(&cold);
+    let new_hot_key = credential_to_hash(&hot_key_cred);
+
+    // First: authorize with script
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold.clone(),
+        hot_credential: hot_script,
+    });
+
+    // Then: re-authorize with a key hot credential
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold,
+        hot_credential: hot_key_cred,
+    });
+
+    // The committee_hot_keys map now points to the new key hot credential
+    assert_eq!(
+        state.governance.committee_hot_keys[&cold_key], new_hot_key,
+        "committee_hot_keys must point to the new hot key"
+    );
+    // The new hot key is a key credential — it must not be in the script set
+    assert!(
+        !state
+            .governance
+            .script_committee_hot_credentials
+            .contains(&new_hot_key),
+        "new key hot credential must not be in script_committee_hot_credentials"
+    );
+}
+
+/// Re-authorization: replacing a key hot key with a script hot key.
+/// The new script hot key must appear in the script set.
+#[test]
+fn test_committee_hot_auth_reauth_key_to_script() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
+    let hot_key_cred = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
+    let hot_script = Credential::Script(Hash28::from_bytes([50u8; 28]));
+    let cold_key = credential_to_hash(&cold);
+    let new_hot_key = credential_to_hash(&hot_script);
+
+    // First: authorize with key
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold.clone(),
+        hot_credential: hot_key_cred,
+    });
+
+    // Then: re-authorize with script
+    state.process_certificate(&Certificate::CommitteeHotAuth {
+        cold_credential: cold,
+        hot_credential: hot_script,
+    });
+
+    assert_eq!(
+        state.governance.committee_hot_keys[&cold_key], new_hot_key,
+        "committee_hot_keys must point to the new script hot key"
+    );
+    assert!(
+        state
+            .governance
+            .script_committee_hot_credentials
+            .contains(&new_hot_key),
+        "new script hot key must be in script_committee_hot_credentials"
+    );
+}
+
 #[test]
 fn test_governance_proposal_and_vote() {
     let params = ProtocolParameters::mainnet_defaults();

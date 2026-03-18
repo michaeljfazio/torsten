@@ -311,11 +311,18 @@ impl Node {
                             Some(hk) if !is_resigned => Some(hash32_padded_to_28_bytes(hk)),
                             _ => None,
                         },
-                        // Hot credential type: 0=KeyHash, 1=Script.
-                        // TODO: Track hot credential types in governance state
-                        // when script-based CC hot keys are encountered. Currently
-                        // defaults to KeyHash (0) which covers all known deployments.
-                        hot_credential_type: 0,
+                        // Hot credential type: 0=KeyHash, 1=ScriptHash.
+                        // Resolved by probing script_committee_hot_credentials with the current
+                        // hot key hash.  The set is keyed by hot credential hash so that
+                        // re-authorization with a different hot key is handled naturally: the
+                        // new hot key either is or is not in the script set independently of
+                        // any prior authorization for the same cold key.
+                        hot_credential_type: match hot_key {
+                            Some(hk) if !is_resigned => {
+                                ls.governance.script_committee_hot_credentials.contains(hk) as u8
+                            }
+                            _ => 0,
+                        },
                         member_status: 0, // Active (simplified)
                         expiry_epoch: Some(_expiry.0),
                     }
