@@ -384,21 +384,28 @@ pub(crate) fn handle_account_state(state: &NodeStateSnapshot) -> QueryResult {
     }
 }
 
-/// Handle DebugEpochState (tag 8) — epoch state summary.
+/// Handle DebugEpochState (tag 8).
 ///
-/// In the Haskell node this returns the full serialized EpochState.
-/// We return the key fields that tools typically inspect.
+/// Returns the full Haskell-compatible `EpochState` structure:
+/// `array(4) [ChainAccountState, LedgerState, SnapShots, NonMyopic]`
+///
+/// `ChainAccountState` = `array(2)[treasury, reserves]`
+/// `LedgerState`       = simplified placeholder (CBOR-skippable)
+/// `SnapShots`         = `array(4)[mark, set, go, fee]` with real data
+/// `NonMyopic`         = `array(2)[likelihoods_map, reward_pot]`
+///
+/// Tools like db-analyser expect the EpochState structure at the top level of
+/// the result; the SnapShots field at position [2] is typically what callers
+/// need for epoch-boundary analysis.
 pub(crate) fn handle_debug_epoch_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: DebugEpochState");
     QueryResult::DebugEpochState {
-        epoch: state.epoch.0,
         treasury: state.treasury,
         reserves: state.reserves,
-        stake_pool_count: state.pool_count as u64,
-        utxo_count: state.utxo_count as u64,
-        active_stake: state.total_active_stake,
-        delegations: state.active_delegations,
-        rewards: state.total_rewards,
+        snap_mark: Box::new(state.snap_mark.clone()),
+        snap_set: Box::new(state.snap_set.clone()),
+        snap_go: Box::new(state.snap_go.clone()),
+        snap_fee: state.snap_fee,
     }
 }
 
@@ -431,19 +438,37 @@ pub(crate) fn handle_debug_new_epoch_state(state: &NodeStateSnapshot) -> QueryRe
     }
 }
 
-/// Handle DebugChainDepState (tag 13) — consensus chain-dependent state.
+/// Handle DebugChainDepState (tag 13).
 ///
-/// In the Haskell node this returns the Praos ChainDepState (nonce, etc).
-/// We return the last applied slot.
+/// Returns the full Haskell-compatible `PraosState` CBOR structure.  Haskell
+/// uses `encodeVersion 0` (from `Ouroboros.Consensus.Util.Versioned`) which
+/// wraps the payload as `array(2)[0, payload]`.  The payload itself is
+/// `array(8)` containing all eight `PraosState` fields.
+///
+/// The `OCertCounters` map (`praosStateOCertCounters`) is not tracked in
+/// `NodeStateSnapshot` — we emit an empty map, which is safe because tools
+/// reading this query for nonce inspection do not use the counter map.
 pub(crate) fn handle_debug_chain_dep_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: DebugChainDepState");
-    let last_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+    let (last_slot, is_origin) = match state.tip.point.slot() {
+        Some(s) => (s.0, false),
+        None => (0, true),
+    };
     QueryResult::DebugChainDepState {
         last_slot,
-        epoch_nonce: state.epoch_nonce.clone(),
+        last_slot_is_origin: is_origin,
+        // OCertCounters: not tracked per peer; emit empty map
+        ocert_counters: Vec::new(),
         evolving_nonce: state.evolving_nonce.clone(),
         candidate_nonce: state.candidate_nonce.clone(),
+        epoch_nonce: state.epoch_nonce.clone(),
+        // Previous epoch nonce: not separately tracked; reuse epoch_nonce as
+        // a conservative approximation.  Tools inspecting this field for
+        // cross-epoch nonce chaining should use the epoch_nonce field instead.
+        prev_epoch_nonce: state.epoch_nonce.clone(),
         lab_nonce: state.lab_nonce.clone(),
+        // Last epoch block nonce: same conservative approximation as above.
+        last_epoch_block_nonce: state.lab_nonce.clone(),
     }
 }
 
@@ -516,18 +541,10 @@ mod tests {
         let result = handle_debug_epoch_state(&state);
         match result {
             QueryResult::DebugEpochState {
-                epoch,
-                treasury,
-                reserves,
-                stake_pool_count,
-                utxo_count,
-                ..
+                treasury, reserves, ..
             } => {
-                assert_eq!(epoch, 42);
                 assert_eq!(treasury, 1_000_000_000);
                 assert_eq!(reserves, 10_000_000_000);
-                assert_eq!(stake_pool_count, 3);
-                assert_eq!(utxo_count, 5000);
             }
             _ => panic!("Expected DebugEpochState"),
         }

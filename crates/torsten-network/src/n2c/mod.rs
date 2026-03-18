@@ -778,23 +778,30 @@ mod tests {
 
     #[test]
     fn test_encode_debug_epoch_state() {
+        use crate::query_handler::SnapshotStakeData;
+        let empty_snap = Box::new(SnapshotStakeData::default());
         let result = QueryResult::DebugEpochState {
-            epoch: 42,
             treasury: 1_000_000,
             reserves: 5_000_000,
-            stake_pool_count: 10,
-            utxo_count: 5000,
-            active_stake: 1_000_000_000,
-            delegations: 100,
-            rewards: 500_000,
+            snap_mark: empty_snap.clone(),
+            snap_set: empty_snap.clone(),
+            snap_go: empty_snap,
+            snap_fee: 0,
         };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
-        // Verify it's valid CBOR by decoding
+        // Outer: MsgResult [4, [result]]
         let mut dec = minicbor::Decoder::new(&cbor);
-        // [4, inner]
         assert_eq!(dec.array().unwrap(), Some(2));
         assert_eq!(dec.u32().unwrap(), 4); // MsgResult tag
+                                           // EitherMismatch Right wrapper: array(1)
+        assert_eq!(dec.array().unwrap(), Some(1));
+        // EpochState: array(4) [AccountState, LedgerState, SnapShots, NonMyopic]
+        assert_eq!(dec.array().unwrap(), Some(4));
+        // [0] ChainAccountState: array(2) [treasury, reserves]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u64().unwrap(), 1_000_000); // treasury
+        assert_eq!(dec.u64().unwrap(), 5_000_000); // reserves
     }
 
     #[test]
@@ -829,16 +836,127 @@ mod tests {
     fn test_encode_debug_chain_dep_state() {
         let result = QueryResult::DebugChainDepState {
             last_slot: 999,
+            last_slot_is_origin: false,
+            ocert_counters: vec![],
             epoch_nonce: vec![0xAA; 32],
             evolving_nonce: vec![0xBB; 32],
             candidate_nonce: vec![0xCC; 32],
+            prev_epoch_nonce: vec![0xAA; 32],
             lab_nonce: vec![0xDD; 32],
+            last_epoch_block_nonce: vec![0xDD; 32],
         };
         let cbor = encode_query_result(&result);
         assert!(!cbor.is_empty());
         let mut dec = minicbor::Decoder::new(&cbor);
+        // Outer: MsgResult [4, [result]]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u32().unwrap(), 4); // MsgResult tag
+                                           // EitherMismatch Right wrapper: array(1)
+        assert_eq!(dec.array().unwrap(), Some(1));
+        // PraosState encodeVersion 0: array(2) [0, payload]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u8().unwrap(), 0); // version = 0
+                                          // PraosState payload: array(8)
+        assert_eq!(dec.array().unwrap(), Some(8));
+        // [0] lastSlot = At 999: array(2) [1, 999]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u8().unwrap(), 1); // At constructor
+        assert_eq!(dec.u64().unwrap(), 999);
+        // [1] ocertCounters: empty map
+        assert_eq!(dec.map().unwrap(), Some(0));
+        // [2] evolvingNonce: Nonce (non-zero): array(2) [1, bytes]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u8().unwrap(), 1);
+        let nonce_bytes = dec.bytes().unwrap();
+        assert_eq!(nonce_bytes, &[0xBBu8; 32]);
+    }
+
+    /// Verify that DebugChainDepState encodes a NeutralNonce correctly.
+    ///
+    /// When a nonce field is all-zero (or empty), it must encode as
+    /// `array(1)[0]` — the Haskell `NeutralNonce` constructor.
+    #[test]
+    fn test_encode_debug_chain_dep_state_neutral_nonce() {
+        // All-zero nonces should be encoded as NeutralNonce
+        let result = QueryResult::DebugChainDepState {
+            last_slot: 0,
+            last_slot_is_origin: true,
+            ocert_counters: vec![],
+            epoch_nonce: vec![0u8; 32],    // all-zero → NeutralNonce
+            evolving_nonce: vec![0u8; 32], // all-zero → NeutralNonce
+            candidate_nonce: vec![0u8; 32],
+            prev_epoch_nonce: vec![0u8; 32],
+            lab_nonce: vec![0u8; 32],
+            last_epoch_block_nonce: vec![0u8; 32],
+        };
+        let cbor = encode_query_result(&result);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        // Skip outer MsgResult envelope
         assert_eq!(dec.array().unwrap(), Some(2));
         assert_eq!(dec.u32().unwrap(), 4);
+        // Skip EitherMismatch Right wrapper
+        assert_eq!(dec.array().unwrap(), Some(1));
+        // encodeVersion: array(2) [0, payload]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u8().unwrap(), 0); // version
+                                          // PraosState: array(8)
+        assert_eq!(dec.array().unwrap(), Some(8));
+        // [0] lastSlot = Origin: array(1) [0]
+        assert_eq!(dec.array().unwrap(), Some(1));
+        assert_eq!(dec.u8().unwrap(), 0); // Origin
+                                          // [1] ocertCounters: empty map
+        assert_eq!(dec.map().unwrap(), Some(0));
+        // [2] evolvingNonce: NeutralNonce → array(1) [0]
+        assert_eq!(dec.array().unwrap(), Some(1));
+        assert_eq!(dec.u8().unwrap(), 0);
+        // [3] candidateNonce: NeutralNonce → array(1) [0]
+        assert_eq!(dec.array().unwrap(), Some(1));
+        assert_eq!(dec.u8().unwrap(), 0);
+    }
+
+    /// Verify that DebugNewEpochState encodes NonMyopic as array(2)[map, coin]
+    /// instead of the previously incorrect map(0).
+    #[test]
+    fn test_encode_debug_new_epoch_state_non_myopic_structure() {
+        use crate::query_handler::SnapshotStakeData;
+        let empty_snap = Box::new(SnapshotStakeData::default());
+        let result = QueryResult::DebugNewEpochState {
+            epoch: 5,
+            blocks_made_prev: vec![],
+            blocks_made_cur: vec![],
+            treasury: 100,
+            reserves: 200,
+            snap_mark: empty_snap.clone(),
+            snap_set: empty_snap.clone(),
+            snap_go: empty_snap,
+            snap_fee: 0,
+            total_active_stake: 0,
+            pool_distr: vec![],
+        };
+        let cbor = encode_query_result(&result);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        // Skip MsgResult [4, [result]]
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u32().unwrap(), 4);
+        assert_eq!(dec.array().unwrap(), Some(1));
+        // NewEpochState: array(7)
+        assert_eq!(dec.array().unwrap(), Some(7));
+        dec.skip().unwrap(); // [0] EpochNo
+        dec.skip().unwrap(); // [1] BlocksMade prev
+        dec.skip().unwrap(); // [2] BlocksMade cur
+                             // [3] EpochState: array(4)
+        assert_eq!(dec.array().unwrap(), Some(4));
+        dec.skip().unwrap(); // [3][0] AccountState
+        dec.skip().unwrap(); // [3][1] LedgerState
+        dec.skip().unwrap(); // [3][2] SnapShots
+                             // [3][3] NonMyopic: must be array(2) [likelihoods_map, reward_pot]
+        assert_eq!(dec.array().unwrap(), Some(2), "NonMyopic must be array(2)");
+        assert_eq!(
+            dec.map().unwrap(),
+            Some(0),
+            "likelihoods map must be empty map"
+        );
+        assert_eq!(dec.u64().unwrap(), 0, "reward_pot must be 0");
     }
 
     #[test]

@@ -1180,20 +1180,13 @@ mod tests {
             utxo_count: 100,
             ..NodeStateSnapshot::default()
         });
+        // DebugEpochState now carries the EpochState structure (treasury/reserves + snapshots).
         match query(&handler, 8) {
             QueryResult::DebugEpochState {
-                epoch,
-                treasury,
-                reserves,
-                stake_pool_count,
-                utxo_count,
-                ..
+                treasury, reserves, ..
             } => {
-                assert_eq!(epoch, 55);
                 assert_eq!(treasury, 2_000_000);
                 assert_eq!(reserves, 8_000_000);
-                assert_eq!(stake_pool_count, 5);
-                assert_eq!(utxo_count, 100);
             }
             other => panic!("Expected DebugEpochState, got {other:?}"),
         }
@@ -1268,12 +1261,15 @@ mod tests {
         match query(&handler, 13) {
             QueryResult::DebugChainDepState {
                 last_slot,
+                last_slot_is_origin,
                 epoch_nonce,
                 evolving_nonce,
                 candidate_nonce,
                 lab_nonce,
+                ..
             } => {
                 assert_eq!(last_slot, 99999);
+                assert!(!last_slot_is_origin);
                 assert_eq!(epoch_nonce.len(), 32);
                 assert_eq!(evolving_nonce.len(), 32);
                 assert_eq!(candidate_nonce.len(), 32);

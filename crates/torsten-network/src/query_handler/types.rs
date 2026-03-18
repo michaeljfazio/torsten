@@ -60,16 +60,25 @@ pub enum QueryResult {
     HardForkCurrentEra(u32),
     /// GetCBOR (tag 9): wraps an inner query result as CBOR-in-CBOR (tag 24)
     WrappedCbor(Box<QueryResult>),
-    /// DebugEpochState (tag 8): epoch state summary
+    /// DebugEpochState (tag 8): full Haskell-compatible EpochState.
+    ///
+    /// Haskell encodes `EpochState` as `array(4)`:
+    ///   `[ChainAccountState, LedgerState, SnapShots, NonMyopic]`
+    ///
+    /// Tools like db-analyser deserialize this by parsing the well-known
+    /// positional structure, so we must match it even if LedgerState and
+    /// NonMyopic are simplified.
     DebugEpochState {
-        epoch: u64,
         treasury: u64,
         reserves: u64,
-        stake_pool_count: u64,
-        utxo_count: u64,
-        active_stake: u64,
-        delegations: u64,
-        rewards: u64,
+        /// Mark snapshot (most recent epoch boundary)
+        snap_mark: Box<SnapshotStakeData>,
+        /// Set snapshot (one epoch ago)
+        snap_set: Box<SnapshotStakeData>,
+        /// Go snapshot (two epochs ago)
+        snap_go: Box<SnapshotStakeData>,
+        /// Snapshot fee (lovelace unclaimed at last epoch boundary)
+        snap_fee: u64,
     },
     /// DebugNewEpochState (tag 12): full Haskell-compatible NewEpochState.
     ///
@@ -98,13 +107,49 @@ pub enum QueryResult {
         /// Current pool stake distribution (pool_id_28B → (stake_rational_num, stake_rational_den, vrf_hash_32B))
         pool_distr: Vec<StakePoolSnapshot>,
     },
-    /// DebugChainDepState (tag 13): consensus chain dependent state
+    /// DebugChainDepState (tag 13): consensus chain-dependent state.
+    ///
+    /// Haskell encodes `PraosState` (the `ChainDepState` for the Praos/TPraos
+    /// protocol) using `encodeVersion 0`, producing:
+    ///
+    /// ```text
+    /// array(2) [
+    ///   0,              -- version number
+    ///   array(8) [
+    ///     lastSlot,             -- WithOrigin SlotNo: [0] or [1, slot]
+    ///     ocertCounters,        -- Map<pool_hash, Word64>
+    ///     evolvingNonce,        -- Nonce: [0] neutral or [1, hash32]
+    ///     candidateNonce,       -- Nonce
+    ///     epochNonce,           -- Nonce
+    ///     previousEpochNonce,   -- Nonce
+    ///     labNonce,             -- Nonce (last-applied-block nonce)
+    ///     lastEpochBlockNonce,  -- Nonce (lab nonce from prior epoch)
+    ///   ]
+    /// ]
+    /// ```
+    ///
+    /// Sources:
+    ///   - ouroboros-consensus-protocol/Ouroboros/Consensus/Protocol/Praos.hs
+    ///   - ouroboros-consensus/Ouroboros/Consensus/Util/Versioned.hs (`encodeVersion`)
     DebugChainDepState {
+        /// Last applied block slot (0 = Origin)
         last_slot: u64,
-        epoch_nonce: Vec<u8>,
+        /// Whether last_slot is Origin (true) or At (false)
+        last_slot_is_origin: bool,
+        /// Operation certificate counters: Map<pool_hash(28B), Word64>
+        ocert_counters: Vec<(Vec<u8>, u64)>,
+        /// Evolving nonce (32 bytes), empty = NeutralNonce
         evolving_nonce: Vec<u8>,
+        /// Candidate nonce (32 bytes), empty = NeutralNonce
         candidate_nonce: Vec<u8>,
+        /// Epoch nonce (32 bytes), empty = NeutralNonce
+        epoch_nonce: Vec<u8>,
+        /// Previous epoch nonce (32 bytes), empty = NeutralNonce
+        prev_epoch_nonce: Vec<u8>,
+        /// Lab nonce — derived from the VRF output of the last applied block
         lab_nonce: Vec<u8>,
+        /// Last epoch block nonce — lab nonce from the last block of the prior epoch
+        last_epoch_block_nonce: Vec<u8>,
     },
     /// GetRewardProvenance (tag 14): reward calculation provenance
     RewardProvenance {

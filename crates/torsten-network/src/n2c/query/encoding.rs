@@ -247,25 +247,15 @@ pub(crate) fn encode_query_result_value(
             enc.bytes(&inner_buf).ok();
         }
         QueryResult::DebugEpochState {
-            epoch,
             treasury,
             reserves,
-            stake_pool_count,
-            utxo_count,
-            active_stake,
-            delegations,
-            rewards,
+            snap_mark,
+            snap_set,
+            snap_go,
+            snap_fee,
         } => {
             encode_debug_epoch_state(
-                enc,
-                *epoch,
-                *treasury,
-                *reserves,
-                *stake_pool_count,
-                *utxo_count,
-                *active_stake,
-                *delegations,
-                *rewards,
+                enc, *treasury, *reserves, snap_mark, snap_set, snap_go, *snap_fee,
             );
         }
         QueryResult::DebugNewEpochState {
@@ -298,20 +288,27 @@ pub(crate) fn encode_query_result_value(
         }
         QueryResult::DebugChainDepState {
             last_slot,
-            epoch_nonce,
+            last_slot_is_origin,
+            ocert_counters,
             evolving_nonce,
             candidate_nonce,
+            epoch_nonce,
+            prev_epoch_nonce,
             lab_nonce,
+            last_epoch_block_nonce,
         } => {
-            // Chain dep state: array(5)
-            // [last_slot, epoch_nonce(bytes32), evolving_nonce(bytes32),
-            //  candidate_nonce(bytes32), lab_nonce(bytes32)]
-            enc.array(5).ok();
-            enc.u64(*last_slot).ok();
-            enc.bytes(epoch_nonce).ok();
-            enc.bytes(evolving_nonce).ok();
-            enc.bytes(candidate_nonce).ok();
-            enc.bytes(lab_nonce).ok();
+            encode_debug_chain_dep_state(
+                enc,
+                *last_slot,
+                *last_slot_is_origin,
+                ocert_counters,
+                evolving_nonce,
+                candidate_nonce,
+                epoch_nonce,
+                prev_epoch_nonce,
+                lab_nonce,
+                last_epoch_block_nonce,
+            );
         }
         QueryResult::RewardProvenance {
             epoch,
@@ -1615,29 +1612,82 @@ pub(crate) fn encode_snap_shot(
 
 // ─── Debug query encoding ─────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+/// Encode `DebugEpochState` (tag 8) as the Haskell `EpochState` CBOR structure.
+///
+/// Haskell `EpochState` is a 4-element positional record:
+/// ```text
+/// array(4) [
+///   ChainAccountState,   -- array(2) [treasury, reserves]
+///   LedgerState,         -- simplified placeholder (CBOR-skippable)
+///   SnapShots,           -- array(4) [mark, set, go, fee]
+///   NonMyopic,           -- array(2) [likelihoods_map, reward_pot_coin]
+/// ]
+/// ```
+///
+/// References:
+///   `cardano-ledger / eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/Types.hs`
+///   `encCBOR (EpochState acnt ls ss nm) = ... encodeListLen 4 <> ...`
 fn encode_debug_epoch_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    epoch: u64,
     treasury: u64,
     reserves: u64,
-    stake_pool_count: u64,
-    utxo_count: u64,
-    active_stake: u64,
-    delegations: u64,
-    rewards: u64,
+    snap_mark: &SnapshotStakeData,
+    snap_set: &SnapshotStakeData,
+    snap_go: &SnapshotStakeData,
+    snap_fee: u64,
 ) {
-    // Epoch state summary: array(8)
-    // [epoch, treasury, reserves, pool_count, utxo_count, active_stake, delegations, rewards]
-    enc.array(8).ok();
-    enc.u64(epoch).ok();
+    // EpochState = array(4) [AccountState, LedgerState, SnapShots, NonMyopic]
+    enc.array(4).ok();
+
+    // [0] ChainAccountState = array(2) [treasury, reserves]
+    enc.array(2).ok();
     enc.u64(treasury).ok();
     enc.u64(reserves).ok();
-    enc.u64(stake_pool_count).ok();
-    enc.u64(utxo_count).ok();
-    enc.u64(active_stake).ok();
-    enc.u64(delegations).ok();
-    enc.u64(rewards).ok();
+
+    // [1] LedgerState — simplified CBOR-skippable placeholder.
+    //
+    // In Conway, `LedgerState = array(2) [UTxOState, CertState]`.
+    // We emit a minimal but structurally valid representation so that a
+    // strict CBOR parser can decode past it to reach SnapShots at [2].
+    //
+    // UTxOState = array(5) [utxo_map, deposited, fees, gov_state, donation]
+    // CertState = array(3) [VState, PState, DState]
+    //
+    // Haskell references:
+    //   `Cardano.Ledger.Shelley.LedgerState.UTxOState` (encodeListLen 5)
+    //   `Cardano.Ledger.Shelley.LedgerState.CertState` (encodeListLen 3)
+    enc.array(2).ok();
+    // UTxOState: array(5) with all-zero / empty contents
+    enc.array(5).ok();
+    enc.map(0).ok(); // empty UTxO map
+    enc.u64(0).ok(); // deposited lovelace = 0
+    enc.u64(0).ok(); // fees = 0
+                     // GovState placeholder: ConwayGovState = array(7) — emit array(0) as a
+                     // skippable marker; parsers that only read LedgerState[1] (CertState) skip
+                     // this via decodeSkip before reaching CertState.
+    enc.array(0).ok();
+    enc.u64(0).ok(); // donation = 0
+                     // CertState: array(3) [VState, PState, DState] — all empty
+    enc.array(3).ok();
+    enc.array(0).ok(); // VState placeholder
+    enc.array(0).ok(); // PState placeholder
+    enc.array(0).ok(); // DState placeholder
+
+    // [2] SnapShots = array(4) [mark, set, go, fee]
+    enc.array(4).ok();
+    encode_snap_shot(enc, snap_mark);
+    encode_snap_shot(enc, snap_set);
+    encode_snap_shot(enc, snap_go);
+    enc.u64(snap_fee).ok();
+
+    // [3] NonMyopic = array(2) [likelihoods_map, reward_pot_coin]
+    //
+    // `NonMyopic` stores per-pool likelihood histories used for non-myopic
+    // pool ranking.  We emit an empty likelihoods map and a zero reward pot.
+    // Reference: `Cardano.Ledger.Shelley.PoolRank` (encodeListLen 2)
+    enc.array(2).ok();
+    enc.map(0).ok(); // empty likelihoods map
+    enc.u64(0).ok(); // reward pot coin = 0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1720,8 +1770,12 @@ fn encode_debug_new_epoch_state(
     encode_snap_shot(enc, snap_go);
     enc.u64(snap_fee).ok();
 
-    // [3][3] NonMyopic — empty map (cncli doesn't use this)
-    enc.map(0).ok();
+    // [3][3] NonMyopic = array(2) [likelihoods_map, reward_pot_coin]
+    // cncli does not inspect this field, but we encode it correctly for
+    // strict parsers.  Reference: Cardano.Ledger.Shelley.PoolRank (encodeListLen 2)
+    enc.array(2).ok();
+    enc.map(0).ok(); // empty likelihoods map
+    enc.u64(0).ok(); // reward pot coin = 0
 
     // [4] StrictMaybe RewardUpdate = Nothing = array(0)
     enc.array(0).ok();
@@ -1739,6 +1793,99 @@ fn encode_debug_new_epoch_state(
 
     // [6] Extra = array(0)
     enc.array(0).ok();
+}
+
+/// Encode `DebugChainDepState` (tag 13) as the Haskell `PraosState` CBOR structure.
+///
+/// Haskell uses `encodeVersion 0` (from `Ouroboros.Consensus.Util.Versioned`),
+/// which wraps any payload as `array(2) [version, payload]`.  The PraosState
+/// payload itself is `array(8)` of the eight fields listed below.
+///
+/// All nonce values use the Haskell `Nonce` encoding:
+///   - `NeutralNonce` → `array(1) [0]`
+///   - `Nonce hash`   → `array(2) [1, bytes32]`
+///
+/// We treat any 32-byte non-zero slice as a real nonce (`Nonce hash`), and
+/// an empty or all-zero slice as `NeutralNonce`.  This matches the Haskell
+/// semantics where the neutral element is the identity for nonce evolution.
+///
+/// The `WithOrigin SlotNo` (praosStateLastSlot) uses the same convention as
+/// other `WithOrigin` fields in the protocol:
+///   - `Origin` → `array(1) [0]`
+///   - `At slot` → `array(2) [1, slot_u64]`
+///
+/// References:
+///   `ouroboros-consensus-protocol / Ouroboros/Consensus/Protocol/Praos.hs`
+///   `ouroboros-consensus / Ouroboros/Consensus/Util/Versioned.hs`
+///   `cardano-ledger / libs/cardano-ledger-core/src/Cardano/Ledger/BaseTypes.hs`
+#[allow(clippy::too_many_arguments)]
+fn encode_debug_chain_dep_state(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    last_slot: u64,
+    last_slot_is_origin: bool,
+    ocert_counters: &[(Vec<u8>, u64)],
+    evolving_nonce: &[u8],
+    candidate_nonce: &[u8],
+    epoch_nonce: &[u8],
+    prev_epoch_nonce: &[u8],
+    lab_nonce: &[u8],
+    last_epoch_block_nonce: &[u8],
+) {
+    // encodeVersion 0: array(2) [0, payload]
+    enc.array(2).ok();
+    enc.u8(0).ok(); // version number
+
+    // PraosState: array(8) [lastSlot, ocertCounters, evolvingNonce,
+    //   candidateNonce, epochNonce, previousEpochNonce, labNonce,
+    //   lastEpochBlockNonce]
+    enc.array(8).ok();
+
+    // [0] praosStateLastSlot: WithOrigin SlotNo
+    // WithOrigin<T> via generic Serialise: Origin=[0], At slot=[1, slot]
+    if last_slot_is_origin {
+        enc.array(1).ok();
+        enc.u8(0).ok();
+    } else {
+        enc.array(2).ok();
+        enc.u8(1).ok();
+        enc.u64(last_slot).ok();
+    }
+
+    // [1] praosStateOCertCounters: Map<KeyHash BlockIssuer, Word64>
+    // KeyHash is a 28-byte hash; we use the raw bytes as map key.
+    enc.map(ocert_counters.len() as u64).ok();
+    for (pool_hash, counter) in ocert_counters {
+        enc.bytes(pool_hash).ok();
+        enc.u64(*counter).ok();
+    }
+
+    // Helper: encode a Cardano `Nonce` value.
+    // NeutralNonce: empty or all-zero bytes → array(1)[0]
+    // Nonce(hash):  any non-zero 32-byte slice → array(2)[1, bytes32]
+    let encode_nonce = |enc: &mut minicbor::Encoder<&mut Vec<u8>>, nonce: &[u8]| {
+        let is_neutral = nonce.is_empty() || nonce.iter().all(|&b| b == 0);
+        if is_neutral {
+            enc.array(1).ok();
+            enc.u8(0).ok();
+        } else {
+            enc.array(2).ok();
+            enc.u8(1).ok();
+            enc.bytes(nonce).ok();
+        }
+    };
+
+    // [2] praosStateEvolvingNonce
+    encode_nonce(enc, evolving_nonce);
+    // [3] praosStateCandidateNonce
+    encode_nonce(enc, candidate_nonce);
+    // [4] praosStateEpochNonce
+    encode_nonce(enc, epoch_nonce);
+    // [5] praosStatePreviousEpochNonce
+    encode_nonce(enc, prev_epoch_nonce);
+    // [6] praosStateLabNonce
+    encode_nonce(enc, lab_nonce);
+    // [7] praosStateLastEpochBlockNonce
+    encode_nonce(enc, last_epoch_block_nonce);
 }
 
 fn encode_reward_info_pools(
