@@ -366,8 +366,11 @@ pub(super) fn run_phase1_rules(
             tagged.extend_from_slice(s);
             available_script_hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
         }
-        for ref_input in &body.reference_inputs {
-            if let Some(utxo) = utxo_set.lookup(ref_input) {
+        // Per Haskell's `scriptsProvided`, script_refs are collected from BOTH
+        // spending inputs AND reference inputs.  A minting policy satisfied via
+        // a script_ref that lives in a spending-input UTxO is therefore valid.
+        for inp in body.inputs.iter().chain(body.reference_inputs.iter()) {
+            if let Some(utxo) = utxo_set.lookup(inp) {
                 if let Some(script_ref) = &utxo.script_ref {
                     let hash = super::scripts::compute_script_ref_hash(script_ref);
                     available_script_hashes.insert(hash);
@@ -379,7 +382,7 @@ pub(super) fn run_phase1_rules(
             if !available_script_hashes.contains(policy) {
                 tracing::debug!(
                     policy = %policy.to_hex(),
-                    "Minting policy without matching script in witness set or reference inputs"
+                    "Minting policy without matching script in witness set, spending inputs, or reference inputs"
                 );
                 errors.push(ValidationError::InvalidMint);
                 break;

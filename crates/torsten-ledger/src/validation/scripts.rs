@@ -99,7 +99,11 @@ pub(super) fn compute_script_ref_hash(script_ref: &ScriptRef) -> Hash28 {
 }
 
 /// Collect all available script hashes from the transaction's witness set and
-/// from reference input UTxOs.
+/// from UTxOs reachable by both spending inputs and reference inputs.
+///
+/// Matches Haskell's `scriptsProvided` which is defined over
+/// `inputs txb <> referenceInputs txb`.  A script_ref on a *spending* input's
+/// UTxO is as valid a source of a script witness as one on a reference input.
 ///
 /// Used for witness completeness checks (Rule 9b) and minting policy checks
 /// (Rule 3c).
@@ -142,9 +146,14 @@ pub(super) fn collect_available_script_hashes(
         hashes.insert(torsten_primitives::hash::blake2b_224(&tagged));
     }
 
-    // Reference scripts from reference inputs
-    for ref_input in &tx.body.reference_inputs {
-        if let Some(utxo) = utxo_set.lookup(ref_input) {
+    // Reference scripts from spending inputs AND reference inputs.
+    //
+    // Haskell's `scriptsProvided` is computed over `inputs txb <> referenceInputs txb`,
+    // meaning a script_ref attached to a *spending* input UTxO is also available as a
+    // witness for minting policies and script-locked inputs (Rule 9b). This matches the
+    // Cardano ledger's `Cardano.Ledger.Alonzo.Tx.ScriptsProvided` definition.
+    for inp in tx.body.inputs.iter().chain(tx.body.reference_inputs.iter()) {
+        if let Some(utxo) = utxo_set.lookup(inp) {
             if let Some(script_ref) = &utxo.script_ref {
                 hashes.insert(compute_script_ref_hash(script_ref));
             }

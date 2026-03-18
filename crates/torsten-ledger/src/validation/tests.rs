@@ -1267,6 +1267,196 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // ---------------------------------------------------------------------------
+    // Issue #155: minting policy satisfied by script_ref on a spending input
+    //
+    // Haskell's `scriptsProvided` collects script_refs from BOTH spending inputs
+    // and reference inputs.  Our original Rule 3c and collect_available_script_hashes
+    // only scanned reference_inputs, causing false InvalidMint rejections.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_minting_policy_satisfied_by_spending_input_script_ref() {
+        // Scenario: the spending input's UTxO itself carries a script_ref whose hash
+        // matches the minting policy.  No reference_inputs are needed.
+        let native_script = NativeScript::ScriptAll(vec![]);
+        let script_hash = compute_script_ref_hash(&ScriptRef::NativeScript(native_script.clone()));
+
+        let mut utxo_set = UtxoSet::new();
+        // Spending input carries the script_ref
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                // script_ref on the spending input — the fix makes this count
+                script_ref: Some(ScriptRef::NativeScript(native_script.clone())),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let asset = AssetName(b"Coin".to_vec());
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(script_hash)
+            .or_default()
+            .insert(asset.clone(), 100);
+
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(script_hash)
+            .or_default()
+            .insert(asset, 100);
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.mint = mint;
+        tx.body.outputs[0].value = output_value;
+        // No reference_inputs; the script comes from the spending input's UTxO
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(
+            result.is_ok(),
+            "Minting policy satisfied via spending-input script_ref should be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_minting_policy_spending_input_script_ref_wrong_hash_fails() {
+        // Script_ref on the spending input does NOT match the minting policy hash.
+        // Should still fail with InvalidMint.
+        let native_script = NativeScript::ScriptAll(vec![]);
+        let wrong_policy = Hash28::from_bytes([0xde; 28]); // not the script's hash
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::NativeScript(native_script)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let asset = AssetName(b"Coin".to_vec());
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(wrong_policy)
+            .or_default()
+            .insert(asset.clone(), 100);
+        let mut output_value = Value::lovelace(9_800_000);
+        output_value
+            .multi_asset
+            .entry(wrong_policy)
+            .or_default()
+            .insert(asset, 100);
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.mint = mint;
+        tx.body.outputs[0].value = output_value;
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidMint)),
+            "Wrong script_ref hash should still produce InvalidMint: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_witness_completeness_script_input_satisfied_by_spending_input_script_ref() {
+        // Rule 9b: a script-locked input's script can be satisfied by a script_ref
+        // on another spending input (not just reference inputs).
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        let native_script = NativeScript::ScriptAll(vec![]);
+        let script_hash = compute_script_ref_hash(&ScriptRef::NativeScript(native_script.clone()));
+
+        let mut utxo_set = UtxoSet::new();
+
+        // Input 0: carries the script_ref (the "provider" input)
+        let provider_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            provider_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::NativeScript(native_script)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Input 1: locked by the script whose hash is script_hash
+        let script_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            script_input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(9_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(provider_input.clone(), 9_800_000, 200_000);
+        // Spend both inputs together
+        tx.body.inputs.push(script_input);
+        // Recalculate value conservation: 1_000_000 + 9_000_000 = 10_000_000
+        tx.body.outputs[0].value = Value::lovelace(9_800_000);
+        // No explicit scripts in the witness_set — only the spending input's script_ref
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        // After the fix, Rule 9b finds the script via the spending input's script_ref.
+        match result {
+            Ok(()) => {}
+            Err(ref errors) => {
+                assert!(
+                    !errors.iter().any(|e| matches!(e, ValidationError::MissingScriptWitness(_))),
+                    "Script witness should be satisfied via spending-input script_ref, got: {errors:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_compute_script_ref_hash_plutus_v2() {
         let script_bytes = vec![0x01, 0x02, 0x03, 0x04];
