@@ -10,24 +10,184 @@ use tracing::{error, info};
 const STALLED_THRESHOLD_SECS: u64 = 300; // 5 minutes
 
 /// Tracks process CPU utilization between samples.
+///
+/// Computes CPU percentage by comparing cumulative process CPU time (user +
+/// kernel) across two wall-clock samples.  The percentage is relative to one
+/// logical CPU core, so values > 100 are possible on multi-threaded workloads.
+///
+/// Platform notes:
+/// - Linux: reads `/proc/self/stat` fields 14 (utime) and 15 (stime) in clock
+///   ticks, then divides by the tick frequency obtained from `libc::sysconf`.
+/// - macOS: shell out to `ps -o pcpu= -p <pid>` which reports instantaneous
+///   CPU% directly — cheap enough for a 5-second polling window.
+/// - Other platforms: returns 0.0 (no-op, no external dependencies needed).
 struct CpuTracker {
-    last_sample: std::time::Instant,
+    /// Wall-clock time of the previous sample.
+    last_wall: std::time::Instant,
+    /// Cumulative CPU ticks (utime + stime) at the previous sample.
+    /// Stored as 0 on non-Linux platforms (unused).
+    last_cpu_ticks: u64,
+    /// CPU percentage from the most recent interval (updated on each `sample()`).
+    last_pct: f64,
+    /// Cumulative CPU seconds (utime + stime / CLK_TCK) updated on each sample.
+    /// Used to expose `torsten_cpu_seconds_total`.
+    cumulative_cpu_secs: f64,
 }
 
 impl CpuTracker {
     fn new() -> Self {
         Self {
-            last_sample: std::time::Instant::now(),
+            last_wall: std::time::Instant::now(),
+            last_cpu_ticks: read_cpu_ticks_linux(),
+            last_pct: 0.0,
+            cumulative_cpu_secs: 0.0,
         }
     }
 
-    /// Sample current CPU usage. Returns percentage (0-100+).
+    /// Sample current CPU usage.
+    ///
+    /// Returns the CPU percentage consumed since the previous call (0.0–100.0+
+    /// per core).  Also updates `self.cumulative_cpu_secs`.
     fn sample(&mut self) -> f64 {
-        let _ = self.last_sample;
-        self.last_sample = std::time::Instant::now();
-        // Placeholder — actual CPU measurement requires platform-specific code
-        0.0
+        let pct = sample_cpu_pct_impl(
+            &mut self.last_wall,
+            &mut self.last_cpu_ticks,
+            &mut self.cumulative_cpu_secs,
+        );
+        self.last_pct = pct;
+        pct
     }
+}
+
+// ---------------------------------------------------------------------------
+// Linux implementation — /proc/self/stat
+// ---------------------------------------------------------------------------
+
+/// Read the sum of `utime + stime` (in clock ticks) from `/proc/self/stat`.
+/// Returns 0 on non-Linux platforms or if the file cannot be parsed.
+#[cfg(target_os = "linux")]
+fn read_cpu_ticks_linux() -> u64 {
+    // /proc/self/stat is a single space-separated line; fields are 1-indexed
+    // in the proc(5) man page.  Fields 14 (utime) and 15 (stime) are the
+    // user-mode and kernel-mode CPU times in clock ticks.
+    //
+    // Field 2 (comm) can contain spaces inside parentheses, so we locate the
+    // closing ')' and split from there to get the remaining positional fields.
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            // Skip past the closing ')' of the comm field.
+            let after_comm = s.find(')')? + 1;
+            let rest = s[after_comm..].trim_start();
+            // Remaining fields are whitespace-separated; 0-indexed from here:
+            //   0 = state (field 3)
+            //   ...
+            //  11 = utime (field 14)
+            //  12 = stime (field 15)
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            let utime: u64 = fields.get(11)?.parse().ok()?;
+            let stime: u64 = fields.get(12)?.parse().ok()?;
+            Some(utime + stime)
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_cpu_ticks_linux() -> u64 {
+    0
+}
+
+/// Return the number of clock ticks per second (`_SC_CLK_TCK`).
+///
+/// 100 is the correct value on virtually all Linux systems but we read the
+/// actual kernel-reported value to be accurate.  The result is cached after
+/// the first call via a `std::sync::OnceLock`.
+#[cfg(target_os = "linux")]
+fn clk_tck() -> u64 {
+    static CLK_TCK: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CLK_TCK.get_or_init(|| {
+        // SAFETY: sysconf is always safe to call with _SC_CLK_TCK.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if ticks > 0 {
+            ticks as u64
+        } else {
+            100
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Platform-dispatched sampling
+// ---------------------------------------------------------------------------
+
+/// Compute the CPU percentage consumed since the last call and update
+/// the cumulative CPU seconds counter.
+///
+/// On Linux: delta_ticks / clk_tck / elapsed_wall_secs * 100.
+/// On macOS: one `ps -o pcpu=` shell-out per call.
+/// Elsewhere: 0.0 always.
+#[cfg(target_os = "linux")]
+fn sample_cpu_pct_impl(
+    last_wall: &mut std::time::Instant,
+    last_ticks: &mut u64,
+    cumulative_secs: &mut f64,
+) -> f64 {
+    let now_wall = std::time::Instant::now();
+    let elapsed_wall = now_wall.duration_since(*last_wall).as_secs_f64();
+
+    let current_ticks = read_cpu_ticks_linux();
+    let tck = clk_tck();
+
+    // Guard against clock going backwards or zero elapsed time.
+    if elapsed_wall < 0.001 || tck == 0 {
+        return 0.0;
+    }
+
+    let delta_ticks = current_ticks.saturating_sub(*last_ticks);
+    let delta_cpu_secs = delta_ticks as f64 / tck as f64;
+
+    *cumulative_secs += delta_cpu_secs;
+    *last_wall = now_wall;
+    *last_ticks = current_ticks;
+
+    // Clamp to a sane ceiling (400% = 4 fully-loaded cores).
+    (delta_cpu_secs / elapsed_wall * 100.0).clamp(0.0, 400.0)
+}
+
+#[cfg(target_os = "macos")]
+fn sample_cpu_pct_impl(
+    last_wall: &mut std::time::Instant,
+    _last_ticks: &mut u64,
+    cumulative_secs: &mut f64,
+) -> f64 {
+    // `ps -o pcpu=` emits the CPU% since process start (not since last call),
+    // which is what we want for the gauge display.  The shell-out takes ~5 ms
+    // on macOS; acceptable for a monitoring interval of >= 2 seconds.
+    let pct = std::process::Command::new("ps")
+        .args(["-o", "pcpu=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    // Update cumulative seconds from the elapsed wall time and the current %.
+    let now_wall = std::time::Instant::now();
+    let elapsed_wall = now_wall.duration_since(*last_wall).as_secs_f64();
+    *last_wall = now_wall;
+    // Approximate: pct is since-start average, so delta = pct/100 * elapsed_wall.
+    *cumulative_secs += (pct / 100.0) * elapsed_wall;
+
+    pct.clamp(0.0, 400.0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn sample_cpu_pct_impl(
+    _last_wall: &mut std::time::Instant,
+    _last_ticks: &mut u64,
+    _cumulative_secs: &mut f64,
+) -> f64 {
+    0.0
 }
 
 /// Sync progress threshold (as percentage * 100) at or above which the node is "healthy".
@@ -450,11 +610,15 @@ impl NodeMetrics {
                 Ordering::Relaxed,
             );
         }
-        // Sample CPU tracker to keep measurement window fresh (CPU metric
-        // will be emitted once platform-specific sampling is implemented).
-        if let Ok(mut tracker) = self.cpu_tracker.lock() {
-            let _cpu = tracker.sample();
-        }
+        // Sample the CPU tracker on every scrape.  This computes the
+        // percentage CPU consumed since the previous scrape interval and
+        // accumulates cumulative seconds.  Both values are emitted below.
+        let (cpu_pct, cpu_secs_total) = if let Ok(mut tracker) = self.cpu_tracker.lock() {
+            let pct = tracker.sample();
+            (pct, tracker.cumulative_cpu_secs)
+        } else {
+            (0.0, 0.0)
+        };
 
         let mut out = String::with_capacity(2048);
 
@@ -679,6 +843,25 @@ impl NodeMetrics {
         let uptime_secs = self.startup_instant.elapsed().as_secs();
         out.push_str(&format!(
             "# HELP torsten_uptime_seconds Time since node startup\n# TYPE torsten_uptime_seconds gauge\ntorsten_uptime_seconds {uptime_secs}\n"
+        ));
+
+        // CPU metrics — emitted as both a gauge (current %) and a counter
+        // (cumulative seconds of CPU time consumed since node start).
+        //
+        // `torsten_cpu_percent`: instantaneous CPU utilisation (user + kernel)
+        //   relative to one logical core.  >100 is possible on multi-threaded
+        //   workloads.
+        // `torsten_cpu_seconds_total`: monotonically increasing counter of
+        //   wall-adjusted CPU seconds consumed since node start.
+        out.push_str(&format!(
+            "# HELP torsten_cpu_percent Process CPU utilisation as a percentage of one core\n\
+             # TYPE torsten_cpu_percent gauge\n\
+             torsten_cpu_percent {cpu_pct:.3}\n"
+        ));
+        out.push_str(&format!(
+            "# HELP torsten_cpu_seconds_total Cumulative CPU time consumed by the process in seconds\n\
+             # TYPE torsten_cpu_seconds_total counter\n\
+             torsten_cpu_seconds_total {cpu_secs_total:.6}\n"
         ));
 
         // Resident memory gauge
@@ -920,6 +1103,50 @@ mod tests {
         assert!(output.contains("torsten_peer_handshake_rtt_ms_bucket"));
         assert!(output.contains("torsten_peer_block_fetch_ms_bucket"));
         assert!(output.contains("torsten_uptime_seconds"));
+    }
+
+    #[test]
+    fn test_prometheus_output_includes_cpu_metrics() {
+        // Verify that the two CPU-related metrics are always present in the
+        // Prometheus output, even when the measured value is zero (which is the
+        // case on platforms without a sampling implementation or immediately
+        // after node start before any meaningful CPU has been consumed).
+        let metrics = NodeMetrics::new();
+        let output = metrics.to_prometheus();
+
+        // Both metrics must be present with correct types.
+        assert!(
+            output.contains("# TYPE torsten_cpu_percent gauge"),
+            "torsten_cpu_percent gauge TYPE declaration missing"
+        );
+        assert!(
+            output.contains("# TYPE torsten_cpu_seconds_total counter"),
+            "torsten_cpu_seconds_total counter TYPE declaration missing"
+        );
+        // The gauge line must exist (value may be 0.000 on first call).
+        assert!(
+            output.contains("torsten_cpu_percent "),
+            "torsten_cpu_percent value line missing"
+        );
+        assert!(
+            output.contains("torsten_cpu_seconds_total "),
+            "torsten_cpu_seconds_total value line missing"
+        );
+        // The resident-memory metric should still be present alongside CPU.
+        assert!(output.contains("torsten_mem_resident_bytes "));
+    }
+
+    #[test]
+    fn test_cpu_tracker_cumulative_seconds_non_negative() {
+        // After two sample() calls the cumulative CPU seconds must be >= 0.
+        let mut tracker = CpuTracker::new();
+        let _pct1 = tracker.sample();
+        let _pct2 = tracker.sample();
+        assert!(
+            tracker.cumulative_cpu_secs >= 0.0,
+            "cumulative CPU seconds must be non-negative, got {}",
+            tracker.cumulative_cpu_secs
+        );
     }
 
     #[test]
