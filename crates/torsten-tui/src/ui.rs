@@ -897,7 +897,6 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let rtt = &app.rtt_bands;
     let total = rtt.band_0_50 + rtt.band_50_100 + rtt.band_100_200 + rtt.band_200_plus;
 
-    // Format RTT value — derived from histogram _sum/_count for accuracy.
     let fmt_rtt = |ms: Option<f64>| -> String {
         match ms {
             Some(v) => format!("{:.0}ms", v),
@@ -905,112 +904,62 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     };
 
-    // Bar width = full inner width minus 1-char left margin.
-    let bar_width = inner.width.saturating_sub(1) as usize;
-
+    let col_w = inner.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
-    // RTT distribution bar (colored segments per band).
-    if total > 0 && bar_width >= 4 {
-        let bar = build_rtt_colored_bar(
-            rtt.band_0_50,
-            rtt.band_50_100,
-            rtt.band_100_200,
-            rtt.band_200_plus,
-            bar_width,
-            theme,
-        );
-        lines.push(Line::from([vec![Span::raw(" ")], bar].concat()));
-    } else {
+    if total == 0 {
         lines.push(Line::from(Span::styled(
-            " (no handshake data yet)",
+            " Waiting for handshake data...",
             Style::default().fg(theme.muted),
         )));
-    }
+    } else {
+        // Row 1: Key stats as right-aligned key-value pairs.
+        lines.push(kv_aligned(
+            "Avg RTT",
+            fmt_rtt(rtt.avg_ms),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "Min / Max",
+            format!("{} / {}", fmt_rtt(rtt.min_ms), fmt_rtt(rtt.max_ms)),
+            theme.muted,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "p50 / p95",
+            format!("{} / {}", fmt_rtt(rtt.p50_ms), fmt_rtt(rtt.p95_ms)),
+            theme.warning,
+            theme,
+            col_w,
+        ));
 
-    // Per-band histogram rows: each band gets its own row with a proportional
-    // bar so the operator can see at a glance which latency buckets are most
-    // populated.  Bar width is `count / max_count * bar_max_w`.
-    //
-    // Layout per row:  " LABEL  COUNT  [████████░░░░░░░░]"
-    //   - label: 9 chars left-aligned
-    //   - count: 4 chars right-aligned
-    //   - bar:   remaining width minus 1-char margin
-    // Single compact row with all RTT bands:
-    //  0-50:5 | 50-100:0 | 100-200:0 | 200+:0
-    let band_items: &[(&str, u64, Color)] = &[
-        ("0-50", rtt.band_0_50, theme.success),
-        ("50-100", rtt.band_50_100, theme.info),
-        ("100-200", rtt.band_100_200, theme.warning),
-        ("200+", rtt.band_200_plus, theme.error),
-    ];
-    let sep = Span::styled(" | ", Style::default().fg(theme.muted));
-    let mut band_spans = vec![Span::raw(" ")];
-    for (i, (label, count, color)) in band_items.iter().enumerate() {
-        if i > 0 {
-            band_spans.push(sep.clone());
+        // Row 4: Band distribution — compact inline.
+        let band_items: &[(&str, u64, Color)] = &[
+            ("<50ms:", rtt.band_0_50, theme.success),
+            ("<100:", rtt.band_50_100, theme.info),
+            ("<200:", rtt.band_100_200, theme.warning),
+            ("200+:", rtt.band_200_plus, theme.error),
+        ];
+        let sep = Span::styled("  ", Style::default().fg(theme.muted));
+        let mut band_spans = vec![Span::raw(" ")];
+        for (i, (label, count, color)) in band_items.iter().enumerate() {
+            if i > 0 {
+                band_spans.push(sep.clone());
+            }
+            band_spans.push(Span::styled(
+                label.to_string(),
+                Style::default().fg(theme.muted),
+            ));
+            band_spans.push(Span::styled(
+                format!("{count}"),
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            ));
         }
-        band_spans.push(Span::styled(
-            format!("{label}:"),
-            Style::default().fg(theme.muted),
-        ));
-        band_spans.push(Span::styled(
-            format!("{count}"),
-            Style::default().fg(*color).add_modifier(Modifier::BOLD),
-        ));
+        lines.push(Line::from(band_spans));
     }
-    lines.push(Line::from(band_spans));
-
-    // Single horizontal RTT breakpoint row:
-    //   min: 12ms | avg: 45ms | p50: 38ms | p95: 120ms | max: 250ms
-    //
-    // All five values sit on one line, separated by a muted ` | ` divider,
-    // so the panel row is not wasted on vertical stacking.
-    let min_str = fmt_rtt(rtt.min_ms);
-    let avg_str = fmt_rtt(rtt.avg_ms);
-    let p50_str = fmt_rtt(rtt.p50_ms);
-    let p95_str = fmt_rtt(rtt.p95_ms);
-    let max_str = fmt_rtt(rtt.max_ms);
-
-    let sep = Span::styled(" | ", Style::default().fg(theme.muted));
-    lines.push(Line::from(vec![
-        Span::raw(" "),
-        Span::styled("min:", Style::default().fg(theme.muted)),
-        Span::styled(
-            min_str,
-            Style::default()
-                .fg(theme.success)
-                .add_modifier(Modifier::BOLD),
-        ),
-        sep.clone(),
-        Span::styled("avg:", Style::default().fg(theme.muted)),
-        Span::styled(
-            avg_str,
-            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-        ),
-        sep.clone(),
-        Span::styled("p50:", Style::default().fg(theme.muted)),
-        Span::styled(
-            p50_str,
-            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-        ),
-        sep.clone(),
-        Span::styled("p95:", Style::default().fg(theme.muted)),
-        Span::styled(
-            p95_str,
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ),
-        sep.clone(),
-        Span::styled("max:", Style::default().fg(theme.muted)),
-        Span::styled(
-            max_str,
-            Style::default()
-                .fg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
 
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1346,11 +1295,11 @@ fn peer_state_row(items: &[(&str, u64, Color)], theme: &Theme) -> Line<'static> 
             spans.push(sep.clone());
         }
         spans.push(Span::styled(
-            format!("{label}"),
+            label.to_string(),
             Style::default().fg(theme.muted),
         ));
         spans.push(Span::styled(
-            format!("{}", App::format_number(*value)),
+            App::format_number(*value).to_string(),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
         ));
     }
@@ -1488,68 +1437,6 @@ fn build_mini_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) -> V
 
 /// Build a colored RTT distribution bar using distinct colors per band.
 ///
-/// Each band is drawn as a contiguous run of full-block characters,
-/// colored by latency severity (success/info/warning/error).
-///
-/// Pixel widths are assigned proportionally using the largest-remainder method
-/// to ensure the total always equals `width` regardless of rounding.
-fn build_rtt_colored_bar<'a>(
-    b0: u64,
-    b1: u64,
-    b2: u64,
-    b3: u64,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Span<'a>> {
-    let total = b0 + b1 + b2 + b3;
-    if total == 0 || width == 0 {
-        return vec![Span::styled(
-            "\u{2591}".repeat(width),
-            Style::default().fg(theme.gauge_empty),
-        )];
-    }
-
-    // Largest-remainder allocation: compute exact fractional widths, take the
-    // floor of each, then distribute the remaining pixels to the bands with
-    // the highest fractional remainders.  This guarantees sum == width and
-    // prevents zero-count bands from receiving pixels due to rounding.
-    let bands_raw: [(u64, Color); 4] = [
-        (b0, theme.success),
-        (b1, theme.info),
-        (b2, theme.warning),
-        (b3, theme.error),
-    ];
-
-    // Compute exact floating-point widths.
-    let exact: [f64; 4] = bands_raw.map(|(count, _)| (count as f64 / total as f64) * width as f64);
-
-    // Floor allocations.
-    let mut floors: [usize; 4] = exact.map(|v| v as usize);
-    let allocated: usize = floors.iter().sum();
-    let remainder = width.saturating_sub(allocated);
-
-    // Sort indices by fractional part descending and give one extra pixel each.
-    let mut remainders: [(usize, f64); 4] = [
-        (0, exact[0] - floors[0] as f64),
-        (1, exact[1] - floors[1] as f64),
-        (2, exact[2] - floors[2] as f64),
-        (3, exact[3] - floors[3] as f64),
-    ];
-    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for i in 0..remainder {
-        floors[remainders[i].0] += 1;
-    }
-
-    // Full block character — uniformly solid, color carries the meaning.
-    let ch = '\u{2588}';
-    bands_raw
-        .iter()
-        .zip(floors.iter())
-        .filter(|(_, &w)| w > 0)
-        .map(|((_, color), &w)| Span::styled(ch.to_string().repeat(w), Style::default().fg(*color)))
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
