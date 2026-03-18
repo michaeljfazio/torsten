@@ -12,12 +12,14 @@
 //! - Missing Spend redeemer for script-locked inputs (Rule 11c)
 //! - Missing Reward redeemer for script-locked withdrawals (Rule 11c, Haskell `scriptsNeeded`)
 //! - Missing Mint redeemer for Plutus minting policies (Rule 11c, Haskell `scriptsNeeded`)
+//! - Missing Cert redeemer for script-credential certificates (Rule 11c, Haskell `conwayCertsNeeded`)
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::{Hash28, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{RedeemerTag, ScriptRef, Transaction};
+use torsten_primitives::transaction::{Certificate, RedeemerTag, ScriptRef, Transaction};
 use torsten_primitives::value::AssetName;
 
 use crate::utxo::UtxoSet;
@@ -309,6 +311,89 @@ pub(crate) fn check_script_redeemers(
                 tag: "Mint".to_string(),
                 index: idx as u32,
             });
+        }
+    }
+
+    // ------------------------------------------------------------------ Cert
+    // Per Haskell's `conwayCertsNeeded` (Cardano.Ledger.Conway.Rules.Cert),
+    // every certificate that requires a script witness must have a matching
+    // `Cert` redeemer at the certificate's 0-based position in the body's
+    // certificate list.  The index is NOT re-numbered by skipping key-credential
+    // certs; it is the raw positional index, matching Haskell's
+    // `zip [0..] (txcerts txb)`.
+    //
+    // Certificates that require a script credential witness (i.e. contribute to
+    // `scriptsNeeded`):
+    //   - StakeDeregistration (pre-Conway, credential must be Script)
+    //   - StakeDelegation (credential must be Script)
+    //   - ConwayStakeDeregistration (credential must be Script)
+    //   - VoteDelegation (credential must be Script)
+    //   - StakeVoteDelegation (credential must be Script)
+    //   - RegStakeDeleg (credential must be Script)
+    //   - RegStakeVoteDeleg (credential must be Script)
+    //   - VoteRegDeleg (credential must be Script)
+    //   - CommitteeHotAuth (cold_credential must be Script)
+    //   - CommitteeColdResign (cold_credential must be Script)
+    //   - UnregDRep (credential must be Script)
+    //   - UpdateDRep (credential must be Script)
+    //
+    // Certificates that do NOT require a redeemer regardless of credential type:
+    //   - StakeRegistration, ConwayStakeRegistration, PoolRegistration,
+    //     PoolRetirement, RegDRep, GenesisKeyDelegation, MoveInstantaneousRewards
+    //     (either registrations or pool-operator-only actions)
+    let cert_indices: HashSet<u32> = tx
+        .witness_set
+        .redeemers
+        .iter()
+        .filter(|r| r.tag == RedeemerTag::Cert)
+        .map(|r| r.index)
+        .collect();
+
+    for (idx, cert) in body.certificates.iter().enumerate() {
+        // Extract the script credential that must be witnessed, if any.
+        let script_cred: Option<&Credential> = match cert {
+            // Pre-Conway: stake deregistration requires witness when credential is Script.
+            Certificate::StakeDeregistration(c) => Some(c),
+            // Pre-Conway: stake delegation requires witness when credential is Script.
+            Certificate::StakeDelegation { credential: c, .. } => Some(c),
+            // Conway deregistration requires a witness when credential is Script.
+            Certificate::ConwayStakeDeregistration { credential: c, .. } => Some(c),
+            // Conway delegation variants require a witness when credential is Script.
+            Certificate::VoteDelegation { credential: c, .. } => Some(c),
+            Certificate::StakeVoteDelegation { credential: c, .. } => Some(c),
+            Certificate::RegStakeDeleg { credential: c, .. } => Some(c),
+            Certificate::RegStakeVoteDeleg { credential: c, .. } => Some(c),
+            Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+            // CC hot-key authorisation: the cold credential authorises the hot key.
+            Certificate::CommitteeHotAuth {
+                cold_credential: c, ..
+            } => Some(c),
+            // CC cold resign: the cold credential must sign.
+            Certificate::CommitteeColdResign {
+                cold_credential: c, ..
+            } => Some(c),
+            // DRep unregistration: credential must sign.
+            Certificate::UnregDRep { credential: c, .. } => Some(c),
+            // DRep update: credential must sign.
+            Certificate::UpdateDRep { credential: c, .. } => Some(c),
+            // Registrations and pool operations do not require a redeemer.
+            Certificate::StakeRegistration(_)
+            | Certificate::ConwayStakeRegistration { .. }
+            | Certificate::PoolRegistration(_)
+            | Certificate::PoolRetirement { .. }
+            | Certificate::RegDRep { .. }
+            | Certificate::GenesisKeyDelegation { .. }
+            | Certificate::MoveInstantaneousRewards { .. } => None,
+        };
+
+        // A redeemer is only required when the extracted credential is a script hash.
+        if let Some(Credential::Script(_)) = script_cred {
+            if !cert_indices.contains(&(idx as u32)) {
+                errors.push(ValidationError::MissingRedeemer {
+                    tag: "Cert".to_string(),
+                    index: idx as u32,
+                });
+            }
         }
     }
 }
