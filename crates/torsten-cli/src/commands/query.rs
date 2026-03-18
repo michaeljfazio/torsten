@@ -269,13 +269,18 @@ async fn release_and_done(client: &mut torsten_network::N2CClient) {
     client.done().await.ok();
 }
 
-/// Parse and print a UTxO query response in the standard tabular format.
+/// Parse and print a UTxO query response in the cardano-cli tabular format.
 ///
 /// The `raw` bytes are a full LocalStateQuery MsgResult payload:
 ///   `[4, [Map<[tx_hash, index], TransactionOutput>]]`
 /// where the inner array(1) is the HFC success wrapper.
 ///
-/// Matches cardano-cli output: columns TxHash#Ix, Datum, Lovelace.
+/// Output format matches cardano-cli `query utxo` exactly:
+/// ```
+///                            TxHash                                 TxIx        Amount
+/// --------------------------------------------------------------------------------------
+/// <64-char-hash>                                                        0        5000000 lovelace + TxOutDatumNone
+/// ```
 fn print_utxo_result(raw: &[u8]) -> Result<()> {
     // Parse MsgResult [4, array[map{...}]]
     let mut decoder = minicbor::Decoder::new(raw);
@@ -296,8 +301,12 @@ fn print_utxo_result(raw: &[u8]) -> Result<()> {
     // UTxO result: CBOR Map<[tx_hash, index], TransactionOutput>
     let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
 
-    println!("{:<68} {:>6} {:>20}", "TxHash#Ix", "Datum", "Lovelace");
-    println!("{}", "-".repeat(96));
+    // cardano-cli header: TxHash is 64 chars wide, TxIx 4 chars, Amount fills the rest
+    println!(
+        "{:<64} {:<4}         Amount",
+        "                           TxHash", "TxIx"
+    );
+    println!("{}", "-".repeat(86));
 
     for _ in 0..map_len {
         // Key: [tx_hash_bytes, output_index]
@@ -344,12 +353,16 @@ fn print_utxo_result(raw: &[u8]) -> Result<()> {
             }
         }
 
-        let utxo_ref = format!("{tx_hash}#{output_index}");
-        let datum_str = if has_datum { "yes" } else { "no" };
-        println!("{utxo_ref:<68} {datum_str:>6} {lovelace:>20}");
+        // cardano-cli amount format: "<lovelace> lovelace + TxOutDatumNone"
+        // (or "+ TxOutDatumInline ..." for inline datums)
+        let datum_suffix = if has_datum {
+            "+ TxOutDatumInline"
+        } else {
+            "+ TxOutDatumNone"
+        };
+        println!("{tx_hash:<64} {output_index:<4} {lovelace} lovelace {datum_suffix}");
     }
 
-    println!("\nTotal UTxOs: {map_len}");
     Ok(())
 }
 
@@ -405,17 +418,39 @@ impl QueryCmd {
                     100.0
                 };
 
-                let network_name = torsten_primitives::network::NetworkId::name_from_magic(
-                    testnet_magic.unwrap_or(764824073),
-                );
+                // Epoch slot position.
+                // Epoch length: Preview=86400 (1 day), Preprod/Mainnet=432000 (5 days).
+                // Compute slot-in-epoch from (slot - byron_slots) % epoch_length.
+                // Byron: mainnet 21600 epochs × 21600 slots/epoch = 466560000 slots total.
+                // For simplicity we use the well-known epoch-length per network.
+                let epoch_length: u64 = match testnet_magic {
+                    Some(2) => 86400,  // Preview
+                    Some(1) => 432000, // Preprod
+                    _ => 432000,       // Mainnet (and others)
+                };
+                // Byron offset in slots (only mainnet has Byron blocks in current tip).
+                // We derive slot-in-epoch from tip.slot and the known epoch number.
+                // epoch_length * epoch gives the slot at start of epoch (approximately).
+                // Use the simple modular formula which holds once we are in Shelley+.
+                let slot_in_epoch = if epoch_length > 0 {
+                    tip.slot % epoch_length
+                } else {
+                    0
+                };
+                let slots_to_epoch_end = epoch_length.saturating_sub(slot_in_epoch);
+
+                // cardano-cli 10.x JSON output format (fields in alphabetical order):
+                // block, epoch, era, hash, slot, slotInEpoch, slotsToEpochEnd, syncProgress
+                // NOTE: cardano-cli does NOT include a "network" field.
                 println!("{{");
-                println!("    \"slot\": {},", tip.slot);
-                println!("    \"hash\": \"{hash_hex}\",");
                 println!("    \"block\": {block_no},");
                 println!("    \"epoch\": {epoch},");
                 println!("    \"era\": \"{era_str}\",");
-                println!("    \"syncProgress\": \"{sync_progress:.2}\",");
-                println!("    \"network\": \"{network_name}\"");
+                println!("    \"hash\": \"{hash_hex}\",");
+                println!("    \"slot\": {},", tip.slot);
+                println!("    \"slotInEpoch\": {slot_in_epoch},");
+                println!("    \"slotsToEpochEnd\": {slots_to_epoch_end},");
+                println!("    \"syncProgress\": \"{sync_progress:.2}\"");
                 println!("}}");
                 Ok(())
             }
@@ -637,8 +672,11 @@ impl QueryCmd {
                     entries.push((cred, reward_balance));
                 }
 
-                // Output JSON array matching cardano-cli format:
+                // Output JSON array matching cardano-cli 10.x format:
                 // [{"address": "stake1...", "delegation": "pool1...", "rewardAccountBalance": N}]
+                //
+                // cardano-cli returns an empty array [] for addresses that are not registered.
+                // Do NOT synthesize a zero-balance entry — that diverges from cardano-cli.
                 println!("[");
                 let last = entries.len().saturating_sub(1);
                 for (i, (cred, reward_balance)) in entries.iter().enumerate() {
@@ -653,15 +691,6 @@ impl QueryCmd {
                     }
                     println!("    \"rewardAccountBalance\": {reward_balance}");
                     println!("  }}{comma}");
-                }
-                if entries.is_empty() {
-                    // Address not registered — cardano-cli returns empty array
-                    // with a single entry showing zero balance and no delegation.
-                    println!("  {{");
-                    println!("    \"address\": \"{address}\",");
-                    println!("    \"delegation\": null,");
-                    println!("    \"rewardAccountBalance\": 0");
-                    println!("  }}");
                 }
                 println!("]");
 

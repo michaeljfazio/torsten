@@ -1012,9 +1012,58 @@ fn parse_epoch_result(payload: &[u8]) -> Result<u64, N2CClientError> {
         .map_err(|e| N2CClientError::Protocol(format!("bad epoch: {e}")))
 }
 
-/// Parse protocol params CBOR into JSON string.
+/// Format a tagged rational (num/den) as a cardano-cli compatible decimal string.
+///
+/// cardano-cli renders protocol-parameter rationals as JSON numbers using the
+/// minimum decimal representation that round-trips exactly, not as
+/// `{numerator, denominator}` objects.
+///
+/// Examples:
+///   3/10  → 0.3
+///   3/1000 → 0.003
+///   1/20  → 0.05
+///   15/1  → 15.0
+///   577/10000 → 0.0577
+fn format_rational_decimal(num: u64, den: u64) -> String {
+    if den == 0 {
+        return "0.0".to_string();
+    }
+    // Compute the exact decimal using integer arithmetic.
+    // We need enough decimal places to represent the fraction exactly (up to 12 sig figs).
+    let int_part = num / den;
+    let remainder = num % den;
+    if remainder == 0 {
+        // Exact integer — cardano-cli still outputs decimal point for rational fields
+        return format!("{int_part}.0");
+    }
+    // Find exact decimal representation (up to 12 decimal places)
+    let mut frac_digits = String::new();
+    let mut rem = remainder;
+    for _ in 0..12 {
+        rem *= 10;
+        frac_digits.push(char::from_digit((rem / den) as u32, 10).unwrap_or('0'));
+        rem %= den;
+        if rem == 0 {
+            break;
+        }
+    }
+    // Trim trailing zeros (keep at least one digit after decimal)
+    let trimmed = frac_digits.trim_end_matches('0');
+    let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+    format!("{int_part}.{trimmed}")
+}
+
+/// Parse protocol params CBOR into JSON string matching cardano-cli 10.x output format.
 ///
 /// Handles both array(31) format (Haskell/new Torsten) and legacy CBOR map format.
+///
+/// Key format compatibility notes:
+/// - Rational fields (poolPledgeInfluence, monetaryExpansion, treasuryCut,
+///   executionUnitPrices.priceMemory/priceSteps, voting thresholds,
+///   minFeeRefScriptCostPerByte) are output as decimal JSON numbers, matching
+///   cardano-cli 10.x — NOT as `{numerator, denominator}` objects.
+/// - costModels keys are "PlutusV1", "PlutusV2", "PlutusV3" (matching cardano-cli).
+/// - Fields appear in positional (array index) order, matching Haskell encoding.
 fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> {
     let mut decoder = minicbor::Decoder::new(payload);
     strip_msg_result(&mut decoder)?;
@@ -1028,6 +1077,7 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                 .map_err(|e| N2CClientError::Protocol(format!("bad array: {e}")))?
                 .unwrap_or(0);
 
+            // Integer fields [0]..[8]
             let field_names: &[&str] = &[
                 "txFeePerByte",        // [0]
                 "txFeeFixed",          // [1]
@@ -1040,6 +1090,7 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                 "stakePoolTargetNum",  // [8]
             ];
 
+            // Rational fields [9]..[11] — output as decimals
             let rational_fields: &[&str] = &[
                 "poolPledgeInfluence", // [9]
                 "monetaryExpansion",   // [10]
@@ -1057,14 +1108,14 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         }
                     }
                     9..=11 => {
+                        // Rational: tag(30) [num, den] — output as decimal number
                         let _ = decoder.tag();
                         let _ = decoder.array();
                         let num = decoder.u64().unwrap_or(0);
                         let den = decoder.u64().unwrap_or(1);
                         if let Some(name) = rational_fields.get((i - 9) as usize) {
-                            entries.push(format!(
-                                "  \"{name}\": {{\n    \"numerator\": {num},\n    \"denominator\": {den}\n  }}"
-                            ));
+                            let decimal = format_rational_decimal(num, den);
+                            entries.push(format!("  \"{name}\": {decimal}"));
                         }
                     }
                     12 => {
@@ -1085,7 +1136,8 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         entries.push(format!("  \"utxoCostPerByte\": {val}"));
                     }
                     15 => {
-                        // costModels (map: {0: [v1], 1: [v2], 2: [v3]})
+                        // costModels (CBOR map: {0: [v1_costs], 1: [v2_costs], 2: [v3_costs]})
+                        // Output as {"PlutusV1": [...], "PlutusV2": [...], "PlutusV3": [...]}
                         let mut cm_entries = Vec::new();
                         if let Ok(Some(map_len)) = decoder.map() {
                             for _ in 0..map_len {
@@ -1119,6 +1171,7 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                     }
                     16 => {
                         // prices [mem_price, step_price] as tagged rationals
+                        // Output as decimal numbers (matching cardano-cli)
                         let _ = decoder.array();
                         let _ = decoder.tag();
                         let _ = decoder.array();
@@ -1128,8 +1181,10 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         let _ = decoder.array();
                         let step_num = decoder.u64().unwrap_or(0);
                         let step_den = decoder.u64().unwrap_or(1);
+                        let mem_decimal = format_rational_decimal(mem_num, mem_den);
+                        let step_decimal = format_rational_decimal(step_num, step_den);
                         entries.push(format!(
-                            "  \"executionUnitPrices\": {{\n    \"priceMemory\": {{\n      \"numerator\": {mem_num},\n      \"denominator\": {mem_den}\n    }},\n    \"priceSteps\": {{\n      \"numerator\": {step_num},\n      \"denominator\": {step_den}\n    }}\n  }}"
+                            "  \"executionUnitPrices\": {{\n    \"priceMemory\": {mem_decimal},\n    \"priceSteps\": {step_decimal}\n  }}"
                         ));
                     }
                     17 => {
@@ -1163,7 +1218,8 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         entries.push(format!("  \"maxCollateralInputs\": {val}"));
                     }
                     22 => {
-                        // poolVotingThresholds (5 tagged rationals)
+                        // poolVotingThresholds (5 tagged rationals) — output as decimals
+                        // Order matches Haskell PoolVotingThresholds field encoding
                         let pvt_names = [
                             "pvtMotionNoConfidence",
                             "pvtCommitteeNormal",
@@ -1178,9 +1234,8 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                             let _ = decoder.array();
                             let num = decoder.u64().unwrap_or(0);
                             let den = decoder.u64().unwrap_or(1);
-                            pvt_entries.push(format!(
-                                "    \"{name}\": {{\n      \"numerator\": {num},\n      \"denominator\": {den}\n    }}"
-                            ));
+                            let decimal = format_rational_decimal(num, den);
+                            pvt_entries.push(format!("    \"{name}\": {decimal}"));
                         }
                         entries.push(format!(
                             "  \"poolVotingThresholds\": {{\n{}\n  }}",
@@ -1188,7 +1243,8 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         ));
                     }
                     23 => {
-                        // drepVotingThresholds (10 tagged rationals)
+                        // drepVotingThresholds (10 tagged rationals) — output as decimals
+                        // Order matches Haskell DRepVotingThresholds field encoding
                         let dvt_names = [
                             "dvtMotionNoConfidence",
                             "dvtCommitteeNormal",
@@ -1208,9 +1264,8 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                             let _ = decoder.array();
                             let num = decoder.u64().unwrap_or(0);
                             let den = decoder.u64().unwrap_or(1);
-                            dvt_entries.push(format!(
-                                "    \"{name}\": {{\n      \"numerator\": {num},\n      \"denominator\": {den}\n    }}"
-                            ));
+                            let decimal = format_rational_decimal(num, den);
+                            dvt_entries.push(format!("    \"{name}\": {decimal}"));
                         }
                         entries.push(format!(
                             "  \"drepVotingThresholds\": {{\n{}\n  }}",
@@ -1242,14 +1297,13 @@ fn parse_protocol_params_cbor(payload: &[u8]) -> Result<String, N2CClientError> 
                         entries.push(format!("  \"dRepActivity\": {val}"));
                     }
                     30 => {
-                        // minFeeRefScriptCostPerByte (tagged rational)
+                        // minFeeRefScriptCostPerByte (tagged rational) — output as decimal
                         let _ = decoder.tag();
                         let _ = decoder.array();
                         let num = decoder.u64().unwrap_or(0);
                         let den = decoder.u64().unwrap_or(1);
-                        entries.push(format!(
-                            "  \"minFeeRefScriptCostPerByte\": {{\n    \"numerator\": {num},\n    \"denominator\": {den}\n  }}"
-                        ));
+                        let decimal = format_rational_decimal(num, den);
+                        entries.push(format!("  \"minFeeRefScriptCostPerByte\": {decimal}"));
                     }
                     _ => {
                         let _ = decoder.skip();
@@ -1296,6 +1350,50 @@ fn parse_u64_result(payload: &[u8]) -> Result<u64, N2CClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── format_rational_decimal tests ───────────────────────────────────────
+
+    #[test]
+    fn test_format_rational_decimal_basic() {
+        // 3/10 = 0.3
+        assert_eq!(format_rational_decimal(3, 10), "0.3");
+        // 3/1000 = 0.003
+        assert_eq!(format_rational_decimal(3, 1000), "0.003");
+        // 1/20 = 0.05
+        assert_eq!(format_rational_decimal(1, 20), "0.05");
+        // 2/10 = 0.2
+        assert_eq!(format_rational_decimal(2, 10), "0.2");
+    }
+
+    #[test]
+    fn test_format_rational_decimal_integers() {
+        // 15/1 = 15.0  (integer-valued rationals keep .0 suffix)
+        assert_eq!(format_rational_decimal(15, 1), "15.0");
+        // 0/1 = 0.0
+        assert_eq!(format_rational_decimal(0, 1), "0.0");
+    }
+
+    #[test]
+    fn test_format_rational_decimal_execution_unit_prices() {
+        // 577/10000 = 0.0577  (priceMemory)
+        assert_eq!(format_rational_decimal(577, 10000), "0.0577");
+        // 721/10000000 = 0.0000721  (priceSteps)
+        assert_eq!(format_rational_decimal(721, 10_000_000), "0.0000721");
+    }
+
+    #[test]
+    fn test_format_rational_decimal_voting_thresholds() {
+        // 51/100 = 0.51
+        assert_eq!(format_rational_decimal(51, 100), "0.51");
+        // 67/100 = 0.67
+        assert_eq!(format_rational_decimal(67, 100), "0.67");
+        // 60/100 = 0.6
+        assert_eq!(format_rational_decimal(60, 100), "0.6");
+        // 75/100 = 0.75
+        assert_eq!(format_rational_decimal(75, 100), "0.75");
+    }
+
+    // ─── parse_tip_result tests ───────────────────────────────────────────────
 
     #[test]
     fn test_parse_tip_result() {
@@ -1493,23 +1591,33 @@ mod tests {
         let result = parse_protocol_params_cbor(&buf).unwrap();
         assert!(result.contains("\"txFeePerByte\": 44"));
         assert!(result.contains("\"txFeeFixed\": 155381"));
-        assert!(result.contains("\"poolPledgeInfluence\""));
-        assert!(result.contains("\"numerator\": 3"));
+        // Rational fields must be decimal numbers, not {numerator, denominator} objects
+        // (cardano-cli 10.x compatibility)
+        assert!(result.contains("\"poolPledgeInfluence\": 0.3"));
+        assert!(
+            !result.contains("\"numerator\""),
+            "rationals must not be objects — got: {result}"
+        );
+        assert!(result.contains("\"monetaryExpansion\": 0.003"));
+        assert!(result.contains("\"treasuryCut\": 0.2"));
         // Verify new fields are parsed
         assert!(result.contains("\"costModels\""));
         assert!(result.contains("\"executionUnitPrices\""));
-        assert!(result.contains("\"priceMemory\""));
+        // Execution unit prices as decimals
+        assert!(result.contains("\"priceMemory\": 0.0577"));
+        assert!(result.contains("\"priceSteps\":"));
         assert!(result.contains("\"poolVotingThresholds\""));
-        assert!(result.contains("\"pvtMotionNoConfidence\""));
+        assert!(result.contains("\"pvtMotionNoConfidence\": 0.51"));
         assert!(result.contains("\"drepVotingThresholds\""));
-        assert!(result.contains("\"dvtMotionNoConfidence\""));
+        assert!(result.contains("\"dvtMotionNoConfidence\": 0.67"));
         assert!(result.contains("\"committeeMinSize\": 7"));
         assert!(result.contains("\"committeeMaxTermLength\": 146"));
         assert!(result.contains("\"govActionLifetime\": 6"));
         assert!(result.contains("\"govActionDeposit\": 100000000000"));
         assert!(result.contains("\"dRepDeposit\": 500000000"));
         assert!(result.contains("\"dRepActivity\": 20"));
-        assert!(result.contains("\"minFeeRefScriptCostPerByte\""));
+        // minFeeRefScriptCostPerByte as decimal (15/1 = 15.0)
+        assert!(result.contains("\"minFeeRefScriptCostPerByte\": 15.0"));
     }
 
     #[test]
