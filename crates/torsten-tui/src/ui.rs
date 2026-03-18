@@ -1552,8 +1552,6 @@ fn build_rtt_colored_bar<'a>(
         .collect()
 }
 
-/// Build a single-band proportional bar for the RTT per-bucket histogram.
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
