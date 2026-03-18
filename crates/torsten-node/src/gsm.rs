@@ -663,6 +663,113 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
     }
 
+    /// Simulate the LoE apply-loop guard introduced in fix #137:
+    /// `if let Some(loe_slot) = loe_limit { if block.slot > loe_slot { break } }`
+    ///
+    /// This helper mirrors the predicate used in `process_forward_blocks` so
+    /// the unit tests are faithful to the actual enforcement logic.
+    fn should_apply(block_slot: u64, loe_limit: Option<u64>) -> bool {
+        match loe_limit {
+            None => true,
+            Some(ceiling) => block_slot <= ceiling,
+        }
+    }
+
+    #[test]
+    fn test_loe_ledger_apply_presyncing_blocks_all_ledger_application() {
+        // PreSyncing → loe_limit = Some(0): no block may be applied to the ledger.
+        let gsm = make_gsm(true, "/tmp/test_loe_apply_pre_marker");
+        assert_eq!(gsm.state(), GenesisSyncState::PreSyncing);
+        let loe = gsm.loe_limit(&[]);
+        assert_eq!(loe, Some(0));
+
+        // Any positive-slot block must be deferred.
+        assert!(
+            !should_apply(1, loe),
+            "slot=1 must be deferred in PreSyncing"
+        );
+        assert!(
+            !should_apply(1_000_000, loe),
+            "slot=1_000_000 must be deferred in PreSyncing"
+        );
+        // Slot 0 (genesis) is technically ≤ the ceiling, so it is allowed.
+        assert!(
+            should_apply(0, loe),
+            "slot=0 must be allowed even in PreSyncing"
+        );
+    }
+
+    #[test]
+    fn test_loe_ledger_apply_syncing_blocks_beyond_ceiling() {
+        // Syncing with peer tip at slot 500 → loe_limit = Some(500).
+        // Blocks at slot ≤ 500 may be applied; blocks at slot > 500 must be deferred.
+        let mut gsm = make_gsm(true, "/tmp/test_loe_apply_sync_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+
+        let peer_tip = Point::Specific(SlotNo(500), torsten_primitives::hash::Hash32::ZERO);
+        let loe = gsm.loe_limit(&[peer_tip]);
+        assert_eq!(loe, Some(500));
+
+        assert!(should_apply(0, loe), "slot=0 within ceiling");
+        assert!(should_apply(499, loe), "slot=499 within ceiling");
+        assert!(should_apply(500, loe), "slot=500 exactly at ceiling");
+        assert!(
+            !should_apply(501, loe),
+            "slot=501 beyond ceiling — must defer"
+        );
+        assert!(
+            !should_apply(1_000_000, loe),
+            "slot=1_000_000 beyond ceiling — must defer"
+        );
+    }
+
+    #[test]
+    fn test_loe_ledger_apply_caught_up_no_restriction() {
+        // CaughtUp → loe_limit = None: all blocks may be applied.
+        let marker = PathBuf::from("/tmp/test_loe_apply_caught_marker");
+        std::fs::write(&marker, "caught_up").unwrap();
+        let config = GsmConfig {
+            marker_path: marker.clone(),
+            ..Default::default()
+        };
+        let gsm = GenesisStateMachine::new(config, true);
+        assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
+        let loe = gsm.loe_limit(&[]);
+        assert_eq!(loe, None, "CaughtUp: no LoE constraint");
+
+        // Any slot is allowed
+        assert!(should_apply(0, loe));
+        assert!(should_apply(500, loe));
+        assert!(should_apply(u64::MAX, loe));
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn test_loe_ledger_apply_genesis_disabled_no_restriction() {
+        // Genesis mode off (Praos) → loe_limit = None: no restriction ever.
+        let gsm = make_gsm(false, "/tmp/test_loe_apply_disabled_marker");
+        assert_eq!(gsm.state(), GenesisSyncState::CaughtUp);
+        let loe = gsm.loe_limit(&[]);
+        assert_eq!(loe, None, "Genesis disabled: no LoE constraint");
+        assert!(should_apply(0, loe));
+        assert!(should_apply(u64::MAX, loe));
+    }
+
+    #[test]
+    fn test_loe_syncing_empty_candidate_list_blocks_all() {
+        // Syncing with no candidate tips → common prefix is undefined → Some(0).
+        // This is the safe default: if we can't determine the common prefix,
+        // block all ledger application to avoid long-range attack.
+        let mut gsm = make_gsm(true, "/tmp/test_loe_apply_empty_tips_marker");
+        gsm.evaluate(5, false, 0); // → Syncing
+        let loe = gsm.loe_limit(&[]);
+        assert_eq!(loe, Some(0));
+        assert!(
+            !should_apply(1, loe),
+            "No tips → must defer all positive slots"
+        );
+    }
+
     // ── GDD tests ────────────────────────────────────────────────────────────
 
     #[test]

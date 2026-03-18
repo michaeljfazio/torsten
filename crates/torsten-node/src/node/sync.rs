@@ -709,6 +709,25 @@ impl Node {
             }
         }
 
+        // Compute the Limit on Eagerness (LoE) slot ceiling ONCE here, before
+        // acquiring any other locks.  This value is used in two places:
+        //
+        // 1. The ledger apply loop below — blocks with slot > loe_slot are
+        //    skipped so the ledger state cannot advance past the LoE boundary.
+        //    They remain in VolatileDB and will be applied when the GSM later
+        //    transitions to CaughtUp and the constraint is lifted.
+        //
+        // 2. The volatile→immutable flush at the end of this function, which
+        //    similarly must not promote blocks beyond the LoE slot.
+        //
+        // In Praos mode (genesis disabled) the GSM starts in CaughtUp and
+        // loe_limit() always returns None, so both paths take the fast branch
+        // with zero overhead.
+        let loe_limit: Option<u64> = {
+            let gsm = self.gsm.read().await;
+            gsm.loe_limit(std::slice::from_ref(&tip.point))
+        };
+
         // Now apply blocks to ledger — storage is confirmed
         let mut applied_count: u64 = 0;
         {
@@ -817,6 +836,25 @@ impl Node {
                     }
                 }
 
+                // LoE guard: when the Genesis State Machine is in PreSyncing or
+                // Syncing state, do not apply blocks whose slot exceeds the LoE
+                // ceiling.  Those blocks are already in VolatileDB (stored above)
+                // and will be applied once the GSM transitions to CaughtUp.
+                //
+                // Because blocks are delivered in slot order, the first block that
+                // exceeds the ceiling means all subsequent ones will too — break
+                // rather than continue so we don't scan the rest of the batch.
+                if let Some(loe_slot) = loe_limit {
+                    if block.slot().0 > loe_slot {
+                        debug!(
+                            slot = block.slot().0,
+                            loe_slot,
+                            "LoE: deferring ledger application of blocks beyond LoE ceiling"
+                        );
+                        break;
+                    }
+                }
+
                 // Byron EBB bridge: before applying a block, check if its
                 // prev_hash references a Byron Epoch Boundary Block (EBB)
                 // rather than the current ledger tip.  EBBs carry no transactions
@@ -917,26 +955,14 @@ impl Node {
 
         // Flush finalized blocks from VolatileDB to ImmutableDB.
         //
-        // When the Genesis State Machine is active (--consensus-mode genesis)
-        // and the node is still in PreSyncing or Syncing state, the Limit on
-        // Eagerness (LoE) applies: the immutable tip must not advance past the
-        // common prefix of all candidate chains (approximated here by the tip
-        // slot reported by the current upstream peer).  We query `loe_limit`
-        // with the peer tip as the sole candidate; once the GSM transitions to
-        // CaughtUp, `loe_limit` returns `None` and we revert to the normal
-        // unconstrained flush.
-        //
-        // In Praos mode (genesis disabled) `loe_limit` always returns `None`
-        // because the GSM starts in CaughtUp, so there is no overhead on the
-        // hot path.
+        // Uses the same `loe_limit` computed before the ledger apply section.
+        // When LoE is active the immutable tip cannot advance past the LoE
+        // ceiling; blocks beyond that slot remain in VolatileDB (and were not
+        // applied to the ledger above) until the GSM reaches CaughtUp.
+        // In Praos mode (genesis disabled) `loe_limit` is always None.
         {
-            // Read the GSM state without blocking the write lock.
-            let loe = {
-                let gsm = self.gsm.read().await;
-                gsm.loe_limit(std::slice::from_ref(&tip.point))
-            };
             let mut db = self.chain_db.write().await;
-            let flush_result = match loe {
+            let flush_result = match loe_limit {
                 None => {
                     // No LoE constraint — flush normally (Praos mode or CaughtUp).
                     db.flush_to_immutable()
