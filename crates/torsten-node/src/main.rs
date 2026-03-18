@@ -114,9 +114,21 @@ struct RunArgs {
     #[arg(long, default_value = "0.0.0.0")]
     host_addr: String,
 
-    /// Prometheus metrics port (0 to disable)
-    #[arg(long, default_value = "12798")]
-    metrics_port: u16,
+    /// Prometheus metrics port.
+    ///
+    /// Overrides the MetricsPort value from the config file.
+    /// Pass 0 to disable the metrics server.
+    /// If not specified, the config file value is used; if neither is set,
+    /// the default port 12798 is used.
+    #[arg(long)]
+    metrics_port: Option<u16>,
+
+    /// Disable the Prometheus metrics server entirely.
+    ///
+    /// Equivalent to `--metrics-port 0`. Takes precedence over `--metrics-port`
+    /// and the MetricsPort config file field.
+    #[arg(long)]
+    no_metrics: bool,
 
     /// Maximum number of transactions in the mempool
     #[arg(long, default_value = "16384")]
@@ -395,6 +407,20 @@ async fn run_node(args: RunArgs) -> Result<()> {
         .to_path_buf();
     node_config.validate(&config_dir)?;
 
+    // Resolve effective metrics port using a three-level priority:
+    //   1. --no-metrics flag → 0 (disabled), takes highest precedence
+    //   2. --metrics-port <PORT> CLI arg → explicit operator override
+    //   3. MetricsPort field in config JSON → site-wide default from config file
+    //   4. Cardano-node default: 12798
+    const DEFAULT_METRICS_PORT: u16 = 12798;
+    let effective_metrics_port: u16 = if args.no_metrics {
+        0
+    } else if let Some(cli_port) = args.metrics_port {
+        cli_port
+    } else {
+        node_config.metrics_port.unwrap_or(DEFAULT_METRICS_PORT)
+    };
+
     // Load topology
     let topology = topology::Topology::load(&args.topology)?;
     let all_peers = topology.all_peers();
@@ -408,6 +434,11 @@ async fn run_node(args: RunArgs) -> Result<()> {
         "Network",
     );
     info!(host = %args.host_addr, port = args.port, "Listen");
+    if effective_metrics_port > 0 {
+        info!(port = effective_metrics_port, "Metrics");
+    } else {
+        info!("Metrics disabled");
+    }
     info!(
         total = all_peers.len(),
         producers = topology.producers.len(),
@@ -462,7 +493,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_vrf_key: args.shelley_vrf_key,
         shelley_operational_certificate: args.shelley_operational_certificate,
         _shelley_cold_key: args.shelley_cold_key,
-        metrics_port: args.metrics_port,
+        metrics_port: effective_metrics_port,
         mempool_max_tx: args.mempool_max_tx,
         mempool_max_bytes: args.mempool_max_bytes,
         snapshot_max_retained: args.snapshot_max_retained,

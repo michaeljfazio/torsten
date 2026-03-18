@@ -304,6 +304,9 @@ pub(crate) fn convert_validation_error(
         VE::UnelectedCommitteeMember { cold_credential_hash } => TxValidationError::ScriptFailed {
             reason: format!("Unelected committee member: {cold_credential_hash}"),
         },
+        VE::MissingRedeemer { tag, index } => TxValidationError::ScriptFailed {
+            reason: format!("Missing redeemer for {tag} at index {index}"),
+        },
     }
 }
 

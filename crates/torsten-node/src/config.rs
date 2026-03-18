@@ -96,6 +96,16 @@ pub struct NodeConfig {
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
 
+    /// Prometheus metrics port.
+    ///
+    /// When set to 0 the metrics server is disabled.  The CLI flag
+    /// `--metrics-port` takes precedence over this field; the CLI flag
+    /// `--no-metrics` forces the port to 0 regardless of this value.
+    /// If neither the CLI flag nor this field is present the node falls back
+    /// to the Cardano-node default of 12798.
+    #[serde(default)]
+    pub metrics_port: Option<u16>,
+
     /// Storage configuration (optional overrides for storage profiles)
     #[serde(default)]
     pub storage: Option<StorageConfigJson>,
@@ -297,6 +307,7 @@ impl Default for NodeConfig {
             target_number_of_known_big_ledger_peers: 15,
             trace_options: TraceOptions::default(),
             min_severity: "Info".to_string(),
+            metrics_port: None,
             storage: None,
         }
     }
@@ -369,5 +380,110 @@ mod tests {
             ..NodeConfig::default()
         };
         assert!(config.validate(Path::new(".")).is_ok());
+    }
+
+    // ── MetricsPort config field ──────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_has_no_metrics_port() {
+        // When the field is absent from the config file the operator gets None,
+        // and the node binary falls back to the Cardano-node default of 12798.
+        let config = NodeConfig::default();
+        assert!(config.metrics_port.is_none());
+    }
+
+    #[test]
+    fn test_metrics_port_from_json() {
+        // Verify that "MetricsPort" is correctly deserialised from config JSON.
+        let json = r#"{"MetricsPort": 9876}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.metrics_port, Some(9876));
+    }
+
+    #[test]
+    fn test_metrics_port_zero_from_json() {
+        // Port 0 in the config file should disable metrics (same semantics as
+        // the --metrics-port 0 CLI flag).
+        let json = r#"{"MetricsPort": 0}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.metrics_port, Some(0));
+    }
+
+    #[test]
+    fn test_metrics_port_absent_from_json() {
+        // Absence of the field must deserialise as None so the node can fall
+        // through to the default port.
+        let json = r#"{}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.metrics_port.is_none());
+    }
+
+    #[test]
+    fn test_metrics_port_round_trip_serialise() {
+        // Confirm that a port value survives a JSON round-trip.
+        let original = NodeConfig {
+            metrics_port: Some(8080),
+            ..NodeConfig::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: NodeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.metrics_port, Some(8080));
+    }
+
+    // ── Metrics port resolution priority ─────────────────────────────────────
+    //
+    // The node binary resolves the effective port with this priority:
+    //   1. --no-metrics  → 0
+    //   2. --metrics-port → explicit CLI value
+    //   3. config MetricsPort → site-wide default from file
+    //   4. 12798 (Cardano-node historical default)
+    //
+    // We test the rule table here using plain functions that mirror the
+    // logic in run_node() so the tests stay fast and do not require spawning
+    // an actual server.
+
+    const CARDANO_DEFAULT_METRICS_PORT: u16 = 12798;
+
+    fn resolve_metrics_port(no_metrics: bool, cli: Option<u16>, config: Option<u16>) -> u16 {
+        if no_metrics {
+            0
+        } else if let Some(p) = cli {
+            p
+        } else {
+            config.unwrap_or(CARDANO_DEFAULT_METRICS_PORT)
+        }
+    }
+
+    #[test]
+    fn test_resolve_no_metrics_flag_wins_over_all() {
+        // --no-metrics must win even when a CLI port and a config port are set.
+        assert_eq!(resolve_metrics_port(true, Some(9000), Some(8000)), 0);
+    }
+
+    #[test]
+    fn test_resolve_cli_port_wins_over_config() {
+        assert_eq!(resolve_metrics_port(false, Some(9000), Some(8000)), 9000);
+    }
+
+    #[test]
+    fn test_resolve_config_port_used_when_no_cli() {
+        assert_eq!(resolve_metrics_port(false, None, Some(8080)), 8080);
+    }
+
+    #[test]
+    fn test_resolve_falls_back_to_default_12798() {
+        assert_eq!(resolve_metrics_port(false, None, None), 12798);
+    }
+
+    #[test]
+    fn test_resolve_cli_port_zero_disables_metrics() {
+        // Passing --metrics-port 0 from the CLI should disable the server.
+        assert_eq!(resolve_metrics_port(false, Some(0), None), 0);
+    }
+
+    #[test]
+    fn test_resolve_config_port_zero_disables_metrics() {
+        // Setting MetricsPort=0 in the config file should also disable the server.
+        assert_eq!(resolve_metrics_port(false, None, Some(0)), 0);
     }
 }
