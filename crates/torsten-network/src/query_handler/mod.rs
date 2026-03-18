@@ -764,6 +764,7 @@ mod tests {
                 return_addr: vec![0xdd; 29],
                 anchor_url: "https://example.com/proposal".to_string(),
                 anchor_hash: vec![0xee; 32],
+                gov_action: torsten_primitives::transaction::GovAction::InfoAction,
                 committee_votes: vec![],
                 drep_votes: vec![],
                 spo_votes: vec![],

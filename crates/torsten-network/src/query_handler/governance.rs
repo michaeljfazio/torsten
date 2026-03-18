@@ -223,6 +223,7 @@ mod tests {
                     return_addr: vec![0u8; 29],
                     anchor_url: "https://example.com/proposal1".to_string(),
                     anchor_hash: vec![0xAA; 32],
+                    gov_action: torsten_primitives::transaction::GovAction::InfoAction,
                     committee_votes: vec![],
                     drep_votes: vec![(vec![0xCC; 28], 0, 1)], // one DRep Yes vote
                     spo_votes: vec![],
@@ -240,6 +241,7 @@ mod tests {
                     return_addr: vec![0u8; 29],
                     anchor_url: "https://example.com/proposal2".to_string(),
                     anchor_hash: vec![0xBB; 32],
+                    gov_action: torsten_primitives::transaction::GovAction::InfoAction,
                     committee_votes: vec![],
                     drep_votes: vec![],
                     spo_votes: vec![(vec![0xDD; 28], 0)], // one SPO No vote
@@ -329,6 +331,7 @@ mod tests {
             return_addr: vec![0xBB; 29],
             anchor_url: "https://example.com".to_string(),
             anchor_hash: vec![0xCC; 32],
+            gov_action: torsten_primitives::transaction::GovAction::InfoAction,
             committee_votes: Vec::new(),
             drep_votes: Vec::new(),
             spo_votes: Vec::new(),

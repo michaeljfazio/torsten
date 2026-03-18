@@ -110,29 +110,41 @@ pub(crate) fn handle_pool_state(
 ///
 /// Returns: array(2)[pool_map, total_active_stake]
 /// Each pool entry: array(3)[stake_rational, compact_lovelace, vrf_hash]
+///
+/// total_active_stake is the sum of ALL delegated stake including orphaned
+/// delegations to retired pools — matching Haskell's PoolDistr total field.
+/// Using stake_pools.iter().map(|p| p.stake).sum() would undercount because
+/// stake_pools only contains active (non-retired) pools.
 pub(crate) fn handle_stake_distribution2(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetStakeDistribution2");
-    let total_active_stake: u64 = state.stake_pools.iter().map(|p| p.stake).sum();
+    // Use the pre-computed total that includes orphaned delegations to retired pools.
+    let total_active_stake = state.total_active_stake.max(1); // NonZero
     QueryResult::PoolDistr2 {
         pools: state.stake_pools.clone(),
-        total_active_stake: total_active_stake.max(1), // NonZero
+        total_active_stake,
     }
 }
 
 /// Handle GetPoolDistr2 (tag 36) — filtered new PoolDistr format.
 ///
 /// Argument: Maybe (tag(258) Set<KeyHash StakePool>)
+///
+/// total_active_stake is the denominator for the per-pool stake rational and
+/// always reflects ALL delegated stake (including orphaned delegations to retired
+/// pools), regardless of whether a pool filter was applied.  This matches the
+/// Haskell PoolDistr total field which is global, not filtered.
 pub(crate) fn handle_pool_distr2(
     state: &NodeStateSnapshot,
     decoder: &mut minicbor::Decoder<'_>,
 ) -> QueryResult {
     debug!("Query: GetPoolDistr2");
     let filter_pools = parse_pool_id_set(decoder);
-    let total_active_stake: u64 = state.stake_pools.iter().map(|p| p.stake).sum();
+    // Use the pre-computed total that includes orphaned delegations to retired pools.
+    let total_active_stake = state.total_active_stake.max(1); // NonZero
     if filter_pools.is_empty() {
         QueryResult::PoolDistr2 {
             pools: state.stake_pools.clone(),
-            total_active_stake: total_active_stake.max(1),
+            total_active_stake,
         }
     } else {
         let filtered: Vec<_> = state
@@ -143,7 +155,7 @@ pub(crate) fn handle_pool_distr2(
             .collect();
         QueryResult::PoolDistr2 {
             pools: filtered,
-            total_active_stake: total_active_stake.max(1),
+            total_active_stake,
         }
     }
 }
@@ -235,9 +247,13 @@ pub(crate) fn handle_stake_deleg_deposits(
 ///
 /// Returns estimated reward breakdown for each active pool: leader/member rewards,
 /// margin, cost, and stake.
+///
+/// total_active_stake is the denominator for the per-pool stake fraction and must
+/// include orphaned delegations to retired pools, matching Haskell semantics.
 pub(crate) fn handle_reward_info_pools(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetRewardInfoPools");
-    let total_active_stake: u64 = state.stake_pools.iter().map(|p| p.stake).sum();
+    // Use the pre-computed total that includes orphaned delegations to retired pools.
+    let total_active_stake = state.total_active_stake;
     // Compute reward pot from reserves * rho
     let rho_num = state.protocol_params.rho_num;
     let rho_den = state.protocol_params.rho_den.max(1);
@@ -405,6 +421,12 @@ mod tests {
     };
 
     fn make_state_with_pools() -> NodeStateSnapshot {
+        // total_active_stake must include ALL delegated stake (including orphaned
+        // delegations to retired pools).  In this fixture there are no retired pools,
+        // so it equals the sum of the two active pool stakes: 600M + 400M = 1B.
+        // The NodeStateSnapshot.total_active_stake field drives GetStakeDistribution2,
+        // GetPoolDistr2, and GetRewardInfoPools — it must be set explicitly here.
+        let total_active_stake = 1_000_000_000u64;
         NodeStateSnapshot {
             reserves: 10_000_000_000,
             protocol_params: ProtocolParamsSnapshot {
@@ -419,15 +441,16 @@ mod tests {
                     pool_id: vec![1u8; 28],
                     stake: 600_000_000,
                     vrf_keyhash: vec![0u8; 32],
-                    total_active_stake: 1_000_000_000,
+                    total_active_stake,
                 },
                 StakePoolSnapshot {
                     pool_id: vec![2u8; 28],
                     stake: 400_000_000,
                     vrf_keyhash: vec![0u8; 32],
-                    total_active_stake: 1_000_000_000,
+                    total_active_stake,
                 },
             ],
+            total_active_stake,
             pool_params_entries: vec![
                 PoolParamsSnapshot {
                     pool_id: vec![1u8; 28],
