@@ -128,13 +128,11 @@ impl LocalRootGroup {
     }
 
     /// Get effective hot valency (prefers hotValency over deprecated valency)
-    #[cfg(test)]
     pub fn effective_hot_valency(&self) -> u16 {
         self.hot_valency.unwrap_or(self.valency)
     }
 
     /// Get effective warm valency (defaults to hot_valency + 1 if not set)
-    #[cfg(test)]
     pub fn effective_warm_valency(&self) -> u16 {
         self.warm_valency
             .unwrap_or_else(|| self.effective_hot_valency() + 1)

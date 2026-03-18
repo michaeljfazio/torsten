@@ -13,6 +13,7 @@
 //! - Connection limit enforcement (hard/soft)
 
 use crate::peer_manager::{PeerCategory, PeerManager};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
@@ -188,13 +189,17 @@ impl Governor {
     ///
     /// Examines the PeerManager state, compares against targets, and returns
     /// a list of events that should be executed. Events are prioritized:
-    /// 1. Big ledger peers (most important for genesis/sync)
-    /// 2. Active peers below target → promote
-    /// 3. Established peers below target → connect
-    /// 4. Above target → demote/disconnect (respecting local root protection)
+    /// 1. Local root valency enforcement (per-group, highest priority)
+    /// 2. Big ledger peers (most important for genesis/sync)
+    /// 3. Active peers below target → promote
+    /// 4. Established peers below target → connect
+    /// 5. Above target → demote/disconnect (respecting local root protection)
     pub fn evaluate(&mut self, pm: &PeerManager) -> Vec<GovernorEvent> {
         let mut events = Vec::new();
         let targets = self.active_targets().clone();
+
+        // --- Phase 0: Local root valency enforcement ---
+        self.evaluate_local_root_deficit(pm, &mut events);
 
         // --- Phase 1: Big Ledger Peers ---
         self.evaluate_blp(pm, &targets, &mut events);
@@ -211,6 +216,16 @@ impl Governor {
         // --- Phase 5: Surplus reduction ---
         self.evaluate_surplus(pm, &targets, &mut events);
 
+        // Deduplicate events by address — multiple phases may emit Connect or
+        // Promote for the same peer (e.g., BLP phase + general deficit phase).
+        let mut seen_connect = std::collections::HashSet::new();
+        let mut seen_promote = std::collections::HashSet::new();
+        events.retain(|e| match e {
+            GovernorEvent::Connect(addr) => seen_connect.insert(*addr),
+            GovernorEvent::Promote(addr) => seen_promote.insert(*addr),
+            _ => true,
+        });
+
         if !events.is_empty() {
             debug!(
                 event_count = events.len(),
@@ -224,7 +239,121 @@ impl Governor {
         events
     }
 
-    /// Evaluate big ledger peer targets
+    /// Phase 0: Enforce per-group local root valency.
+    ///
+    /// For each registered `LocalRootGroupInfo`:
+    /// - If connected (warm+hot) members < `warm_valency`, emit `Connect` for
+    ///   cold members of this group.
+    /// - If hot members < `hot_valency`, emit `Promote` for warm members of
+    ///   this group.
+    ///
+    /// This phase runs before all others so that local root groups (which are
+    /// operator-configured trusted peers) are always kept at their target
+    /// valency.  Events for peers that already have pending actions from a
+    /// prior phase are deduplicated by tracking addressed already added.
+    fn evaluate_local_root_deficit(&self, pm: &PeerManager, events: &mut Vec<GovernorEvent>) {
+        // Collect addresses already targeted by events emitted so far, so we
+        // do not double-emit for the same peer across multiple group evaluations.
+        let already_targeted: HashSet<SocketAddr> = events
+            .iter()
+            .map(|e| match e {
+                GovernorEvent::Connect(a)
+                | GovernorEvent::Promote(a)
+                | GovernorEvent::Demote(a)
+                | GovernorEvent::Disconnect(a) => *a,
+            })
+            .collect();
+        // Build a mutable copy we update as we add events during this phase.
+        let mut targeted = already_targeted;
+
+        let hot_set: HashSet<SocketAddr> = pm.hot_peer_addrs().into_iter().collect();
+        let connected_set: HashSet<SocketAddr> = pm.connected_peer_addrs().into_iter().collect();
+
+        for group in pm.local_root_groups() {
+            // Count current hot members
+            let hot_members: Vec<SocketAddr> = group
+                .members
+                .iter()
+                .filter(|a| hot_set.contains(a))
+                .copied()
+                .collect();
+            let hot_count = hot_members.len();
+
+            // Count warm members (connected but not hot)
+            let warm_members: Vec<SocketAddr> = group
+                .members
+                .iter()
+                .filter(|a| connected_set.contains(a) && !hot_set.contains(a))
+                .copied()
+                .collect();
+
+            // Count cold members (not connected)
+            let cold_members: Vec<SocketAddr> = group
+                .members
+                .iter()
+                .filter(|a| !connected_set.contains(a))
+                .copied()
+                .collect();
+
+            let connected_count = hot_count + warm_members.len();
+
+            // --- Warm valency: ensure enough connected members ---
+            if connected_count < group.warm_valency {
+                let warm_deficit = group.warm_valency - connected_count;
+                // Collect candidates first to avoid aliased borrow of `targeted`
+                // inside the loop body (filter borrows immutably, insert borrows
+                // mutably — Rust forbids both at the same time).
+                let to_connect: Vec<SocketAddr> = cold_members
+                    .iter()
+                    .filter(|a| !targeted.contains(*a))
+                    .take(warm_deficit)
+                    .copied()
+                    .collect();
+                for addr in to_connect {
+                    debug!(
+                        group_id = group.group_id,
+                        %addr,
+                        connected = connected_count,
+                        target = group.warm_valency,
+                        "Local root group: emitting Connect for warm valency deficit"
+                    );
+                    events.push(GovernorEvent::Connect(addr));
+                    targeted.insert(addr);
+                }
+            }
+
+            // --- Hot valency: ensure enough active members ---
+            if hot_count < group.hot_valency {
+                let hot_deficit = group.hot_valency - hot_count;
+                // Same two-phase collect+iterate pattern to avoid double-borrow.
+                let to_promote: Vec<SocketAddr> = warm_members
+                    .iter()
+                    .filter(|a| !targeted.contains(*a))
+                    .take(hot_deficit)
+                    .copied()
+                    .collect();
+                for addr in to_promote {
+                    debug!(
+                        group_id = group.group_id,
+                        %addr,
+                        hot = hot_count,
+                        target = group.hot_valency,
+                        "Local root group: emitting Promote for hot valency deficit"
+                    );
+                    events.push(GovernorEvent::Promote(addr));
+                    targeted.insert(addr);
+                }
+            }
+        }
+    }
+
+    /// Phase 1: Evaluate big ledger peer targets.
+    ///
+    /// When active (hot) BLPs are below target:
+    /// 1. Promote warm BLPs to hot.
+    /// 2. If still short after promotions, emit `Connect` for cold BLPs.
+    ///
+    /// This replaces the previous TODO stub that never connected cold BLPs.
     fn evaluate_blp(
         &self,
         pm: &PeerManager,
@@ -233,36 +362,48 @@ impl Governor {
     ) {
         let active_blp = pm.active_big_ledger_peer_count();
 
-        if active_blp < targets.active_blp {
-            // Need more active BLPs — promote warm BLPs
-            let deficit = targets.active_blp - active_blp;
-            let warm_blps: Vec<SocketAddr> = pm
-                .connected_peer_addrs()
-                .into_iter()
-                .filter(|addr| {
-                    pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer)
-                        && pm.peer_performance(addr).is_some_and(|_| true) // warm, not hot
-                })
-                .filter(|addr| {
-                    // Only warm peers (not already hot)
-                    !pm.hot_peer_addrs().contains(addr)
-                })
-                .take(deficit)
-                .collect();
+        if active_blp >= targets.active_blp {
+            return;
+        }
 
-            for addr in warm_blps {
-                events.push(GovernorEvent::Promote(addr));
-            }
+        let mut blp_hot_after_events = active_blp;
 
-            // If still short, connect cold BLPs
-            if active_blp + events.len() < targets.active_blp {
-                // The node will handle connecting cold BLPs through the regular connect path
-                // We just ensure they get prioritized
+        // Step 1: promote warm BLPs first (connection already established)
+        let hot_set: HashSet<SocketAddr> = pm.hot_peer_addrs().into_iter().collect();
+        let warm_blps: Vec<SocketAddr> = pm
+            .connected_peer_addrs()
+            .into_iter()
+            .filter(|addr| {
+                pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer)
+                    && !hot_set.contains(addr)
+            })
+            .take(targets.active_blp - blp_hot_after_events)
+            .collect();
+
+        for addr in warm_blps {
+            blp_hot_after_events += 1;
+            events.push(GovernorEvent::Promote(addr));
+        }
+
+        // Step 2: if we're still below target, connect cold BLPs proactively.
+        // This is the key fix: previously this path was a TODO and never emitted
+        // any events, meaning cold BLPs were never connected when needed.
+        if blp_hot_after_events < targets.active_blp {
+            let cold_deficit = targets.active_blp - blp_hot_after_events;
+            let cold_blps = pm.cold_big_ledger_peer_addrs();
+            for addr in cold_blps.into_iter().take(cold_deficit) {
+                debug!(
+                    %addr,
+                    active_blp,
+                    target = targets.active_blp,
+                    "BLP: emitting Connect for cold big ledger peer"
+                );
+                events.push(GovernorEvent::Connect(addr));
             }
         }
     }
 
-    /// Evaluate active (hot) peer targets
+    /// Phase 2: Evaluate active (hot) peer targets.
     fn evaluate_active(
         &self,
         pm: &PeerManager,
@@ -279,7 +420,7 @@ impl Governor {
         }
     }
 
-    /// Evaluate established (warm + hot) peer targets
+    /// Phase 3: Evaluate established (warm + hot) peer targets.
     fn evaluate_established(
         &self,
         pm: &PeerManager,
@@ -296,18 +437,19 @@ impl Governor {
         }
     }
 
-    /// Evaluate known peer targets — connect more cold peers
+    /// Phase 4: Evaluate known peer targets — connect more cold peers.
+    ///
+    /// Known peer expansion is handled by `evaluate_established`.
+    /// This hook exists for future peer discovery integration.
     fn evaluate_known(
         &self,
         _pm: &PeerManager,
         _targets: &PeerTargets,
         _events: &mut Vec<GovernorEvent>,
     ) {
-        // Known peer expansion is handled by evaluate_established.
-        // This hook exists for future peer discovery integration.
     }
 
-    /// Evaluate surplus — demote/disconnect peers above targets
+    /// Phase 5: Evaluate surplus — demote/disconnect peers above targets.
     fn evaluate_surplus(
         &self,
         pm: &PeerManager,
@@ -666,5 +808,260 @@ mod tests {
             .filter(|e| matches!(e, GovernorEvent::Demote(_)))
             .count();
         assert_eq!(demote_count, 0);
+    }
+
+    // ── BLP proactive connection ──────────────────────────────────────────────
+
+    #[test]
+    fn test_blp_cold_connect_when_below_target() {
+        // Build a PM with 3 cold BLPs and no active BLPs.
+        // The governor should emit Connect events for the cold BLPs to bring
+        // active_blp up to the target (default 5, but we set it to 2 here).
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+        let blp1 = test_addr(4001);
+        let blp2 = test_addr(4002);
+        let blp3 = test_addr(4003);
+        pm.add_big_ledger_peer(blp1);
+        pm.add_big_ledger_peer(blp2);
+        pm.add_big_ledger_peer(blp3);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_blp: 2,
+                established_blp: 3,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let connect_addrs: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Connect(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // Should have emitted Connect for cold BLPs (may connect all 3 cold
+        // to ensure at least 2 reach active). The count is >= target deficit.
+        assert!(
+            connect_addrs.len() >= 2,
+            "Expected at least 2 Connect events for cold BLPs, got: {connect_addrs:?}"
+        );
+        // All connects must target known BLP addresses
+        for addr in &connect_addrs {
+            assert!(
+                [blp1, blp2, blp3].contains(addr),
+                "Connect target {addr} is not a registered BLP"
+            );
+        }
+    }
+
+    #[test]
+    fn test_blp_warm_promoted_before_cold_connected() {
+        // When there are warm BLPs, they should be promoted to hot before the
+        // governor tries to connect cold BLPs.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // One warm BLP
+        let warm_blp = test_addr(4001);
+        pm.add_big_ledger_peer(warm_blp);
+        pm.peer_connected(&warm_blp, 14, ConnectionDirection::Outbound);
+
+        // One cold BLP
+        let cold_blp = test_addr(4002);
+        pm.add_big_ledger_peer(cold_blp);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_blp: 2,
+                established_blp: 2,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let promotes: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+        let connects: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Connect(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // warm_blp must be promoted
+        assert!(
+            promotes.contains(&warm_blp),
+            "warm BLP should be promoted: promotes={promotes:?}"
+        );
+        // cold_blp should be connected to fill the remaining deficit
+        assert!(
+            connects.contains(&cold_blp),
+            "cold BLP should be connected: connects={connects:?}"
+        );
+    }
+
+    // ── Local root valency enforcement ────────────────────────────────────────
+
+    #[test]
+    fn test_local_root_deficit_emits_connect() {
+        // Group with hot_valency=2, warm_valency=3.
+        // All 4 members are cold — the governor should emit Connect events for
+        // the cold members up to the warm_valency target (3).
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let lr1 = test_addr(5001);
+        let lr2 = test_addr(5002);
+        let lr3 = test_addr(5003);
+        let lr4 = test_addr(5004);
+        pm.add_config_peer(lr1, true, false);
+        pm.add_config_peer(lr2, true, false);
+        pm.add_config_peer(lr3, true, false);
+        pm.add_config_peer(lr4, true, false);
+
+        pm.add_local_root_group(vec![lr1, lr2, lr3, lr4], 2, 3);
+
+        let mut gov = Governor::new(GovernorConfig::default());
+        let events = gov.evaluate(&pm);
+
+        let connect_addrs: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Connect(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        // Should connect at least warm_valency (3) members; general deficit
+        // phase may also emit Connect for the 4th cold member.
+        assert!(
+            connect_addrs.len() >= 3,
+            "Expected at least 3 Connect events for local root warm_valency deficit; got {connect_addrs:?}"
+        );
+        for addr in &connect_addrs {
+            assert!(
+                [lr1, lr2, lr3, lr4].contains(addr),
+                "Connect {addr} is not a local root group member"
+            );
+        }
+    }
+
+    #[test]
+    fn test_local_root_deficit_emits_promote() {
+        // Group with hot_valency=2, warm_valency=2.
+        // 2 members are warm but 0 are hot — the governor should Promote both.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let lr1 = test_addr(5001);
+        let lr2 = test_addr(5002);
+        pm.add_config_peer(lr1, true, false);
+        pm.add_config_peer(lr2, true, false);
+        pm.peer_connected(&lr1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&lr2, 14, ConnectionDirection::Outbound);
+
+        pm.add_local_root_group(vec![lr1, lr2], 2, 2);
+
+        let mut gov = Governor::new(GovernorConfig::default());
+        let events = gov.evaluate(&pm);
+
+        let promote_addrs: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            promote_addrs.len(),
+            2,
+            "Expected 2 Promote events for local root hot_valency deficit; got {promote_addrs:?}"
+        );
+        assert!(promote_addrs.contains(&lr1));
+        assert!(promote_addrs.contains(&lr2));
+    }
+
+    #[test]
+    fn test_local_root_at_valency_no_events() {
+        // Group hot_valency=1, warm_valency=2. Already has 1 hot + 1 warm member.
+        // Should emit no valency-related events for this group.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let lr1 = test_addr(5001);
+        let lr2 = test_addr(5002);
+        pm.add_config_peer(lr1, true, false);
+        pm.add_config_peer(lr2, true, false);
+        pm.peer_connected(&lr1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&lr2, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&lr1);
+
+        pm.add_local_root_group(vec![lr1, lr2], 1, 2);
+
+        // Use a config where global targets are exactly met so surplus/deficit
+        // logic in phases 2-5 adds no noise.
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 1,
+                established_peers: 2,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let group_events: Vec<_> = events
+            .iter()
+            .filter(|e| match e {
+                GovernorEvent::Connect(a) | GovernorEvent::Promote(a) => [lr1, lr2].contains(a),
+                _ => false,
+            })
+            .collect();
+
+        assert!(
+            group_events.is_empty(),
+            "No valency events should be emitted for a group already at target; got: {group_events:?}"
+        );
     }
 }

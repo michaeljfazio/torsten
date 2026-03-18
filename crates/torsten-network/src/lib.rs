@@ -34,8 +34,8 @@ pub use n2n_server::{
 };
 pub use peer::PeerConnection;
 pub use peer_manager::{
-    CircuitState, ConnectionDirection, DiffusionMode, PeerCategory, PeerManager, PeerManagerConfig,
-    PeerPerformance,
+    CircuitState, ConnectionDirection, DiffusionMode, LocalRootGroupInfo, PeerCategory,
+    PeerManager, PeerManagerConfig, PeerPerformance,
 };
 pub use pipelined::PipelinedPeerClient;
 pub use query_handler::{NodeStateSnapshot, QueryHandler, QueryResult};

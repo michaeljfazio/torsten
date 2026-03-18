@@ -370,6 +370,26 @@ pub enum PeerManagerEvent {
     DemoteToWarm(SocketAddr),
 }
 
+/// A local root group registered from the topology file.
+///
+/// The governor uses these records to enforce per-group valency: if fewer than
+/// `hot_valency` members of a group are hot (active), the governor emits
+/// `Connect` events for cold members and `Promote` events for warm members
+/// until the target is met.  The group is identified by a stable integer ID
+/// assigned sequentially at startup.
+#[derive(Debug, Clone)]
+pub struct LocalRootGroupInfo {
+    /// Stable numeric ID for this group (0-based, assigned at registration time)
+    pub group_id: usize,
+    /// All member addresses in the group (resolved from the topology)
+    pub members: Vec<SocketAddr>,
+    /// Target number of hot (actively syncing) connections
+    pub hot_valency: usize,
+    /// Target number of warm (connected, not syncing) connections.
+    /// Defaults to `hot_valency + 1` when not explicitly specified.
+    pub warm_valency: usize,
+}
+
 /// The peer manager tracks all known peers and drives connection decisions.
 pub struct PeerManager {
     config: PeerManagerConfig,
@@ -378,6 +398,9 @@ pub struct PeerManager {
     warm_peers: HashSet<SocketAddr>,
     cold_peers: HashSet<SocketAddr>,
     inbound_count: usize,
+    /// Registered local-root groups with their per-group valency targets.
+    /// Populated once at startup from the topology; immutable thereafter.
+    local_root_groups: Vec<LocalRootGroupInfo>,
 }
 
 impl PeerManager {
@@ -389,7 +412,57 @@ impl PeerManager {
             warm_peers: HashSet::new(),
             cold_peers: HashSet::new(),
             inbound_count: 0,
+            local_root_groups: Vec::new(),
         }
+    }
+
+    /// Register a local-root group with its valency targets.
+    ///
+    /// Must be called after `add_config_peer()` has been called for all members
+    /// of the group so that the PeerManager knows about them.  Members that are
+    /// not yet known are silently skipped (they may have failed DNS resolution).
+    ///
+    /// Groups are assigned sequential IDs starting from 0.
+    pub fn add_local_root_group(
+        &mut self,
+        members: Vec<SocketAddr>,
+        hot_valency: usize,
+        warm_valency: usize,
+    ) {
+        let group_id = self.local_root_groups.len();
+        // Only keep members that are actually registered in the peer table.
+        let known_members: Vec<SocketAddr> = members
+            .into_iter()
+            .filter(|addr| self.peers.contains_key(addr))
+            .collect();
+        if known_members.is_empty() {
+            // No resolvable members — skip registration but log at debug.
+            debug!(
+                group_id,
+                "Local root group has no resolvable members, skipping"
+            );
+            return;
+        }
+        debug!(
+            group_id,
+            members = known_members.len(),
+            hot_valency,
+            warm_valency,
+            "Registered local root group"
+        );
+        self.local_root_groups.push(LocalRootGroupInfo {
+            group_id,
+            members: known_members,
+            hot_valency,
+            warm_valency,
+        });
+    }
+
+    /// Return a snapshot of all registered local root groups.
+    ///
+    /// Used by the governor to evaluate per-group valency deficits.
+    pub fn local_root_groups(&self) -> &[LocalRootGroupInfo] {
+        &self.local_root_groups
     }
 
     /// Add a peer from the topology/config.
@@ -440,6 +513,33 @@ impl PeerManager {
                     .is_some_and(|p| p.category == PeerCategory::BigLedgerPeer)
             })
             .count()
+    }
+
+    /// Return cold (unconnected) big ledger peer addresses, sorted by selection
+    /// score descending so the governor connects the most-preferred BLPs first.
+    ///
+    /// Circuit-open peers are excluded — they will become eligible again once
+    /// their cooldown expires.
+    pub fn cold_big_ledger_peer_addrs(&self) -> Vec<SocketAddr> {
+        let mut candidates: Vec<(SocketAddr, f64)> = self
+            .cold_peers
+            .iter()
+            .filter_map(|addr| {
+                let info = self.peers.get(addr)?;
+                if info.category != PeerCategory::BigLedgerPeer {
+                    return None;
+                }
+                // Skip peers whose circuit breaker is still open
+                if self.is_circuit_open(addr) {
+                    return None;
+                }
+                Some((*addr, info.selection_score()))
+            })
+            .collect();
+
+        // Best score first → governor can take(n) to pick the top-N candidates.
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.into_iter().map(|(addr, _)| addr).collect()
     }
 
     /// Check if a peer is a local root (protected from demotion)

@@ -1019,13 +1019,50 @@ impl Node {
                     }
                 }
             }
+
+            // Resolve local root group members for per-group valency registration.
+            // Each entry is (resolved_addrs_for_group, hot_valency, warm_valency).
+            // We collect these here (pre-lock) so that `add_local_root_group` can
+            // be called with already-resolved addresses while holding the PM lock.
+            let mut resolved_groups: Vec<(Vec<std::net::SocketAddr>, usize, usize)> = Vec::new();
+            for group in &self.topology.local_roots {
+                let hot_val = usize::from(group.effective_hot_valency());
+                let warm_val = usize::from(group.effective_warm_valency());
+                let mut group_addrs = Vec::new();
+                for ap in &group.access_points {
+                    match tokio::net::lookup_host(format!("{}:{}", ap.address, ap.port)).await {
+                        Ok(addrs) => {
+                            for socket_addr in addrs {
+                                group_addrs.push(socket_addr);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                address = %ap.address,
+                                port = ap.port,
+                                "Failed to resolve local root group member address: {e}"
+                            );
+                        }
+                    }
+                }
+                if !group_addrs.is_empty() {
+                    resolved_groups.push((group_addrs, hot_val, warm_val));
+                }
+            }
+
             let mut pm = peer_manager.write().await;
             for (socket_addr, trustable, advertise) in resolved_peers {
                 pm.add_config_peer(socket_addr, trustable, advertise);
             }
+            // Register per-group valency targets.  This must happen AFTER
+            // add_config_peer() calls so the peer table contains the members.
+            for (group_addrs, hot_val, warm_val) in resolved_groups {
+                pm.add_local_root_group(group_addrs, hot_val, warm_val);
+            }
             let stats = pm.stats();
             info!(
                 known = stats.known_peers,
+                local_root_groups = pm.local_root_groups().len(),
                 mode = ?pm.diffusion_mode(),
                 "Peers",
             );
