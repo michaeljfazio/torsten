@@ -57,8 +57,9 @@ use ratatui::{
 /// (the 2 accounts for the 1-char left padding in `kv_line`).
 const LABEL_W: usize = 14;
 
-/// Width reserved for the value field (used for right-aligning numbers).
-const VALUE_W: usize = 12;
+/// Width reserved for the value field (used for right-aligning numbers and
+/// short strings like "Block Producer", "Waiting (nonce)", "v0.4.4-alpha").
+const VALUE_W: usize = 16;
 
 // Smooth block-character set for progress bars, index 0 (empty) – 8 (full).
 const SMOOTH_BLOCKS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
