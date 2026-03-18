@@ -6,26 +6,29 @@
 //! - Lookup of collateral UTxOs
 //! - Multi-asset net-token check (collateral net must be pure ADA)
 //! - `total_collateral` declaration matching
-//! - Minimum collateral percentage enforcement
+//! - Minimum collateral percentage enforcement (ceiling division, matching Haskell)
 //! - Per-transaction execution-unit limit check
 //! - Redeemer index bounds check (Rule 11b)
 //! - Missing Spend redeemer for script-locked inputs (Rule 11c)
+//! - Missing Reward redeemer for script-locked withdrawals (Rule 11c, Haskell `scriptsNeeded`)
+//! - Missing Mint redeemer for Plutus minting policies (Rule 11c, Haskell `scriptsNeeded`)
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use torsten_primitives::hash::PolicyId;
+use torsten_primitives::hash::{Hash28, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{RedeemerTag, Transaction};
+use torsten_primitives::transaction::{RedeemerTag, ScriptRef, Transaction};
 use torsten_primitives::value::AssetName;
 
 use crate::utxo::UtxoSet;
 
+use super::scripts::compute_script_ref_hash;
 use super::ValidationError;
 
 /// Validate all collateral-related rules for a Plutus transaction (Rule 11).
 ///
 /// This function is only called when `has_plutus_scripts(tx)` is true.
-pub(super) fn check_collateral(
+pub(crate) fn check_collateral(
     tx: &Transaction,
     utxo_set: &UtxoSet,
     params: &ProtocolParameters,
@@ -112,8 +115,15 @@ pub(super) fn check_collateral(
         }
     }
 
-    // Effective collateral must be >= fee * collateral_percentage / 100
-    let required_collateral = body.fee.0 * params.collateral_percentage / 100;
+    // Effective collateral must be >= ceil(fee * collateral_percentage / 100).
+    //
+    // Haskell uses `ceiling (fromIntegral fee * fromIntegral pct % 100)`, which
+    // is equivalent to ceiling division.  Truncating division under-counts by at
+    // most 1 lovelace, which would incorrectly accept transactions whose
+    // collateral sits exactly on the fractional threshold.
+    //
+    // Example: fee=101, pct=150 → exact=151.5 → required=152 (not 151).
+    let required_collateral = (body.fee.0 * params.collateral_percentage).div_ceil(100);
     if effective_collateral < required_collateral {
         errors.push(ValidationError::InsufficientCollateral);
     }
@@ -176,14 +186,24 @@ fn check_redeemer_indices(tx: &Transaction, errors: &mut Vec<ValidationError>) {
     }
 }
 
-/// Rule 11c: Every script-locked spending input must have a matching Spend
-/// redeemer at the correct sorted index.
-pub(super) fn check_spend_redeemers(
+/// Rule 11c: Every script-locked spending input, script-locked withdrawal, and
+/// Plutus minting policy must have a matching redeemer of the appropriate tag.
+///
+/// Matches Haskell's `scriptsNeeded` which requires:
+/// - A `Spend` redeemer at the sorted index for each script-locked input.
+/// - A `Reward` redeemer at the sorted index for each script-locked withdrawal
+///   (reward address whose stake credential is a script hash).
+/// - A `Mint` redeemer at the sorted index for each Plutus minting policy (a
+///   policy ID that matches a script in the witness set or reference inputs).
+pub(crate) fn check_script_redeemers(
     tx: &Transaction,
     utxo_set: &UtxoSet,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
+
+    // ------------------------------------------------------------------ Spend
+    // Collect existing Spend redeemer indices.
     let spend_indices: HashSet<u32> = tx
         .witness_set
         .redeemers
@@ -229,4 +249,141 @@ pub(super) fn check_spend_redeemers(
             }
         }
     }
+
+    // ----------------------------------------------------------------- Reward
+    // Withdrawals are kept in a BTreeMap<Vec<u8>, Lovelace> keyed by the
+    // raw reward address bytes.  The BTreeMap iteration order is the
+    // canonical sorted order, which gives us the deterministic index that
+    // Haskell uses for Reward redeemers.
+    //
+    // A reward address is script-locked when the header nibble is 0xF
+    // (i.e., bit 4 of the header byte is set), indicating a script stake
+    // credential.
+    let reward_indices: HashSet<u32> = tx
+        .witness_set
+        .redeemers
+        .iter()
+        .filter(|r| r.tag == RedeemerTag::Reward)
+        .map(|r| r.index)
+        .collect();
+
+    for (idx, reward_addr) in body.withdrawals.keys().enumerate() {
+        if reward_addr.len() < 29 {
+            continue;
+        }
+        let header = reward_addr[0];
+        // Bit 4 of the header distinguishes script (1) from key (0) credentials.
+        // 0xE0/0xE1 = key stake credential (no redeemer required)
+        // 0xF0/0xF1 = script stake credential (Reward redeemer required)
+        let is_script_credential = (header & 0x10) != 0;
+        if is_script_credential && !reward_indices.contains(&(idx as u32)) {
+            errors.push(ValidationError::MissingRedeemer {
+                tag: "Reward".to_string(),
+                index: idx as u32,
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------ Mint
+    // Build the set of Plutus script hashes available to this transaction
+    // (witness set V1/V2/V3 + reference input script_refs).
+    let plutus_script_hashes: HashSet<Hash28> = collect_plutus_script_hashes(tx, utxo_set);
+
+    // Minting policies are sorted by policy ID (the BTreeMap key order) to
+    // assign deterministic Mint redeemer indices, matching Haskell's
+    // `Map.toAscList (txmint txb)`.
+    let mint_indices: HashSet<u32> = tx
+        .witness_set
+        .redeemers
+        .iter()
+        .filter(|r| r.tag == RedeemerTag::Mint)
+        .map(|r| r.index)
+        .collect();
+
+    for (idx, policy_id) in body.mint.keys().enumerate() {
+        // Only Plutus policies need a Mint redeemer.  Native script policies
+        // are authenticated by including the script in native_scripts — they
+        // do not use redeemers.
+        if plutus_script_hashes.contains(policy_id) && !mint_indices.contains(&(idx as u32)) {
+            errors.push(ValidationError::MissingRedeemer {
+                tag: "Mint".to_string(),
+                index: idx as u32,
+            });
+        }
+    }
+}
+
+/// Build the set of Plutus script hashes (V1, V2, V3) that are available to
+/// this transaction: witness set scripts plus Plutus script_refs on spending
+/// and reference inputs.
+///
+/// This mirrors the Plutus subset of Haskell's `scriptsProvided`, limited to
+/// Plutus language scripts (native scripts do not use redeemers).
+fn collect_plutus_script_hashes(tx: &Transaction, utxo_set: &UtxoSet) -> HashSet<Hash28> {
+    // Collect all Plutus scripts with their version tag for hashing.
+    // Map from hash → present (we only need membership).
+    let mut hashes: HashSet<Hash28> = HashSet::new();
+
+    // Witness set: V1 (tag 0x01), V2 (0x02), V3 (0x03)
+    for s in &tx.witness_set.plutus_v1_scripts {
+        hashes.insert(torsten_primitives::hash::blake2b_224_tagged(1, s));
+    }
+    for s in &tx.witness_set.plutus_v2_scripts {
+        hashes.insert(torsten_primitives::hash::blake2b_224_tagged(2, s));
+    }
+    for s in &tx.witness_set.plutus_v3_scripts {
+        hashes.insert(torsten_primitives::hash::blake2b_224_tagged(3, s));
+    }
+
+    // Reference scripts from spending inputs and reference inputs.
+    for inp in tx.body.inputs.iter().chain(tx.body.reference_inputs.iter()) {
+        if let Some(utxo) = utxo_set.lookup(inp) {
+            if let Some(script_ref) = &utxo.script_ref {
+                match script_ref {
+                    ScriptRef::PlutusV1(_) | ScriptRef::PlutusV2(_) | ScriptRef::PlutusV3(_) => {
+                        hashes.insert(compute_script_ref_hash(script_ref));
+                    }
+                    // Native scripts do not require redeemers.
+                    ScriptRef::NativeScript(_) => {}
+                }
+            }
+        }
+    }
+
+    hashes
+}
+
+/// Build a map from Plutus script hash → language version tag (1=V1, 2=V2,
+/// 3=V3) for all Plutus scripts available to this transaction.
+///
+/// Used by the V3 non-Unit return check in `plutus.rs` to determine which
+/// scripts executing in a given transaction are PlutusV3.
+pub(crate) fn plutus_script_version_map(
+    tx: &Transaction,
+    utxo_set: &UtxoSet,
+) -> HashMap<Hash28, u8> {
+    let mut map: HashMap<Hash28, u8> = HashMap::new();
+    for s in &tx.witness_set.plutus_v1_scripts {
+        map.insert(torsten_primitives::hash::blake2b_224_tagged(1, s), 1);
+    }
+    for s in &tx.witness_set.plutus_v2_scripts {
+        map.insert(torsten_primitives::hash::blake2b_224_tagged(2, s), 2);
+    }
+    for s in &tx.witness_set.plutus_v3_scripts {
+        map.insert(torsten_primitives::hash::blake2b_224_tagged(3, s), 3);
+    }
+    for inp in tx.body.inputs.iter().chain(tx.body.reference_inputs.iter()) {
+        if let Some(utxo) = utxo_set.lookup(inp) {
+            if let Some(script_ref) = &utxo.script_ref {
+                let tag = match script_ref {
+                    ScriptRef::PlutusV1(_) => 1u8,
+                    ScriptRef::PlutusV2(_) => 2,
+                    ScriptRef::PlutusV3(_) => 3,
+                    ScriptRef::NativeScript(_) => continue,
+                };
+                map.insert(compute_script_ref_hash(script_ref), tag);
+            }
+        }
+    }
+    map
 }

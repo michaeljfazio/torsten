@@ -416,7 +416,10 @@ proptest! {
     ) {
         let p = params();
         let collateral_pct = p.collateral_percentage;
-        let required = fee * collateral_pct / 100;
+        // Use ceiling division to match Haskell: ceil(fee * pct / 100).
+        // The old truncating formula `fee * pct / 100` could be 1 below the
+        // required amount when the product is not an exact multiple of 100.
+        let required = (fee * collateral_pct).div_ceil(100);
         let collateral_value = required + extra_pct * 1000; // Always sufficient
 
         let output_value = 5_000_000u64;

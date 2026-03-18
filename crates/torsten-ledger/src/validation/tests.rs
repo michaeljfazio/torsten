@@ -3711,4 +3711,1130 @@ mod tests {
              their full byte size (2 × 100 = 200)"
         );
     }
+
+    // =========================================================================
+    // Bug C5: Collateral percentage ceiling division
+    // =========================================================================
+
+    /// Bug C5: Haskell uses ceiling(fee * pct / 100), not truncating division.
+    ///
+    /// fee=101, pct=150: exact = 151.5 → required = 152 (ceiling), not 151 (truncating).
+    /// A collateral of exactly 151 lovelace should be rejected; 152 should pass.
+    #[test]
+    fn test_collateral_minimum_exact_ceiling() {
+        use super::super::collateral::check_collateral;
+
+        let mut utxo_set = UtxoSet::new();
+
+        // A collateral UTxO that provides exactly the truncated value (151), which
+        // is one less than the correct ceiling (152).  Must be rejected.
+        let col_input_low = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC1; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input_low.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                // Exactly 151 — truncating division would (wrongly) accept this.
+                value: Value::lovelace(151),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // A collateral UTxO that provides exactly the ceiling (152).  Must pass.
+        let col_input_ok = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC2; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input_ok.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(152),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Build a minimal protocol parameters struct with the test values.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.collateral_percentage = 150;
+
+        // Build a minimal transaction body with fee = 101.
+        // We only need the fields read by check_collateral; the rest are ignored.
+        let spend_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA0; 32]),
+            index: 0,
+        };
+        let make_tx = |col: TransactionInput| -> Transaction {
+            let mut tx = make_simple_tx(spend_input.clone(), 0, 101);
+            tx.body.collateral = vec![col];
+            tx
+        };
+
+        // --- collateral = 151 (truncating would accept; ceiling must reject) ---
+        let tx_low = make_tx(col_input_low);
+        let mut errors_low: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx_low, &utxo_set, &params, &mut errors_low);
+        assert!(
+            errors_low
+                .iter()
+                .any(|e| matches!(e, ValidationError::InsufficientCollateral)),
+            "Collateral of 151 should fail with ceiling(101*150/100)=152: {errors_low:?}"
+        );
+
+        // --- collateral = 152 (exactly the ceiling; must pass) ---
+        let tx_ok = make_tx(col_input_ok);
+        let mut errors_ok: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx_ok, &utxo_set, &params, &mut errors_ok);
+        let collateral_errors: Vec<_> = errors_ok
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InsufficientCollateral))
+            .collect();
+        assert!(
+            collateral_errors.is_empty(),
+            "Collateral of 152 should satisfy ceiling(101*150/100)=152: {errors_ok:?}"
+        );
+    }
+
+    /// Verify the formula handles exact multiples (no rounding required).
+    /// fee=100, pct=150: exact = 150.0 → ceiling = 150.
+    #[test]
+    fn test_collateral_minimum_no_rounding_needed() {
+        use super::super::collateral::check_collateral;
+
+        let mut utxo_set = UtxoSet::new();
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xD1; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(150),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.collateral_percentage = 150;
+        let spend_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA1; 32]),
+            index: 0,
+        };
+        let mut tx = make_simple_tx(spend_input, 0, 100);
+        tx.body.collateral = vec![col_input];
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo_set, &params, &mut errors);
+        let insuff: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InsufficientCollateral))
+            .collect();
+        assert!(
+            insuff.is_empty(),
+            "fee=100, pct=150, collateral=150: ceiling(150.0)=150 should pass: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Bug C5 extra: collateral_return interacts correctly with ceiling arithmetic
+    // =========================================================================
+
+    /// Verifies that collateral_return is subtracted before the ceiling check.
+    ///
+    /// col_input provides 300 lovelace, collateral_return takes 148 back,
+    /// effective = 152.  With fee=101 and pct=150, ceiling(151.5)=152 must pass.
+    /// If effective were 151 (e.g., return=149) the check must reject.
+    #[test]
+    fn test_collateral_return_reduces_effective_collateral_ceiling() {
+        use super::super::collateral::check_collateral;
+
+        let mut utxo_set = UtxoSet::new();
+        let col_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xE0; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            col_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(300),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.collateral_percentage = 150;
+
+        let spend_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA2; 32]),
+            index: 0,
+        };
+
+        // effective = 300 - 148 = 152 → ceiling(101*150/100) = 152 → must pass
+        let mut tx_pass = make_simple_tx(spend_input.clone(), 0, 101);
+        tx_pass.body.collateral = vec![col_input.clone()];
+        tx_pass.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(148),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        });
+        let mut errors_pass: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx_pass, &utxo_set, &params, &mut errors_pass);
+        assert!(
+            !errors_pass
+                .iter()
+                .any(|e| matches!(e, ValidationError::InsufficientCollateral)),
+            "effective=152 should pass ceiling check: {errors_pass:?}"
+        );
+
+        // effective = 300 - 149 = 151 → ceiling(101*150/100) = 152 → must fail
+        let mut tx_fail = make_simple_tx(spend_input, 0, 101);
+        tx_fail.body.collateral = vec![col_input];
+        tx_fail.body.collateral_return = Some(TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(149),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        });
+        let mut errors_fail: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx_fail, &utxo_set, &params, &mut errors_fail);
+        assert!(
+            errors_fail
+                .iter()
+                .any(|e| matches!(e, ValidationError::InsufficientCollateral)),
+            "effective=151 should fail ceiling check: {errors_fail:?}"
+        );
+    }
+
+    // =========================================================================
+    // Bug C1: Missing Reward redeemer for script-locked withdrawals
+    // =========================================================================
+
+    /// Constructs a transaction that has a script-locked withdrawal but no
+    /// matching Reward redeemer.  Must be rejected with MissingRedeemer { tag:
+    /// "Reward", .. }.
+    ///
+    /// Reward address format: [0xF0, script_hash_bytes[0..28]]
+    #[test]
+    fn test_script_withdrawal_missing_reward_redeemer() {
+        use super::super::collateral::check_script_redeemers;
+
+        let script_hash = Hash28::from_bytes([0xCC; 28]);
+
+        // Reward address: header 0xF0 = script stake credential (no network bit),
+        // followed by the 28-byte script hash.
+        let mut reward_addr = vec![0xF0u8];
+        reward_addr.extend_from_slice(script_hash.as_bytes());
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Transaction with a script-locked withdrawal but NO Reward redeemer.
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(1_000_000));
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals,
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xAB]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Reward redeemer — this is the bug we are testing.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Reward")),
+            "Expected MissingRedeemer {{ tag: Reward, index: 0 }}, got: {errors:?}"
+        );
+    }
+
+    /// A script-locked withdrawal WITH a matching Reward redeemer must not
+    /// produce a MissingRedeemer error.
+    #[test]
+    fn test_script_withdrawal_with_reward_redeemer_ok() {
+        use super::super::collateral::check_script_redeemers;
+
+        let script_hash = Hash28::from_bytes([0xCC; 28]);
+        let mut reward_addr = vec![0xF0u8];
+        reward_addr.extend_from_slice(script_hash.as_bytes());
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(1_000_000));
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_000_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals,
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xAB]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Reward redeemer at index 0 — matches the single withdrawal.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Reward,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Reward")
+            ),
+            "Reward redeemer present; must not produce MissingRedeemer: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Bug C1: Missing Mint redeemer for Plutus minting policies
+    // =========================================================================
+
+    /// A Plutus minting policy (V2 script in witness set) without a Mint redeemer
+    /// must be rejected with MissingRedeemer { tag: "Mint", index: 0 }.
+    #[test]
+    fn test_minting_policy_missing_mint_redeemer() {
+        use super::super::collateral::check_script_redeemers;
+
+        // Create a fake Plutus V2 script and compute its policy hash.
+        let script_bytes: Vec<u8> = vec![0x11, 0x22, 0x33];
+        let policy_id = torsten_primitives::hash::blake2b_224_tagged(2, &script_bytes);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let asset = AssetName::new(b"MyToken".to_vec()).unwrap();
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy_id).or_default().insert(asset, 100);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint,
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                // The Plutus V2 script is present in the witness set.
+                plutus_v2_scripts: vec![script_bytes],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Mint redeemer — this is the bug we are testing.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Mint")
+            ),
+            "Expected MissingRedeemer {{ tag: Mint, index: 0 }}, got: {errors:?}"
+        );
+    }
+
+    /// A Plutus minting policy WITH a matching Mint redeemer must not produce
+    /// a MissingRedeemer error.
+    #[test]
+    fn test_minting_policy_with_mint_redeemer_ok() {
+        use super::super::collateral::check_script_redeemers;
+
+        let script_bytes: Vec<u8> = vec![0x11, 0x22, 0x33];
+        let policy_id = torsten_primitives::hash::blake2b_224_tagged(2, &script_bytes);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x21; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let asset = AssetName::new(b"MyToken".to_vec()).unwrap();
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy_id).or_default().insert(asset, 100);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint,
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![script_bytes],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Mint redeemer at index 0 — matches the single minting policy.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Mint,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Mint")
+            ),
+            "Mint redeemer present; must not produce MissingRedeemer: {errors:?}"
+        );
+    }
+
+    /// Two Plutus V2 minting policies in sorted order.  The Mint redeemer at
+    /// index 0 must map to the lexicographically-first policy ID, and index 1
+    /// to the second.  Missing either redeemer must produce the correct index.
+    #[test]
+    fn test_mint_redeemer_sorted_index_order() {
+        use super::super::collateral::check_script_redeemers;
+
+        // Two different Plutus V2 scripts.  Their policy IDs will be sorted by
+        // BTreeMap, so we must ensure the test acknowledges that order.
+        let script_a: Vec<u8> = vec![0x01];
+        let script_b: Vec<u8> = vec![0xFF];
+        let policy_a = torsten_primitives::hash::blake2b_224_tagged(2, &script_a);
+        let policy_b = torsten_primitives::hash::blake2b_224_tagged(2, &script_b);
+
+        // Determine which policy comes first in BTreeMap order.
+        let (policy_first, policy_second) = if policy_a < policy_b {
+            (policy_a, policy_b)
+        } else {
+            (policy_b, policy_a)
+        };
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x30; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let asset = AssetName::new(b"T".to_vec()).unwrap();
+        let mut mint: BTreeMap<torsten_primitives::hash::PolicyId, BTreeMap<AssetName, i64>> =
+            BTreeMap::new();
+        mint.entry(policy_first)
+            .or_default()
+            .insert(asset.clone(), 1);
+        mint.entry(policy_second).or_default().insert(asset, 1);
+
+        // Only a redeemer for index 0 — the second policy (index 1) is missing.
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint,
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![script_a, script_b],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Only the first policy has a redeemer.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Mint,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        // The second policy (index 1) is missing a Mint redeemer.
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, index: 1 } if tag == "Mint")
+            ),
+            "Expected MissingRedeemer {{ tag: Mint, index: 1 }}, got: {errors:?}"
+        );
+        // The first policy (index 0) has a redeemer and must not trigger an error.
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Mint")
+            ),
+            "Index 0 redeemer present; must not trigger MissingRedeemer: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Bug C1: Two spending inputs — two different Plutus V2 scripts, both with
+    // correct Spend redeemers at sorted indices (integration smoke test).
+    // =========================================================================
+
+    /// Two script-locked inputs, each locked by a different Plutus V2 script,
+    /// both with Spend redeemers at the correct sorted indices.  check_script_redeemers
+    /// must not produce any MissingSpendRedeemer or MissingRedeemer error.
+    #[test]
+    fn test_multi_script_two_spending_inputs() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        // Two fake Plutus V2 scripts with distinct hashes.
+        let script_a: Vec<u8> = vec![0xA1, 0xA2];
+        let script_b: Vec<u8> = vec![0xB1, 0xB2];
+        let hash_a = torsten_primitives::hash::blake2b_224_tagged(2, &script_a);
+        let hash_b = torsten_primitives::hash::blake2b_224_tagged(2, &script_b);
+
+        // Two inputs locked by the respective scripts.
+        // After sorting by tx_id the order is input_a (0x01…) < input_b (0x02…).
+        let input_a = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01; 32]),
+            index: 0,
+        };
+        let input_b = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02; 32]),
+            index: 0,
+        };
+
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(
+            input_a.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(hash_a),
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        utxo_set.insert(
+            input_b.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(hash_b),
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input_a, input_b],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![script_a, script_b],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Spend redeemers for sorted index 0 (input_a) and index 1 (input_b).
+                redeemers: vec![
+                    Redeemer {
+                        tag: RedeemerTag::Spend,
+                        index: 0,
+                        data: PlutusData::Integer(1),
+                        ex_units: ExUnits {
+                            mem: 100,
+                            steps: 100,
+                        },
+                    },
+                    Redeemer {
+                        tag: RedeemerTag::Spend,
+                        index: 1,
+                        data: PlutusData::Integer(2),
+                        ex_units: ExUnits {
+                            mem: 100,
+                            steps: 100,
+                        },
+                    },
+                ],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        let redeemer_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ValidationError::MissingSpendRedeemer { .. }
+                        | ValidationError::MissingRedeemer { .. }
+                )
+            })
+            .collect();
+        assert!(
+            redeemer_errors.is_empty(),
+            "Both Spend redeemers present; expected no errors, got: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Bug C3: PlutusV3 non-Unit return value validation (plutus.rs tests)
+    // =========================================================================
+
+    // Note: These tests exercise the PlutusV3 Unit-return check indirectly by
+    // verifying the `plutus_script_version_map` and `has_any_v3` detection logic
+    // in isolation, since constructing a fully-evaluated Plutus V3 transaction
+    // requires a valid on-chain CBOR encoding that is not practical to fabricate
+    // in a unit test.
+    //
+    // The full end-to-end V3 behavior is covered by integration tests against
+    // the preview testnet (see tests/reward_cross_validation.rs for the pattern).
+
+    /// Verifies that `plutus_script_version_map` correctly identifies V3 scripts
+    /// and returns version tag 3 for each.
+    #[test]
+    fn test_plutus_script_version_map_v3_detection() {
+        use super::super::collateral::plutus_script_version_map;
+
+        let script_v1: Vec<u8> = vec![0x11];
+        let script_v2: Vec<u8> = vec![0x22];
+        let script_v3: Vec<u8> = vec![0x33];
+
+        let hash_v1 = torsten_primitives::hash::blake2b_224_tagged(1, &script_v1);
+        let hash_v2 = torsten_primitives::hash::blake2b_224_tagged(2, &script_v2);
+        let hash_v3 = torsten_primitives::hash::blake2b_224_tagged(3, &script_v3);
+
+        let mut utxo_set = UtxoSet::new();
+        // Minimal tx: one key-locked input, no reference inputs.
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x50; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![script_v1],
+                plutus_v2_scripts: vec![script_v2],
+                plutus_v3_scripts: vec![script_v3],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let map = plutus_script_version_map(&tx, &utxo_set);
+
+        assert_eq!(
+            map.get(&hash_v1),
+            Some(&1u8),
+            "V1 script should map to version 1"
+        );
+        assert_eq!(
+            map.get(&hash_v2),
+            Some(&2u8),
+            "V2 script should map to version 2"
+        );
+        assert_eq!(
+            map.get(&hash_v3),
+            Some(&3u8),
+            "V3 script should map to version 3"
+        );
+
+        // Verify the has_any_v3 condition used by evaluate_plutus_scripts.
+        let has_any_v3 = map.values().any(|v| *v == 3);
+        assert!(
+            has_any_v3,
+            "has_any_v3 must be true when V3 scripts are present"
+        );
+
+        // Without V3 scripts, the flag must be false.
+        let mut tx_no_v3 = tx.clone();
+        tx_no_v3.witness_set.plutus_v3_scripts.clear();
+        let map_no_v3 = plutus_script_version_map(&tx_no_v3, &utxo_set);
+        let has_v3 = map_no_v3.values().any(|v| *v == 3);
+        assert!(
+            !has_v3,
+            "has_any_v3 must be false when no V3 scripts are present"
+        );
+    }
+
+    /// When only V1/V2 scripts are present, `plutus_script_version_map` must
+    /// return no version-3 entries — the strict Unit check must not fire.
+    #[test]
+    fn test_plutus_script_version_map_no_v3_no_strict_check() {
+        use super::super::collateral::plutus_script_version_map;
+
+        let script_v2: Vec<u8> = vec![0xBB];
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x60; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![script_v2],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let map = plutus_script_version_map(&tx, &utxo_set);
+        let has_any_v3 = map.values().any(|v| *v == 3);
+        assert!(
+            !has_any_v3,
+            "No V3 scripts present; strict Unit check must not fire: {map:?}"
+        );
+    }
 }

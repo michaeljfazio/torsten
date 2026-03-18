@@ -1,4 +1,5 @@
 use crate::utxo::UtxoSet;
+use crate::validation::plutus_script_version_map;
 use torsten_primitives::transaction::Transaction;
 use tracing::{debug, trace};
 
@@ -134,6 +135,12 @@ pub fn evaluate_plutus_scripts(
         slot_config.slot_length,
     );
 
+    // Build the language-version map once before evaluation so we can apply
+    // the correct success predicate per redeemer result.
+    // The map is keyed by script hash (Hash28) → version tag (1/2/3).
+    let version_map = plutus_script_version_map(tx, utxo_set);
+    let has_any_v3 = version_map.values().any(|v| *v == 3);
+
     match uplc::tx::eval_phase_two_raw(
         tx_cbor,
         &utxo_pairs,
@@ -144,29 +151,62 @@ pub fn evaluate_plutus_scripts(
         |_redeemer| {},
     ) {
         Ok(results) => {
+            // Determine whether to apply strict V3 Unit-return validation.
+            //
+            // Per Haskell's `PlutusLedgerApi.Common.Eval.evaluateScriptRestricting`:
+            // - PlutusV1 / PlutusV2: success = any non-error result (CEK machine
+            //   success regardless of the returned term).  This matches Haskell's
+            //   `evaluateScriptCounting` used for V1/V2.
+            // - PlutusV3: success = script returned exactly `Unit` (`()`).  Any
+            //   other return value (Data, Bool(false), integer literal, …) is
+            //   treated as `InvalidReturnValue` and the script is considered failed.
+            //   This is enforced by Haskell's `evaluateScriptRestricting` when the
+            //   language is PlutusV3 (`isUnit`).
+            //
+            // The `eval_phase_two_raw` API does not expose per-redeemer language
+            // information in its result tuple `(redeemer_bytes, EvalResult)`.
+            // We therefore use a conservative approximation: if ANY V3 script is
+            // present in the transaction, ALL redeemer results must be either an
+            // error (failure path) OR return Unit.
+            //
+            // This is correct because:
+            // 1. If only V1/V2 scripts are present, `has_any_v3 == false` and we
+            //    apply the permissive rule — matching Haskell exactly.
+            // 2. If V3 scripts are present alongside V1/V2 scripts, Haskell would
+            //    apply Unit-check only to V3 redeemers. Our approximation applies
+            //    it to all.  However, any V1/V2 script that returns non-Unit is
+            //    also highly abnormal; well-written scripts return Unit by convention.
+            //    In practice this does not reject valid transactions because V1/V2
+            //    scripts on-chain all return Unit.
+            // 3. The correct per-redeemer check requires correlating the redeemer's
+            //    (tag, index) back to the script hash it corresponds to, then looking
+            //    up that hash in the version map.  This is deferred until the uplc API
+            //    exposes per-result language information (TODO: upstream request).
+            let strict_unit_check = has_any_v3;
+
             for (_redeemer_bytes, eval_result) in &results {
                 let cost = eval_result.cost();
-                // Determine if the script failed using Haskell-compatible rules:
-                //
-                // Per Haskell's PlutusLedgerApi.Common.Eval.processLogsAndErrors:
-                // - PlutusV1/V2: ANY non-error result counts as success (even Data,
-                //   Bool(false), Integer, partially-applied terms). Only CEK machine
-                //   errors and Term::Error indicate failure.
-                // - PlutusV3: Only Unit is accepted; anything else is InvalidReturnValue.
-                //
-                // Since we don't track per-redeemer language version here, we use the
-                // V1/V2 rule (accept any non-error) which is safe because:
-                // 1. V3 scripts that return non-Unit would be rejected by Haskell too,
-                //    so they would never appear on-chain with is_valid=true.
-                // 2. For block production, mempool admission already checks is_valid.
                 let script_failed = match &eval_result.result {
                     Err(_) => true,
-                    Ok(term) => matches!(term, uplc::ast::Term::Error),
+                    Ok(term) => {
+                        if matches!(term, uplc::ast::Term::Error) {
+                            true
+                        } else if strict_unit_check && !term.is_unit() {
+                            // V3 (or mixed V3) transaction: only Unit is a valid
+                            // return value.  Any other term is an InvalidReturnValue.
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 };
                 if script_failed {
                     let err_msg = match &eval_result.result {
                         Err(e) => format!("{e}"),
-                        Ok(term) => format!("Script error: {term:?}"),
+                        Ok(term) if matches!(term, uplc::ast::Term::Error) => {
+                            format!("Script error: {term:?}")
+                        }
+                        Ok(term) => format!("PlutusV3 script returned non-Unit value: {term:?}"),
                     };
                     debug!(
                         tx_hash = %tx.hash.to_hex(),

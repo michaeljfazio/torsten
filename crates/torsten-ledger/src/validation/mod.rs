@@ -28,6 +28,10 @@ pub(crate) use scripts::script_ref_byte_size;
 // Re-export the tier cap so apply.rs can reuse the same constant for the
 // block-body check, keeping the tiered-fee short-circuit in sync.
 pub(crate) use scripts::MAX_REF_SCRIPT_SIZE_TIER_CAP;
+// Re-exported for use by plutus.rs (V3 non-Unit return value check): maps
+// script hashes to their language version so the evaluator can apply the
+// correct success predicate per-result.
+pub(crate) use collateral::plutus_script_version_map;
 
 use std::collections::HashSet;
 
@@ -126,6 +130,14 @@ pub enum ValidationError {
     MissingSlotConfig,
     #[error("Script-locked input at index {index} has no matching Spend redeemer")]
     MissingSpendRedeemer { index: u32 },
+    /// A script-locked withdrawal or Plutus minting policy has no matching
+    /// redeemer of the required tag/index.
+    ///
+    /// Mirrors Haskell's `scriptsNeeded` check: every entry in the `Reward`
+    /// and `Mint` buckets that corresponds to a Plutus script must have an
+    /// explicit redeemer at the correct sorted position.
+    #[error("Missing {tag} redeemer at index {index}")]
+    MissingRedeemer { tag: String, index: u32 },
     #[error("Redeemer index out of range: tag={tag}, index={index}, max={max}")]
     RedeemerIndexOutOfRange { tag: String, index: u32, max: usize },
     #[error("Missing VKey witness for input credential: {0}")]
@@ -251,8 +263,10 @@ pub fn validate_transaction_with_pools(
         // Rule 11b: redeemer index bounds
         collateral::check_collateral(tx, utxo_set, params, &mut errors);
 
-        // Rule 11c: every script-locked spending input must have a Spend redeemer
-        collateral::check_spend_redeemers(tx, utxo_set, &mut errors);
+        // Rule 11c: every script-locked input/withdrawal and every Plutus minting
+        // policy must have a matching redeemer (Spend / Reward / Mint respectively).
+        // Matches Haskell's `scriptsNeeded` check.
+        collateral::check_script_redeemers(tx, utxo_set, &mut errors);
 
         // Rule 12: script data hash (mkScriptIntegrity) — covers redeemers,
         // datums, cost models, and language versions.
