@@ -1050,7 +1050,7 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
     let col_w = inner.width.saturating_sub(2) as usize;
     // Treasury value can be long (e.g. "14,074,169 ADA" = 14 chars + spaces).
     // Use a wider value column (16 chars) so the number is never clipped.
-    const TREASURY_VALUE_W: usize = 16;
+    const TREASURY_VALUE_W: usize = 22;
     let treasury_label_w = col_w.saturating_sub(TREASURY_VALUE_W).max(LABEL_W);
     let treasury_value_w = col_w.saturating_sub(treasury_label_w).max(1);
 
