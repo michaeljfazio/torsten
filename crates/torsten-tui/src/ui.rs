@@ -685,15 +685,13 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     // Cold / Warm / Hot compact row.
     let cwh_line = peer_state_row(
         &[
-            ("Cold", cold, theme.muted),
-            ("Warm", warm, theme.warning),
-            ("Hot", hot, theme.success),
+            ("Cold:", cold, theme.muted),
+            ("Warm:", warm, theme.warning),
+            ("Hot:", hot, theme.success),
         ],
         theme,
     );
 
-    // Uni / Bi / Duplex compact row.
-    // Duplex is shown as 0 (not N/A) since the metric is defined but not yet populated.
     let ubd_line = peer_state_row(
         &[
             ("Uni:", unidir, theme.muted),
@@ -1337,22 +1335,22 @@ fn kv_line_custom_value(
     ])
 }
 
-/// Compact two-column peer-state row for Cold/Warm/Hot or Uni/Bi/Duplex.
+/// Compact peer-state row with fixed-width columns for consistent alignment.
+/// Each item is rendered as "Label:N" with the label right-padded and value
+/// left-padded so columns line up across rows.
 fn peer_state_row(items: &[(&str, u64, Color)], theme: &Theme) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+    let sep = Span::styled(" | ", Style::default().fg(theme.muted));
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
     for (i, (label, value, color)) in items.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("   ", Style::default().fg(theme.muted)));
+            spans.push(sep.clone());
         }
-        // Convert label to owned String so the span is 'static.
         spans.push(Span::styled(
-            label.to_string(),
+            format!("{label}"),
             Style::default().fg(theme.muted),
         ));
-        spans.push(Span::raw(" "));
-        // Use thousands separators for peer counts.
         spans.push(Span::styled(
-            format!("{:>4}", App::format_number(*value)),
+            format!("{}", App::format_number(*value)),
             Style::default().fg(*color).add_modifier(Modifier::BOLD),
         ));
     }
