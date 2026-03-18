@@ -4837,4 +4837,1185 @@ mod tests {
             "No V3 scripts present; strict Unit check must not fire: {map:?}"
         );
     }
+
+    // =========================================================================
+    // Issue #131 Item 1: Reference script Phase-2 path
+    //
+    // Verify that check_script_redeemers and collect_plutus_script_hashes
+    // correctly handle the case where the Plutus script body lives in a
+    // reference input UTxO (script_ref) rather than the witness set.  A
+    // Spend redeemer for a script-locked input must be required, and when the
+    // Spend redeemer IS present (with the Plutus hash reachable via the
+    // reference input), no MissingSpendRedeemer error should fire.
+    // =========================================================================
+
+    /// When a Plutus V2 script body lives in a reference input UTxO (as
+    /// `script_ref = PlutusV2(bytes)`) and a spending input is locked by the
+    /// corresponding script hash, `check_script_redeemers` must require a Spend
+    /// redeemer for that input.
+    ///
+    /// This confirms the Phase-2 reference-script path is wired in correctly:
+    /// `collect_plutus_script_hashes` scans reference input UTxOs and registers
+    /// the script hash, so the missing-redeemer check applies to it.
+    #[test]
+    fn test_ref_script_phase2_missing_spend_redeemer() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::ScriptRef;
+
+        // A fake Plutus V2 script stored in a reference input UTxO.
+        let plutus_script_bytes: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let script_hash = torsten_primitives::hash::blake2b_224_tagged(2, &plutus_script_bytes);
+
+        let mut utxo_set = UtxoSet::new();
+
+        // Spending input locked by the script hash.
+        let spend_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x70; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spend_input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Reference input UTxO carrying the Plutus V2 script body.
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x71; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                // The Plutus script body lives here — not in the witness set.
+                script_ref: Some(ScriptRef::PlutusV2(plutus_script_bytes)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Transaction: spending input locked by script hash, reference input
+        // provides the script body.  NO redeemers — this is what we are testing.
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![spend_input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![ref_input],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                // Script body NOT in witness set — it's in the reference input.
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No redeemers — must trigger MissingSpendRedeemer.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        // The spending input is locked by a Plutus script whose body is provided
+        // via a reference input.  A Spend redeemer is still required — the check
+        // must fire even when the script is not in the witness set.
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingSpendRedeemer { index: 0 })),
+            "Expected MissingSpendRedeemer {{ index: 0 }} for ref-script-locked input, got: {errors:?}"
+        );
+    }
+
+    /// When a Plutus V2 script body lives in a reference input UTxO and the
+    /// transaction includes a matching Spend redeemer, `check_script_redeemers`
+    /// must NOT produce a MissingSpendRedeemer error.
+    ///
+    /// This is the "happy path" for reference-script Phase-2 execution: the
+    /// script is provided via a reference input, the Spend redeemer is present,
+    /// and the redeemer-check logic correctly accepts the transaction.
+    #[test]
+    fn test_ref_script_phase2_with_spend_redeemer_ok() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::ScriptRef;
+
+        let plutus_script_bytes: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let script_hash = torsten_primitives::hash::blake2b_224_tagged(2, &plutus_script_bytes);
+
+        let mut utxo_set = UtxoSet::new();
+
+        let spend_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x72; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spend_input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let ref_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x73; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            ref_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(plutus_script_bytes)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![spend_input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![ref_input],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Spend redeemer at index 0 — matches the single script-locked input.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Spend,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        let spend_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ValidationError::MissingSpendRedeemer { .. }
+                        | ValidationError::MissingRedeemer { .. }
+                )
+            })
+            .collect();
+        assert!(
+            spend_errors.is_empty(),
+            "Spend redeemer present for ref-script path; expected no redeemer errors, got: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Issue #131 Item 2: Certificate redeemers (Cert tag)
+    //
+    // Per Haskell's `conwayCertsNeeded`, every certificate whose relevant
+    // credential is a script hash requires a Cert redeemer at the certificate's
+    // 0-based positional index in the body's certificate list.
+    // =========================================================================
+
+    /// A `ConwayStakeDeregistration` certificate with a Script credential and
+    /// no Cert redeemer must be rejected with MissingRedeemer { tag: "Cert",
+    /// index: 0 }.
+    #[test]
+    fn test_cert_redeemer_conway_deregistration_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+        use torsten_primitives::value::Lovelace;
+
+        let script_hash = Hash28::from_bytes([0xD0; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x80; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                // Conway deregistration with a Script credential — Cert redeemer required.
+                certificates: vec![Certificate::ConwayStakeDeregistration {
+                    credential: Credential::Script(script_hash),
+                    refund: Lovelace(2_000_000),
+                }],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xAA]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Cert redeemer — this is what we are testing.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Cert")),
+            "Expected MissingRedeemer {{ tag: Cert, index: 0 }} for ConwayStakeDeregistration with Script credential, got: {errors:?}"
+        );
+    }
+
+    /// A `ConwayStakeDeregistration` with a Script credential and a matching
+    /// Cert redeemer at index 0 must NOT produce a MissingRedeemer error.
+    #[test]
+    fn test_cert_redeemer_conway_deregistration_present_ok() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+        use torsten_primitives::value::Lovelace;
+
+        let script_hash = Hash28::from_bytes([0xD1; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x81; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![Certificate::ConwayStakeDeregistration {
+                    credential: Credential::Script(script_hash),
+                    refund: Lovelace(2_000_000),
+                }],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xAA]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Cert redeemer at index 0 — matches the certificate.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Cert,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Cert")
+            ),
+            "Cert redeemer present; must not produce MissingRedeemer: {errors:?}"
+        );
+    }
+
+    /// A `StakeDeregistration` (pre-Conway) with a Script credential and no
+    /// Cert redeemer must be rejected.  Pre-Conway deregistration also requires
+    /// a Cert redeemer when the credential is a script hash.
+    #[test]
+    fn test_cert_redeemer_pre_conway_deregistration_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+
+        let script_hash = Hash28::from_bytes([0xD2; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x82; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![Certificate::StakeDeregistration(Credential::Script(
+                    script_hash,
+                ))],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xBB]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Cert")),
+            "Expected MissingRedeemer {{ tag: Cert, index: 0 }} for StakeDeregistration with Script credential, got: {errors:?}"
+        );
+    }
+
+    /// A `StakeRegistration` with a Script credential must NOT require a Cert
+    /// redeemer — registrations are always permitted without a script witness.
+    #[test]
+    fn test_cert_redeemer_registration_no_redeemer_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+
+        let script_hash = Hash28::from_bytes([0xD3; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x83; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                // Registration does not need a redeemer even with a Script credential.
+                certificates: vec![Certificate::StakeRegistration(Credential::Script(
+                    script_hash,
+                ))],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xCC]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Cert redeemer — registration must not require one.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Cert")
+            ),
+            "StakeRegistration must not require a Cert redeemer, got: {errors:?}"
+        );
+    }
+
+    /// A `StakeDeregistration` with a VerificationKey credential must NOT
+    /// require a Cert redeemer — only Script credentials need redeemers.
+    #[test]
+    fn test_cert_redeemer_key_credential_no_redeemer_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+
+        let key_hash = Hash28::from_bytes([0xD4; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x84; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                // Deregistration with VKey credential — redeemer not needed.
+                certificates: vec![Certificate::StakeDeregistration(
+                    Credential::VerificationKey(key_hash),
+                )],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Cert redeemer — VKey credential must not require one.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Cert")
+            ),
+            "VerificationKey credential must not require a Cert redeemer, got: {errors:?}"
+        );
+    }
+
+    /// Three certificates in order:
+    ///   0: StakeRegistration(Script)  — no redeemer required
+    ///   1: ConwayStakeDeregistration(Script)  — Cert redeemer at index 1 required
+    ///   2: StakeDelegation(Script)  — Cert redeemer at index 2 required
+    ///
+    /// Only the redeemer for index 1 is provided.  The check must fire for
+    /// index 2 only, and must NOT fire for index 0 or index 1.
+    #[test]
+    fn test_cert_redeemer_positional_index_mixed_certs() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+        use torsten_primitives::value::Lovelace;
+
+        let hash_a = Hash28::from_bytes([0xD5; 28]);
+        let hash_b = Hash28::from_bytes([0xD6; 28]);
+        let pool_hash = Hash28::from_bytes([0xD7; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x85; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![
+                    // Index 0: registration — no redeemer required even for Script.
+                    Certificate::StakeRegistration(Credential::Script(hash_a)),
+                    // Index 1: deregistration with Script — Cert redeemer at index 1 needed.
+                    Certificate::ConwayStakeDeregistration {
+                        credential: Credential::Script(hash_a),
+                        refund: Lovelace(2_000_000),
+                    },
+                    // Index 2: delegation with Script — Cert redeemer at index 2 needed.
+                    Certificate::StakeDelegation {
+                        credential: Credential::Script(hash_b),
+                        pool_hash,
+                    },
+                ],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xDD]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Only cert index 1 has a redeemer.  Index 2 is missing.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Cert,
+                    index: 1,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        // Index 2 (StakeDelegation with Script) must fire.
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 2 } if tag == "Cert")),
+            "Expected MissingRedeemer {{ tag: Cert, index: 2 }} for StakeDelegation, got: {errors:?}"
+        );
+
+        // Index 0 (StakeRegistration) must NOT fire.
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Cert")
+            ),
+            "StakeRegistration at index 0 must not require a Cert redeemer, got: {errors:?}"
+        );
+
+        // Index 1 (ConwayStakeDeregistration) has a redeemer — must NOT fire.
+        assert!(
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, index: 1 } if tag == "Cert")
+            ),
+            "Index 1 has a Cert redeemer; must not trigger MissingRedeemer, got: {errors:?}"
+        );
+    }
+
+    /// An `UnregDRep` certificate with a Script credential and no Cert redeemer
+    /// must be rejected.  `RegDRep` with the same credential must NOT require
+    /// a redeemer (DRep registration is one-sided, like stake registration).
+    #[test]
+    fn test_cert_redeemer_drep_unreg_requires_cert_reg_does_not() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+        use torsten_primitives::value::Lovelace;
+
+        let drep_script_hash = Hash28::from_bytes([0xD8; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x86; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // --- Part A: RegDRep with Script credential — no redeemer required ---
+
+        let tx_reg = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input.clone()],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                // DRep registration — no redeemer required.
+                certificates: vec![Certificate::RegDRep {
+                    credential: Credential::Script(drep_script_hash),
+                    deposit: Lovelace(500_000_000),
+                    anchor: None,
+                }],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xEE]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut reg_errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx_reg, &utxo_set, &mut reg_errors);
+
+        assert!(
+            !reg_errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Cert")
+            ),
+            "RegDRep must not require a Cert redeemer, got: {reg_errors:?}"
+        );
+
+        // --- Part B: UnregDRep with Script credential — redeemer required ---
+
+        let tx_unreg = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                // DRep unregistration — redeemer required.
+                certificates: vec![Certificate::UnregDRep {
+                    credential: Credential::Script(drep_script_hash),
+                    refund: Lovelace(500_000_000),
+                }],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xEE]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Cert redeemer — must trigger MissingRedeemer.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut unreg_errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx_unreg, &utxo_set, &mut unreg_errors);
+
+        assert!(
+            unreg_errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Cert")),
+            "Expected MissingRedeemer {{ tag: Cert, index: 0 }} for UnregDRep with Script credential, got: {unreg_errors:?}"
+        );
+    }
+
+    /// A `CommitteeColdResign` certificate with a Script cold credential and
+    /// no Cert redeemer must be rejected.
+    #[test]
+    fn test_cert_redeemer_committee_cold_resign_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::Certificate;
+
+        let cold_script_hash = Hash28::from_bytes([0xD9; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x87; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![Certificate::CommitteeColdResign {
+                    cold_credential: Credential::Script(cold_script_hash),
+                    anchor: None,
+                }],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xFF]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Cert")),
+            "Expected MissingRedeemer {{ tag: Cert, index: 0 }} for CommitteeColdResign with Script cold credential, got: {errors:?}"
+        );
+    }
 }
