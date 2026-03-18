@@ -1498,8 +1498,23 @@ pub(crate) fn min_ada_for_output(
 ///
 /// Computes:
 /// - lovelace change = `total_inputs - total_outputs - fee`
-/// - token change   = `input_tokens - output_tokens` (tokens in inputs not
-///   consumed by any explicit output are returned to the change address)
+/// - token change   = `input_tokens + positive_mints - burns - output_tokens`
+///
+/// The Cardano ledger requires exact token conservation for every
+/// (policy, asset) pair:
+/// ```text
+/// Σ(input_tokens[asset]) + mint[asset] == Σ(output_tokens[asset])
+/// ```
+/// where `mint[asset]` is signed (positive = new tokens, negative = burn).
+///
+/// In auto-balance mode the change output is the implicit final output, so:
+/// ```text
+/// change[asset] = Σ(input_tokens[asset]) + mint[asset] - Σ(explicit_output_tokens[asset])
+/// ```
+///
+/// A positive remainder must be placed in the change output.  A negative
+/// remainder means the user is trying to output more tokens than are available
+/// (from inputs plus mints), which is an error.
 ///
 /// The minimum lovelace required to carry the token change bundle is checked
 /// with [`min_ada_for_output`].  If there is insufficient lovelace, an error
@@ -1509,8 +1524,10 @@ pub(crate) fn min_ada_for_output(
 /// lovelace change is zero and there are no tokens.
 ///
 /// Returns an error when:
-/// - `total_inputs < total_outputs + fee` (insufficient funds), or
+/// - `total_inputs < total_outputs + fee` (insufficient funds),
+/// - a token overdraft is detected (`output > input + mint`), or
 /// - the token change requires more lovelace than is available as change.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn calculate_change(
     total_inputs: u64,
     total_outputs: u64,
@@ -1518,6 +1535,7 @@ pub(crate) fn calculate_change(
     change_address: &str,
     input_tokens: &MultiAssetMap,
     output_tokens: &MultiAssetMap,
+    mint: &[MintEntry],
     coins_per_utxo_byte: u64,
 ) -> Result<Option<ParsedTxOutput>> {
     let total_spent = total_outputs
@@ -1534,24 +1552,67 @@ pub(crate) fn calculate_change(
 
     let lovelace_change = total_inputs - total_spent;
 
+    // ── Build the signed token balance map ─────────────────────────────────
+    //
+    // For every (policy, asset) that appears in inputs OR in the mint field,
+    // compute:
+    //   balance[asset] = input_qty + mint_qty (signed)
+    //
+    // `mint_qty` is i64 — positive for new tokens minted, negative for burns.
+    // We use i128 internally to avoid overflow when combining u64 + i64.
+    let mut balance: HashMap<(Vec<u8>, Vec<u8>), i128> = HashMap::new();
+
+    // Start with input quantities (all non-negative).
+    for ((policy, asset), &qty) in input_tokens {
+        *balance.entry((policy.clone(), asset.clone())).or_insert(0) += qty as i128;
+    }
+
+    // Apply mint/burn quantities from the transaction mint field.
+    for (policy_bytes, assets) in mint {
+        for (asset_bytes, mint_qty) in assets {
+            *balance
+                .entry((policy_bytes.clone(), asset_bytes.clone()))
+                .or_insert(0) += *mint_qty as i128;
+        }
+    }
+
     // ── Compute token change ────────────────────────────────────────────────
     //
-    // For each (policy, asset) present in the inputs, subtract whatever amount
-    // the explicit outputs already consume.  Any positive remainder must be
-    // returned in the change output; native tokens cannot be "burned" silently.
+    // For every (policy, asset) in either the balance map or the explicit
+    // outputs, compute:
+    //   change[asset] = balance[asset] - explicit_output_qty[asset]
+    //
+    // Positive remainder → include in change output.
+    // Negative → overdraft error (user sends more than available).
+    // Zero    → nothing needed.
+    //
+    // Collect the full key universe from both maps.
+    let all_keys: std::collections::HashSet<(Vec<u8>, Vec<u8>)> = balance
+        .keys()
+        .cloned()
+        .chain(output_tokens.keys().cloned())
+        .collect();
+
     let mut token_change: Vec<(String, String, u64)> = Vec::new();
-    for ((policy_bytes, asset_name_bytes), &in_qty) in input_tokens {
-        let out_qty = output_tokens
-            .get(&(policy_bytes.clone(), asset_name_bytes.clone()))
-            .copied()
-            .unwrap_or(0);
-        if in_qty > out_qty {
-            token_change.push((
-                hex::encode(policy_bytes),
-                hex::encode(asset_name_bytes),
-                in_qty - out_qty,
-            ));
+    for key in &all_keys {
+        let available: i128 = balance.get(key).copied().unwrap_or(0);
+        let out_qty: i128 = output_tokens.get(key).copied().unwrap_or(0) as i128;
+        let remainder = available - out_qty;
+
+        if remainder < 0 {
+            // More tokens sent to outputs than available from inputs + mints.
+            bail!(
+                "Token overdraft: policy {} asset {} — outputs consume {} tokens but \
+                 inputs + mints only provide {}",
+                hex::encode(&key.0),
+                hex::encode(&key.1),
+                out_qty,
+                available,
+            );
+        } else if remainder > 0 {
+            token_change.push((hex::encode(&key.0), hex::encode(&key.1), remainder as u64));
         }
+        // remainder == 0: this asset is exactly balanced, nothing to do.
     }
     // Sort for deterministic output ordering (policy asc, then asset name asc).
     token_change.sort();
@@ -2023,7 +2084,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         // Assume 1 witness (the payment key). SPO tools can override with --fee.
         let fee_estimate_1 = estimate_fee(&body_no_change, 1, min_fee_a, min_fee_b);
 
-        // Compute tentative change — including any native tokens.
+        // Compute tentative change — including any native tokens and minted/burned tokens.
         let change_output_1 = calculate_change(
             total_inputs,
             total_explicit_outputs,
@@ -2031,6 +2092,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             change_addr,
             &input_tokens,
             &output_tokens,
+            &parsed_mint,
             coins_per_utxo_byte,
         )?;
 
@@ -2069,6 +2131,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             change_addr,
             &input_tokens,
             &output_tokens,
+            &parsed_mint,
             coins_per_utxo_byte,
         )?;
 
@@ -3237,6 +3300,7 @@ mod tests {
             "addr_test1abc",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3257,6 +3321,7 @@ mod tests {
             "addr_test1abc",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3274,6 +3339,7 @@ mod tests {
             "addr_test1abc",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3295,6 +3361,7 @@ mod tests {
             "addr_test1change",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3314,6 +3381,7 @@ mod tests {
             "addr_test1abc",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap_err();
@@ -3339,6 +3407,7 @@ mod tests {
             "addr_test1x",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3357,6 +3426,7 @@ mod tests {
             "addr_test1x",
             &inp,
             &out,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3402,6 +3472,7 @@ mod tests {
             "addr_test1change",
             &input_tokens,
             &output_tokens,
+            &[], // no mint
             4_310,
         )
         .unwrap();
@@ -3487,6 +3558,7 @@ mod tests {
             "addr_test1change",
             &input_tokens,
             &output_tokens,
+            &[], // no mint
             4_310,
         )
         .unwrap_err();
@@ -3499,6 +3571,280 @@ mod tests {
         assert!(
             msg.contains("100000"),
             "error should state available lovelace (100000), got: {msg}"
+        );
+    }
+
+    // ── Minting / burning: calculate_change with mint field ──────────────────
+
+    /// Build a `MintEntry` from hex-encoded policy + asset name + signed qty.
+    fn mint_entry(policy_hex: &str, asset_name_hex: &str, qty: i64) -> MintEntry {
+        (
+            hex::decode(policy_hex).unwrap(),
+            vec![(hex::decode(asset_name_hex).unwrap(), qty)],
+        )
+    }
+
+    #[test]
+    fn test_change_minted_tokens_all_to_change() {
+        // Transaction mints 1000 HOSKY tokens and sends no tokens to explicit
+        // outputs.  All minted tokens should appear in the change output.
+        //
+        // Input UTxO: 10 ADA (no tokens).
+        // Explicit output: 5 ADA.
+        // Mint: +1000 HOSKY.
+        // Expected change: ~4.83 ADA + 1000 HOSKY.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59"; // "HOSKY"
+
+        let input_tokens: MultiAssetMap = HashMap::new(); // no tokens in inputs
+        let output_tokens: MultiAssetMap = HashMap::new(); // no tokens in explicit outputs
+        let mint = vec![mint_entry(policy_hex, asset_hex, 1_000)];
+
+        let result = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("minted tokens with no output must produce a change output");
+        assert_eq!(
+            change.lovelace, 4_830_000,
+            "lovelace change must be correct"
+        );
+        assert_eq!(
+            change.tokens.len(),
+            1,
+            "minted tokens must appear in change"
+        );
+        let (cpol, casset, cqty) = &change.tokens[0];
+        assert_eq!(cpol, policy_hex);
+        assert_eq!(casset, asset_hex);
+        assert_eq!(*cqty, 1_000, "all minted tokens must go to change");
+    }
+
+    #[test]
+    fn test_change_minted_tokens_partial_to_explicit_output() {
+        // Transaction mints 1000 HOSKY tokens; 400 are sent to an explicit
+        // output; the remaining 600 must appear in the change output.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let input_tokens: MultiAssetMap = HashMap::new();
+        let mut output_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), _) = token_entry(policy_hex, asset_hex, 400);
+        output_tokens.insert((p, a), 400);
+        let mint = vec![mint_entry(policy_hex, asset_hex, 1_000)];
+
+        let result = calculate_change(
+            10_000_000,
+            7_000_000, // explicit outputs include 2 ADA for token UTxO + 5 ADA payment
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("partial mint to explicit output must yield token change");
+        assert_eq!(change.tokens.len(), 1, "one token type in change");
+        let (_, _, cqty) = &change.tokens[0];
+        assert_eq!(*cqty, 600, "remaining 600 minted tokens must go to change");
+    }
+
+    #[test]
+    fn test_change_multiple_policies_minted() {
+        // Mint two different policies; neither sent to explicit outputs.
+        // Both should appear in the consolidated change output.
+
+        let policy_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let policy_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let asset_hex = "4100"; // "A"
+
+        let input_tokens: MultiAssetMap = HashMap::new();
+        let output_tokens: MultiAssetMap = HashMap::new();
+        let mint = vec![
+            mint_entry(policy_a, asset_hex, 500),
+            mint_entry(policy_b, asset_hex, 300),
+        ];
+
+        let result = calculate_change(
+            10_000_000,
+            2_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("minted tokens from multiple policies must produce change");
+        assert_eq!(
+            change.tokens.len(),
+            2,
+            "both minted token types must appear in change"
+        );
+        // Tokens are sorted: policy_a < policy_b lexicographically.
+        let qtys: Vec<u64> = change.tokens.iter().map(|(_, _, q)| *q).collect();
+        assert!(qtys.contains(&500), "500 of policy_a must be in change");
+        assert!(qtys.contains(&300), "300 of policy_b must be in change");
+    }
+
+    #[test]
+    fn test_change_burn_reduces_input_tokens() {
+        // Input UTxO: 10 ADA + 1000 HOSKY.
+        // Burn 400 HOSKY.
+        // No explicit token outputs.
+        // Change should contain 1000 - 400 = 600 HOSKY.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 1_000);
+        input_tokens.insert((p, a), qty);
+
+        let output_tokens: MultiAssetMap = HashMap::new();
+        // Burn 400 (negative mint quantity).
+        let mint = vec![mint_entry(policy_hex, asset_hex, -400)];
+
+        let result = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("burn leaves remaining tokens in change");
+        assert_eq!(change.tokens.len(), 1);
+        let (_, _, cqty) = &change.tokens[0];
+        assert_eq!(*cqty, 600, "1000 input - 400 burned = 600 in change");
+    }
+
+    #[test]
+    fn test_change_full_burn_no_token_change() {
+        // Input UTxO: 10 ADA + 500 HOSKY.
+        // Burn all 500 HOSKY.
+        // Change should be ADA-only with no tokens.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 500);
+        input_tokens.insert((p, a), qty);
+
+        let output_tokens: MultiAssetMap = HashMap::new();
+        // Burn all 500 tokens.
+        let mint = vec![mint_entry(policy_hex, asset_hex, -500)];
+
+        let result = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("ADA change still expected after full burn");
+        assert!(
+            change.tokens.is_empty(),
+            "after burning all tokens, change must be ADA-only"
+        );
+        assert_eq!(change.lovelace, 4_830_000);
+    }
+
+    #[test]
+    fn test_change_token_overdraft_error() {
+        // Explicit output tries to send 1200 HOSKY but inputs only have 1000
+        // and no mint is present → overdraft error.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 1_000);
+        input_tokens.insert((p.clone(), a.clone()), qty);
+
+        let mut output_tokens: MultiAssetMap = HashMap::new();
+        output_tokens.insert((p, a), 1_200); // 200 more than available
+
+        let err = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &[], // no mint
+            4_310,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overdraft") || msg.contains("Token overdraft"),
+            "expected overdraft error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_change_input_and_minted_tokens_combined() {
+        // Input UTxO: 10 ADA + 300 HOSKY.
+        // Mint: +200 HOSKY.
+        // Explicit output: 100 HOSKY.
+        // Expected change: 300 + 200 - 100 = 400 HOSKY.
+
+        let policy_hex = "a0028f350aaabe0545fdcb56b039bfb08e4bb4d8c4d7c3c7d481ef70";
+        let asset_hex = "484f534b59";
+
+        let mut input_tokens: MultiAssetMap = HashMap::new();
+        let ((p, a), qty) = token_entry(policy_hex, asset_hex, 300);
+        input_tokens.insert((p.clone(), a.clone()), qty);
+
+        let mut output_tokens: MultiAssetMap = HashMap::new();
+        output_tokens.insert((p, a), 100);
+
+        let mint = vec![mint_entry(policy_hex, asset_hex, 200)];
+
+        let result = calculate_change(
+            10_000_000,
+            5_000_000,
+            170_000,
+            "addr_test1change",
+            &input_tokens,
+            &output_tokens,
+            &mint,
+            4_310,
+        )
+        .unwrap();
+
+        let change = result.expect("combined input+mint should produce token change");
+        assert_eq!(change.tokens.len(), 1);
+        let (_, _, cqty) = &change.tokens[0];
+        assert_eq!(
+            *cqty, 400,
+            "300 input + 200 minted - 100 output = 400 change"
         );
     }
 
