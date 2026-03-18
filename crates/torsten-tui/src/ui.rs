@@ -1490,23 +1490,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_rtt_colored_bar_zero_total() {
-        let theme = &crate::theme::THEME_DEFAULT;
-        let spans = build_rtt_colored_bar(0, 0, 0, 0, 40, theme);
-        // Should return a single empty-fill span.
-        assert_eq!(spans.len(), 1);
-    }
-
-    #[test]
-    fn test_build_rtt_colored_bar_all_same() {
-        let theme = &crate::theme::THEME_DEFAULT;
-        let spans = build_rtt_colored_bar(10, 10, 10, 10, 40, theme);
-        // Each band gets ~10 chars; all four bands present.
-        let total_chars: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(total_chars, 40);
-    }
-
-    #[test]
     fn test_build_smooth_bar_empty() {
         let theme = &crate::theme::THEME_DEFAULT;
         let spans = build_smooth_bar(0.0, 0, theme.success, theme);

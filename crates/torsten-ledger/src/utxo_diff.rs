@@ -56,7 +56,12 @@ impl Default for UtxoDiff {
 /// and unapply them (delete the inserts, re-insert the deletes).
 #[derive(Debug, Clone)]
 pub struct DiffSeq {
-    diffs: VecDeque<(SlotNo, Hash32, UtxoDiff)>,
+    /// Per-block diffs in chronological order (oldest at front, newest at back).
+    /// Made `pub(crate)` so that `handle_rollback` in `torsten-node` can inspect
+    /// slot/hash entries to determine the new tip after a fast diff-based rollback
+    /// without needing to go through a higher-level API that would require the
+    /// full `LedgerState` write lock to be held for complex computations.
+    pub diffs: VecDeque<(SlotNo, Hash32, UtxoDiff)>,
 }
 
 impl DiffSeq {

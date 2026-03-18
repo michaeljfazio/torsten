@@ -14,6 +14,7 @@ use super::{
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
+use crate::utxo_diff::UtxoDiff;
 use crate::validation::{
     script_ref_byte_size, validate_transaction_with_pools, ValidationError,
     MAX_REF_SCRIPT_SIZE_TIER_CAP,
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
 use torsten_primitives::era::Era;
 use torsten_primitives::time::EpochNo;
-use torsten_primitives::transaction::Certificate;
+use torsten_primitives::transaction::{Certificate, TransactionInput};
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
 
@@ -82,6 +83,11 @@ impl LedgerState {
             }
         }
 
+        // Allocate a per-block diff to record all UTxO inserts and deletes.
+        // Pushed into self.diff_seq at the end of the method, enabling fast
+        // diff-based rollback without a snapshot reload + full replay.
+        let mut block_diff = UtxoDiff::new();
+
         // Check for epoch transition before processing the block.
         // When multiple epochs are skipped (e.g., after offline time or Mithril import),
         // process each intermediate epoch transition individually so that snapshots rotate
@@ -121,6 +127,11 @@ impl LedgerState {
         //
         // We skip the entire Shelley+ transaction pipeline (execution units,
         // Plutus evaluation, certificate processing, etc.) for Byron blocks.
+        //
+        // The per-block UTxO diff (`block_diff`) is populated inside the Byron
+        // apply loop (see the `effect.spent` / `effect.created` recording below)
+        // and pushed to `self.diff_seq` just before returning so that Byron
+        // blocks participate in diff-based rollback alongside Shelley+ blocks.
         if block.era == Era::Byron {
             let fee_policy = ByronFeePolicy {
                 min_fee_a: self.protocol_params.min_fee_a,
@@ -169,9 +180,14 @@ impl LedgerState {
                 // Apply each tx's effects immediately so subsequent txs in the
                 // same block see the correct UTxO state.
                 for input in &effect.spent {
+                    // Capture the output value before removal for diff-based rollback.
+                    if let Some(spent_output) = self.utxo_set.lookup(input) {
+                        block_diff.record_delete(input.clone(), spent_output);
+                    }
                     self.utxo_set.remove(input);
                 }
                 for (input, output) in effect.created {
+                    block_diff.record_insert(input.clone(), output.clone());
                     self.utxo_set.insert(input, output);
                 }
                 total_byron_fees.0 = total_byron_fees.0.saturating_add(effect.fees.0);
@@ -196,6 +212,9 @@ impl LedgerState {
 
             self.tip = block.tip();
             self.era = block.era;
+
+            // Record this block's UTxO diff for rollback support.
+            self.diff_seq.push(block.slot(), *block.hash(), block_diff);
 
             trace!(
                 slot = block.slot().0,
@@ -560,6 +579,8 @@ impl LedgerState {
                                 stake.0 = stake.0.saturating_sub(spent.value.coin.0);
                             }
                         }
+                        // Record collateral deletion for diff-based rollback.
+                        block_diff.record_delete(col_input.clone(), spent);
                     }
                     self.utxo_set.remove(col_input);
                 }
@@ -572,11 +593,13 @@ impl LedgerState {
                             .entry(cred)
                             .or_insert(Lovelace(0)) += Lovelace(col_return.value.coin.0);
                     }
-                    let return_input = torsten_primitives::transaction::TransactionInput {
+                    let return_input = TransactionInput {
                         transaction_id: tx.hash,
                         index: tx.body.outputs.len() as u32, // collateral return is after regular outputs
                     };
                     let return_val = col_return.value.coin.0;
+                    // Record collateral return insertion for diff-based rollback.
+                    block_diff.record_insert(return_input.clone(), col_return.clone());
                     self.utxo_set.insert(return_input, col_return.clone());
                     return_val
                 } else {
@@ -593,13 +616,31 @@ impl LedgerState {
                 continue;
             }
 
+            // Snapshot the spent input values BEFORE removal.
+            //
+            // We need the original `TransactionOutput` values for two purposes:
+            //   1. Updating the stake distribution (subtract the spent stake).
+            //   2. Recording the deletion in `block_diff` so that diff-based
+            //      rollback can re-insert the spent UTxOs.
+            //
+            // Collect into a Vec so we can iterate twice (stake update + diff record)
+            // without borrowing `self.utxo_set` mutably while iterating.
+            let spent_outputs: Vec<_> = tx
+                .body
+                .inputs
+                .iter()
+                .filter_map(|input| {
+                    self.utxo_set
+                        .lookup(input)
+                        .map(|output| (input.clone(), output))
+                })
+                .collect();
+
             // Update stake distribution from consumed inputs (subtract)
-            for input in &tx.body.inputs {
-                if let Some(spent_output) = self.utxo_set.lookup(input) {
-                    if let Some(cred_hash) = stake_credential_hash(&spent_output.address) {
-                        if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
-                            stake.0 = stake.0.saturating_sub(spent_output.value.coin.0);
-                        }
+            for (_input, spent_output) in &spent_outputs {
+                if let Some(cred_hash) = stake_credential_hash(&spent_output.address) {
+                    if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
+                        stake.0 = stake.0.saturating_sub(spent_output.value.coin.0);
                     }
                 }
             }
@@ -614,6 +655,23 @@ impl LedgerState {
                 // Fees and certificates are still processed.
                 debug!("UTxO application skipped (missing inputs): {e}");
             } else {
+                // Record the UTxO deletions (spent inputs) in the block diff.
+                // Only record when apply_transaction succeeded — if it failed (missing
+                // inputs during early sync), we have no diffs to record anyway since
+                // no UTxO state was changed.
+                for (input, output) in spent_outputs {
+                    block_diff.record_delete(input, output);
+                }
+
+                // Record the UTxO insertions (new outputs) in the block diff.
+                for (idx, output) in tx.body.outputs.iter().enumerate() {
+                    let new_input = TransactionInput {
+                        transaction_id: tx.hash,
+                        index: idx as u32,
+                    };
+                    block_diff.record_insert(new_input, output.clone());
+                }
+
                 // Update stake distribution from new outputs (add)
                 // Only credit stake when UTxO application succeeded to avoid
                 // phantom stake from outputs that don't actually exist in the set.
@@ -744,6 +802,9 @@ impl LedgerState {
         // Update tip
         self.tip = block.tip();
         self.era = block.era;
+
+        // Record this block's UTxO diff for rollback support.
+        self.diff_seq.push(block.slot(), *block.hash(), block_diff);
 
         trace!(
             slot = block.slot().0,

@@ -18,6 +18,7 @@ pub use rewards::Rat;
 
 use crate::plutus::SlotConfig;
 use crate::utxo::UtxoSet;
+use crate::utxo_diff::DiffSeq;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -175,6 +176,15 @@ pub struct LedgerState {
     /// GetStakeDelegDeposits and GetFilteredVoteDelegatees responses.
     #[serde(default)]
     pub script_stake_credentials: std::collections::HashSet<Hash32>,
+    /// Per-block UTxO diffs for the last k blocks, supporting fast diff-based
+    /// rollback without a snapshot reload + replay.
+    ///
+    /// Not persisted in snapshots (`#[serde(skip)]`): the diff window only
+    /// covers in-memory volatile blocks, so it resets to empty after any
+    /// snapshot load.  The snapshot-reload+replay path in `handle_rollback`
+    /// covers the case where the diff window is insufficient.
+    #[serde(skip)]
+    pub diff_seq: DiffSeq,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -458,6 +468,7 @@ impl LedgerState {
             needs_stake_rebuild: true,
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
+            diff_seq: DiffSeq::new(),
         }
     }
 
@@ -715,6 +726,69 @@ impl LedgerState {
 
     pub fn current_block_number(&self) -> BlockNo {
         self.tip.block_number
+    }
+
+    /// Roll back the ledger UTxO set by unapplying the last `n` block diffs.
+    ///
+    /// This is the fast rollback path: it avoids a full snapshot reload + replay
+    /// by directly inverting the UTxO changes recorded during `apply_block`.
+    ///
+    /// For each rolled-back block (most-recent first):
+    ///   - Remove every UTxO that was **inserted** by that block (undo outputs)
+    ///   - Re-insert every UTxO that was **deleted** by that block (restore spent inputs)
+    ///
+    /// The `tip` is updated to the slot/hash of the new head after undo.
+    ///
+    /// Returns the number of diffs actually unapplied (may be less than `n` when
+    /// fewer diffs are available in the window, e.g. after a snapshot load).
+    ///
+    /// # Limitations
+    /// - Does **not** undo epoch-transition effects (rewards, pool retirements,
+    ///   snapshot rotations) because rollbacks are bounded to the volatile window
+    ///   which is always within a single epoch in normal operation.
+    /// - Does **not** undo `stake_distribution` changes.  After rollback the stake
+    ///   distribution may be slightly stale until the next block is applied, which
+    ///   is acceptable since it is not used for consensus-critical decisions.
+    /// - The tip is set to the oldest slot in the diffs that were NOT rolled back.
+    ///   Callers that need an exact tip hash after rollback (e.g. for the next
+    ///   block's prev_hash check) must supply `rollback_to_tip` via
+    ///   `rollback_blocks_to_point`.
+    pub fn rollback_blocks(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+
+        // Pop the last n diffs from the sequence (most-recent first).
+        let diffs = self.diff_seq.rollback(n);
+        let actually_rolled = diffs.len();
+
+        for (_slot, _hash, diff) in &diffs {
+            // Undo inserts: remove UTxOs that were created by this block.
+            for (input, _output) in &diff.inserts {
+                self.utxo_set.remove(input);
+            }
+            // Undo deletes: restore UTxOs that were consumed by this block.
+            for (input, output) in &diff.deletes {
+                self.utxo_set.insert(input.clone(), output.clone());
+            }
+        }
+
+        actually_rolled
+    }
+
+    /// Roll back the ledger UTxO set and update the tip to a specific point.
+    ///
+    /// Combines `rollback_blocks(n)` with an explicit tip update.  Used by
+    /// `handle_rollback` when the rollback target point is known.
+    ///
+    /// `n` is the number of blocks to undo (determined by caller from DiffSeq
+    /// contents).  `new_tip` is the `Tip` the ledger should report after undo.
+    pub fn rollback_blocks_to_point(&mut self, n: usize, new_tip: Tip) -> usize {
+        let rolled = self.rollback_blocks(n);
+        if rolled > 0 {
+            self.tip = new_tip;
+        }
+        rolled
     }
 }
 

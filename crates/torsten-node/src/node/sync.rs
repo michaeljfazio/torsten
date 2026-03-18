@@ -386,8 +386,30 @@ impl Node {
         }
     }
 
-    /// Handle a chain rollback: roll back ChainDB, reload ledger state from snapshot,
-    /// and replay blocks from the snapshot up to the rollback point.
+    /// Handle a chain rollback: roll back ChainDB and restore ledger UTxO state
+    /// to the rollback point.
+    ///
+    /// # Fast path — diff-based rollback
+    ///
+    /// When the rollback target is within the in-memory `DiffSeq` window (i.e.
+    /// the rolled-back blocks were applied during this session and their per-block
+    /// UTxO diffs are still held in memory), the ledger is restored by unapplying
+    /// the diffs directly:
+    ///
+    ///   1. Identify which blocks in the DiffSeq are *after* the rollback point.
+    ///   2. Call `rollback_blocks_to_point(n, new_tip)` to invert their UTxO
+    ///      changes (remove inserted UTxOs, re-insert deleted UTxOs).
+    ///   3. Update the ledger tip to the rollback point.
+    ///
+    /// This is O(txs in rolled-back blocks) and requires no I/O, making it
+    /// ideal for the common micro-fork case (1-block chain reorganisation).
+    ///
+    /// # Slow path — snapshot reload + replay
+    ///
+    /// When the target is outside the diff window (e.g. after a node restart
+    /// that cleared the in-memory diffs, or a deep rollback beyond k blocks),
+    /// the ledger is rebuilt from the best available snapshot followed by
+    /// replaying ImmutableDB blocks up to the rollback point.
     pub async fn handle_rollback(&self, rollback_point: &Point) {
         let rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);
 
@@ -411,7 +433,7 @@ impl Node {
             }
         }
 
-        // 1. Roll back ChainDB
+        // 1. Roll back ChainDB (removes volatile blocks after the rollback point).
         {
             let mut db = self.chain_db.write().await;
             if let Err(e) = db.rollback_to_point(rollback_point) {
@@ -420,82 +442,154 @@ impl Node {
             }
         }
 
-        // 2. Find the best ledger snapshot at or before the rollback point.
-        //    Try epoch-numbered snapshots first (newest that's <= rollback_slot),
-        //    then fall back to the latest snapshot.
-        let best_snapshot = self.find_best_snapshot_for_rollback(rollback_slot);
+        // 2. Attempt the fast diff-based rollback path.
+        //
+        // Inspect the DiffSeq to determine whether all blocks that need to be
+        // undone are covered by the in-memory diff window.  A diff is "after the
+        // rollback point" if its slot is strictly greater than `rollback_slot`.
+        //
+        // The DiffSeq stores diffs in chronological order (oldest at front).
+        // We count from the back (most-recent) until we find a diff whose slot
+        // is <= rollback_slot — that's the new tip after rollback.
+        let fast_path_used =
+            {
+                let mut ls = self.ledger_state.write().await;
 
-        if let Some(snapshot_path) = best_snapshot {
-            match torsten_ledger::LedgerState::load_snapshot(&snapshot_path) {
-                Ok(snapshot_state) => {
-                    let snapshot_slot = snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                // Count how many trailing diffs are after the rollback point.
+                // Also locate the new tip (the diff just at or before rollback_slot).
+                let diffs_to_undo = ls
+                    .diff_seq
+                    .diffs
+                    .iter()
+                    .rev()
+                    .take_while(|(slot, _hash, _diff)| slot.0 > rollback_slot)
+                    .count();
 
-                    // Restore from snapshot and replay forward to rollback point.
-                    // Detach the UtxoStore before replacing state so it survives
-                    // the replacement (bincode snapshot has utxos=0 in LSM mode).
-                    let mut ls = self.ledger_state.write().await;
-                    let utxo_store = ls.utxo_set.detach_store();
-                    *ls = snapshot_state;
-                    if let Some(store) = utxo_store {
-                        ls.attach_utxo_store(store);
+                // The diff window is valid for the fast path when:
+                //   (a) the DiffSeq is non-empty (at least some history is available), AND
+                //   (b) all blocks after the rollback point are covered (i.e., the oldest
+                //       diff we still have is at or before rollback_slot, meaning the
+                //       ledger's state before those diffs is correctly represented
+                //       by the remaining DiffSeq + underlying UTxO store).
+                //
+                // If diffs_to_undo == 0 the ledger is already at or before the rollback
+                // point (handled above by the no-op check, but guard here for safety).
+                //
+                // If diffs_to_undo == ls.diff_seq.len() it means EVERY diff in the window
+                // is after the rollback point, implying the diff window doesn't reach
+                // far enough back to cover the rollback — fall back to slow path.
+                let diff_total = ls.diff_seq.len();
+                let window_covers_rollback = diffs_to_undo > 0 && diffs_to_undo < diff_total;
+
+                if window_covers_rollback {
+                    // Determine the new ledger tip: the most-recent diff that is AT or
+                    // BEFORE the rollback slot becomes the new head.
+                    let new_tip = ls.diff_seq.diffs.iter().rev().nth(diffs_to_undo).map(
+                        |(slot, hash, _diff)| torsten_primitives::block::Tip {
+                            point: torsten_primitives::block::Point::Specific(*slot, *hash),
+                            block_number: torsten_primitives::time::BlockNo(0), // approximate; refreshed on next apply
+                        },
+                    );
+
+                    if let Some(tip) = new_tip {
+                        let rolled = ls.rollback_blocks_to_point(diffs_to_undo, tip);
+                        info!(
+                            rollback_slot,
+                            diffs_undone = rolled,
+                            "Fast diff-based rollback succeeded"
+                        );
+                        true
+                    } else {
+                        false
                     }
-                    let replay_from = snapshot_slot;
+                } else {
+                    false
+                }
+            };
 
-                    // 3. Replay blocks from snapshot tip to rollback point
-                    let db = self.chain_db.read().await;
-                    let mut current_slot = replay_from;
-                    let mut replayed = 0u64;
-                    while current_slot < rollback_slot {
-                        match db.get_next_block_after_slot(torsten_primitives::time::SlotNo(
-                            current_slot,
-                        )) {
-                            Ok(Some((next_slot, _hash, cbor))) => {
-                                if next_slot.0 > rollback_slot {
-                                    break;
-                                }
-                                // Minimal decode: rollback replay uses ApplyOnly
-                                // mode, so witness-set data is never read.
-                                match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
-                                    Ok(block) => {
-                                        if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
-                                            error!(
-                                                slot = next_slot.0,
-                                                "Ledger apply failed during rollback replay: {e} — aborting replay"
-                                            );
-                                            break;
-                                        }
-                                        replayed += 1;
-                                        current_slot = next_slot.0;
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to decode block during replay: {e}");
+        if fast_path_used {
+            // Fast path completed — skip snapshot reload.
+        } else {
+            // 3. Slow path: reload from snapshot and replay to rollback point.
+            //
+            // Find the best ledger snapshot at or before the rollback point.
+            // Try epoch-numbered snapshots first (newest that's <= rollback_slot),
+            // then fall back to the latest snapshot.
+            let best_snapshot = self.find_best_snapshot_for_rollback(rollback_slot);
+
+            if let Some(snapshot_path) = best_snapshot {
+                match torsten_ledger::LedgerState::load_snapshot(&snapshot_path) {
+                    Ok(snapshot_state) => {
+                        let snapshot_slot =
+                            snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+                        // Restore from snapshot and replay forward to rollback point.
+                        // Detach the UtxoStore before replacing state so it survives
+                        // the replacement (bincode snapshot has utxos=0 in LSM mode).
+                        let mut ls = self.ledger_state.write().await;
+                        let utxo_store = ls.utxo_set.detach_store();
+                        *ls = snapshot_state;
+                        if let Some(store) = utxo_store {
+                            ls.attach_utxo_store(store);
+                        }
+                        let replay_from = snapshot_slot;
+
+                        // Replay blocks from snapshot tip to rollback point.
+                        let db = self.chain_db.read().await;
+                        let mut current_slot = replay_from;
+                        let mut replayed = 0u64;
+                        while current_slot < rollback_slot {
+                            match db.get_next_block_after_slot(torsten_primitives::time::SlotNo(
+                                current_slot,
+                            )) {
+                                Ok(Some((next_slot, _hash, cbor))) => {
+                                    if next_slot.0 > rollback_slot {
                                         break;
                                     }
+                                    // Minimal decode: rollback replay uses ApplyOnly
+                                    // mode, so witness-set data is never read.
+                                    match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
+                                        Ok(block) => {
+                                            if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
+                                                error!(
+                                                    slot = next_slot.0,
+                                                    "Ledger apply failed during rollback replay: {e} — aborting replay"
+                                                );
+                                                break;
+                                            }
+                                            replayed += 1;
+                                            current_slot = next_slot.0;
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to decode block during replay: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!("Failed to read block during replay: {e}");
+                                    break;
                                 }
                             }
-                            Ok(None) => break,
-                            Err(e) => {
-                                warn!("Failed to read block during replay: {e}");
-                                break;
-                            }
                         }
+                        debug!(
+                            snapshot_slot,
+                            rollback_slot,
+                            replayed,
+                            snapshot = %snapshot_path.display(),
+                            "Ledger state restored from snapshot and replayed"
+                        );
                     }
-                    debug!(
-                        snapshot_slot,
-                        rollback_slot,
-                        replayed,
-                        snapshot = %snapshot_path.display(),
-                        "Ledger state restored from snapshot and replayed"
-                    );
+                    Err(e) => {
+                        error!("Failed to load ledger snapshot for rollback: {e}");
+                        self.reset_ledger_and_replay(rollback_slot).await;
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to load ledger snapshot for rollback: {e}");
-                    self.reset_ledger_and_replay(rollback_slot).await;
-                }
+            } else {
+                warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
+                self.reset_ledger_and_replay(rollback_slot).await;
             }
-        } else {
-            warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
-            self.reset_ledger_and_replay(rollback_slot).await;
         }
 
         // 4. Re-validate mempool transactions against the rolled-back ledger state.

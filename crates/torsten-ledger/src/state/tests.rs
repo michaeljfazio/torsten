@@ -11389,3 +11389,464 @@ fn test_reward_cross_validation_epoch_1239() {
         "Koios distributed pool rewards should be < 1B ADA: got {koios_distributed}"
     );
 }
+
+// =========================================================================
+// Issue #176: UTxO set inconsistent after 1-block rollback
+// =========================================================================
+//
+// Regression test for the micro-fork / chain-reorganisation bug.
+//
+// Scenario:
+//   1. Block A at slot S is applied (consumes UTxOs X,Y; produces P,Q)
+//   2. Rollback to slot S-1 (the parent)
+//   3. Block B at slot S (different hash, replacement fork) is applied
+//   4. Block B's transactions reference UTxOs X,Y
+//
+// Before the fix, `rollback_blocks` didn't exist and the DiffSeq was never
+// populated, so X,Y remained spent after the rollback.  Block B's txs then
+// failed Phase-1 with `InputNotFound(X)` / `InputNotFound(Y)`.
+//
+// After the fix:
+//   - `apply_block` records UTxO inserts/deletes into a per-block `UtxoDiff`
+//     and pushes it into `LedgerState::diff_seq`.
+//   - `rollback_blocks(n)` pops the last n diffs and inverts them (removes
+//     inserted UTxOs, re-inserts deleted UTxOs) so that X,Y are back in the
+//     set and P,Q are removed.
+//   - Block B can then be applied successfully because X,Y are present.
+
+/// Build a minimal valid `Transaction` that spends `inputs` and produces
+/// `outputs`, suitable for `BlockValidationMode::ApplyOnly` (no witness
+/// validation, no fee check).
+fn make_simple_tx(
+    tx_hash_byte: u8,
+    inputs: Vec<TransactionInput>,
+    outputs: Vec<TransactionOutput>,
+) -> Transaction {
+    Transaction {
+        hash: Hash32::from_bytes([tx_hash_byte; 32]),
+        body: TransactionBody {
+            inputs,
+            outputs,
+            fee: Lovelace(200_000),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+/// Helper: create a minimal `TransactionOutput` at the Byron zero address with
+/// the given lovelace amount.  Sufficient for rollback tests that only care
+/// about UTxO existence.
+fn make_lovelace_output(lovelace: u64) -> TransactionOutput {
+    TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(lovelace),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    }
+}
+
+/// Regression test for issue #176.
+///
+/// Verifies that after a 1-block diff-based rollback the UTxOs consumed by the
+/// rolled-back block are restored so that a replacement block at the same slot
+/// can successfully spend them.
+#[test]
+fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // ── Setup ────────────────────────────────────────────────────────────
+    // Seed UTxOs X and Y (the inputs that block A will consume).
+    let utxo_x = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    let utxo_y = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(utxo_x.clone(), make_lovelace_output(5_000_000));
+    state
+        .utxo_set
+        .insert(utxo_y.clone(), make_lovelace_output(3_000_000));
+
+    assert_eq!(state.utxo_set.len(), 2, "UTxOs X and Y must be seeded");
+
+    // ── Step 1: apply block A at slot 100 ────────────────────────────────
+    // Block A spends X,Y and produces P (tx_hash=0xCC, index 0) and
+    //                                   Q (tx_hash=0xCC, index 1).
+    let tx_a = make_simple_tx(
+        0xCC,
+        vec![utxo_x.clone(), utxo_y.clone()],
+        vec![
+            make_lovelace_output(4_000_000), // P
+            make_lovelace_output(3_800_000), // Q
+        ],
+    );
+    let block_a = make_test_block(100, 1, Hash32::ZERO, vec![tx_a]);
+    state
+        .apply_block(&block_a, BlockValidationMode::ApplyOnly)
+        .expect("Block A must apply cleanly");
+
+    // X,Y are spent; P,Q are present.
+    assert!(
+        !state.utxo_set.contains(&utxo_x),
+        "X must be spent after block A"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_y),
+        "Y must be spent after block A"
+    );
+    let utxo_p = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+        index: 0,
+    };
+    let utxo_q = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+        index: 1,
+    };
+    assert!(
+        state.utxo_set.contains(&utxo_p),
+        "P must exist after block A"
+    );
+    assert!(
+        state.utxo_set.contains(&utxo_q),
+        "Q must exist after block A"
+    );
+    assert_eq!(state.diff_seq.len(), 1, "DiffSeq must hold block A's diff");
+
+    // ── Step 2: roll back 1 block (micro-fork, back to slot 99 / origin) ─
+    // Simulate the ChainSync RollBackward to the parent point.
+    // In production this is done via `rollback_blocks_to_point`, which is
+    // what `handle_rollback` calls on the fast path.  Here we call
+    // `rollback_blocks` directly and verify the UTxO set is correct.
+    let rolled = state.rollback_blocks(1);
+    assert_eq!(rolled, 1, "Exactly 1 diff must be rolled back");
+    assert_eq!(
+        state.diff_seq.len(),
+        0,
+        "DiffSeq must be empty after rolling back the only diff"
+    );
+
+    // X,Y must be restored; P,Q must be removed.
+    assert!(
+        state.utxo_set.contains(&utxo_x),
+        "X must be restored after rollback (issue #176)"
+    );
+    assert!(
+        state.utxo_set.contains(&utxo_y),
+        "Y must be restored after rollback (issue #176)"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_p),
+        "P must be removed after rollback"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_q),
+        "Q must be removed after rollback"
+    );
+    assert_eq!(
+        state.utxo_set.len(),
+        2,
+        "UTxO count must be 2 (X,Y) after rollback"
+    );
+
+    // ── Step 3: apply replacement block B at slot 100 ────────────────────
+    // Block B is a different block at the same slot (micro-fork replacement).
+    // It also spends X,Y but produces different outputs R and S.
+    // Reset tip to origin so block B can connect.
+    state.tip = torsten_primitives::block::Tip::origin();
+
+    let tx_b = make_simple_tx(
+        0xDD, // different tx hash from block A's tx
+        vec![utxo_x.clone(), utxo_y.clone()],
+        vec![
+            make_lovelace_output(4_500_000), // R
+            make_lovelace_output(3_300_000), // S
+        ],
+    );
+    let block_b = make_test_block(100, 1, Hash32::ZERO, vec![tx_b]);
+    state
+        .apply_block(&block_b, BlockValidationMode::ApplyOnly)
+        .expect("Block B must apply cleanly — X,Y must be available after rollback (issue #176)");
+
+    // X,Y must be spent; R,S must be present.
+    assert!(
+        !state.utxo_set.contains(&utxo_x),
+        "X must be spent after block B"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_y),
+        "Y must be spent after block B"
+    );
+    let utxo_r = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+        index: 0,
+    };
+    let utxo_s = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+        index: 1,
+    };
+    assert!(
+        state.utxo_set.contains(&utxo_r),
+        "R must exist after block B"
+    );
+    assert!(
+        state.utxo_set.contains(&utxo_s),
+        "S must exist after block B"
+    );
+    assert_eq!(
+        state.utxo_set.len(),
+        2,
+        "UTxO count must be 2 (R,S) after block B"
+    );
+}
+
+/// Test that a 2-block rollback correctly restores the UTxO chain across both blocks.
+///
+/// Chain: genesis → block A (slot 10) → block B (slot 20)
+/// Rollback by 2: both blocks' UTxO changes are inverted in reverse order
+/// (B first, then A), restoring the genesis UTxO set.
+#[test]
+fn test_multi_block_diff_rollback_restores_full_chain() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Seed genesis UTxO G.
+    let utxo_g = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x01u8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(utxo_g.clone(), make_lovelace_output(10_000_000));
+    assert_eq!(state.utxo_set.len(), 1);
+
+    // Block A at slot 10: spends G → produces A0 and A1.
+    let tx_a = make_simple_tx(
+        0xA0,
+        vec![utxo_g.clone()],
+        vec![
+            make_lovelace_output(6_000_000), // A0
+            make_lovelace_output(3_800_000), // A1
+        ],
+    );
+    let block_a = make_test_block(10, 1, Hash32::ZERO, vec![tx_a]);
+    state
+        .apply_block(&block_a, BlockValidationMode::ApplyOnly)
+        .expect("Block A must apply");
+
+    let utxo_a0 = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xA0u8; 32]),
+        index: 0,
+    };
+    let utxo_a1 = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xA0u8; 32]),
+        index: 1,
+    };
+    assert!(!state.utxo_set.contains(&utxo_g));
+    assert!(state.utxo_set.contains(&utxo_a0));
+    assert!(state.utxo_set.contains(&utxo_a1));
+    assert_eq!(state.diff_seq.len(), 1);
+
+    // Block B at slot 20 (block number 2, prev = block A's hash):
+    // spends A0 → produces B0.
+    let block_a_hash = Hash32::from_bytes([1u8; 32]); // header_hash from make_test_block(_, 1, ...)
+    let tx_b = make_simple_tx(
+        0xB0,
+        vec![utxo_a0.clone()],
+        vec![make_lovelace_output(5_800_000)], // B0
+    );
+    let block_b = make_test_block(20, 2, block_a_hash, vec![tx_b]);
+    state
+        .apply_block(&block_b, BlockValidationMode::ApplyOnly)
+        .expect("Block B must apply");
+
+    let utxo_b0 = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xB0u8; 32]),
+        index: 0,
+    };
+    assert!(!state.utxo_set.contains(&utxo_a0));
+    assert!(state.utxo_set.contains(&utxo_a1));
+    assert!(state.utxo_set.contains(&utxo_b0));
+    assert_eq!(state.diff_seq.len(), 2);
+
+    // Rollback both blocks.
+    let rolled = state.rollback_blocks(2);
+    assert_eq!(rolled, 2, "Both diffs must be rolled back");
+    assert_eq!(state.diff_seq.len(), 0);
+
+    // Genesis UTxO G must be fully restored.
+    assert!(
+        state.utxo_set.contains(&utxo_g),
+        "G must be restored after 2-block rollback"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_a0),
+        "A0 must be removed after rollback"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_a1),
+        "A1 must be removed after rollback"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_b0),
+        "B0 must be removed after rollback"
+    );
+    assert_eq!(
+        state.utxo_set.len(),
+        1,
+        "Only G must remain after 2-block rollback"
+    );
+}
+
+/// Test that the DiffSeq fast-path correctly handles partial rollbacks
+/// (roll back 1 of 2 applied blocks, then apply a replacement block).
+///
+/// This is the exact micro-fork scenario from issue #176 but with
+/// 2 blocks in the diff window.
+#[test]
+fn test_partial_rollback_then_reapply() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Seed genesis UTxOs X and Y.
+    let utxo_x = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    let utxo_y = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(utxo_x.clone(), make_lovelace_output(5_000_000));
+    state
+        .utxo_set
+        .insert(utxo_y.clone(), make_lovelace_output(3_000_000));
+
+    // Block 1 (slot 10): spends X → produces M.
+    let tx1 = make_simple_tx(
+        0x10,
+        vec![utxo_x.clone()],
+        vec![make_lovelace_output(4_800_000)],
+    );
+    let block1 = make_test_block(10, 1, Hash32::ZERO, vec![tx1]);
+    state
+        .apply_block(&block1, BlockValidationMode::ApplyOnly)
+        .expect("Block 1 must apply");
+
+    let utxo_m = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x10u8; 32]),
+        index: 0,
+    };
+    assert!(!state.utxo_set.contains(&utxo_x));
+    assert!(state.utxo_set.contains(&utxo_m));
+    assert_eq!(state.diff_seq.len(), 1);
+
+    // Block 2 (slot 20): spends Y → produces N.
+    let block1_hash = Hash32::from_bytes([1u8; 32]);
+    let tx2 = make_simple_tx(
+        0x20,
+        vec![utxo_y.clone()],
+        vec![make_lovelace_output(2_800_000)],
+    );
+    let block2 = make_test_block(20, 2, block1_hash, vec![tx2]);
+    state
+        .apply_block(&block2, BlockValidationMode::ApplyOnly)
+        .expect("Block 2 must apply");
+
+    let utxo_n = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x20u8; 32]),
+        index: 0,
+    };
+    assert!(!state.utxo_set.contains(&utxo_y));
+    assert!(state.utxo_set.contains(&utxo_n));
+    assert_eq!(state.diff_seq.len(), 2);
+
+    // Rollback only the last block (block 2).
+    let rolled = state.rollback_blocks(1);
+    assert_eq!(rolled, 1);
+    assert_eq!(state.diff_seq.len(), 1);
+
+    // Y must be restored; M must still exist (from block 1 which was NOT rolled back).
+    assert!(
+        state.utxo_set.contains(&utxo_y),
+        "Y must be restored after partial rollback"
+    );
+    assert!(
+        state.utxo_set.contains(&utxo_m),
+        "M must still exist (block 1 was NOT rolled back)"
+    );
+    assert!(
+        !state.utxo_set.contains(&utxo_n),
+        "N must be removed (block 2 was rolled back)"
+    );
+
+    // Apply replacement block 2' at slot 20, spending Y → produces N'.
+    // Must succeed because Y is restored.
+    state.tip = torsten_primitives::block::Tip {
+        point: torsten_primitives::block::Point::Specific(
+            torsten_primitives::time::SlotNo(10),
+            block1_hash,
+        ),
+        block_number: torsten_primitives::time::BlockNo(1),
+    };
+    let tx2_prime = make_simple_tx(
+        0x21, // different tx hash — replacement fork
+        vec![utxo_y.clone()],
+        vec![make_lovelace_output(2_900_000)],
+    );
+    let block2_prime = make_test_block(20, 2, block1_hash, vec![tx2_prime]);
+    state
+        .apply_block(&block2_prime, BlockValidationMode::ApplyOnly)
+        .expect("Replacement block 2' must apply — Y must be present after partial rollback");
+
+    let utxo_n_prime = TransactionInput {
+        transaction_id: Hash32::from_bytes([0x21u8; 32]),
+        index: 0,
+    };
+    assert!(state.utxo_set.contains(&utxo_n_prime));
+    assert!(!state.utxo_set.contains(&utxo_y));
+    assert!(state.utxo_set.contains(&utxo_m));
+}
