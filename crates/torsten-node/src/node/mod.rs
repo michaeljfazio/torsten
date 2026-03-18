@@ -798,6 +798,49 @@ impl Node {
                 mempool_txs = self.mempool.len(),
                 "Chain tip",
             );
+
+            // Initialize Prometheus metrics from loaded ledger state so they
+            // are accurate immediately on startup (before any blocks arrive).
+            self.metrics.set_epoch(ls.epoch.0);
+            self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
+            self.metrics.set_mempool_count(self.mempool.len() as u64);
+            self.metrics.delegation_count.store(
+                ls.delegations.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.metrics
+                .treasury_lovelace
+                .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+            self.metrics.pool_count.store(
+                ls.pool_params.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.metrics.drep_count.store(
+                ls.governance.active_drep_count() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.metrics.proposal_count.store(
+                ls.governance.proposals.len() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            // Set slot/block from tip and compute sync progress
+            if let Some(slot) = tip.point.slot() {
+                self.metrics.set_slot(slot.0);
+                self.metrics.set_block_number(tip.block_number.0);
+                // Compute initial sync progress from tip slot
+                let tip_slot = slot.0;
+                if tip_slot > 0 {
+                    // At startup with a snapshot, we're close to or at the tip.
+                    // A more accurate progress would need the network tip, but
+                    // 100% is a reasonable initial estimate for a loaded snapshot.
+                    self.metrics.set_sync_progress(100.0);
+                }
+                // Initialize tip slot time for tip_age_seconds computation
+                let sc = &ls.slot_config;
+                let slot_time_ms =
+                    sc.zero_time + slot.0.saturating_sub(sc.zero_slot) * sc.slot_length as u64;
+                self.metrics.set_tip_slot_time_ms(slot_time_ms);
+            }
         }
 
         // Setup shutdown signal (SIGINT + SIGTERM) early so the node can be

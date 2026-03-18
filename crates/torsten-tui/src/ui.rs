@@ -1438,8 +1438,6 @@ fn build_mini_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) -> V
     ]
 }
 
-/// Build a colored RTT distribution bar using distinct colors per band.
-///
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

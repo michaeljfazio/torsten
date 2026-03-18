@@ -26,6 +26,147 @@ const MINI_PROTOCOL_TX_SUBMISSION: u16 = 6;
 const MINI_PROTOCOL_STATE_QUERY: u16 = 7;
 const MINI_PROTOCOL_TX_MONITOR: u16 = 9;
 
+/// Decode the nested MsgRejectTx reason from the CBOR wire format.
+///
+/// Wire format after the `[2, ...]` tag:
+///   `array(1)[ array(2)[era_idx, ApplyTxError] ]`
+///
+/// where `ApplyTxError` is an array of `ConwayLedgerPredFailure`:
+///   - tag 1 → ConwayUtxowFailure → [0, <ConwayUtxoPredFailure>]
+///   - tag 7 → ConwayMempoolFailure(Text)
+///
+/// ConwayUtxoPredFailure tags:
+///   - 2 → OutsideValidityIntervalUTxO
+///   - 3 → MaxTxSizeUTxO
+///   - 4 → InputSetEmptyUTxO
+///   - 5 → FeeTooSmallUTxO
+///   - 6 → ValueNotConservedUTxO
+///   - 18 → TooManyCollateralInputs
+///   - 19 → NoCollateralInputs
+fn decode_reject_reason(decoder: &mut minicbor::Decoder<'_>) -> Option<String> {
+    // Skip HFC Right branch: array(1)
+    let _ = decoder.array().ok()?;
+    // Skip encodeNS: array(2)
+    let _ = decoder.array().ok()?;
+    // Read era index (e.g. 6 for Conway)
+    let _era_idx = decoder.u8().ok()?;
+    // ApplyTxError = array of ConwayLedgerPredFailure
+    let n_errors = decoder.array().ok()??;
+    if n_errors == 0 {
+        return Some("no errors in ApplyTxError".to_string());
+    }
+
+    let mut reasons = Vec::new();
+    for _ in 0..n_errors {
+        if let Some(reason) = decode_conway_pred_failure(decoder) {
+            reasons.push(reason);
+        } else {
+            reasons.push("(undecodable error)".to_string());
+            // Skip remaining — decoder position may be lost
+            break;
+        }
+    }
+
+    Some(reasons.join("; "))
+}
+
+/// Decode a single ConwayLedgerPredFailure from the CBOR stream.
+fn decode_conway_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Option<String> {
+    let _ = decoder.array().ok()?;
+    let tag = decoder.u8().ok()?;
+    match tag {
+        1 => {
+            // ConwayUtxowFailure → inner is ConwayUtxowPredFailure
+            decode_conway_utxow_failure(decoder)
+        }
+        7 => {
+            // ConwayMempoolFailure(Text)
+            let text = decoder.str().ok()?;
+            Some(text.to_string())
+        }
+        other => {
+            // Skip unknown tag payload
+            let _ = decoder.skip();
+            Some(format!("ConwayLedgerPredFailure(tag={other})"))
+        }
+    }
+}
+
+/// Decode ConwayUtxowPredFailure which wraps UtxoFailure.
+fn decode_conway_utxow_failure(decoder: &mut minicbor::Decoder<'_>) -> Option<String> {
+    let _ = decoder.array().ok()?;
+    let tag = decoder.u8().ok()?;
+    match tag {
+        0 => {
+            // UtxoFailure → inner is ConwayUtxoPredFailure
+            decode_conway_utxo_pred_failure(decoder)
+        }
+        other => {
+            let _ = decoder.skip();
+            Some(format!("ConwayUtxowPredFailure(tag={other})"))
+        }
+    }
+}
+
+/// Decode a ConwayUtxoPredFailure variant into a human-readable string.
+fn decode_conway_utxo_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Option<String> {
+    let _ = decoder.array().ok()?;
+    let tag = decoder.u8().ok()?;
+    match tag {
+        2 => {
+            // OutsideValidityIntervalUTxO(ValidityInterval, SlotNo)
+            let _ = decoder.array().ok()?; // ValidityInterval [before, after]
+            let _ = decoder.skip(); // before (null or slot)
+            let ttl = decoder.u64().ok().unwrap_or(0);
+            let current = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "OutsideValidityInterval: current slot {current}, TTL {ttl}"
+            ))
+        }
+        3 => {
+            // MaxTxSizeUTxO [supplied, expected]
+            let supplied = decoder.u64().ok().unwrap_or(0);
+            let expected = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "MaxTxSizeUTxO: tx size {supplied} > max {expected}"
+            ))
+        }
+        4 => {
+            // InputSetEmptyUTxO
+            Some("InputSetEmptyUTxO: no inputs".to_string())
+        }
+        5 => {
+            // FeeTooSmallUTxO [expected, supplied] (swapped)
+            let expected = decoder.u64().ok().unwrap_or(0);
+            let supplied = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "FeeTooSmallUTxO: minimum fee {expected} lovelace, actual fee {supplied} lovelace"
+            ))
+        }
+        6 => {
+            // ValueNotConservedUTxO [supplied, expected]
+            let supplied = decoder.u64().ok().unwrap_or(0);
+            let expected = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "ValueNotConservedUTxO: consumed {supplied} lovelace, produced {expected} lovelace"
+            ))
+        }
+        18 => {
+            // TooManyCollateralInputs [expected, supplied]
+            let expected = decoder.u64().ok().unwrap_or(0);
+            let supplied = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "TooManyCollateralInputs: max {expected}, provided {supplied}"
+            ))
+        }
+        19 => {
+            // NoCollateralInputs
+            Some("NoCollateralInputs".to_string())
+        }
+        other => Some(format!("ConwayUtxoPredFailure(tag={other})")),
+    }
+}
+
 /// Node-to-Client client for connecting to a Cardano node via Unix socket.
 pub struct N2CClient {
     stream: UnixStream,
@@ -570,8 +711,10 @@ impl N2CClient {
     /// The tx_cbor should be the raw CBOR bytes of the signed transaction.
     /// Returns Ok(()) if accepted, Err with rejection reason if rejected.
     pub async fn submit_tx(&mut self, tx_cbor: &[u8]) -> Result<(), N2CClientError> {
-        // Build MsgSubmitTx: [0, [era_id, tx_bytes]]
+        // Build MsgSubmitTx: [0, [era_id, tag(24, tx_bytes)]]
         // era_id 6 = Conway
+        // The tx payload is wrapped in CBOR tag 24 (wrapCBORinCBOR) per the
+        // Haskell node's encoding: `encodeTag 24 <> encodeBytes (toStrict bs)`
         let mut payload = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut payload);
         enc.array(2)
@@ -582,6 +725,8 @@ impl N2CClient {
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
         enc.u32(6)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // Conway era
+        enc.tag(minicbor::data::Tag::new(24))
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
         enc.bytes(tx_cbor)
             .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
 
@@ -611,15 +756,11 @@ impl N2CClient {
         match msg_tag {
             1 => Ok(()), // MsgAcceptTx
             2 => {
-                // MsgRejectTx - extract reason
-                let reason = if let Ok(Some(_)) = decoder.array() {
-                    decoder
-                        .str()
-                        .unwrap_or("unknown rejection reason")
-                        .to_string()
-                } else {
-                    "transaction rejected".to_string()
-                };
+                // MsgRejectTx — wire format:
+                //   [2, array(1)[ array(2)[era_idx, ApplyTxError] ]]
+                // where ApplyTxError is an array of ConwayLedgerPredFailure.
+                let reason = decode_reject_reason(&mut decoder)
+                    .unwrap_or_else(|| "unknown rejection reason".to_string());
                 Err(N2CClientError::Protocol(format!(
                     "Transaction rejected: {reason}"
                 )))
