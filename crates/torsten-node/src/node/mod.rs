@@ -981,6 +981,12 @@ impl Node {
             let pm_config = PeerManagerConfig {
                 diffusion_mode: DiffusionMode::InitiatorAndResponder,
                 peer_sharing_enabled: true,
+                target_hot_peers: self.config.target_number_of_active_peers,
+                target_warm_peers: self
+                    .config
+                    .target_number_of_established_peers
+                    .saturating_sub(self.config.target_number_of_active_peers),
+                target_known_peers: self.config.target_number_of_known_peers,
                 ..PeerManagerConfig::default()
             };
             *self.peer_manager.write().await = PeerManager::new(pm_config);
@@ -1349,8 +1355,24 @@ impl Node {
         {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
+            let gov_config = {
+                use torsten_network::{GovernorConfig, PeerTargets};
+                let cfg = &self.config;
+                GovernorConfig {
+                    normal_targets: PeerTargets {
+                        root_peers: cfg.target_number_of_root_peers,
+                        known_peers: cfg.target_number_of_known_peers,
+                        established_peers: cfg.target_number_of_established_peers,
+                        active_peers: cfg.target_number_of_active_peers,
+                        known_blp: cfg.target_number_of_known_big_ledger_peers,
+                        established_blp: cfg.target_number_of_established_big_ledger_peers,
+                        active_blp: cfg.target_number_of_active_big_ledger_peers,
+                    },
+                    ..Default::default()
+                }
+            };
             tokio::spawn(async move {
-                let mut governor = Governor::new(Default::default());
+                let mut governor = Governor::new(gov_config);
                 // Full evaluation every 30 s; skip the first immediate tick so
                 // the node has time to connect peers before the first evaluation.
                 let mut full_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1396,7 +1418,8 @@ impl Node {
                                 GovernorEvent::EvictColdPeer(addr) => {
                                     pm.peer_disconnected(addr);
                                 }
-                                GovernorEvent::Connect(_) | GovernorEvent::RequestPeerSharing(_, _) => {
+                                GovernorEvent::Connect(_)
+                                | GovernorEvent::RequestPeerSharing(_, _) => {
                                     // Connection and peer-sharing events are handled
                                     // asynchronously by other tasks.
                                 }

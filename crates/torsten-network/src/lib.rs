@@ -27,7 +27,7 @@ pub use miniprotocols::txsubmission::{TxSubmissionClient, TxSubmissionError, TxS
 pub use n2c::{N2CServer, TxValidationError, TxValidator};
 pub use n2c_client::N2CClient;
 // Re-export mempool trait and types from torsten-primitives for convenience
-pub use governor::{Governor, GovernorEvent, PeerTargets};
+pub use governor::{Governor, GovernorConfig, GovernorEvent, PeerTargets};
 pub use n2c::encode_query_result;
 pub use n2n_server::{
     BlockAnnouncement, BlockProvider, N2NRateLimitConfig, N2NServer, RollbackAnnouncement, TipInfo,
