@@ -10156,3 +10156,498 @@ fn test_within_block_ref_script_minting_policy_visible() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Plutus script validation — collateral path and ExUnits budget tests
+//
+// The tests in this section cover the `is_valid = false` path in `apply_block`
+// where Phase-2 script evaluation has failed:
+//
+//   - Regular inputs/outputs are NOT applied to the UTxO set.
+//   - Collateral inputs ARE consumed (forfeited to the block producer).
+//   - If present, the collateral_return output is added to the UTxO set.
+//   - The epoch fee accumulator is credited with the net collateral amount.
+//
+// These tests use `BlockValidationMode::ApplyOnly` to bypass Phase-1/Phase-2
+// re-validation and test the UTxO effect logic in isolation.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal Transaction with `is_valid = false` that has collateral.
+///
+/// The transaction references `regular_input` in its body inputs (would be
+/// spent if valid) and `collateral_input` as its collateral.  When applied
+/// with `is_valid = false`:
+///   - `regular_input` must remain in the UTxO set (not consumed).
+///   - `collateral_input` must be removed from the UTxO set.
+fn make_invalid_tx_with_collateral(
+    tx_hash: Hash32,
+    regular_input: TransactionInput,
+    collateral_input: TransactionInput,
+    collateral_return: Option<TransactionOutput>,
+    total_collateral: Option<Lovelace>,
+) -> Transaction {
+    Transaction {
+        hash: tx_hash,
+        body: TransactionBody {
+            inputs: vec![regular_input],
+            outputs: vec![],
+            fee: Lovelace(0),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: std::collections::BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: std::collections::BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![collateral_input],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return,
+            total_collateral,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: std::collections::BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: false,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+// -----------------------------------------------------------------------
+// Test: is_valid=false — regular inputs are NOT consumed, collateral IS
+//
+// This is the fundamental invariant for invalid Plutus transactions:
+// - Regular inputs/outputs are skipped (no UTxO changes from body)
+// - Collateral inputs are spent (forfeited)
+// - Collateral return output (if present) is added to UTxO set
+// -----------------------------------------------------------------------
+#[test]
+fn test_invalid_tx_collateral_consumed_regular_inputs_skipped() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Set up two UTxOs: one is the "would-be-spent" regular input,
+    // the other is the collateral.
+    let regular_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+        index: 0,
+    };
+    let collateral_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+        index: 0,
+    };
+
+    let utxo_value = Value::lovelace(10_000_000);
+    for inp in [&regular_input, &collateral_input] {
+        state.utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: utxo_value.clone(),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+    }
+    assert_eq!(state.utxo_set.len(), 2, "setup: two UTxOs");
+
+    let tx_hash = Hash32::from_bytes([0xCCu8; 32]);
+    let tx = make_invalid_tx_with_collateral(
+        tx_hash,
+        regular_input.clone(),
+        collateral_input.clone(),
+        None, // no collateral return
+        None,
+    );
+
+    let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
+    state
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .expect("apply_block must succeed");
+
+    // Collateral must be consumed
+    assert!(
+        !state.utxo_set.contains(&collateral_input),
+        "collateral input must be consumed after is_valid=false"
+    );
+
+    // Regular input must remain (tx body skipped)
+    assert!(
+        state.utxo_set.contains(&regular_input),
+        "regular input must NOT be consumed when is_valid=false"
+    );
+
+    // No outputs from the tx body were created
+    let new_output_input = TransactionInput {
+        transaction_id: tx_hash,
+        index: 0,
+    };
+    assert!(
+        !state.utxo_set.contains(&new_output_input),
+        "tx body outputs must NOT be created when is_valid=false"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test: collateral return output is created when is_valid=false
+//
+// When the block producer provides a collateral_return output, it must be
+// added to the UTxO set at index `outputs.len()` (after regular outputs).
+// The net collateral forfeited = collateral_input_value − return_value.
+// -----------------------------------------------------------------------
+#[test]
+fn test_invalid_tx_collateral_return_created() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let collateral_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+        index: 0,
+    };
+    let regular_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xEEu8; 32]),
+        index: 0,
+    };
+
+    // Collateral UTxO has 5 ADA; return gives 3 ADA back; 2 ADA is forfeited
+    let collateral_value = Value::lovelace(5_000_000);
+    let return_value = Value::lovelace(3_000_000);
+
+    for (inp, val) in [
+        (&collateral_input, collateral_value.clone()),
+        (&regular_input, Value::lovelace(10_000_000)),
+    ] {
+        state.utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: val,
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+    }
+
+    let collateral_return_output = TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0xFFu8; 32],
+        }),
+        value: return_value.clone(),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    };
+
+    let tx_hash = Hash32::from_bytes([0xFFu8; 32]);
+    let tx = make_invalid_tx_with_collateral(
+        tx_hash,
+        regular_input.clone(),
+        collateral_input.clone(),
+        Some(collateral_return_output.clone()),
+        // total_collateral declared = 2 ADA (5 - 3)
+        Some(Lovelace(2_000_000)),
+    );
+
+    let fees_before = state.epoch_fees;
+
+    let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
+    state
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .expect("apply_block must succeed");
+
+    // Collateral input consumed
+    assert!(
+        !state.utxo_set.contains(&collateral_input),
+        "collateral input must be consumed"
+    );
+
+    // Regular input NOT consumed
+    assert!(
+        state.utxo_set.contains(&regular_input),
+        "regular input must remain when is_valid=false"
+    );
+
+    // Collateral return output created at index `outputs.len()` = 0
+    // (because the tx has no regular outputs).
+    let return_input = TransactionInput {
+        transaction_id: tx_hash,
+        index: 0, // outputs.len() = 0 → collateral return at index 0
+    };
+    assert!(
+        state.utxo_set.contains(&return_input),
+        "collateral return output must be created in UTxO set"
+    );
+
+    // Fees: total_collateral was declared as 2 ADA, so 2 ADA should be credited
+    let fee_increase = state.epoch_fees.0 - fees_before.0;
+    assert_eq!(
+        fee_increase, 2_000_000,
+        "epoch fees must increase by the declared total_collateral (2 ADA)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test: multiple UTxOs — only collateral inputs are consumed
+//
+// When a block contains multiple transactions, only the transactions'
+// own collateral inputs should be consumed.  UTxOs belonging to other
+// transactions in the block or to the global ledger state must be
+// unaffected.
+// -----------------------------------------------------------------------
+#[test]
+fn test_invalid_tx_does_not_consume_unrelated_utxos() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Set up 5 unrelated UTxOs
+    let mut unrelated_inputs = Vec::new();
+    for i in 0u8..5 {
+        let inp = TransactionInput {
+            transaction_id: Hash32::from_bytes([i; 32]),
+            index: 0,
+        };
+        state.utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![i; 32],
+                }),
+                value: Value::lovelace(1_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        unrelated_inputs.push(inp);
+    }
+
+    // The collateral input is a distinct UTxO
+    let collateral_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xF0u8; 32]),
+        index: 0,
+    };
+    let regular_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xF1u8; 32]),
+        index: 0,
+    };
+    for (inp, seed) in [(&collateral_input, 0xF0u8), (&regular_input, 0xF1u8)] {
+        state.utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![seed; 32],
+                }),
+                value: Value::lovelace(3_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+    }
+
+    let utxo_count_before = state.utxo_set.len(); // 5 + 2 = 7
+
+    let tx = make_invalid_tx_with_collateral(
+        Hash32::from_bytes([0xABu8; 32]),
+        regular_input.clone(),
+        collateral_input.clone(),
+        None,
+        None,
+    );
+    let block = make_test_block(200, 2, Hash32::ZERO, vec![tx]);
+    state
+        .apply_block(&block, BlockValidationMode::ApplyOnly)
+        .expect("apply_block must succeed");
+
+    // Exactly one UTxO removed: the collateral input
+    assert_eq!(
+        state.utxo_set.len(),
+        utxo_count_before - 1,
+        "only the collateral input should be removed"
+    );
+
+    // All unrelated UTxOs still present
+    for inp in &unrelated_inputs {
+        assert!(
+            state.utxo_set.contains(inp),
+            "unrelated UTxO {:?} must not be consumed",
+            inp
+        );
+    }
+
+    // Regular input not consumed
+    assert!(
+        state.utxo_set.contains(&regular_input),
+        "regular input must not be consumed when is_valid=false"
+    );
+
+    // Collateral consumed
+    assert!(
+        !state.utxo_set.contains(&collateral_input),
+        "collateral input must be consumed"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test: ExUnits budget in validate_transaction — max_tx_ex_units check
+//
+// `validate_transaction` checks that the total declared ExUnits across all
+// redeemers do not exceed the protocol-level `max_tx_ex_units`.
+// A transaction whose sum of redeemer ex_units exceeds the limit must be
+// rejected with `ExUnitsExceeded`.
+// -----------------------------------------------------------------------
+#[test]
+fn test_validate_transaction_ex_units_exceeded() {
+    use crate::validation::{validate_transaction, ValidationError};
+
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Set a strict per-tx budget: 1000 steps, 500 mem
+    params.max_tx_ex_units = ExUnits {
+        steps: 1_000,
+        mem: 500,
+    };
+
+    let (utxo_set, input) = {
+        let mut utxo_set = crate::utxo::UtxoSet::new();
+        let inp = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        (utxo_set, inp)
+    };
+
+    // Build a transaction whose redeemers exceed the step limit
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x11u8; 32]));
+    tx.body.inputs = vec![input];
+    // Add a redeemer that exceeds max_tx_ex_units.steps (1_000)
+    tx.witness_set.redeemers.push(Redeemer {
+        tag: RedeemerTag::Spend,
+        index: 0,
+        data: PlutusData::Integer(0),
+        ex_units: ExUnits {
+            steps: 2_000, // exceeds the 1_000 limit
+            mem: 100,
+        },
+    });
+
+    let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+    assert!(
+        result.is_err(),
+        "transaction exceeding max_tx_ex_units must be rejected"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ExUnitsExceeded)),
+        "must produce ExUnitsExceeded error; got: {:?}",
+        errors
+    );
+}
+
+// -----------------------------------------------------------------------
+// Test: ExUnits budget — within limit is accepted
+//
+// Complementary to the above: a transaction with redeemer ex_units below
+// the protocol limit is not rejected for budget reasons.
+// -----------------------------------------------------------------------
+#[test]
+fn test_validate_transaction_ex_units_within_limit() {
+    use crate::validation::validate_transaction;
+
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.max_tx_ex_units = ExUnits {
+        steps: 10_000_000_000,
+        mem: 14_000_000,
+    };
+
+    let (utxo_set, input) = {
+        let mut utxo_set = crate::utxo::UtxoSet::new();
+        let inp = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        (utxo_set, inp)
+    };
+
+    // Transaction with redeemers well within budget
+    let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x21u8; 32]));
+    tx.body.inputs = vec![input];
+    tx.witness_set.redeemers.push(Redeemer {
+        tag: RedeemerTag::Spend,
+        index: 0,
+        data: PlutusData::Integer(0),
+        ex_units: ExUnits {
+            steps: 1_000_000, // << 10B limit
+            mem: 1_000,       // << 14M limit
+        },
+    });
+
+    // Will fail for other Phase-1 reasons (missing collateral, missing script
+    // data hash, etc.) but NOT for ExUnitsExceeded — that's what we verify.
+    let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+    if let Err(errors) = result {
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, crate::validation::ValidationError::ExUnitsExceeded)),
+            "ExUnitsExceeded must NOT appear when budget is within limit; got: {:?}",
+            errors
+        );
+    }
+    // (If Ok — unlikely given missing witnesses — that's fine too)
+}
