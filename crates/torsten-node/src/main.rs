@@ -130,6 +130,15 @@ struct RunArgs {
     #[arg(long)]
     no_metrics: bool,
 
+    /// Also emit `cardano_node_metrics_*` compatibility aliases in the Prometheus
+    /// output alongside the native `torsten_*` metrics.
+    ///
+    /// Enables reuse of existing cardano-node Grafana dashboards without
+    /// modification.  Disabled by default to avoid polluting the metrics
+    /// namespace for operators who do not need it.
+    #[arg(long)]
+    compat_metrics: bool,
+
     /// Maximum number of transactions in the mempool
     #[arg(long, default_value = "16384")]
     mempool_max_tx: usize,
@@ -494,6 +503,7 @@ async fn run_node(args: RunArgs) -> Result<()> {
         shelley_operational_certificate: args.shelley_operational_certificate,
         _shelley_cold_key: args.shelley_cold_key,
         metrics_port: effective_metrics_port,
+        compat_metrics: args.compat_metrics,
         mempool_max_tx: args.mempool_max_tx,
         mempool_max_bytes: args.mempool_max_bytes,
         snapshot_max_retained: args.snapshot_max_retained,

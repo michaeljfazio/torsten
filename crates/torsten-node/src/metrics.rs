@@ -372,6 +372,10 @@ pub struct NodeMetrics {
     peak_mem_bytes: AtomicU64,
     /// Network magic number (764824073=mainnet, 2=preview, 1=preprod).
     pub network_magic: AtomicU64,
+    /// When true, emit additional `cardano_node_metrics_*` aliases alongside the
+    /// native `torsten_*` metrics.  Allows existing cardano-node Grafana dashboards
+    /// to work without modification.  Controlled by `--compat-metrics` CLI flag.
+    compat_metrics: std::sync::atomic::AtomicBool,
 }
 
 impl NodeMetrics {
@@ -426,7 +430,18 @@ impl NodeMetrics {
             cpu_tracker: std::sync::Mutex::new(CpuTracker::new()),
             peak_mem_bytes: AtomicU64::new(0),
             network_magic: AtomicU64::new(0),
+            compat_metrics: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Enable or disable `cardano_node_metrics_*` compatibility aliases.
+    ///
+    /// When enabled, `to_prometheus()` emits a second set of metric lines using
+    /// the naming convention used by cardano-node (Haskell), so existing Grafana
+    /// dashboards built for cardano-node continue to work without modification.
+    pub fn set_compat_metrics(&self, enabled: bool) {
+        self.compat_metrics
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record a transaction validation error by type.
@@ -917,6 +932,80 @@ impl NodeMetrics {
             "Per-block fetch latency in milliseconds",
         ));
 
+        // cardano-node compatibility aliases.
+        //
+        // When --compat-metrics is set, emit a second set of metric lines using
+        // the `cardano_node_metrics_*` naming convention.  This allows operators
+        // to reuse existing cardano-node Grafana dashboards without modification.
+        //
+        // Naming rules follow the cardano-node EKG metric export convention:
+        //   - Integer gauges use the `_int` suffix.
+        //   - The density metric is a real-valued fraction in [0, 1].
+        //   - forge metrics use the full EKG path as the metric name.
+        //
+        // NOTE: We emit only GAUGE lines (no # TYPE or # HELP declarations) for
+        // the compat names because Prometheus rejects duplicate TYPE declarations
+        // when the same name appears twice, and the compat names are aliases, not
+        // independent metrics.  Prometheus will infer the type as "untyped" for
+        // lines without a TYPE header, which is harmless for dashboard queries.
+        if self.compat_metrics.load(Ordering::Relaxed) {
+            // slotNum_int — current slot number
+            out.push_str(&format!(
+                "cardano_node_metrics_slotNum_int {}\n",
+                self.slot_number.load(Ordering::Relaxed)
+            ));
+
+            // blockNum_int — current block number
+            out.push_str(&format!(
+                "cardano_node_metrics_blockNum_int {}\n",
+                self.block_number.load(Ordering::Relaxed)
+            ));
+
+            // epoch_int — current epoch number
+            out.push_str(&format!(
+                "cardano_node_metrics_epoch_int {}\n",
+                self.epoch_number.load(Ordering::Relaxed)
+            ));
+
+            // connectedPeers_int — total connected peers
+            out.push_str(&format!(
+                "cardano_node_metrics_connectedPeers_int {}\n",
+                self.peers_connected.load(Ordering::Relaxed)
+            ));
+
+            // utxoSize_int — UTxO set size
+            out.push_str(&format!(
+                "cardano_node_metrics_utxoSize_int {}\n",
+                self.utxo_count.load(Ordering::Relaxed)
+            ));
+
+            // txsInMempool_int — mempool transaction count
+            out.push_str(&format!(
+                "cardano_node_metrics_txsInMempool_int {}\n",
+                self.mempool_tx_count.load(Ordering::Relaxed)
+            ));
+
+            // mempoolBytes_int — mempool size in bytes
+            out.push_str(&format!(
+                "cardano_node_metrics_mempoolBytes_int {}\n",
+                self.mempool_bytes.load(Ordering::Relaxed)
+            ));
+
+            // Forge_forge_adopted_int — blocks forged and adopted
+            out.push_str(&format!(
+                "cardano_node_metrics_Forge_forge_adopted_int {}\n",
+                self.blocks_forged.load(Ordering::Relaxed)
+            ));
+
+            // density_real — chain density as a fraction in [0, 1].
+            //
+            // torsten stores sync progress as (percentage * 100), i.e. 0–10000
+            // for 0%–100%.  Divide by 10000 to produce the [0, 1] density
+            // fraction that cardano-node's EKG dashboard panel expects.
+            let density = self.sync_progress_pct.load(Ordering::Relaxed) as f64 / 10000.0;
+            out.push_str(&format!("cardano_node_metrics_density_real {density:.6}\n"));
+        }
+
         out
     }
 }
@@ -1052,6 +1141,126 @@ mod tests {
         assert!(output.contains("# TYPE torsten_slot_number gauge"));
         assert!(output.contains("# TYPE torsten_rollback_count_total counter"));
         assert!(output.contains("# TYPE torsten_peers_connected gauge"));
+    }
+
+    #[test]
+    fn test_compat_metrics_disabled_by_default() {
+        // With the default NodeMetrics no compat aliases should appear.
+        let metrics = NodeMetrics::new();
+        metrics.set_slot(42);
+        let output = metrics.to_prometheus();
+        assert!(
+            !output.contains("cardano_node_metrics_"),
+            "compat aliases must not appear when compat_metrics is false"
+        );
+    }
+
+    #[test]
+    fn test_compat_metrics_enabled() {
+        let metrics = NodeMetrics::new();
+        metrics.set_compat_metrics(true);
+
+        // Set known values so we can assert exact alias output.
+        metrics.set_slot(100_000);
+        metrics.set_block_number(50_000);
+        metrics.set_epoch(410);
+        metrics.peers_connected.store(8, Ordering::Relaxed);
+        metrics.set_utxo_count(23_000_000);
+        metrics.set_mempool_count(7);
+        metrics.mempool_bytes.store(14_336, Ordering::Relaxed);
+        metrics.blocks_forged.store(3, Ordering::Relaxed);
+        // 50% sync stored as 5000 (pct * 100)
+        metrics.sync_progress_pct.store(5000, Ordering::Relaxed);
+
+        let output = metrics.to_prometheus();
+
+        // Each alias must be present with the correct value.
+        assert!(
+            output.contains("cardano_node_metrics_slotNum_int 100000"),
+            "slotNum_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_blockNum_int 50000"),
+            "blockNum_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_epoch_int 410"),
+            "epoch_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_connectedPeers_int 8"),
+            "connectedPeers_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_utxoSize_int 23000000"),
+            "utxoSize_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_txsInMempool_int 7"),
+            "txsInMempool_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_mempoolBytes_int 14336"),
+            "mempoolBytes_int alias missing or wrong"
+        );
+        assert!(
+            output.contains("cardano_node_metrics_Forge_forge_adopted_int 3"),
+            "Forge_forge_adopted_int alias missing or wrong"
+        );
+        // 5000 / 10000 = 0.5 density
+        assert!(
+            output.contains("cardano_node_metrics_density_real 0.500000"),
+            "density_real alias missing or wrong"
+        );
+
+        // Native torsten metrics must still be present alongside compat aliases.
+        assert!(
+            output.contains("torsten_slot_number 100000"),
+            "native torsten_slot_number must still be present"
+        );
+    }
+
+    #[test]
+    fn test_compat_metrics_can_be_toggled() {
+        // Verify that set_compat_metrics can be called multiple times and takes effect.
+        let metrics = NodeMetrics::new();
+        metrics.set_slot(1);
+
+        // Off initially
+        let out1 = metrics.to_prometheus();
+        assert!(!out1.contains("cardano_node_metrics_"));
+
+        // Enable
+        metrics.set_compat_metrics(true);
+        let out2 = metrics.to_prometheus();
+        assert!(out2.contains("cardano_node_metrics_slotNum_int 1"));
+
+        // Disable again
+        metrics.set_compat_metrics(false);
+        let out3 = metrics.to_prometheus();
+        assert!(!out3.contains("cardano_node_metrics_"));
+    }
+
+    #[test]
+    fn test_compat_density_real_zero_and_full() {
+        let metrics = NodeMetrics::new();
+        metrics.set_compat_metrics(true);
+
+        // 0% sync
+        metrics.sync_progress_pct.store(0, Ordering::Relaxed);
+        let out = metrics.to_prometheus();
+        assert!(
+            out.contains("cardano_node_metrics_density_real 0.000000"),
+            "density_real must be 0.0 at 0% sync"
+        );
+
+        // 100% sync stored as 10000
+        metrics.sync_progress_pct.store(10000, Ordering::Relaxed);
+        let out = metrics.to_prometheus();
+        assert!(
+            out.contains("cardano_node_metrics_density_real 1.000000"),
+            "density_real must be 1.0 at 100% sync"
+        );
     }
 
     #[test]

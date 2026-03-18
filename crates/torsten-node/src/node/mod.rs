@@ -59,6 +59,8 @@ pub struct NodeArgs {
     pub _shelley_cold_key: Option<PathBuf>,
     /// Prometheus metrics port (0 to disable)
     pub metrics_port: u16,
+    /// Emit `cardano_node_metrics_*` compatibility aliases alongside native metrics
+    pub compat_metrics: bool,
     /// Maximum number of transactions in the mempool
     pub mempool_max_tx: usize,
     /// Maximum mempool size in bytes
@@ -724,6 +726,7 @@ impl Node {
         let node_metrics = {
             let m = crate::metrics::NodeMetrics::new();
             m.set_network_magic(network_magic);
+            m.set_compat_metrics(args.compat_metrics);
             Arc::new(m)
         };
 
