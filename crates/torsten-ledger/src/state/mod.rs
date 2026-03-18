@@ -196,7 +196,17 @@ pub struct PendingRewardUpdate {
 /// Conway-era governance state (CIP-1694)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceState {
-    /// Registered DReps: credential -> DRepState
+    /// Registered DReps: credential -> DRepState.
+    ///
+    /// This map contains ALL currently-registered DReps — entries are added by
+    /// `RegDRep` certificates and removed by `UnregDRep` certificates.  It does
+    /// NOT shrink when a DRep becomes inactive due to `drep_activity` expiry;
+    /// inactive DReps are merely flagged `active = false` at each epoch boundary
+    /// (matching Haskell's `vsDReps` map semantics).
+    ///
+    /// Use [`GovernanceState::active_drep_count`] to obtain the count of DReps
+    /// whose activity flag is still `true` (i.e. those that contribute voting
+    /// power and that external tools like Koios report as "registered").
     pub dreps: HashMap<Hash32, DRepRegistration>,
     /// Vote delegations: stake credential hash -> DRep
     pub vote_delegations: HashMap<Hash32, DRep>,
@@ -273,6 +283,25 @@ pub struct DRepRegistration {
 
 fn default_drep_active() -> bool {
     true
+}
+
+impl GovernanceState {
+    /// Count of DReps whose `active` flag is currently `true`.
+    ///
+    /// This is the number that external tools (Koios, cardano-cli) report as
+    /// "registered" DReps: all DReps that have registered and whose activity
+    /// window has not yet expired.  It excludes:
+    ///
+    /// * DReps that became inactive due to `drep_activity` epoch inactivity
+    ///   (they remain in `self.dreps` with `active = false` until explicitly
+    ///   deregistered via `UnregDRep`).
+    ///
+    /// Per CIP-1694, inactive DReps still hold their deposit and can
+    /// reactivate by voting or submitting an `UpdateDRep` certificate; they
+    /// are simply excluded from voting power calculations.
+    pub fn active_drep_count(&self) -> usize {
+        self.dreps.values().filter(|d| d.active).count()
+    }
 }
 
 /// State of a governance proposal

@@ -721,7 +721,11 @@ impl Node {
             pool_count: ls.pool_params.len(),
             treasury: ls.treasury.0,
             reserves: ls.reserves.0,
-            drep_count: ls.governance.dreps.len(),
+            // Active DRep count: only DReps whose activity window has not expired.
+            // Inactive DReps (active=false) remain registered in the map until
+            // explicitly deregistered via UnregDRep, but external tools (Koios,
+            // cardano-cli) report only the active count.
+            drep_count: ls.governance.active_drep_count(),
             proposal_count: ls.governance.proposals.len(),
             protocol_params,
             stake_pools,

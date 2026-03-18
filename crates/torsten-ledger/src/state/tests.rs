@@ -10696,3 +10696,295 @@ fn test_validate_transaction_ex_units_within_limit() {
     }
     // (If Ok — unlikely given missing witnesses — that's fine too)
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Issue #173: DRep count phantom entries
+//
+// Regression tests that verify:
+//   1. VoteDelegation / VoteRegDeleg / RegStakeVoteDeleg / StakeVoteDelegation
+//      with DRep::KeyHash targets do NOT create entries in governance.dreps.
+//   2. Only RegDRep inserts into governance.dreps.
+//   3. active_drep_count() only counts DReps with active=true.
+//   4. Inactive DReps (marked by drep_activity) are excluded from active_drep_count.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// VoteDelegation with DRep::KeyHash must NOT create an entry in governance.dreps.
+/// The target DRep is referenced as a delegation target; it is only created by RegDRep.
+#[test]
+fn test_vote_delegation_keyhash_does_not_create_drep_entry() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    let mut state = LedgerState::new(params);
+
+    // A stake key that is delegating its vote
+    let stake_cred = Credential::VerificationKey(Hash28::from_bytes([0xAAu8; 28]));
+    // Register the stake key first
+    state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
+
+    // The DRep they want to delegate to (NOT yet registered via RegDRep)
+    let drep_cred = Credential::VerificationKey(Hash28::from_bytes([0xBBu8; 28]));
+    let drep_key = credential_to_hash(&drep_cred);
+    let drep_keyhash = drep_key; // Hash32 is what DRep::KeyHash stores
+
+    // Sanity: DRep not in registry yet
+    assert!(
+        !state.governance.dreps.contains_key(&drep_keyhash),
+        "DRep must not exist before registration"
+    );
+
+    // Process VoteDelegation pointing at the unregistered DRep
+    state.process_certificate(&Certificate::VoteDelegation {
+        credential: stake_cred.clone(),
+        drep: DRep::KeyHash(drep_keyhash),
+    });
+
+    // DRep must still NOT be in the dreps registry
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "VoteDelegation with DRep::KeyHash must NOT create a drep registry entry"
+    );
+    // vote_delegations should have been updated
+    let stake_key = credential_to_hash(&stake_cred);
+    assert_eq!(
+        state.governance.vote_delegations.get(&stake_key),
+        Some(&DRep::KeyHash(drep_keyhash)),
+        "VoteDelegation must update vote_delegations"
+    );
+}
+
+/// VoteRegDeleg with DRep::KeyHash must NOT create a drep registry entry.
+/// This certificate registers a stake address AND delegates to a DRep;
+/// it must not auto-register the target DRep.
+#[test]
+fn test_vote_reg_deleg_does_not_create_drep_entry() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    let mut state = LedgerState::new(params);
+
+    let stake_cred = Credential::VerificationKey(Hash28::from_bytes([0xCCu8; 28]));
+    let drep_cred = Credential::VerificationKey(Hash28::from_bytes([0xDDu8; 28]));
+    let drep_keyhash = credential_to_hash(&drep_cred);
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "registry must be empty before test"
+    );
+
+    state.process_certificate(&Certificate::VoteRegDeleg {
+        credential: stake_cred.clone(),
+        drep: DRep::KeyHash(drep_keyhash),
+        deposit: torsten_primitives::value::Lovelace(2_000_000),
+    });
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "VoteRegDeleg with DRep::KeyHash must NOT create a drep registry entry"
+    );
+    let stake_key = credential_to_hash(&stake_cred);
+    assert_eq!(
+        state.governance.vote_delegations.get(&stake_key),
+        Some(&DRep::KeyHash(drep_keyhash)),
+        "VoteRegDeleg must update vote_delegations"
+    );
+}
+
+/// RegStakeVoteDeleg with DRep::KeyHash must NOT create a drep registry entry.
+#[test]
+fn test_reg_stake_vote_deleg_does_not_create_drep_entry() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    let mut state = LedgerState::new(params);
+
+    let stake_cred = Credential::VerificationKey(Hash28::from_bytes([0xEEu8; 28]));
+    let pool_id = Hash28::from_bytes([0x01u8; 28]);
+    let drep_cred = Credential::VerificationKey(Hash28::from_bytes([0xFFu8; 28]));
+    let drep_keyhash = credential_to_hash(&drep_cred);
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "registry must be empty before test"
+    );
+
+    state.process_certificate(&Certificate::RegStakeVoteDeleg {
+        credential: stake_cred.clone(),
+        pool_hash: pool_id,
+        drep: DRep::KeyHash(drep_keyhash),
+        deposit: torsten_primitives::value::Lovelace(2_000_000),
+    });
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "RegStakeVoteDeleg with DRep::KeyHash must NOT create a drep registry entry"
+    );
+    let stake_key = credential_to_hash(&stake_cred);
+    assert_eq!(
+        state.governance.vote_delegations.get(&stake_key),
+        Some(&DRep::KeyHash(drep_keyhash)),
+        "RegStakeVoteDeleg must update vote_delegations"
+    );
+    assert_eq!(
+        state.delegations.get(&stake_key),
+        Some(&pool_id),
+        "RegStakeVoteDeleg must set pool delegation"
+    );
+}
+
+/// StakeVoteDelegation with DRep::KeyHash must NOT create a drep registry entry.
+#[test]
+fn test_stake_vote_delegation_does_not_create_drep_entry() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    let mut state = LedgerState::new(params);
+
+    let stake_cred = Credential::VerificationKey(Hash28::from_bytes([0x11u8; 28]));
+    let pool_id = Hash28::from_bytes([0x22u8; 28]);
+    let drep_cred = Credential::VerificationKey(Hash28::from_bytes([0x33u8; 28]));
+    let drep_keyhash = credential_to_hash(&drep_cred);
+
+    state.process_certificate(&Certificate::StakeVoteDelegation {
+        credential: stake_cred.clone(),
+        pool_hash: pool_id,
+        drep: DRep::KeyHash(drep_keyhash),
+    });
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "StakeVoteDelegation with DRep::KeyHash must NOT create a drep registry entry"
+    );
+}
+
+/// active_drep_count() should only count DReps with active=true.
+#[test]
+fn test_active_drep_count_excludes_inactive() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    params.drep_activity = 5; // DReps inactive after 5 epochs of no activity
+    let mut state = LedgerState::new(params);
+
+    // Register 3 DReps
+    for i in 0u8..3 {
+        let cred = Credential::VerificationKey(Hash28::from_bytes([i; 28]));
+        state.process_certificate(&Certificate::RegDRep {
+            credential: cred,
+            deposit: torsten_primitives::value::Lovelace(500_000_000),
+            anchor: None,
+        });
+    }
+    assert_eq!(state.governance.dreps.len(), 3, "all 3 DReps registered");
+    assert_eq!(
+        state.governance.active_drep_count(),
+        3,
+        "all 3 DReps active at registration"
+    );
+
+    // Manually mark one as inactive (simulating drep_activity expiry)
+    {
+        let gov = Arc::make_mut(&mut state.governance);
+        let first_key = gov.dreps.keys().copied().next().unwrap();
+        gov.dreps.get_mut(&first_key).unwrap().active = false;
+    }
+
+    // active_drep_count should now be 2, but dreps.len() is still 3
+    assert_eq!(
+        state.governance.dreps.len(),
+        3,
+        "total registered DReps (including inactive) is still 3"
+    );
+    assert_eq!(
+        state.governance.active_drep_count(),
+        2,
+        "active_drep_count excludes inactive DRep"
+    );
+}
+
+/// After drep_activity epochs of inactivity, a DRep is marked inactive
+/// at the epoch boundary but stays in the registry (not removed).
+/// active_drep_count() must exclude it.
+#[test]
+fn test_epoch_transition_marks_inactive_drep() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10; // Conway
+    params.drep_activity = 3; // expire after 3 epochs of inactivity
+    let mut state = LedgerState::new(params);
+
+    // Register 2 DReps at epoch 0
+    let cred_a = Credential::VerificationKey(Hash28::from_bytes([0xA0u8; 28]));
+    let cred_b = Credential::VerificationKey(Hash28::from_bytes([0xB0u8; 28]));
+    let key_a = credential_to_hash(&cred_a);
+
+    state.process_certificate(&Certificate::RegDRep {
+        credential: cred_a.clone(),
+        deposit: torsten_primitives::value::Lovelace(500_000_000),
+        anchor: None,
+    });
+    state.process_certificate(&Certificate::RegDRep {
+        credential: cred_b.clone(),
+        deposit: torsten_primitives::value::Lovelace(500_000_000),
+        anchor: None,
+    });
+
+    assert_eq!(state.governance.active_drep_count(), 2);
+
+    // Advance 4 epochs: last_active_epoch=0, epoch 4, inactive gap = 4 > drep_activity=3
+    for e in 1u64..=4 {
+        state.process_epoch_transition(torsten_primitives::time::EpochNo(e));
+    }
+
+    // DRep A should now be inactive; total count stays 2 but active is 0
+    assert_eq!(
+        state.governance.dreps.len(),
+        2,
+        "both DReps still registered (not removed by inactivity)"
+    );
+    assert_eq!(
+        state.governance.active_drep_count(),
+        0,
+        "both DReps inactive after 4 epochs (drep_activity=3)"
+    );
+    // They're still IN the map — just marked inactive
+    assert!(
+        state.governance.dreps.contains_key(&key_a),
+        "DRep A still in registry despite being inactive"
+    );
+}
+
+/// Deregistering a DRep removes it entirely from the registry,
+/// so active_drep_count drops accordingly.
+#[test]
+fn test_unreg_drep_removes_from_registry_and_active_count() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 10;
+    let mut state = LedgerState::new(params);
+
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0x42u8; 28]));
+
+    state.process_certificate(&Certificate::RegDRep {
+        credential: cred.clone(),
+        deposit: torsten_primitives::value::Lovelace(500_000_000),
+        anchor: None,
+    });
+    assert_eq!(state.governance.active_drep_count(), 1);
+    assert_eq!(state.governance.dreps.len(), 1);
+
+    state.process_certificate(&Certificate::UnregDRep {
+        credential: cred.clone(),
+        refund: torsten_primitives::value::Lovelace(500_000_000),
+    });
+
+    assert_eq!(
+        state.governance.dreps.len(),
+        0,
+        "UnregDRep removes entry from registry"
+    );
+    assert_eq!(
+        state.governance.active_drep_count(),
+        0,
+        "active_drep_count is 0 after deregistration"
+    );
+}
