@@ -727,6 +727,11 @@ impl Node {
             let m = crate::metrics::NodeMetrics::new();
             m.set_network_magic(network_magic);
             m.set_compat_metrics(args.compat_metrics);
+            // Advertise block producer mode so the TUI shows the correct role and
+            // displays the abbreviated pool ID in the Node panel.
+            if let Some(ref creds) = block_producer {
+                m.set_block_producer(&creds.pool_id.to_hex());
+            }
             Arc::new(m)
         };
 

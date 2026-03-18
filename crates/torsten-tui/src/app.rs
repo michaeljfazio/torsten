@@ -489,6 +489,29 @@ impl App {
         self.metrics.get("torsten_is_block_producer") >= 1.0
     }
 
+    /// Return the pool ID hex string if running as a block producer, or `None`.
+    ///
+    /// The hex string is extracted from the `torsten_pool_id_info{pool_id="..."}` label
+    /// emitted by the node when forge credentials are loaded.
+    pub fn pool_id_hex(&self) -> Option<&str> {
+        self.metrics
+            .string_labels
+            .get("torsten_pool_id_info.pool_id")
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Return a short (12-char) abbreviation of the pool ID for display in tight panels.
+    ///
+    /// Format: first 6 hex chars + ".." + last 6 hex chars.
+    pub fn pool_id_abbrev(&self) -> Option<String> {
+        let hex = self.pool_id_hex()?;
+        if hex.len() <= 12 {
+            return Some(hex.to_string());
+        }
+        Some(format!("{}..{}", &hex[..6], &hex[hex.len() - 6..]))
+    }
+
     /// Determine current sync status.
     ///
     /// Returns (label, is_synced, is_stalled).
@@ -626,6 +649,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
             histogram_buckets: HashMap::new(),
+            string_labels: HashMap::new(),
             connected: true,
             error: None,
         }
@@ -717,6 +741,7 @@ mod tests {
         MetricsSnapshot {
             values: HashMap::new(),
             histogram_buckets: HashMap::new(),
+            string_labels: HashMap::new(),
             connected: false,
             error: Some(error.to_string()),
         }

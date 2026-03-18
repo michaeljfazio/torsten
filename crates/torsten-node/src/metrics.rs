@@ -304,6 +304,46 @@ fn get_resident_memory_bytes_impl() -> u64 {
     0
 }
 
+/// Get total system physical memory in bytes.
+///
+/// Used to compute the process RSS fraction for the TUI memory bar.
+/// Returns 0 on unsupported platforms (bar will be hidden).
+fn get_total_memory_bytes() -> u64 {
+    get_total_memory_bytes_impl()
+}
+
+#[cfg(target_os = "linux")]
+fn get_total_memory_bytes_impl() -> u64 {
+    // /proc/meminfo line: "MemTotal:       16384000 kB"
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn get_total_memory_bytes_impl() -> u64 {
+    // sysctl hw.memsize returns total physical RAM as a string integer.
+    std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn get_total_memory_bytes_impl() -> u64 {
+    0
+}
+
 /// Node metrics for monitoring
 pub struct NodeMetrics {
     pub blocks_received: AtomicU64,
@@ -372,6 +412,17 @@ pub struct NodeMetrics {
     peak_mem_bytes: AtomicU64,
     /// Network magic number (764824073=mainnet, 2=preview, 1=preprod).
     pub network_magic: AtomicU64,
+    /// 1 when running as a block producer (forge credentials loaded), 0 for relay.
+    ///
+    /// Exposed as `torsten_is_block_producer` gauge so the TUI can show the
+    /// correct role label without inspecting CLI arguments directly.
+    pub is_block_producer: AtomicU64,
+    /// Hex-encoded pool ID (28-byte Blake2b-224 of the cold verification key).
+    ///
+    /// Empty string when running as a relay.  Emitted as a Prometheus info metric
+    /// with a `pool_id` label so operators can identify the producing pool at a
+    /// glance in the TUI without opening the logs.
+    pool_id_hex: std::sync::Mutex<String>,
     /// When true, emit additional `cardano_node_metrics_*` aliases alongside the
     /// native `torsten_*` metrics.  Allows existing cardano-node Grafana dashboards
     /// to work without modification.  Controlled by `--compat-metrics` CLI flag.
@@ -430,6 +481,8 @@ impl NodeMetrics {
             cpu_tracker: std::sync::Mutex::new(CpuTracker::new()),
             peak_mem_bytes: AtomicU64::new(0),
             network_magic: AtomicU64::new(0),
+            is_block_producer: AtomicU64::new(0),
+            pool_id_hex: std::sync::Mutex::new(String::new()),
             compat_metrics: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -596,6 +649,18 @@ impl NodeMetrics {
     /// Set the network magic number.
     pub fn set_network_magic(&self, magic: u64) {
         self.network_magic.store(magic, Ordering::Relaxed);
+    }
+
+    /// Record block producer mode.
+    ///
+    /// Call once during node startup when forge credentials are loaded.
+    /// Sets `torsten_is_block_producer` to 1 and stores the pool ID hex string
+    /// so the TUI can display the role and abbreviated pool identifier.
+    pub fn set_block_producer(&self, pool_id_hex: &str) {
+        self.is_block_producer.store(1, Ordering::Relaxed);
+        if let Ok(mut guard) = self.pool_id_hex.lock() {
+            *guard = pool_id_hex.to_string();
+        }
     }
 
     /// Compute and store the chainsync idle time.
@@ -838,6 +903,11 @@ impl NodeMetrics {
                 "Network magic number (764824073=mainnet, 2=preview, 1=preprod)",
                 &self.network_magic,
             ),
+            (
+                "torsten_is_block_producer",
+                "1 when running as a block producer (forge credentials loaded), 0 for relay",
+                &self.is_block_producer,
+            ),
         ];
 
         for (name, help, value) in counters {
@@ -859,6 +929,25 @@ impl NodeMetrics {
         out.push_str(&format!(
             "# HELP torsten_uptime_seconds Time since node startup\n# TYPE torsten_uptime_seconds gauge\ntorsten_uptime_seconds {uptime_secs}\n"
         ));
+
+        // Pool ID info metric — emitted only when running as a block producer.
+        //
+        // Uses a Prometheus info metric pattern: a gauge permanently set to 1
+        // with a `pool_id` label carrying the hex-encoded pool identifier.
+        // The TUI reads `torsten_pool_id_info` and parses the label value from
+        // the metrics text to display an abbreviated pool ID in the Node panel.
+        if self.is_block_producer.load(Ordering::Relaxed) == 1 {
+            if let Ok(guard) = self.pool_id_hex.lock() {
+                if !guard.is_empty() {
+                    out.push_str(&format!(
+                        "# HELP torsten_pool_id_info Block producer pool identity\n\
+                         # TYPE torsten_pool_id_info gauge\n\
+                         torsten_pool_id_info{{pool_id=\"{}\"}} 1\n",
+                        *guard
+                    ));
+                }
+            }
+        }
 
         // CPU metrics — emitted as both a gauge (current %) and a counter
         // (cumulative seconds of CPU time consumed since node start).
@@ -884,6 +973,17 @@ impl NodeMetrics {
         out.push_str(&format!(
             "# HELP torsten_mem_resident_bytes Resident set size in bytes\n# TYPE torsten_mem_resident_bytes gauge\ntorsten_mem_resident_bytes {rss}\n"
         ));
+
+        // Total system physical memory gauge — used by the TUI memory bar to
+        // show RSS as a percentage of total RAM rather than a raw byte value.
+        let mem_total = get_total_memory_bytes();
+        if mem_total > 0 {
+            out.push_str(&format!(
+                "# HELP torsten_mem_total_bytes Total physical memory on this host in bytes\n\
+                 # TYPE torsten_mem_total_bytes gauge\n\
+                 torsten_mem_total_bytes {mem_total}\n"
+            ));
+        }
 
         // Track peak RSS (monotonically increasing high-water mark).
         let _ = self.peak_mem_bytes.fetch_max(rss, Ordering::Relaxed);

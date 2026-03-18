@@ -392,6 +392,39 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let no_data = !app.has_data();
 
     lines.push(kv_aligned("Role", role, role_color, theme, col_w));
+
+    // When running as a block producer, show the abbreviated pool ID and
+    // forge activity status directly in the Node panel.
+    if app.is_block_producer() {
+        if let Some(abbrev) = app.pool_id_abbrev() {
+            lines.push(kv_aligned("Pool", abbrev, theme.warning, theme, col_w));
+        }
+        // "Forge" status: show "Active" when the node has performed at least one
+        // leader check (indicating the forge loop is running) and "Waiting" when
+        // the leader-check counter is still zero (startup / nonce not established).
+        let leader_checks = app.metrics.get_u64("torsten_leader_checks_total");
+        let forge_failures = app.metrics.get_u64("torsten_forge_failures_total");
+        let forge_label = if no_data {
+            "--".to_string()
+        } else if forge_failures > 0 {
+            format!("Active ({} err)", forge_failures)
+        } else if leader_checks > 0 {
+            "Active".to_string()
+        } else {
+            "Waiting (nonce)".to_string()
+        };
+        let forge_color = if no_data {
+            theme.muted
+        } else if forge_failures > 0 {
+            theme.error
+        } else if leader_checks > 0 {
+            theme.success
+        } else {
+            theme.warning
+        };
+        lines.push(kv_aligned("Forge", forge_label, forge_color, theme, col_w));
+    }
+
     lines.push(kv_aligned("Network", network, theme.accent, theme, col_w));
     lines.push(kv_aligned(
         "Version",
@@ -662,9 +695,9 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     // Duplex is shown as 0 (not N/A) since the metric is defined but not yet populated.
     let ubd_line = peer_state_row(
         &[
-            ("Uni", unidir, theme.muted),
-            ("Bi", bidir, theme.info),
-            ("Dpx", duplex, theme.accent),
+            ("Uni:", unidir, theme.muted),
+            ("Bi:", bidir, theme.info),
+            ("Duplex:", duplex, theme.accent),
         ],
         theme,
     );
@@ -713,6 +746,8 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     let mem_rss = app.metrics.get_u64("torsten_mem_rss_bytes");
     // Fallback: use live if RSS is unavailable.
     let mem_rss = if mem_rss > 0 { mem_rss } else { mem_live };
+    // Total system physical memory — used to show RSS as a % of total RAM.
+    let mem_total = app.metrics.get_u64("torsten_mem_total_bytes");
 
     let cpu_color = if cpu_pct > 80.0 {
         theme.error
@@ -722,9 +757,16 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         theme.success
     };
 
-    let mem_color = if mem_live > 8_000_000_000 {
+    // Compute memory color based on fraction of system total when available,
+    // or fall back to absolute thresholds if total is not published.
+    let mem_pct_of_total = if mem_total > 0 {
+        mem_live as f64 / mem_total as f64
+    } else {
+        0.0
+    };
+    let mem_color = if mem_pct_of_total > 0.8 || mem_live > 8_000_000_000 {
         theme.error
-    } else if mem_live > 4_000_000_000 {
+    } else if mem_pct_of_total > 0.5 || mem_live > 4_000_000_000 {
         theme.warning
     } else {
         theme.success
@@ -780,16 +822,42 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         col_w,
     ));
 
-    // Inline mem bar showing live/RSS ratio.
-    let mem_ratio = if mem_rss > 0 {
-        (mem_live as f64 / mem_rss as f64).clamp(0.0, 1.0)
+    // Memory bar: show RSS as a percentage of total system RAM when the
+    // `torsten_mem_total_bytes` gauge is available.  Fall back to the live/RSS
+    // ratio (an intra-process metric) when total RAM is unknown.
+    //
+    // The bar is rendered in the theme's `mem_color` (green/warning/error
+    // depending on how much RAM the node is consuming), which is visually
+    // distinct from the muted `gauge_empty` background.  A compact percentage
+    // label to the left of the bar makes the value legible at a glance.
+    let (mem_ratio, mem_pct_label) = if mem_total > 0 {
+        let ratio = (mem_live as f64 / mem_total as f64).clamp(0.0, 1.0);
+        (ratio, format!("{:.1}%", ratio * 100.0))
+    } else if mem_rss > 0 {
+        let ratio = (mem_live as f64 / mem_rss as f64).clamp(0.0, 1.0);
+        (ratio, String::new())
     } else {
-        0.0
+        (0.0, String::new())
     };
-    let mem_bar_w = col_w.min(inner.width.saturating_sub(4) as usize);
-    if mem_bar_w >= 8 && inner.height >= 4 {
+    // Reserve 6 chars for the percentage label (e.g. " 12.3%") when available.
+    let pct_label_w = if mem_pct_label.is_empty() { 0 } else { 6 };
+    let mem_bar_w = col_w
+        .saturating_sub(pct_label_w + 1)
+        .min(inner.width.saturating_sub(4) as usize);
+    if mem_bar_w >= 4 && inner.height >= 4 {
         let mem_bar = build_smooth_bar(mem_ratio, mem_bar_w, mem_color, theme);
-        lines.push(Line::from([vec![Span::raw(" ")], mem_bar].concat()));
+        let prefix = if mem_pct_label.is_empty() {
+            vec![Span::raw(" ")]
+        } else {
+            vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:>5} ", mem_pct_label),
+                    Style::default().fg(mem_color).add_modifier(Modifier::BOLD),
+                ),
+            ]
+        };
+        lines.push(Line::from([prefix, mem_bar].concat()));
     }
 
     // Block rate sparkline — occupies the last available row in the Resources panel.
@@ -861,57 +929,38 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         )));
     }
 
-    // Band counts: two rows of two columns each.
-    let half = inner.width.saturating_sub(2) / 2;
-    let band_rows: &[(&str, u64, Color, &str, u64, Color)] = &[
-        (
-            "0-50ms",
-            rtt.band_0_50,
-            theme.success,
-            "50-100ms",
-            rtt.band_50_100,
-            theme.info,
-        ),
-        (
-            "100-200ms",
-            rtt.band_100_200,
-            theme.warning,
-            "200ms+",
-            rtt.band_200_plus,
-            theme.error,
-        ),
+    // Per-band histogram rows: each band gets its own row with a proportional
+    // bar so the operator can see at a glance which latency buckets are most
+    // populated.  Bar width is `count / max_count * bar_max_w`.
+    //
+    // Layout per row:  " LABEL  COUNT  [████████░░░░░░░░]"
+    //   - label: 9 chars left-aligned
+    //   - count: 4 chars right-aligned
+    //   - bar:   remaining width minus 1-char margin
+    // Single compact row with all RTT bands:
+    //  0-50:5 | 50-100:0 | 100-200:0 | 200+:0
+    let band_items: &[(&str, u64, Color)] = &[
+        ("0-50", rtt.band_0_50, theme.success),
+        ("50-100", rtt.band_50_100, theme.info),
+        ("100-200", rtt.band_100_200, theme.warning),
+        ("200+", rtt.band_200_plus, theme.error),
     ];
-
-    for (lbl_a, val_a, col_a, lbl_b, val_b, col_b) in band_rows {
-        let val_a_str = App::format_number(*val_a);
-        let val_b_str = App::format_number(*val_b);
-        let half_w = half as usize;
-
-        // Left cell: label left-aligned, count right-aligned within half width.
-        let left_label_w = half_w.saturating_sub(5); // reserve 5 for value
-        let left = format!(" {:<lw$}{:>5}", lbl_a, val_a_str, lw = left_label_w.max(1));
-        // Right cell: label left-aligned, count right-aligned.
-        let right_label_w = (inner.width.saturating_sub(2) as usize)
-            .saturating_sub(half_w)
-            .saturating_sub(5);
-        let right = format!(
-            "  {:<rw$}{:>5}",
-            lbl_b,
-            val_b_str,
-            rw = right_label_w.max(1)
-        );
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                left,
-                Style::default().fg(*col_a).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                right,
-                Style::default().fg(*col_b).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+    let sep = Span::styled(" | ", Style::default().fg(theme.muted));
+    let mut band_spans = vec![Span::raw(" ")];
+    for (i, (label, count, color)) in band_items.iter().enumerate() {
+        if i > 0 {
+            band_spans.push(sep.clone());
+        }
+        band_spans.push(Span::styled(
+            format!("{label}:"),
+            Style::default().fg(theme.muted),
+        ));
+        band_spans.push(Span::styled(
+            format!("{count}"),
+            Style::default().fg(*color).add_modifier(Modifier::BOLD),
+        ));
     }
+    lines.push(Line::from(band_spans));
 
     // Single horizontal RTT breakpoint row:
     //   min: 12ms | avg: 45ms | p50: 38ms | p95: 120ms | max: 250ms
@@ -991,10 +1040,19 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
     let proposal_count = app.metrics.get_u64("torsten_proposal_count");
     let delegation_count = app.metrics.get_u64("torsten_delegation_count");
     // Treasury is stored in lovelace; convert to ADA for display.
+    // The formatted value includes " ADA" suffix and thousands separators, e.g.
+    // "14,074,169 ADA" (14 chars) — wider than the default VALUE_W of 12, so
+    // we use a wider value column (16) to avoid truncation on a typical panel width.
     let treasury_lovelace = app.metrics.get_u64("torsten_treasury_lovelace");
     let treasury_ada = treasury_lovelace / 1_000_000;
+    let treasury_str = format!("{} ADA", App::format_number(treasury_ada));
 
     let col_w = inner.width.saturating_sub(2) as usize;
+    // Treasury value can be long (e.g. "14,074,169 ADA" = 14 chars + spaces).
+    // Use a wider value column (16 chars) so the number is never clipped.
+    const TREASURY_VALUE_W: usize = 16;
+    let treasury_label_w = col_w.saturating_sub(TREASURY_VALUE_W).max(LABEL_W);
+    let treasury_value_w = col_w.saturating_sub(treasury_label_w).max(1);
 
     let mut lines = vec![
         kv_aligned(
@@ -1030,13 +1088,21 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
             theme,
             col_w,
         ),
-        kv_aligned(
-            "Treasury",
-            format!("{} ADA", App::format_number(treasury_ada)),
-            theme.success,
-            theme,
-            col_w,
-        ),
+        // Treasury uses a dedicated wider value column to avoid truncation of
+        // large ADA values (e.g. "14,074,169 ADA").
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<label_w$}", "Treasury", label_w = treasury_label_w),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("{:>value_w$}", treasury_str, value_w = treasury_value_w),
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         kv_aligned(
             "Delegations",
             App::format_number(delegation_count),
@@ -1425,6 +1491,9 @@ fn build_mini_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) -> V
 ///
 /// Each band is drawn as a contiguous run of full-block characters,
 /// colored by latency severity (success/info/warning/error).
+///
+/// Pixel widths are assigned proportionally using the largest-remainder method
+/// to ensure the total always equals `width` regardless of rounding.
 fn build_rtt_colored_bar<'a>(
     b0: u64,
     b1: u64,
@@ -1441,27 +1510,48 @@ fn build_rtt_colored_bar<'a>(
         )];
     }
 
-    // Compute pixel widths proportionally, distributing any rounding error to b0.
-    let w1 = ((b1 as f64 / total as f64) * width as f64).round() as usize;
-    let w2 = ((b2 as f64 / total as f64) * width as f64).round() as usize;
-    let w3 = ((b3 as f64 / total as f64) * width as f64).round() as usize;
-    let w0 = width.saturating_sub(w1 + w2 + w3);
+    // Largest-remainder allocation: compute exact fractional widths, take the
+    // floor of each, then distribute the remaining pixels to the bands with
+    // the highest fractional remainders.  This guarantees sum == width and
+    // prevents zero-count bands from receiving pixels due to rounding.
+    let bands_raw: [(u64, Color); 4] = [
+        (b0, theme.success),
+        (b1, theme.info),
+        (b2, theme.warning),
+        (b3, theme.error),
+    ];
+
+    // Compute exact floating-point widths.
+    let exact: [f64; 4] = bands_raw.map(|(count, _)| (count as f64 / total as f64) * width as f64);
+
+    // Floor allocations.
+    let mut floors: [usize; 4] = exact.map(|v| v as usize);
+    let allocated: usize = floors.iter().sum();
+    let remainder = width.saturating_sub(allocated);
+
+    // Sort indices by fractional part descending and give one extra pixel each.
+    let mut remainders: [(usize, f64); 4] = [
+        (0, exact[0] - floors[0] as f64),
+        (1, exact[1] - floors[1] as f64),
+        (2, exact[2] - floors[2] as f64),
+        (3, exact[3] - floors[3] as f64),
+    ];
+    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for i in 0..remainder {
+        floors[remainders[i].0] += 1;
+    }
 
     // Full block character — uniformly solid, color carries the meaning.
     let ch = '\u{2588}';
-    let bands = [
-        (w0, theme.success),
-        (w1, theme.info),
-        (w2, theme.warning),
-        (w3, theme.error),
-    ];
-
-    bands
+    bands_raw
         .iter()
-        .filter(|(w, _)| *w > 0)
-        .map(|(w, color)| Span::styled(ch.to_string().repeat(*w), Style::default().fg(*color)))
+        .zip(floors.iter())
+        .filter(|(_, &w)| w > 0)
+        .map(|((_, color), &w)| Span::styled(ch.to_string().repeat(w), Style::default().fg(*color)))
         .collect()
 }
+
+/// Build a single-band proportional bar for the RTT per-bucket histogram.
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -16,6 +16,12 @@ pub struct MetricsSnapshot {
     /// Key: metric base name (e.g. `"torsten_peer_handshake_rtt_ms"`).
     /// Value: map of le-label string (e.g. `"50"`, `"100"`, `"+Inf"`) -> cumulative count.
     pub histogram_buckets: HashMap<String, HashMap<String, f64>>,
+    /// String-valued labels from Prometheus info metrics.
+    ///
+    /// Populated for metrics that carry a single text label (e.g. pool_id).
+    /// Key: synthetic name `<metric_name>.<label_key>` (e.g. `"torsten_pool_id_info.pool_id"`).
+    /// Value: the label value string (e.g. `"6954ec…7856"`).
+    pub string_labels: HashMap<String, String>,
     /// Whether the last scrape succeeded.
     pub connected: bool,
     /// Error message from the last failed scrape, if any.
@@ -47,6 +53,7 @@ impl MetricsSnapshot {
 fn parse_prometheus(text: &str) -> MetricsSnapshot {
     let mut values: HashMap<String, f64> = HashMap::new();
     let mut histogram_buckets: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    let mut string_labels: HashMap<String, String> = HashMap::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -55,26 +62,43 @@ fn parse_prometheus(text: &str) -> MetricsSnapshot {
             continue;
         }
 
-        // Histogram bucket line: `metric_name{le="N"} value [timestamp]`
+        // Labeled metric line: `metric_name{label="value"} numeric_value [timestamp]`
         if let Some(bracket_pos) = line.find('{') {
             // Extract metric base name.
             let base_name = &line[..bracket_pos];
-            // Only handle _bucket lines for histograms.
-            if !base_name.ends_with("_bucket") {
-                // Other labeled lines (summary quantiles, etc.) are skipped.
-                continue;
-            }
-            // Strip the `_bucket` suffix to get the histogram base name.
-            let hist_name = &base_name[..base_name.len() - 7];
 
-            // Extract the le label value.
-            if let Some(le_val) = extract_le_label(line) {
-                // Parse the metric value (after `} value`).
-                if let Some(value) = parse_value_after_labels(line) {
-                    histogram_buckets
-                        .entry(hist_name.to_string())
-                        .or_default()
-                        .insert(le_val, value);
+            if let Some(hist_name) = base_name.strip_suffix("_bucket") {
+                // Histogram bucket: base name has `_bucket` suffix stripped, store
+                // cumulative count under the histogram base name.
+                if let Some(le_val) = extract_le_label(line) {
+                    if let Some(value) = parse_value_after_labels(line) {
+                        histogram_buckets
+                            .entry(hist_name.to_string())
+                            .or_default()
+                            .insert(le_val, value);
+                    }
+                }
+            } else {
+                // Generic labeled metric — extract all key="value" label pairs and
+                // store them as `<metric_name>.<label_key>` string entries so the
+                // TUI can access string-valued metadata (e.g. pool_id from
+                // `torsten_pool_id_info{pool_id="<hex>"}`).
+                if let Some(bracket_end) = line.find('}') {
+                    let labels_str = &line[bracket_pos + 1..bracket_end];
+                    for kv in labels_str.split(',') {
+                        let kv = kv.trim();
+                        if let Some(eq_pos) = kv.find('=') {
+                            let label_key = kv[..eq_pos].trim();
+                            let label_val_raw = kv[eq_pos + 1..].trim();
+                            // Strip surrounding quotes from the value.
+                            let label_val = label_val_raw
+                                .strip_prefix('"')
+                                .and_then(|s| s.strip_suffix('"'))
+                                .unwrap_or(label_val_raw);
+                            let synthetic_key = format!("{}.{}", base_name, label_key);
+                            string_labels.insert(synthetic_key, label_val.to_string());
+                        }
+                    }
                 }
             }
             continue;
@@ -92,6 +116,7 @@ fn parse_prometheus(text: &str) -> MetricsSnapshot {
     MetricsSnapshot {
         values,
         histogram_buckets,
+        string_labels,
         connected: true,
         error: None,
     }
@@ -130,6 +155,7 @@ pub async fn fetch_metrics(url: &str) -> MetricsSnapshot {
             Err(e) => MetricsSnapshot {
                 values: HashMap::new(),
                 histogram_buckets: HashMap::new(),
+                string_labels: HashMap::new(),
                 connected: false,
                 error: Some(format!("Failed to read response: {e}")),
             },
@@ -137,6 +163,7 @@ pub async fn fetch_metrics(url: &str) -> MetricsSnapshot {
         Err(e) => MetricsSnapshot {
             values: HashMap::new(),
             histogram_buckets: HashMap::new(),
+            string_labels: HashMap::new(),
             connected: false,
             error: Some(format!("Connection failed: {e}")),
         },
@@ -234,5 +261,42 @@ torsten_slot_number 42
         assert_eq!(snap.get("torsten_block_number"), 100.0);
         assert_eq!(snap.get("nonexistent"), 0.0);
         assert_eq!(snap.get_u64("torsten_block_number"), 100);
+    }
+
+    /// Verify that `torsten_pool_id_info{pool_id="<hex>"}` is parsed into
+    /// the `string_labels` map under the key `torsten_pool_id_info.pool_id`.
+    #[test]
+    fn test_parse_pool_id_info_label() {
+        let input = r#"
+# HELP torsten_is_block_producer 1 when running as a block producer
+# TYPE torsten_is_block_producer gauge
+torsten_is_block_producer 1
+# HELP torsten_pool_id_info Block producer pool identity
+# TYPE torsten_pool_id_info gauge
+torsten_pool_id_info{pool_id="6954ec7856abcdef1234567890abcdef12345678901234567856"} 1
+torsten_slot_number 42
+"#;
+        let snap = parse_prometheus(input);
+        assert_eq!(snap.values["torsten_is_block_producer"], 1.0);
+        assert_eq!(snap.values["torsten_slot_number"], 42.0);
+        assert_eq!(
+            snap.string_labels.get("torsten_pool_id_info.pool_id"),
+            Some(&"6954ec7856abcdef1234567890abcdef12345678901234567856".to_string())
+        );
+    }
+
+    /// Verify that info metrics with multiple labels are all stored.
+    #[test]
+    fn test_parse_multi_label_info_metric() {
+        let input = r#"torsten_pool_id_info{pool_id="aabbcc",version="1"} 1"#;
+        let snap = parse_prometheus(input);
+        assert_eq!(
+            snap.string_labels.get("torsten_pool_id_info.pool_id"),
+            Some(&"aabbcc".to_string())
+        );
+        assert_eq!(
+            snap.string_labels.get("torsten_pool_id_info.version"),
+            Some(&"1".to_string())
+        );
     }
 }
