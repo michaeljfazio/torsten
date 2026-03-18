@@ -5588,6 +5588,9 @@ fn test_reward_expansion_no_i128_overflow() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
 
     // This should NOT panic from i128 overflow
@@ -5627,6 +5630,9 @@ fn test_reward_expansion_large_rho_numerator() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
 
     // Should not panic
@@ -5668,6 +5674,9 @@ fn test_treasury_cut_no_overflow() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
 
     // Should not panic
@@ -6019,6 +6028,9 @@ fn test_reward_zero_reserves_no_expansion() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -6045,6 +6057,9 @@ fn test_reward_rho_zero_no_expansion() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -6067,6 +6082,9 @@ fn test_reward_tau_zero_no_treasury_cut() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -6093,6 +6111,9 @@ fn test_reward_tau_one_all_to_treasury() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -6122,6 +6143,9 @@ fn test_reward_reserves_decrease_treasury_increase() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -6169,6 +6193,9 @@ fn test_reward_max_reserves_no_overflow() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
 
     // Should not panic or overflow
@@ -6195,6 +6222,9 @@ fn test_reward_treasury_tax_correct_amount() {
         pool_stake: HashMap::new(),
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     };
     state.calculate_and_distribute_rewards(snapshot);
 
@@ -7214,6 +7244,9 @@ fn governance_test_state() -> LedgerState {
         pool_stake,
         pool_params: Arc::clone(&state.pool_params),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     });
 
     // Prevent epoch transitions from triggering a full UTxO scan.
@@ -8912,6 +8945,9 @@ fn test_spo_voting_power_prefers_mark_over_set() {
         pool_stake: mark_pool_stake,
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     });
 
     // Set set snapshot with 200 ADA stake (should NOT be used)
@@ -8923,6 +8959,9 @@ fn test_spo_voting_power_prefers_mark_over_set() {
         pool_stake: set_pool_stake,
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     });
 
     let power = state.compute_spo_voting_power(&pool_id);
@@ -8949,6 +8988,9 @@ fn test_spo_voting_power_no_mark_entry_falls_back_not_to_set() {
         pool_stake: std::collections::HashMap::new(), // no pool_id entry
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     });
 
     // Set snapshot has 200 ADA for this pool (should NOT be used)
@@ -8960,6 +9002,9 @@ fn test_spo_voting_power_no_mark_entry_falls_back_not_to_set() {
         pool_stake: set_pool_stake,
         pool_params: Arc::new(HashMap::new()),
         stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
     });
 
     let power = state.compute_spo_voting_power(&pool_id);

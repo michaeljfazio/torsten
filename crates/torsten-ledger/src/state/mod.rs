@@ -338,6 +338,22 @@ pub struct StakeSnapshot {
     pub epoch_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
 }
 
+impl StakeSnapshot {
+    /// Create a default (empty) snapshot for use in struct update syntax.
+    pub fn empty(epoch: EpochNo) -> Self {
+        StakeSnapshot {
+            epoch,
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: HashMap::new(),
+            pool_params: Arc::new(HashMap::new()),
+            stake_distribution: Arc::new(HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
     pub pool_id: Hash28,

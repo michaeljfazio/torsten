@@ -3145,6 +3145,9 @@ mod tests {
             pool_stake: mark_pool_stake,
             pool_params: Arc::clone(&state.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
         });
 
         let mut set_pool_stake = std::collections::HashMap::new();
@@ -3155,6 +3158,9 @@ mod tests {
             pool_stake: set_pool_stake,
             pool_params: Arc::clone(&state.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
         });
 
         // SPO voting power must come from mark (5B), not set (1B)
@@ -3185,6 +3191,9 @@ mod tests {
             pool_stake: mark_stake,
             pool_params: Arc::clone(&state.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
         });
 
         // Set has only one pool: total = 1B (stale, should NOT be used)
@@ -3196,6 +3205,9 @@ mod tests {
             pool_stake: set_stake,
             pool_params: Arc::clone(&state.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
         });
 
         let total = state.compute_total_spo_stake();

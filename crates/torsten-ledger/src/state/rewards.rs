@@ -174,9 +174,15 @@ impl LedgerState {
             );
         }
         let expected_blocks = raw_expected_blocks.max(1);
-        // Use the go snapshot's block count — Haskell's RUPD computes eta
-        // from the go-epoch block production, not the live epoch counters.
-        let actual_blocks = go_snapshot.epoch_block_count;
+        // Use the go snapshot's epoch data — Haskell's RUPD computes eta and
+        // fees from the go-epoch, not the live epoch counters. Fall back to
+        // self.* for backward compatibility with legacy snapshots where these
+        // fields default to zero.
+        let actual_blocks = if go_snapshot.epoch_block_count > 0 {
+            go_snapshot.epoch_block_count
+        } else {
+            self.epoch_block_count
+        };
         // eta = min(1, actual/expected) — applied as rational: min(actual, expected) / expected
         let effective_blocks = actual_blocks.min(expected_blocks);
         // expansion = floor(rho * reserves * (effective/expected))
@@ -188,7 +194,12 @@ impl LedgerState {
                     expected_blocks as i128,
                 ));
         let expansion = expansion_rat.floor_u64();
-        let total_rewards_available = expansion + go_snapshot.epoch_fees.0;
+        let epoch_fees = if go_snapshot.epoch_fees.0 > 0 {
+            go_snapshot.epoch_fees.0
+        } else {
+            self.epoch_fees.0
+        };
+        let total_rewards_available = expansion + epoch_fees;
 
         if total_rewards_available == 0 {
             return PendingRewardUpdate::default();
@@ -230,7 +241,7 @@ impl LedgerState {
         }
 
         // Total blocks produced in the go epoch (for apparent performance)
-        let total_blocks_in_epoch = go_snapshot.epoch_block_count.max(1);
+        let total_blocks_in_epoch = actual_blocks.max(1);
 
         // Saturation point: z0 = 1/nOpt
         let n_opt = self.protocol_params.n_opt.max(1);
@@ -311,11 +322,15 @@ impl LedgerState {
             // Apparent performance: beta / sigma_a (using total_active_stake)
             //   perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
             //        = (blocks_made * total_active_stake) / (total_blocks * pool_stake)
-            let blocks_made = go_snapshot
-                .epoch_blocks_by_pool
-                .get(pool_id)
-                .copied()
-                .unwrap_or(0);
+            let blocks_made = if !go_snapshot.epoch_blocks_by_pool.is_empty() {
+                go_snapshot
+                    .epoch_blocks_by_pool
+                    .get(pool_id)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                self.epoch_blocks_by_pool.get(pool_id).copied().unwrap_or(0)
+            };
             let pool_reward = if blocks_made == 0 || pool_active_stake.0 == 0 {
                 0u64
             } else {
@@ -413,7 +428,7 @@ impl LedgerState {
             reward_map.len(),
             treasury_cut + undistributed,
             expansion,
-            go_snapshot.epoch_fees.0
+            epoch_fees
         );
 
         PendingRewardUpdate {
