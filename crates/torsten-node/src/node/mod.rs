@@ -1355,6 +1355,7 @@ impl Node {
         {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
+            let gov_network_magic = network_magic;
             let gov_config = {
                 use torsten_network::{GovernorConfig, PeerTargets};
                 let cfg = &self.config;
@@ -1418,10 +1419,65 @@ impl Node {
                                 GovernorEvent::EvictColdPeer(addr) => {
                                     pm.peer_disconnected(addr);
                                 }
-                                GovernorEvent::Connect(_)
-                                | GovernorEvent::RequestPeerSharing(_, _) => {
-                                    // Connection and peer-sharing events are handled
-                                    // asynchronously by other tasks.
+                                GovernorEvent::Connect(addr) => {
+                                    // Spawn an async connection task so the governor
+                                    // loop isn't blocked by TCP handshakes.
+                                    let connect_pm = governor_pm.clone();
+                                    let connect_addr = *addr;
+                                    let magic = gov_network_magic;
+                                    tokio::spawn(async move {
+                                        let target = connect_addr.to_string();
+                                        let result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(5),
+                                            torsten_network::NodeToNodeClient::connect(
+                                                &*target, magic,
+                                            ),
+                                        )
+                                        .await;
+                                        match result {
+                                            Ok(Ok(_client)) => {
+                                                let version = 14; // N2N V14 default
+                                                let mut pm = connect_pm.write().await;
+                                                pm.peer_connected(
+                                                    &connect_addr,
+                                                    version,
+                                                    torsten_network::ConnectionDirection::Outbound,
+                                                );
+                                                debug!(
+                                                    addr = %connect_addr,
+                                                    "Governor: connected to peer"
+                                                );
+                                                // Client is dropped here — the connection
+                                                // was established to register the peer as
+                                                // warm. The main sync loop will use it for
+                                                // block fetching when promoted to hot.
+                                            }
+                                            Ok(Err(e)) => {
+                                                let mut pm = connect_pm.write().await;
+                                                pm.peer_failed(&connect_addr);
+                                                tracing::trace!(
+                                                    addr = %connect_addr,
+                                                    error = %e,
+                                                    "Governor: connection failed"
+                                                );
+                                            }
+                                            Err(_) => {
+                                                let mut pm = connect_pm.write().await;
+                                                pm.peer_failed(&connect_addr);
+                                                tracing::trace!(
+                                                    addr = %connect_addr,
+                                                    "Governor: connection timed out (5s)"
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+                                GovernorEvent::RequestPeerSharing(addr, count) => {
+                                    debug!(
+                                        addr = %addr,
+                                        count,
+                                        "Governor: peer sharing request (not yet implemented)"
+                                    );
                                 }
                             }
                         }
