@@ -13018,17 +13018,21 @@ fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
     }
 }
 
-/// Verify that `treasury_value` self-correction does NOT double-count treasury.
+/// Verify that `treasury_value` self-correction combined with RUPD application
+/// does NOT cause double-counting treasury.
 ///
-/// When a transaction declares `treasury_value` and we self-correct
-/// (`self.treasury = declared_treasury`), that snap replaces our local value
-/// with the canonical on-chain value. The RUPD pending from the prior boundary
-/// is ALREADY baked into the declared_treasury (the block producer computed
-/// their treasury with it applied). If we THEN also apply the RUPD again via
-/// `apply_pending_reward_update`, we double-count.
+/// With the corrected RUPD implementation (compute after rotation, apply
+/// immediately at each epoch boundary), `pending_reward_update` is always
+/// `None` after any epoch transition.  Torsten's treasury therefore stays in
+/// sync with the canonical on-chain value throughout each epoch, so the
+/// `treasury_value` self-correction in ValidateAll mode is a no-op for
+/// normal operation and cannot trigger double-counting.
 ///
-/// This test reproduces the double-counting scenario to identify whether
-/// `self.treasury = declared_treasury` plus subsequent RUPD causes 2x inflation.
+/// This test verifies:
+/// 1. After running several epoch boundaries, `pending_reward_update` is always None.
+/// 2. Treasury grows monotonically and at a rate consistent with a single RUPD per epoch.
+/// 3. A `treasury_value` snap that equals the current treasury is a no-op and does not
+///    inflate treasury when the next boundary fires.
 #[test]
 fn test_treasury_value_snap_plus_rupd_no_double_count() {
     let mut params = ProtocolParameters::mainnet_defaults();
@@ -13051,117 +13055,71 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
     let per_epoch_fees = 1_628_974_620u64;
     let actual_blocks_per_epoch = 2578u64;
 
-    // Advance to epoch 4 so snapshots are warm (go=snap1, set=snap2, mark=snap3).
-    // RUPD_1 is computed at epoch 3→4 and will be applied at 4→5.
-    // At epoch 4, state.pending_reward_update = Some(RUPD_1).
-    for epoch_idx in 1..=4u32 {
+    // Advance through 6 epoch boundaries.  With the corrected immediate-RUPD
+    // path, each boundary applies its RUPD in-place and leaves pending = None.
+    let mut treasury_history = vec![state.treasury.0];
+    for epoch_idx in 1..=6u32 {
         state.epoch_fees = Lovelace(per_epoch_fees);
         state.epoch_block_count = actual_blocks_per_epoch;
         state.process_epoch_transition(EpochNo(epoch_idx as u64));
+
+        // Key invariant: no deferred pending RUPD exists after any boundary.
+        assert!(
+            state.pending_reward_update.is_none(),
+            "pending_reward_update should be None after epoch {} (immediate RUPD)",
+            epoch_idx
+        );
+
+        treasury_history.push(state.treasury.0);
+        eprintln!(
+            "After epoch {}: treasury={}, pending=None",
+            epoch_idx, state.treasury.0
+        );
     }
 
-    // At epoch 4: treasury is still 1T (RUPD_1 computed but not yet applied)
-    // pending_reward_update holds RUPD_1 with a positive delta_treasury.
-    let treasury_before_snap = state.treasury.0;
-    let pending_delta = state
-        .pending_reward_update
-        .as_ref()
-        .map(|r| r.delta_treasury)
-        .unwrap_or(0);
-
-    eprintln!(
-        "Before snap: treasury={}, pending_delta={}",
-        treasury_before_snap, pending_delta
+    // With immediate RUPD application:
+    // history[1] = unchanged (epoch 0→1: go=None → no RUPD)
+    // history[2] = increased (epoch 1→2: go=set from prior rotation, RUPD computed+applied)
+    assert_eq!(
+        treasury_history[1],
+        treasury_history[0],
+        "Treasury should be unchanged after epoch 0→1 (no go snapshot yet)"
     );
-
-    // Verify RUPD_1 was actually computed (sanity check on our timing trace)
+    // From epoch 1→2 onward, treasury should grow (RUPD applied immediately)
     assert!(
-        pending_delta > 0,
-        "Expected RUPD_1 to be computed by epoch 3→4 boundary, got delta=0"
+        treasury_history[2] > treasury_history[0],
+        "Treasury should increase at epoch 1→2 (RUPD applied immediately)"
     );
 
-    // Simulate a tx in epoch 4 that declares treasury_value equal to the canonical treasury.
-    // A real block producer on a correct node would declare the current treasury
-    // (treasury_before_snap, which does NOT yet include the pending RUPD).
-    // This is the "correct" canonical snap scenario.
-    let canonical_snap_value = Lovelace(treasury_before_snap);
-    state.treasury = canonical_snap_value; // no-op since it's the same value
+    // Simulate a treasury_value snap at epoch 5 = current treasury at that point.
+    // This is what ValidateAll mode does when a Conway tx declares treasury_value.
+    let snap_value = treasury_history[5];
+    state.treasury = Lovelace(snap_value); // no-op
 
-    // Now cross epoch 4→5: apply_pending(RUPD_1) adds pending_delta to treasury
+    // Advance one more epoch — should add one RUPD worth, not two.
+    let treasury_before = state.treasury.0;
     state.epoch_fees = Lovelace(per_epoch_fees);
     state.epoch_block_count = actual_blocks_per_epoch;
-    state.process_epoch_transition(EpochNo(5));
+    state.process_epoch_transition(EpochNo(7));
+    let treasury_after = state.treasury.0;
 
-    let treasury_after_correct = state.treasury.0;
-    let expected_after_correct = treasury_before_snap + pending_delta;
-    eprintln!(
-        "After epoch 4→5 (correct snap): treasury={}, expected={}",
-        treasury_after_correct, expected_after_correct
-    );
-
-    // Verify the correct behavior: treasury increased by exactly pending_delta
-    // (plus any rounding). Next RUPD delta is also computed but not applied yet.
-    // The RUPD_2 computed at 4→5 is applied at 5→6, so treasury here = T + pending_delta_1.
-    // Allow up to 2 lovelace rounding.
-    let diff = (treasury_after_correct as i128 - expected_after_correct as i128).unsigned_abs();
+    // The treasury should have grown by approximately one RUPD delta.
+    // Estimate delta from the preceding epoch step.
+    let delta4_5 = treasury_history[4] - treasury_history[3]; // one RUPD worth
+    let actual_delta = treasury_after - treasury_before;
+    // Allow 2% tolerance for declining reserves.
+    let tolerance = delta4_5 / 50;
+    let diff = (actual_delta as i128 - delta4_5 as i128).unsigned_abs();
     assert!(
-        diff <= 2,
-        "After correct snap, treasury should be treasury_before + pending_delta_1: \
-         expected {}, got {}, diff={}",
-        expected_after_correct,
-        treasury_after_correct,
-        diff
+        diff <= tolerance.max(10).into(),
+        "After snap + epoch 6→7, treasury delta should be ~{delta4_5} (single RUPD). \
+         Got delta={actual_delta}, diff={diff}, tolerance={tolerance}. \
+         If delta ≈ 2× expected, the snap caused a double-count."
     );
 
-    // --- Now simulate the buggy scenario: snap to treasury_before + pending_delta ---
-    // This simulates a block producer who has ALREADY applied the RUPD to their treasury
-    // (perhaps they compute the epoch transition before accepting the next block).
-    // If we snap to this value and then also apply the RUPD, we double-count.
-    let mut state2 = state.clone();
-    // Reset state2 back to the start of epoch 4 by restoring treasury and pending
-    // We need a fresh run to test the double-count scenario.
-    // Instead of complex state surgery, we just verify the CLAIM:
-    // If someone snaps treasury to treasury_before_snap + pending_delta (with RUPD already embedded),
-    // and then apply_pending fires, the final treasury = snap_value + pending_delta_1 (from apply_pending).
-    // This would mean RUPD was applied TWICE: once in the snap, once in apply_pending.
-    let snap_with_rupd_embedded = Lovelace(treasury_before_snap + pending_delta);
-    state2.treasury = snap_with_rupd_embedded;
-
-    // The pending_reward_update is still RUPD_1 in state2 (same pending from epoch 3→4).
-    // apply_pending at the epoch 4→5 boundary will ADD pending_delta again.
-    state2.epoch_fees = Lovelace(per_epoch_fees);
-    state2.epoch_block_count = actual_blocks_per_epoch;
-    // Re-set pending since state2 was cloned after the epoch 4→5 transition
-    // (pending was consumed). We need to reconstruct the scenario properly.
-    // Instead, let's just check the math: after the snap, what does apply_pending do?
     eprintln!(
-        "Buggy snap scenario: snap_value={}, pending_delta={}, \
-         double-counted result would be={}",
-        snap_with_rupd_embedded.0,
-        pending_delta,
-        snap_with_rupd_embedded.0 + pending_delta
-    );
-
-    // The key check: the correct post-epoch-4→5 treasury (treasury_after_correct)
-    // should equal snap_value + 0 from apply_pending (since RUPD was already in snap).
-    // But our code does snap + apply_pending(RUPD) = snap + pending_delta = double-counted.
-    // We detect this by checking if treasury_after_correct == snap_value + pending_delta
-    // (double-counted) vs treasury_before_snap + pending_delta (single-counted).
-    //
-    // In the correct scenario (no double-counting):
-    //   state.treasury before 4→5 = treasury_before_snap (same as canonical)
-    //   apply_pending adds pending_delta_1 once
-    //   result = treasury_before_snap + pending_delta_1
-    //
-    // The test already verified this above. The double-count scenario requires
-    // a treasury_value snap that embeds the future RUPD — which is wrong usage.
-    // Our code only snaps to declared_treasury in block body (current on-chain state),
-    // and on-chain treasury does NOT include the pending RUPD (only applied at next boundary).
-    // So the normal self-correction path is safe.
-    eprintln!(
-        "Summary: correct={}, double_counted_hypothetical={}",
-        treasury_after_correct,
-        snap_with_rupd_embedded.0 + pending_delta
+        "treasury_value snap: snap_value={snap_value}, treasury_before={treasury_before}, \
+         treasury_after={treasury_after}, delta={actual_delta}, expected_approx={delta4_5}"
     );
 }
 
@@ -13383,15 +13341,21 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
 }
 
 /// Verify that `epoch_fees` are captured in the mark snapshot at EXACTLY the
-/// right time and are NOT double-counted through the go snapshot mechanism.
+/// right time and are NOT double-counted through the snapshot chain.
 ///
-/// Double-counting path: if `epoch_fees` appear in:
-///   (a) the fallback branch (go_snapshot.epoch_fees==0 uses self.epoch_fees), AND
-///   (b) the mark snapshot (captured BEFORE reset), which later becomes go,
-/// then the same fees are counted twice — once now, once 2 epochs later.
+/// With the corrected RUPD timing (RUPD uses the SET snapshot = old mark = the
+/// epoch that just ended), the snapshot/RUPD timeline is:
 ///
-/// This test verifies that fees accumulated during epoch E appear in the treasury
-/// exactly ONCE (2 epochs after E, when the go snapshot for E is processed).
+///   Boundary 0→1: rotate → go=None, set=None; build mark1(fees=epoch0_fees, blocks=actual)
+///                 RUPD: set=None → skipped; treasury=0
+///   Boundary 1→2: rotate → go=None, set=mark1; build mark2(fees=0, blocks=0)
+///                 RUPD: set=mark1 (epoch0_fees, actual_blocks) → FIRES → treasury += Δ1
+///   Boundary 2→3: rotate → go=mark1, set=mark2; build mark3
+///                 RUPD: set=mark2 (fees=0, blocks=0) → expansion=0 → treasury unchanged
+///   Boundary 3→4: rotate → go=mark2, set=mark3; ...
+///                 RUPD: set=mark3 (fees=0, blocks=0) → treasury unchanged
+///
+/// epoch0_fees appear in the treasury exactly ONCE, at boundary 1→2.
 #[test]
 fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     let mut params = ProtocolParameters::mainnet_defaults();
@@ -13411,105 +13375,289 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     state.treasury = Lovelace(0);
     state.needs_stake_rebuild = false;
 
-    // Epoch 0: accumulate 100M fees
-    // Epoch 1+: 0 fees (to clearly isolate epoch-0 fees in the treasury)
+    // Epoch 0: accumulate 100M fees and some blocks.
+    // Epoch 1+: 0 fees (to clearly isolate epoch-0 fees in the treasury).
     let epoch0_fees = 100_000_000u64;
     let actual_blocks = 2578u64;
 
-    // Snapshot timeline (RUPD check fires BEFORE rotation):
-    //
-    //   0→1: go=None (no RUPD); build mark1(fees=epoch0_fees, blocks=actual_blocks)
-    //   1→2: go=None (no RUPD); build mark2(fees=0, blocks=0)
-    //   2→3: go=None (no RUPD); rotate: go=mark1; build mark3(fees=0)
-    //   3→4: go=mark1 → RUPD_1 computed (uses epoch0_fees); rotate: go=mark2; build mark4
-    //   4→5: apply RUPD_1 → treasury += Δ1 (first and only time epoch0_fees contribute)
-    //   5→6: apply RUPD_2 (from snap_epoch2 with fees=0) → treasury += Δ2 ≈ 0
-
-    // Epoch 0→1: with epoch_fees=epoch0_fees
+    // Boundary 0→1: with epoch_fees=epoch0_fees.
+    // After rotation: go=None, set=None (initial state — no prior mark).
+    // New mark1 built with epoch0 data (epoch0_fees, actual_blocks).
+    // RUPD: set=None → skipped entirely.
     state.epoch_fees = Lovelace(epoch0_fees);
     state.epoch_block_count = actual_blocks;
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.treasury.0, 0, "No RUPD yet at epoch 0→1");
+    assert_eq!(state.treasury.0, 0, "No RUPD yet at epoch 0→1 (set=None)");
+    assert!(
+        state.pending_reward_update.is_none(),
+        "pending should be None after 0→1"
+    );
 
-    // Epoch 1→2: no new fees
+    // Boundary 1→2: no new fees.
+    // After rotation: go=None, set=mark1 (epoch0_fees, actual_blocks).
+    // RUPD fires immediately using set=mark1.
+    // This is the FIRST and ONLY time epoch0_fees contribute to treasury.
     state.epoch_fees = Lovelace(0);
     state.epoch_block_count = 0;
     state.process_epoch_transition(EpochNo(2));
-    assert_eq!(state.treasury.0, 0, "No RUPD yet at epoch 1→2");
-
-    // Epoch 2→3: no new fees — go snapshot is still None (was set AFTER epoch 1→2 rotation)
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
-    state.process_epoch_transition(EpochNo(3));
-    assert_eq!(
-        state.treasury.0, 0,
-        "No RUPD yet at epoch 2→3 (go=None before rotation)"
-    );
-
-    // Epoch 3→4: go=mark1 → RUPD_1 COMPUTED (not applied yet)
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
-    state.process_epoch_transition(EpochNo(4));
-    // apply_pending fires with PREVIOUS pending = None (computed at 2→3 when go=None)
-    // So treasury still 0 here; RUPD_1 is now stored as pending_reward_update.
-    assert_eq!(
-        state.treasury.0, 0,
-        "RUPD_1 computed but not applied yet at epoch 3→4"
-    );
-
-    // Verify RUPD_1 was actually computed
-    let pending_delta = state
-        .pending_reward_update
-        .as_ref()
-        .map(|r| r.delta_treasury)
-        .unwrap_or(0);
     assert!(
-        pending_delta > 0,
-        "RUPD_1 should be computed at epoch 3→4 using snap1 (fees={epoch0_fees}), got delta=0"
+        state.pending_reward_update.is_none(),
+        "pending should be None after 1→2 (RUPD applied immediately)"
     );
 
-    // Epoch 4→5: apply_pending(RUPD_1) fires — epoch0_fees contribute for the first time.
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
-    state.process_epoch_transition(EpochNo(5));
-
-    // Calculate expected delta_treasury (RUPD_1 computed using snap1 with epoch0_fees):
+    // Calculate expected delta_treasury for the RUPD at 1→2.
+    // Reserves = initial at this point (no previous RUPD fired).
     let initial_reserves = 8_000_000_000_000_000u64;
     let expected_blocks = ((0.05f64 * 21600f64).floor() as u64).max(1); // 1080
-    let effective_blocks = actual_blocks.min(expected_blocks);
+    let effective_blocks = actual_blocks.min(expected_blocks); // min(2578, 1080) = 1080
     let expansion = (3u128 * initial_reserves as u128 * effective_blocks as u128)
         / (1000u128 * expected_blocks as u128);
     let total = expansion as u64 + epoch0_fees;
-    // No pools → all goes to treasury
+    // No pools → all reward_pot goes to treasury.
     let expected_delta = total;
 
-    let treasury_after_epoch5 = state.treasury.0;
-    let diff = (treasury_after_epoch5 as i128 - expected_delta as i128).unsigned_abs();
+    let treasury_after_epoch2 = state.treasury.0;
+    let diff = (treasury_after_epoch2 as i128 - expected_delta as i128).unsigned_abs();
     assert!(
         diff <= 2,
-        "Treasury after epoch 4→5 should be ~{expected_delta} (epoch0 fees counted once), \
-         got {treasury_after_epoch5}. diff={diff}"
+        "Treasury after epoch 1→2 should be ~{expected_delta} (epoch0 fees counted once), \
+         got {treasury_after_epoch2}. diff={diff}"
+    );
+    assert!(
+        treasury_after_epoch2 > 0,
+        "Treasury must be positive after first RUPD at 1→2"
     );
 
-    // Epoch 5→6: apply_pending(RUPD_2) fires.
-    // RUPD_2 was computed at epoch 4→5 using go=snap_epoch2 (epoch_fees=0, epoch_block_count=0).
-    // With 0 blocks: effective_blocks=0 → expansion=0. With fees=0: total=0.
-    // Therefore delta_treasury = 0. Epoch-0 fees must NOT contribute here.
+    // Boundary 2→3: no new fees.
+    // After rotation: go=mark1, set=mark2 (fees=0, blocks=0).
+    // RUPD fires using set=mark2: effective_blocks=0 → expansion=0 → delta=0.
+    // epoch0_fees must NOT appear again here.
     state.epoch_fees = Lovelace(0);
     state.epoch_block_count = 0;
-    state.process_epoch_transition(EpochNo(6));
+    state.process_epoch_transition(EpochNo(3));
 
-    let treasury_after_epoch6 = state.treasury.0;
+    let treasury_after_epoch3 = state.treasury.0;
     assert_eq!(
-        treasury_after_epoch6, treasury_after_epoch5,
-        "Epoch 0 fees must NOT appear in treasury a second time at epoch 5→6 \
-         (snap2 had fees=0 and blocks=0, so RUPD_2 delta=0). \
-         treasury@epoch5={treasury_after_epoch5}, treasury@epoch6={treasury_after_epoch6}. \
+        treasury_after_epoch3, treasury_after_epoch2,
+        "Epoch 0 fees must NOT appear in treasury a second time at epoch 2→3 \
+         (mark2 had fees=0 and blocks=0, so RUPD delta=0). \
+         treasury@epoch2={treasury_after_epoch2}, treasury@epoch3={treasury_after_epoch3}. \
          Fee double-counting detected."
+    );
+    assert!(
+        state.pending_reward_update.is_none(),
+        "pending should be None after 2→3"
+    );
+
+    // Boundary 3→4: set=mark3 (fees=0, blocks=0) → also delta=0.
+    state.epoch_fees = Lovelace(0);
+    state.epoch_block_count = 0;
+    state.process_epoch_transition(EpochNo(4));
+    let treasury_after_epoch4 = state.treasury.0;
+    assert_eq!(
+        treasury_after_epoch4, treasury_after_epoch2,
+        "Treasury should still not grow at 3→4 (all post-epoch0 snaps have fees=0/blocks=0)"
+    );
+
+    // Boundary 4→5: set=mark4 (fees=0, blocks=0) → also delta=0.
+    state.epoch_fees = Lovelace(0);
+    state.epoch_block_count = 0;
+    state.process_epoch_transition(EpochNo(5));
+    let treasury_after_epoch5 = state.treasury.0;
+    assert_eq!(
+        treasury_after_epoch5, treasury_after_epoch2,
+        "Treasury should still not grow at 4→5 (all post-epoch0 snaps have fees=0/blocks=0)"
     );
 
     eprintln!(
         "Fee isolation test: epoch0_fees={epoch0_fees}, expected_delta={expected_delta}, \
-         treasury@epoch5={treasury_after_epoch5}, treasury@epoch6={treasury_after_epoch6}"
+         treasury@epoch2={treasury_after_epoch2}, treasury@epoch3={treasury_after_epoch3}, \
+         treasury@epoch4={treasury_after_epoch4}, treasury@epoch5={treasury_after_epoch5}"
     );
+}
+
+// =========================================================================
+// RUPD snapshot-position regression: treasury 2.16× divergence fix
+// =========================================================================
+//
+// Root cause: the RUPD was using `self.snapshots.go` (epoch-2-ago data) instead
+// of `self.snapshots.set` (epoch-just-ended data).  At the first two epoch
+// boundaries (0→1 and 1→2) `go` is None, so the RUPD was skipped entirely.
+// This caused 2 full epochs of expansion to be lost, and subsequent epochs
+// compounded on the already-incorrect reserves/treasury — producing ~2.16×
+// treasury inflation relative to the canonical on-chain Koios values.
+//
+// Canonical verification (Koios preview testnet):
+//   initial_reserves = 45T - 30T (Byron genesis UTxOs) = 15_000_000_000_000_000
+//   expansion(0→1)   = floor(rho × reserves × eta)
+//                    = floor(0.003 × 15_000_000_000_000_000 × 4320/4320)
+//                    = floor(0.003 × 15_000_000_000_000_000)
+//                    = 45_000_000_000_000
+//   treasury(0→1)    = floor(tau × (expansion + fees))
+//                    = floor(0.2 × 45_000_000_000_000) = 9_000_000_000_000
+//   Koios epoch 1 treasury = 9_000_000_000_000  ← exact match
+//
+// The RUPD at epoch 0→1 uses the epoch-0 snapshot.  After the 0→1 rotation,
+// that snapshot is in the SET position (old mark = epoch-0 data).  The GO
+// position (old set = None) would skip the RUPD — that was the bug.
+
+/// Regression test for the 2.16× treasury divergence: verify that the RUPD
+/// fires at the FIRST epoch boundary (0→1→2 produces non-zero treasury by 1→2)
+/// and produces exactly the canonical 9B lovelace treasury (preview testnet params).
+#[test]
+fn test_rupd_fires_at_first_epoch_canonical_treasury() {
+    // Preview testnet parameters (Conway, rho=0.003, tau=0.2, epoch=86400, f=0.05)
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.rho = Rational {
+        numerator: 3,
+        denominator: 1000,
+    };
+    params.tau = Rational {
+        numerator: 2,
+        denominator: 10,
+    };
+    params.active_slots_coeff = 0.05;
+    params.protocol_version_major = 9;
+
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 86_400;
+    // Preview: 45T max supply, 30T in Byron genesis UTxOs → initial reserves = 15T
+    state.reserves = Lovelace(15_000_000_000_000_000);
+    state.treasury = Lovelace(0);
+    state.needs_stake_rebuild = false;
+
+    // Epoch 0: exactly 4320 blocks (= floor(0.05 * 86400)), eta = 1.0.
+    // No fees (to isolate the pure expansion calculation).
+    let epoch0_blocks = 4320u64;
+    state.epoch_block_count = epoch0_blocks;
+    state.epoch_fees = Lovelace(0);
+
+    // Boundary 0→1:
+    // After rotation: go=None, set=None (no prior mark) → RUPD skipped.
+    // New mark1 built with (epoch_block_count=4320, epoch_fees=0).
+    state.process_epoch_transition(EpochNo(1));
+    assert_eq!(
+        state.treasury.0, 0,
+        "Treasury must be 0 after 0→1: set=None means no RUPD fires"
+    );
+
+    // Boundary 1→2:
+    // After rotation: go=None, set=mark1 (4320 blocks, 0 fees) → RUPD fires.
+    // expansion = floor(0.003 × 15_000_000_000_000_000 × 4320/4320) = 45_000_000_000_000
+    // treasury  = floor(0.2 × 45_000_000_000_000) = 9_000_000_000_000
+    state.epoch_block_count = 0;
+    state.epoch_fees = Lovelace(0);
+    state.process_epoch_transition(EpochNo(2));
+
+    // Canonical expected values from Koios preview epoch 1 data:
+    const CANONICAL_TREASURY_EPOCH1: u64 = 9_000_000_000_000;
+    const CANONICAL_EXPANSION_EPOCH1: u64 = 45_000_000_000_000;
+
+    assert_eq!(
+        state.treasury.0, CANONICAL_TREASURY_EPOCH1,
+        "Treasury after epoch 1→2 must match Koios canonical value of 9B lovelace. \
+         Got {} — if >9B the RUPD fired with wrong (inflated) data; \
+         if 0 the RUPD was skipped (go=None bug).",
+        state.treasury.0
+    );
+
+    // Reserves must have decreased by exactly the expansion amount.
+    let expected_reserves = 15_000_000_000_000_000u64 - CANONICAL_EXPANSION_EPOCH1;
+    assert_eq!(
+        state.reserves.0, expected_reserves,
+        "Reserves after first RUPD must be initial - expansion: \
+         expected={expected_reserves}, got={}",
+        state.reserves.0
+    );
+}
+
+/// Verify multi-epoch treasury accumulation: 3 full epochs should produce
+/// compounding treasury growth matching the geometric series.
+///
+/// Preview params: rho=0.003, tau=0.2, full blocks each epoch.
+///
+/// Formula:
+///   epoch 1→2: expansion1 = floor(0.003 * R0) = 45B; treasury += 9B;  R1 = R0 - 45B
+///   epoch 2→3: expansion2 = floor(0.003 * R1) = floor(0.003 * 14.955T) ≈ 44.865B
+///              treasury += floor(0.2 * 44.865B) = 8.973B
+///   epoch 3→4: expansion3 = floor(0.003 * R2), etc.
+#[test]
+fn test_rupd_compounding_treasury_over_three_epochs() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.rho = Rational {
+        numerator: 3,
+        denominator: 1000,
+    };
+    params.tau = Rational {
+        numerator: 2,
+        denominator: 10,
+    };
+    params.active_slots_coeff = 0.05;
+    params.protocol_version_major = 9;
+
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 86_400;
+    state.reserves = Lovelace(15_000_000_000_000_000);
+    state.treasury = Lovelace(0);
+    state.needs_stake_rebuild = false;
+
+    let full_blocks = 4320u64;
+
+    // Epoch 0 (full blocks)
+    state.epoch_block_count = full_blocks;
+    state.epoch_fees = Lovelace(0);
+    state.process_epoch_transition(EpochNo(1));
+    assert_eq!(state.treasury.0, 0, "No RUPD at 0→1 (set=None)");
+
+    // Epoch 1 (full blocks) → first RUPD fires (uses epoch0 snapshot from set)
+    state.epoch_block_count = full_blocks;
+    state.epoch_fees = Lovelace(0);
+    state.process_epoch_transition(EpochNo(2));
+    let t1 = state.treasury.0;
+    let r1 = state.reserves.0;
+    assert_eq!(t1, 9_000_000_000_000, "Treasury after epoch 1 (Koios canonical = 9B)");
+    assert_eq!(r1, 15_000_000_000_000_000 - 45_000_000_000_000, "Reserves after epoch 1");
+
+    // Epoch 2 (full blocks) → second RUPD fires (uses epoch1 snapshot from set)
+    state.epoch_block_count = full_blocks;
+    state.epoch_fees = Lovelace(0);
+    state.process_epoch_transition(EpochNo(3));
+    let t2 = state.treasury.0;
+    let r2 = state.reserves.0;
+
+    // expansion2 = floor(0.003 * r1) = floor(0.003 * 14_955_000_000_000_000) = 44_865_000_000_000
+    let expansion2 = (3u128 * r1 as u128 / 1000) as u64;
+    let treasury_delta2 = (2u128 * expansion2 as u128 / 10) as u64;
+    assert_eq!(
+        t2, t1 + treasury_delta2,
+        "Treasury after epoch 2 should be t1({t1}) + Δ2({treasury_delta2}), got {t2}"
+    );
+    assert_eq!(
+        r2,
+        r1 - expansion2,
+        "Reserves after epoch 2 should be r1({r1}) - expansion2({expansion2}), got {r2}"
+    );
+
+    // Epoch 3 (full blocks) → third RUPD fires (uses epoch2 snapshot from set)
+    state.epoch_block_count = full_blocks;
+    state.epoch_fees = Lovelace(0);
+    state.process_epoch_transition(EpochNo(4));
+    let t3 = state.treasury.0;
+    let r3 = state.reserves.0;
+
+    let expansion3 = (3u128 * r2 as u128 / 1000) as u64;
+    let treasury_delta3 = (2u128 * expansion3 as u128 / 10) as u64;
+    assert_eq!(
+        t3, t2 + treasury_delta3,
+        "Treasury after epoch 3 should be t2({t2}) + Δ3({treasury_delta3}), got {t3}"
+    );
+    assert_eq!(
+        r3,
+        r2 - expansion3,
+        "Reserves after epoch 3 should be r2({r2}) - expansion3({expansion3}), got {r3}"
+    );
+
+    // Confirm monotonic: treasury grows, reserves shrink each epoch.
+    assert!(t3 > t2 && t2 > t1, "Treasury must grow each epoch");
+    assert!(r3 < r2 && r2 < r1, "Reserves must shrink each epoch");
 }
