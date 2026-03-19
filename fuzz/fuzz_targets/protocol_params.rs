@@ -52,18 +52,6 @@ fn try_decode_rational(decoder: &mut minicbor::Decoder<'_>) -> bool {
     }
 }
 
-/// Try to decode execution units [mem, steps]
-fn try_decode_ex_units(decoder: &mut minicbor::Decoder<'_>) -> bool {
-    match decoder.array() {
-        Ok(Some(2)) => {
-            let _ = decoder.u64();
-            let _ = decoder.u64();
-            true
-        }
-        _ => false,
-    }
-}
-
 fuzz_target!(|data: &[u8]| {
     // --- Test 1: Parse as positional array(31) ConwayPParams ---
     {

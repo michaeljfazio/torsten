@@ -32,7 +32,8 @@ fuzz_target!(|data: &[u8]| {
         // Re-decode the encoded bytes -- must succeed and produce the same address
         if let Ok(re_decoded) = Address::from_bytes(&bytes) {
             assert_eq!(
-                addr, re_decoded,
+                addr,
+                re_decoded,
                 "Address roundtrip mismatch: original bytes {:?}",
                 &data[..data.len().min(64)]
             );
