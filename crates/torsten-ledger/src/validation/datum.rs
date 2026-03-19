@@ -125,17 +125,32 @@ pub(super) fn check_datum_witnesses(
         }
     }
 
-    // (b) Allowed supplemental: datum hashes declared on transaction outputs.
-    // Cardano allows a transaction to supply datum pre-images for outputs
-    // it creates so that spenders of those outputs in future transactions have
-    // easy access to the datum bytes.  These are optional and do not trigger a
-    // MissingDatumWitness error, but they DO count toward the allowed set for
-    // the ExtraDatumWitness check.
+    // (b) Allowed supplemental: datum hashes from transaction outputs AND
+    // reference inputs.  Cardano allows a transaction to supply datum
+    // pre-images for:
+    //   - outputs it creates (so future spenders have the datum bytes)
+    //   - reference inputs it reads (the datum may be needed by scripts)
+    //
+    // These are optional and do not trigger MissingDatumWitness, but they
+    // DO count toward the allowed set for the ExtraDatumWitness check.
+    //
+    // Haskell reference: `notAllowedSupplementalDatums` includes both
+    // output datum hashes and reference input datum hashes in the
+    // "allowed" set.
     let mut allowed_supplemental_hashes: HashSet<DatumHash> = HashSet::new();
 
     for output in &tx.body.outputs {
         if let OutputDatum::DatumHash(hash) = &output.datum {
             allowed_supplemental_hashes.insert(*hash);
+        }
+    }
+
+    // Reference inputs: their UTxO datum hashes are also supplemental.
+    for ref_input in &tx.body.reference_inputs {
+        if let Some(utxo) = utxo_set.lookup(ref_input) {
+            if let OutputDatum::DatumHash(hash) = &utxo.datum {
+                allowed_supplemental_hashes.insert(*hash);
+            }
         }
     }
 
