@@ -44,9 +44,9 @@ pub struct Theme {
     pub gauge_empty: Color,
 }
 
-/// Default theme — clean dark with cornflower blue accent and muted grays.
+/// Slate theme — clean dark with cornflower blue accent and muted grays.
 pub const THEME_DEFAULT: Theme = Theme {
-    name: "Default",
+    name: "Slate",
     bg: Color::Rgb(24, 24, 32),
     fg: Color::Rgb(230, 230, 240),
     muted: Color::Rgb(160, 160, 170),
