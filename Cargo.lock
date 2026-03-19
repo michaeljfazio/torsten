@@ -3459,7 +3459,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "torsten-cli"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-config"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -3493,7 +3493,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-conformance"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "hex",
  "serde",
@@ -3508,7 +3508,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-consensus"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "async-trait",
  "futures",
@@ -3530,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-crypto"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "criterion",
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-golden-tests"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "hex",
  "memmap2",
@@ -3568,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-integration-tests"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "hex",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-ledger"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "bincode",
  "criterion",
@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-lsm"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "byteorder",
  "crc32fast",
@@ -3620,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-mempool"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "criterion",
  "dashmap",
@@ -3635,7 +3635,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-monitor"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-network"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-node"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -3722,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-primitives"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "bech32 0.11.1",
  "blake2",
@@ -3744,7 +3744,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-serialization"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "bincode",
  "bytes",
@@ -3766,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "torsten-storage"
-version = "0.4.5-alpha"
+version = "0.4.6-alpha"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -4766,18 +4766,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.42"
+version = "0.8.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2578b716f8a7a858b7f02d5bd870c14bf4ddbbcf3a4c05414ba6503640505e3"
+checksum = "5c5030500cb2d66bdfbb4ebc9563be6ce7005a4b5d0f26be0c523870fe372ca6"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.42"
+version = "0.8.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e6cc098ea4d3bd6246687de65af3f920c430e236bee1e3bf2e441463f08a02f"
+checksum = "a5f86989a046a79640b9d8867c823349a139367bda96549794fcc3313ce91f4e"
 dependencies = [
  "proc-macro2",
  "quote",
