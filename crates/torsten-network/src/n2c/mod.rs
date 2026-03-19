@@ -190,6 +190,9 @@ pub struct N2CServer {
     tx_validator: Option<Arc<dyn TxValidator>>,
     block_provider: Option<Arc<dyn BlockProvider>>,
     connection_metrics: Option<Arc<dyn crate::ConnectionMetrics>>,
+    /// Atomic counter incremented on each N2C transaction rejection.
+    /// Shared with the node metrics system so the TUI can display it.
+    tx_rejection_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl N2CServer {
@@ -203,6 +206,7 @@ impl N2CServer {
             tx_validator: None,
             block_provider: None,
             connection_metrics: None,
+            tx_rejection_counter: None,
         }
     }
 
@@ -214,6 +218,11 @@ impl N2CServer {
     /// Set connection metrics callbacks for tracking connection counts and errors.
     pub fn set_connection_metrics(&mut self, metrics: Arc<dyn crate::ConnectionMetrics>) {
         self.connection_metrics = Some(metrics);
+    }
+
+    /// Set a transaction rejection counter for metrics.
+    pub fn set_tx_rejection_counter(&mut self, counter: Arc<std::sync::atomic::AtomicU64>) {
+        self.tx_rejection_counter = Some(counter);
     }
 
     /// Set a block provider for LocalChainSync block delivery
@@ -251,6 +260,7 @@ impl N2CServer {
                             let validator = self.tx_validator.clone();
                             let block_provider = self.block_provider.clone();
                             let conn_metrics = self.connection_metrics.clone();
+                            let reject_ctr = self.tx_rejection_counter.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_n2c_connection(
                                     stream,
@@ -258,6 +268,7 @@ impl N2CServer {
                                     mempool,
                                     validator,
                                     block_provider,
+                                    reject_ctr,
                                 )
                                 .await
                                 {
@@ -295,6 +306,7 @@ async fn handle_n2c_connection(
     mempool: Arc<dyn MempoolProvider>,
     tx_validator: Option<Arc<dyn TxValidator>>,
     block_provider: Option<Arc<dyn BlockProvider>>,
+    tx_rejection_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<(), N2CServerError> {
     let mut read_buf = vec![0u8; 65536];
     // Persistent buffer for partial segments across reads
@@ -398,7 +410,7 @@ async fn process_segment(
             handle_state_query(&segment.payload, query_handler, *negotiated_version).await
         }
         MINI_PROTOCOL_TX_SUBMISSION => {
-            handle_tx_submission(&segment.payload, mempool, tx_validator, None)
+            handle_tx_submission(&segment.payload, mempool, tx_validator, tx_rejection_counter.as_deref())
         }
         MINI_PROTOCOL_TX_MONITOR => {
             handle_tx_monitor(&segment.payload, mempool, query_handler, tx_monitor_cursor).await

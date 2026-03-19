@@ -168,6 +168,10 @@ impl TxValidator for LedgerTxValidator {
             Some(&self.slot_config),
         )
         .map_err(|errors| {
+            // Increment the rejection counter so the TUI and Prometheus show it.
+            self.metrics
+                .transactions_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             for err in &errors {
                 self.metrics.record_validation_error(&format!("{:?}", err));
             }
