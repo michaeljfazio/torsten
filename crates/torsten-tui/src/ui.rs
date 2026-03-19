@@ -591,11 +591,21 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             theme,
             col_w,
         ),
-        kv_aligned("Total Tx", App::format_number(total_tx), theme.muted, theme, col_w),
+        kv_aligned(
+            "Total Tx",
+            App::format_number(total_tx),
+            theme.muted,
+            theme,
+            col_w,
+        ),
         kv_aligned(
             "Rejected Tx",
             App::format_number(tx_rejected),
-            if tx_rejected > 0 { theme.warning } else { theme.muted },
+            if tx_rejected > 0 {
+                theme.warning
+            } else {
+                theme.muted
+            },
             theme,
             col_w,
         ),
@@ -659,6 +669,7 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
 
     let inbound = app.metrics.get_u64("torsten_peers_inbound");
     let outbound = app.metrics.get_u64("torsten_peers_outbound");
+    let duplex = app.metrics.get_u64("torsten_peers_duplex");
     let cold = app.metrics.get_u64("torsten_peers_cold");
     let warm = app.metrics.get_u64("torsten_peers_warm");
     let hot = app.metrics.get_u64("torsten_peers_hot");
@@ -702,6 +713,13 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
             "Outbound",
             App::format_number(outbound),
             theme.info,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Duplex",
+            App::format_number(duplex),
+            if duplex > 0 { theme.accent } else { theme.muted },
             theme,
             col_w,
         ),
