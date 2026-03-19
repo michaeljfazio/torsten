@@ -12242,11 +12242,17 @@ fn test_treasury_mismatch_no_cascade_in_downstream_block() {
 
     // Block B: spend output_a — must NOT get InputNotFound.
     let block_a_hash = Hash32::from_bytes([100u8; 32]); // header_hash from make_test_block
-    let tx_b = make_simple_tx(0xC2, vec![output_a.clone()], vec![make_lovelace_output(9_600_000)]);
+    let tx_b = make_simple_tx(
+        0xC2,
+        vec![output_a.clone()],
+        vec![make_lovelace_output(9_600_000)],
+    );
     let block_b = make_test_block(1001, 101, block_a_hash, vec![tx_b]);
     state
         .apply_block(&block_b, BlockValidationMode::ApplyOnly)
-        .expect("Block B must apply — output_a must be visible (no cascade from treasury mismatch)");
+        .expect(
+            "Block B must apply — output_a must be visible (no cascade from treasury mismatch)",
+        );
 
     // output_a must be consumed.
     assert!(
@@ -12360,14 +12366,302 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
 
     // Block B: spend output_a.
     let block_a_hash = Hash32::from_bytes([200u8; 32]);
-    let tx_b = make_simple_tx(0xE4, vec![output_a.clone()], vec![make_lovelace_output(9_600_000)]);
+    let tx_b = make_simple_tx(
+        0xE4,
+        vec![output_a.clone()],
+        vec![make_lovelace_output(9_600_000)],
+    );
     let block_b = make_test_block(2001, 201, block_a_hash, vec![tx_b]);
     state
         .apply_block(&block_b, BlockValidationMode::ApplyOnly)
-        .expect("Block B must apply — output_a must be visible (no cascade from unelected committee cert)");
+        .expect(
+        "Block B must apply — output_a must be visible (no cascade from unelected committee cert)",
+    );
 
     assert!(
         !state.utxo_set.contains(&output_a),
         "output_a must be consumed by Block B"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #183 — Block ExUnits budget is a hard error in ValidateAll mode
+// ---------------------------------------------------------------------------
+
+/// Build a transaction that declares redeemers with the given execution unit
+/// totals.  The transaction body is otherwise empty — we only need it to drive
+/// the block-level ExUnits accumulation without a live Plutus evaluator.
+fn make_tx_with_redeemers(tx_hash_byte: u8, mem: u64, steps: u64) -> Transaction {
+    Transaction {
+        hash: Hash32::from_bytes([tx_hash_byte; 32]),
+        body: TransactionBody {
+            inputs: vec![],
+            outputs: vec![],
+            fee: Lovelace(200_000),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: std::collections::BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: std::collections::BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: std::collections::BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![Redeemer {
+                tag: RedeemerTag::Spend,
+                index: 0,
+                data: PlutusData::Integer(0),
+                ex_units: ExUnits { mem, steps },
+            }],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+/// In `ValidateAll` mode a block whose summed redeemer memory budget exceeds
+/// `max_block_ex_units.mem` must be rejected with a hard error.
+///
+/// Before Issue #183 was fixed, the budget check was only a `debug!` log; the
+/// block was silently accepted, allowing a misbehaving block producer to bypass
+/// the execution unit limit.
+#[test]
+fn test_issue_183_block_ex_units_mem_hard_error_validate_all() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Lower the block memory budget to something the test redeemer can exceed.
+    params.max_block_ex_units.mem = 100;
+    params.max_block_ex_units.steps = u64::MAX; // steps not under test here
+
+    let mut state = LedgerState::new(params);
+
+    // Tx with a redeemer that consumes 200 memory units (> 100 limit).
+    let tx = make_tx_with_redeemers(0xF1, /* mem */ 200, /* steps */ 1);
+    let block = make_test_block(3000, 300, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert!(
+        result.is_err(),
+        "Expected apply_block to fail in ValidateAll when block mem ExUnits exceeded"
+    );
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("BlockExUnitsExceeded") || err_str.contains("block memory"),
+        "Expected ExUnits error message, got: {err_str}"
+    );
+}
+
+/// In `ValidateAll` mode a block whose summed step budget exceeds
+/// `max_block_ex_units.steps` must also be rejected.
+#[test]
+fn test_issue_183_block_ex_units_steps_hard_error_validate_all() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.max_block_ex_units.mem = u64::MAX;
+    params.max_block_ex_units.steps = 50; // tiny steps cap
+
+    let mut state = LedgerState::new(params);
+
+    let tx = make_tx_with_redeemers(0xF2, /* mem */ 1, /* steps */ 100);
+    let block = make_test_block(3001, 301, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert!(
+        result.is_err(),
+        "Expected apply_block to fail in ValidateAll when block step ExUnits exceeded"
+    );
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("BlockExUnitsExceeded") || err_str.contains("block step"),
+        "Expected ExUnits step error message, got: {err_str}"
+    );
+}
+
+/// In `ApplyOnly` mode (historical replay / Mithril import) an exceeded block
+/// ExUnits budget must NOT cause a hard error — old blocks may have been
+/// produced under different protocol parameter values.
+#[test]
+fn test_issue_183_block_ex_units_apply_only_is_permissive() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.max_block_ex_units.mem = 1; // extremely tight
+    params.max_block_ex_units.steps = 1;
+
+    let mut state = LedgerState::new(params);
+
+    // A redeemer that wildly exceeds the cap — must be tolerated in ApplyOnly.
+    let tx = make_tx_with_redeemers(
+        0xF3,
+        /* mem */ 1_000_000_000,
+        /* steps */ 1_000_000_000,
+    );
+    let block = make_test_block(3002, 302, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
+    assert!(
+        result.is_ok(),
+        "Expected apply_block to succeed in ApplyOnly regardless of ExUnits; got: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #184 — Per-transaction reference script 200 KiB limit enforcement
+// ---------------------------------------------------------------------------
+
+/// Build a `TransactionOutput` that carries a PlutusV2 `script_ref` of the
+/// given byte length.  The output is at a Byron address so stake accounting
+/// does not interfere.
+fn make_output_with_script_ref(byte_len: usize) -> TransactionOutput {
+    TransactionOutput {
+        address: Address::Byron(ByronAddress {
+            payload: vec![0u8; 32],
+        }),
+        value: Value::lovelace(2_000_000),
+        datum: OutputDatum::None,
+        script_ref: Some(ScriptRef::PlutusV2(vec![0xABu8; byte_len])),
+        is_legacy: false,
+        raw_cbor: None,
+    }
+}
+
+/// A transaction that spends a UTxO whose `script_ref` byte size exceeds 200
+/// KiB must be rejected in `ValidateAll` (Conway protocol >= 9).
+///
+/// Before Issue #184 was fixed, `MAX_REF_SCRIPT_SIZE_PER_TX` was declared
+/// but never checked, so oversized transactions were silently applied.
+#[test]
+fn test_issue_184_tx_ref_script_size_exceeds_200kib_validate_all() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Conway protocol so the per-tx size check is enabled.
+    params.protocol_version_major = 9;
+
+    let mut state = LedgerState::new(params);
+
+    // 201 KiB script — just over the 200 KiB per-transaction limit.
+    const OVERSIZED: usize = 201 * 1024;
+    let spending_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xC1u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spending_input.clone(),
+        make_output_with_script_ref(OVERSIZED),
+    );
+
+    let tx = make_simple_tx(
+        0xD1,
+        vec![spending_input],
+        vec![make_lovelace_output(1_800_000)],
+    );
+    let block = make_test_block(4000, 400, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert!(
+        result.is_err(),
+        "Expected apply_block to reject a tx with >200 KiB per-tx ref script size in ValidateAll"
+    );
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("TxRefScriptSizeTooLarge")
+            || err_str.contains("reference script size")
+            || err_str.contains("ppMaxRefScriptSizePerTxG"),
+        "Expected per-tx ref script size error message, got: {err_str}"
+    );
+}
+
+/// A transaction whose combined ref-script byte size is exactly at the 200 KiB
+/// limit must be accepted without a `TxRefScriptSizeTooLarge` error.
+#[test]
+fn test_issue_184_tx_ref_script_size_at_limit_is_accepted() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+
+    let mut state = LedgerState::new(params);
+
+    // Exactly 200 KiB — must not trigger the limit.
+    const AT_LIMIT: usize = 200 * 1024;
+    let spending_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xC2u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spending_input.clone(),
+        make_output_with_script_ref(AT_LIMIT),
+    );
+
+    let tx = make_simple_tx(
+        0xD2,
+        vec![spending_input],
+        vec![make_lovelace_output(1_800_000)],
+    );
+    let block = make_test_block(4001, 401, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // Must not return TxRefScriptSizeTooLarge (other errors e.g. fee/value are ok).
+    let no_size_err = match &result {
+        Ok(_) => true,
+        Err(e) => {
+            let s = e.to_string();
+            !s.contains("TxRefScriptSizeTooLarge") && !s.contains("ppMaxRefScriptSizePerTxG")
+        }
+    };
+    assert!(
+        no_size_err,
+        "Expected no per-tx ref script size error at exactly 200 KiB; got: {result:?}"
+    );
+}
+
+/// In `ApplyOnly` mode the per-transaction ref script size limit is NOT
+/// enforced.  Historical blocks must not be rejected during replay even when
+/// they would exceed the current protocol limit.
+#[test]
+fn test_issue_184_tx_ref_script_size_apply_only_is_permissive() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+
+    let mut state = LedgerState::new(params);
+
+    // 500 KiB — far beyond the limit.
+    const WAY_OVER: usize = 500 * 1024;
+    let spending_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xC3u8; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        spending_input.clone(),
+        make_output_with_script_ref(WAY_OVER),
+    );
+
+    let tx = make_simple_tx(
+        0xD3,
+        vec![spending_input],
+        vec![make_lovelace_output(1_800_000)],
+    );
+    let block = make_test_block(4002, 402, Hash32::ZERO, vec![tx]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
+    assert!(
+        result.is_ok(),
+        "Expected apply_block to succeed in ApplyOnly regardless of per-tx ref script size; \
+         got: {result:?}"
     );
 }

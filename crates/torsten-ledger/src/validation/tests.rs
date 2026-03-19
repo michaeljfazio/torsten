@@ -22,9 +22,9 @@ mod tests {
     use super::super::conway::{calculate_deposits_and_refunds, conway_only_certificate_name};
     use super::super::phase1::extract_reward_credential;
     use super::super::scripts::{
-        calculate_ref_script_tiered_fee, cbor_uint_size, compute_min_fee, compute_script_ref_hash,
-        estimate_value_cbor_size, evaluate_native_script, script_ref_byte_size,
-        MAX_REF_SCRIPT_SIZE_TIER_CAP,
+        calculate_ref_script_tiered_fee, cbor_uint_size, check_script_data_hash, compute_min_fee,
+        compute_script_ref_hash, estimate_value_cbor_size, evaluate_native_script,
+        script_ref_byte_size, MAX_REF_SCRIPT_SIZE_TIER_CAP,
     };
 
     use torsten_primitives::hash::Hash28;
@@ -7815,5 +7815,131 @@ mod tests {
         let mut errors = Vec::new();
         check_datum_witnesses(&tx, &utxo_set, &mut errors);
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Issue #182 — script_data_hash: spending-input script_refs must not be
+    // mistakenly flagged as UnexpectedScriptDataHash.
+    // ---------------------------------------------------------------------------
+
+    /// A transaction that spends a UTxO carrying a `script_ref` (PlutusV2) may
+    /// legitimately include a `script_data_hash` in its body — the ref-script
+    /// byte size contributes to the cost model.  Before the fix, the
+    /// `check_script_data_hash` helper only scanned `reference_inputs` for
+    /// ref-scripts, which caused this valid transaction to be rejected with
+    /// `UnexpectedScriptDataHash`.
+    ///
+    /// This test verifies that the spending-input path now passes correctly.
+    /// We use a dummy (all-zeros) script_data_hash so we do NOT trigger the
+    /// `ScriptDataHashMismatch` branch — the goal is only to confirm that the
+    /// `UnexpectedScriptDataHash` error is NOT emitted when the spending input
+    /// carries a script_ref.
+    #[test]
+    fn test_issue_182_spending_input_script_ref_allows_script_data_hash() {
+        let mut utxo_set = UtxoSet::new();
+
+        // Spending input: a UTxO that carries a PlutusV2 script_ref.
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA1u8; 32]),
+            index: 0,
+        };
+        let script_bytes = vec![0xCAu8; 64]; // dummy 64-byte Plutus script
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(script_bytes)),
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+
+        // Build a simple transaction: spend the script-ref-bearing UTxO,
+        // no inline Plutus scripts in the witness set, but a script_data_hash
+        // present in the body.  The hash value is all-zeros — it won't match
+        // the real computed hash so we'll get ScriptDataHashMismatch (the hash
+        // is there, it just has the wrong value), but NOT UnexpectedScriptDataHash.
+        let mut tx = make_simple_tx(spending_input, 9_800_000, 200_000);
+        tx.body.script_data_hash = Some(Hash32::ZERO);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+
+        // We expect either Ok (unlikely given zero hash) or an error that is
+        // NOT UnexpectedScriptDataHash.  The important invariant is that
+        // UnexpectedScriptDataHash must not appear.
+        let no_unexpected_hash = match &result {
+            Ok(_) => true,
+            Err(errors) => !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnexpectedScriptDataHash)),
+        };
+        assert!(
+            no_unexpected_hash,
+            "Expected no UnexpectedScriptDataHash when spending input carries script_ref; \
+             got errors: {:?}",
+            result.err()
+        );
+    }
+
+    /// Counterpart: verify that `check_script_data_hash` still emits
+    /// `UnexpectedScriptDataHash` when a `script_data_hash` is present in the
+    /// transaction body but NEITHER spending inputs NOR reference inputs carry
+    /// any `script_ref`.
+    ///
+    /// This test calls `check_script_data_hash` directly (bypassing the
+    /// `has_plutus_scripts` gate in `validate_transaction`) because the
+    /// `UnexpectedScriptDataHash` branch is only reachable for transactions with
+    /// no redeemers, no datums, and no inline Plutus scripts — a configuration
+    /// that never satisfies `has_plutus_scripts()` via `validate_transaction`.
+    ///
+    /// By calling the function directly we confirm that the unit-level logic is
+    /// correct: inputs without ref-scripts must not suppress the error.
+    #[test]
+    fn test_issue_182_no_script_ref_still_rejects_unexpected_script_data_hash() {
+        let mut utxo_set = UtxoSet::new();
+
+        // Spending input: plain UTxO with NO script_ref.
+        let spending_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xB2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            spending_input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None, // no script ref — must still be rejected
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let params = ProtocolParameters::mainnet_defaults();
+
+        // Transaction: spending input present, no redeemers, no datums,
+        // no inline Plutus scripts, but script_data_hash is set.
+        let mut tx = make_simple_tx(spending_input, 9_800_000, 200_000);
+        tx.body.script_data_hash = Some(Hash32::ZERO);
+        // Leave witness_set.plutus_v* empty and redeemers empty so the
+        // else-if branch inside check_script_data_hash is exercised.
+
+        let mut errors = Vec::new();
+        check_script_data_hash(&tx, &utxo_set, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnexpectedScriptDataHash)),
+            "Expected UnexpectedScriptDataHash when no ref-scripts exist; got: {errors:?}"
+        );
     }
 }

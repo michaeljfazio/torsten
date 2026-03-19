@@ -29,6 +29,9 @@ pub(crate) use scripts::script_ref_byte_size;
 // Re-export the tier cap so apply.rs can reuse the same constant for the
 // block-body check, keeping the tiered-fee short-circuit in sync.
 pub(crate) use scripts::MAX_REF_SCRIPT_SIZE_TIER_CAP;
+// Re-exported for use by the block-application layer (per-transaction 200 KiB
+// ref script size check — Haskell's `ppMaxRefScriptSizePerTxG` enforcement).
+pub(crate) use scripts::calculate_ref_script_size;
 // Re-exported for use by plutus.rs (V3 non-Unit return value check): maps
 // script hashes to their language version so the evaluator can apply the
 // correct success predicate per-result.
@@ -193,6 +196,17 @@ pub enum ValidationError {
     /// `UTXOW` predicate "allowedSupplementalDatums ⊇ suppliedDatums".
     #[error("Extra (unreferenced) datum witness in transaction: datum hash {0}")]
     ExtraDatumWitness(String),
+    /// Conway rule: the total byte size of all reference scripts reachable
+    /// from a single transaction's inputs and reference inputs must not exceed
+    /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
+    ///
+    /// Source: Haskell `ppMaxRefScriptSizePerTxG = L.to . const $ 200 * 1024`
+    /// (Conway PParams). This is hardcoded, not a governance-updateable parameter.
+    #[error(
+        "Transaction reference script size {actual} exceeds per-transaction limit \
+         {limit} bytes (Conway ppMaxRefScriptSizePerTxG)"
+    )]
+    TxRefScriptSizeTooLarge { actual: u64, limit: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +250,7 @@ pub fn validate_transaction(
 ///    script data hash (Rule 12).
 /// 3. Phase-2 Plutus script execution when all Phase-1 checks pass and redeemers
 ///    are present.
+#[allow(clippy::too_many_arguments)] // validation entry point legitimately needs all context parameters
 pub fn validate_transaction_with_pools(
     tx: &Transaction,
     utxo_set: &UtxoSet,

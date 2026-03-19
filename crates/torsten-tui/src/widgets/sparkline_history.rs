@@ -14,7 +14,10 @@ use ratatui::{
 use std::collections::VecDeque;
 
 /// Unicode block elements from lowest to highest (8 levels).
-const SPARK_CHARS: [char; 8] = [
+///
+/// Exported so that inline sparkline rendering in the UI layer can share the
+/// same character set without duplicating it.
+pub const SPARK_CHARS: [char; 8] = [
     '\u{2581}', // lower one eighth block
     '\u{2582}', // lower one quarter block
     '\u{2583}', // lower three eighths block
@@ -59,6 +62,7 @@ impl<'a> SparklineHistory<'a> {
     ///
     /// Useful when the height of bars alone conveys the meaning (e.g. block rate
     /// displayed with the active accent color) rather than a traffic-light gradient.
+    #[cfg(test)]
     pub fn with_color(data: &'a VecDeque<u64>, color: Color) -> Self {
         Self {
             data,

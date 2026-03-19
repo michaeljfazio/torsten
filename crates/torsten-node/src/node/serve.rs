@@ -313,6 +313,12 @@ pub(crate) fn convert_validation_error(
         VE::ExtraDatumWitness(datum_hash) => TxValidationError::ScriptFailed {
             reason: format!("Extra (unreferenced) datum witness in transaction: datum hash {datum_hash}"),
         },
+        VE::TxRefScriptSizeTooLarge { actual, limit } => TxValidationError::TxTooLarge {
+            // Map to TxTooLarge — closest semantic match for a transaction that
+            // exceeds a size-based limit (ppMaxRefScriptSizePerTxG, Conway+).
+            maximum: limit,
+            actual,
+        },
     }
 }
 

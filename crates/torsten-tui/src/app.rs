@@ -13,6 +13,9 @@ use crate::theme::{cycle_theme, THEMES};
 /// Maximum number of blocks-applied samples retained for the sparkline history.
 const BLOCK_HISTORY_LEN: usize = 60;
 
+/// Maximum number of CPU-percent samples retained for the sparkline history.
+const CPU_HISTORY_LEN: usize = 60;
+
 /// Connection status of the metrics endpoint.
 ///
 /// Tracks whether the TUI can currently reach the node's Prometheus endpoint,
@@ -364,6 +367,12 @@ pub struct App {
     pub block_rate_history: VecDeque<u64>,
     /// Last `torsten_blocks_applied` value, used to compute per-poll deltas.
     prev_blocks_applied: u64,
+    /// Ring-buffer of CPU utilisation samples (one per poll).
+    ///
+    /// Each entry is the CPU percentage scaled by 10 (e.g. 475 means 47.5 %).
+    /// Storing scaled integers lets us reuse the `u64`-typed `SparklineHistory`
+    /// widget without losing sub-percent resolution in the gradient color logic.
+    pub cpu_pct_history: VecDeque<u64>,
     /// Index into `THEMES` for the active theme.
     pub theme_idx: usize,
     /// Whether the application should exit.
@@ -394,6 +403,7 @@ impl App {
             rtt_bands: RttBands::default(),
             block_rate_history: VecDeque::with_capacity(BLOCK_HISTORY_LEN),
             prev_blocks_applied: 0,
+            cpu_pct_history: VecDeque::with_capacity(CPU_HISTORY_LEN),
             theme_idx: monokai_idx,
             should_quit: false,
             show_help: false,
@@ -465,6 +475,19 @@ impl App {
         if blocks_applied > 0 {
             self.prev_blocks_applied = blocks_applied;
         }
+
+        // Record CPU utilisation sample.
+        //
+        // The sparkline widget uses u64 values, so we scale the float percentage
+        // by 10 to preserve one decimal digit of resolution (e.g. 47.5 % → 475).
+        // This lets the 3-tier gradient use finer thresholds than whole-percent
+        // granularity.
+        let cpu_pct = snapshot.get("torsten_cpu_percent");
+        let cpu_sample = (cpu_pct * 10.0).round() as u64;
+        if self.cpu_pct_history.len() >= CPU_HISTORY_LEN {
+            self.cpu_pct_history.pop_front();
+        }
+        self.cpu_pct_history.push_back(cpu_sample);
 
         self.metrics = snapshot;
     }
@@ -840,7 +863,11 @@ mod tests {
         // Actually pct_raw == 0.0 so the replay guard is not hit; we reach
         // the stalled branch because tip_age > 300.
         let state = app.sync_status();
-        assert_ne!(state, SyncState::Replaying, "zero progress should not be Replaying");
+        assert_ne!(
+            state,
+            SyncState::Replaying,
+            "zero progress should not be Replaying"
+        );
 
         // Once blocks have been applied (replay finished, now syncing from peers)
         // but tip age is still high — that is Stalled, not Replaying.
@@ -1082,6 +1109,57 @@ mod tests {
             app.block_rate_history.len(),
             BLOCK_HISTORY_LEN,
             "history should be capped at BLOCK_HISTORY_LEN"
+        );
+    }
+
+    #[test]
+    fn test_cpu_pct_history_accumulates_samples() {
+        let mut app = App::new();
+
+        // Every successful poll appends a sample regardless of the value.
+        app.update_metrics(make_snapshot(vec![("torsten_cpu_percent", 25.0)]));
+        assert_eq!(app.cpu_pct_history.len(), 1);
+        // 25.0 % × 10 = 250.
+        assert_eq!(app.cpu_pct_history[0], 250);
+
+        app.update_metrics(make_snapshot(vec![("torsten_cpu_percent", 75.5)]));
+        assert_eq!(app.cpu_pct_history.len(), 2);
+        // 75.5 % × 10 rounded = 755.
+        assert_eq!(app.cpu_pct_history[1], 755);
+
+        // Zero CPU is a valid sample (idle node).
+        app.update_metrics(make_snapshot(vec![("torsten_cpu_percent", 0.0)]));
+        assert_eq!(app.cpu_pct_history.len(), 3);
+        assert_eq!(app.cpu_pct_history[2], 0);
+    }
+
+    #[test]
+    fn test_cpu_pct_history_capped_at_max_len() {
+        let mut app = App::new();
+        // Push more samples than CPU_HISTORY_LEN.
+        for _ in 0..=(CPU_HISTORY_LEN + 5) {
+            app.update_metrics(make_snapshot(vec![("torsten_cpu_percent", 50.0)]));
+        }
+        assert_eq!(
+            app.cpu_pct_history.len(),
+            CPU_HISTORY_LEN,
+            "cpu history should be capped at CPU_HISTORY_LEN"
+        );
+    }
+
+    #[test]
+    fn test_cpu_pct_history_not_updated_while_offline() {
+        let mut app = App::new();
+
+        app.update_metrics(make_snapshot(vec![("torsten_cpu_percent", 30.0)]));
+        assert_eq!(app.cpu_pct_history.len(), 1);
+
+        // Offline snapshot: no CPU sample should be added.
+        app.update_metrics(make_disconnected_snapshot("refused"));
+        assert_eq!(
+            app.cpu_pct_history.len(),
+            1,
+            "offline snapshot must not push a CPU sample"
         );
     }
 }

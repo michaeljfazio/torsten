@@ -16,8 +16,8 @@ use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::utxo_diff::UtxoDiff;
 use crate::validation::{
-    script_ref_byte_size, validate_transaction_with_pools, ValidationError,
-    MAX_REF_SCRIPT_SIZE_TIER_CAP,
+    calculate_ref_script_size, script_ref_byte_size, validate_transaction_with_pools,
+    ValidationError, MAX_REF_SCRIPT_SIZE_TIER_CAP,
 };
 use std::sync::Arc;
 use torsten_primitives::block::{Block, Point};
@@ -45,10 +45,9 @@ const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = MAX_REF_SCRIPT_SIZE_TIER_CAP;
 /// Source: Haskell `ppMaxRefScriptSizePerTxG = L.to . const $ 200 * 1024`
 /// (Conway PParams). Also hardcoded, not a governance-updateable protocol parameter.
 ///
-/// This constant is defined here for documentation and cross-reference purposes.
-/// The per-tx size limit is enforced via the fee calculation (CIP-0112) where
-/// transactions with excessive ref scripts will fail the `feesOK` check.
-#[allow(dead_code)]
+/// Enforced in `apply_block` for `ValidateAll` mode: any transaction whose
+/// combined spending-input + reference-input script_ref byte count exceeds this
+/// limit is rejected with [`LedgerError::BlockTxValidationFailed`].
 const MAX_REF_SCRIPT_SIZE_PER_TX: u64 = 200 * 1024; // 200 KiB
 
 impl LedgerState {
@@ -238,18 +237,52 @@ impl LedgerState {
             }
         }
         if block_mem > self.protocol_params.max_block_ex_units.mem {
-            debug!(
-                block_mem,
-                limit = self.protocol_params.max_block_ex_units.mem,
-                "Block exceeds max execution unit memory budget (expected during replay before PP updates)"
-            );
+            if mode == BlockValidationMode::ValidateAll {
+                // Hard error at the live tip: a block whose execution unit memory
+                // total exceeds the protocol limit was not produced by a conformant
+                // block producer.  Reject it immediately so the peer is penalised.
+                //
+                // In ApplyOnly (ImmutableDB replay / Mithril import) the limit may
+                // have been lower at the time the block was created than it is now
+                // (or vice-versa), so we keep the permissive debug-only behaviour
+                // to avoid breaking historical replay.
+                return Err(LedgerError::BlockTxValidationFailed {
+                    slot: block.slot().0,
+                    tx_hash: String::from("(block-level check)"),
+                    errors: format!(
+                        "BlockExUnitsExceeded: block memory usage {} exceeds limit {} \
+                         (Alonzo+ block-body ExUnits rule)",
+                        block_mem, self.protocol_params.max_block_ex_units.mem
+                    ),
+                });
+            } else {
+                debug!(
+                    block_mem,
+                    limit = self.protocol_params.max_block_ex_units.mem,
+                    "Block exceeds max execution unit memory budget (expected during replay before PP updates)"
+                );
+            }
         }
         if block_steps > self.protocol_params.max_block_ex_units.steps {
-            debug!(
-                block_steps,
-                limit = self.protocol_params.max_block_ex_units.steps,
-                "Block exceeds max execution unit step budget (expected during replay before PP updates)"
-            );
+            if mode == BlockValidationMode::ValidateAll {
+                // Same logic as memory budget above: hard error at tip,
+                // permissive debug-only during replay.
+                return Err(LedgerError::BlockTxValidationFailed {
+                    slot: block.slot().0,
+                    tx_hash: String::from("(block-level check)"),
+                    errors: format!(
+                        "BlockExUnitsExceeded: block step usage {} exceeds limit {} \
+                         (Alonzo+ block-body ExUnits rule)",
+                        block_steps, self.protocol_params.max_block_ex_units.steps
+                    ),
+                });
+            } else {
+                debug!(
+                    block_steps,
+                    limit = self.protocol_params.max_block_ex_units.steps,
+                    "Block exceeds max execution unit step budget (expected during replay before PP updates)"
+                );
+            }
         }
 
         // Block-level totalRefScriptSize check (Conway+, protocol >= 9).
@@ -375,6 +408,46 @@ impl LedgerState {
             // Phase-1 + Phase-2 validation when ValidateAll mode is active.
             // Verifies the block producer's is_valid flag matches actual evaluation.
             if mode == BlockValidationMode::ValidateAll {
+                // -------------------------------------------------------
+                // Conway rule: per-transaction reference script size limit.
+                //
+                // `ppMaxRefScriptSizePerTxG` (Haskell): the total byte size of
+                // all script_refs reachable from a transaction's spending inputs
+                // AND reference inputs must not exceed 200 KiB.  This is a
+                // hard structural limit that is independent of the tiered fee
+                // (CIP-0112) — a transaction that exceeds it is unconditionally
+                // invalid regardless of what fee it declares.
+                //
+                // Checked in Conway (protocol >= 9) and ValidateAll mode only.
+                // During ApplyOnly (historical replay, Mithril import) we skip
+                // the check so that replay doesn't break if the protocol version
+                // stored in the snapshot is unexpectedly < 9 for blocks that were
+                // genuinely processed in Conway.
+                //
+                // Only applies to valid transactions; invalid (is_valid=false)
+                // transactions have their regular inputs/outputs skipped so their
+                // script_ref contribution does not count toward either limit.
+                // -------------------------------------------------------
+                if self.protocol_params.protocol_version_major >= 9 && tx.is_valid {
+                    let tx_ref_script_size = calculate_ref_script_size(
+                        &tx.body.inputs,
+                        &tx.body.reference_inputs,
+                        &self.utxo_set,
+                    );
+                    if tx_ref_script_size > MAX_REF_SCRIPT_SIZE_PER_TX {
+                        return Err(LedgerError::BlockTxValidationFailed {
+                            slot: block.slot().0,
+                            tx_hash: tx.hash.to_hex(),
+                            errors: format!(
+                                "TxRefScriptSizeTooLarge: reference script size {} exceeds \
+                                 per-transaction limit {} bytes \
+                                 (Conway ppMaxRefScriptSizePerTxG)",
+                                tx_ref_script_size, MAX_REF_SCRIPT_SIZE_PER_TX
+                            ),
+                        });
+                    }
+                }
+
                 let has_redeemers = !tx.witness_set.redeemers.is_empty();
 
                 if tx.is_valid {

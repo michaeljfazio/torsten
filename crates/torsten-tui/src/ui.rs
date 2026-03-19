@@ -39,7 +39,7 @@ use crate::theme::Theme;
 use crate::widgets::epoch_progress::EpochProgress;
 use crate::widgets::header_bar::HeaderBar;
 use crate::widgets::mempool_gauge::MempoolGauge;
-use crate::widgets::sparkline_history::SparklineHistory;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -255,7 +255,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 /// Line 2: epoch progress bar
 ///
 /// Uses the [`HeaderBar`] widget so the same rendering logic is shared and
-/// all three widget types (HeaderBar, MempoolGauge, SparklineHistory) are
+/// all three widget types (HeaderBar, MempoolGauge, and sparkline_history) are
 /// exercised in the main rendering path.
 fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let sync_state = app.sync_status();
@@ -749,14 +749,39 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         return;
     }
 
+    // ---- Gather metrics ----
+
     let cpu_pct = app.metrics.get("torsten_cpu_percent");
-    let mem_live = app.metrics.get_u64("torsten_mem_resident_bytes");
-    let mem_rss = app.metrics.get_u64("torsten_mem_rss_bytes");
-    // Fallback: use live if RSS is unavailable.
-    let mem_rss = if mem_rss > 0 { mem_rss } else { mem_live };
-    // Total system physical memory — used to show RSS as a % of total RAM.
+
+    // RSS memory: prefer torsten_mem_rss_bytes, fall back to resident.
+    let mem_rss_raw = app.metrics.get_u64("torsten_mem_rss_bytes");
+    let mem_resident = app.metrics.get_u64("torsten_mem_resident_bytes");
+    let mem_rss = if mem_rss_raw > 0 {
+        mem_rss_raw
+    } else {
+        mem_resident
+    };
+
+    // Peak RSS — shown as a secondary row so the operator can see the
+    // high-water mark without polling a separate tool.
+    let mem_peak = app.metrics.get_u64("torsten_mem_peak_bytes");
+
+    // Total system physical memory — used to compute the memory gauge ratio.
     let mem_total = app.metrics.get_u64("torsten_mem_total_bytes");
 
+    // UTxO set size.
+    let utxo_count = app.metrics.get_u64("torsten_utxo_count");
+
+    // Peer counts — total plus optional outbound / inbound breakdown.
+    let peers_hot = app.metrics.get_u64("torsten_peers_hot");
+    let peers_warm = app.metrics.get_u64("torsten_peers_warm");
+    let peers_total = peers_hot + peers_warm;
+    let peers_out = app.metrics.get_u64("torsten_peers_outbound");
+    let peers_in = app.metrics.get_u64("torsten_peers_inbound");
+
+    // ---- Derive colors ----
+
+    // CPU: green < 50 %, yellow 50–80 %, red > 80 %.
     let cpu_color = if cpu_pct > 80.0 {
         theme.error
     } else if cpu_pct > 50.0 {
@@ -765,129 +790,220 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         theme.success
     };
 
-    // Compute memory color based on fraction of system total when available,
-    // or fall back to absolute thresholds if total is not published.
+    // Memory: color based on fraction of system total (preferred) or absolute
+    // byte thresholds when total RAM is not published by the node.
     let mem_pct_of_total = if mem_total > 0 {
-        mem_live as f64 / mem_total as f64
+        mem_rss as f64 / mem_total as f64
     } else {
         0.0
     };
-    let mem_color = if mem_pct_of_total > 0.8 || mem_live > 8_000_000_000 {
+    let mem_color = if mem_pct_of_total > 0.8 || mem_rss > 8_000_000_000 {
         theme.error
-    } else if mem_pct_of_total > 0.5 || mem_live > 4_000_000_000 {
+    } else if mem_pct_of_total > 0.5 || mem_rss > 4_000_000_000 {
         theme.warning
     } else {
         theme.success
     };
 
+    // ---- Layout constants ----
+
+    // col_w is the usable width inside the panel (minus the 1-char left indent
+    // already added by panel_block padding and the 1-char right margin).
     let col_w = inner.width.saturating_sub(2) as usize;
 
-    // Inline mini CPU bar (max 20 chars, placed on the CPU row as a suffix).
-    let bar_w = col_w.saturating_sub(LABEL_W + VALUE_W + 2).min(20);
-    let cpu_bar = if bar_w >= 4 {
-        build_mini_bar(cpu_pct / 100.0, bar_w, cpu_color, theme)
-    } else {
-        vec![]
-    };
-
-    let cpu_val = format!("{:.1}%", cpu_pct);
+    // Width reserved for the sparkline that follows the CPU percentage value.
+    // We keep at least LABEL_W + VALUE_W columns for the label+value pair, then
+    // use whatever space remains (up to 20 columns) for the sparkline.
+    let spark_reserve = col_w.saturating_sub(LABEL_W + VALUE_W + 2).min(20);
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // CPU row with optional inline bar.
+    // ---- Row 1: CPU ----
+    //
+    // "CPU          47.5%  ▃▅▆▇▅▄▃▅" — percentage right-aligned, then a
+    // colored sparkline history filling the remaining space.  The sparkline
+    // color tracks the current CPU level: green/yellow/red gradient.
+    //
+    // The history is stored scaled ×10 (integer), so a threshold of 500 = 50 %
+    // and 800 = 80 % maps to the same green/yellow/red breakpoints.
+    let cpu_val = format!("{:.1}%", cpu_pct);
     let mut cpu_spans = vec![
-        Span::styled(" ", Style::default()),
+        Span::raw(" "),
         Span::styled(
-            format!("{:<width$}", "CPU", width = LABEL_W),
+            format!("{:<label_w$}", "CPU", label_w = LABEL_W),
             Style::default().fg(theme.muted),
         ),
         Span::styled(
-            format!("{:>width$}", cpu_val, width = VALUE_W),
+            format!("{:>value_w$}", cpu_val, value_w = VALUE_W),
             Style::default().fg(cpu_color).add_modifier(Modifier::BOLD),
         ),
     ];
-    if !cpu_bar.is_empty() {
+    // Append the sparkline inline — rendered as a series of colored Unicode
+    // block characters.  We use the 3-tier gradient constructor directly here
+    // rather than the uniform-color variant so that history bars reflect their
+    // own intensity (low=green, mid=yellow, high=red) rather than the
+    // *current* CPU level.
+    if spark_reserve >= 4 && !app.cpu_pct_history.is_empty() {
+        let spark_w = spark_reserve;
+        // Determine how many data points fit within the reserved width.
+        let start = if app.cpu_pct_history.len() > spark_w {
+            app.cpu_pct_history.len() - spark_w
+        } else {
+            0
+        };
+        // Max value in the visible window; the gradient thresholds are applied
+        // against the *absolute* scale (max 1000 = 100.0 % × 10) so colors are
+        // consistent across frames rather than relative to the local window max.
+        let abs_max: u64 = 1000; // represents 100.0 %
+        let mut spark_str = String::with_capacity(spark_w);
+        for &sample in app.cpu_pct_history.iter().skip(start) {
+            let level = if sample == 0 {
+                0usize
+            } else {
+                ((sample as f64 / abs_max as f64) * 7.0).round() as usize
+            };
+            spark_str.push(crate::widgets::sparkline_history::SPARK_CHARS[level.min(7)]);
+        }
+        // Pad with spaces on the left when fewer samples than reserved width.
+        let pad = spark_w.saturating_sub(spark_str.chars().count());
         cpu_spans.push(Span::raw("  "));
-        cpu_spans.extend(cpu_bar);
+        if pad > 0 {
+            cpu_spans.push(Span::styled(
+                " ".repeat(pad),
+                Style::default().fg(theme.muted),
+            ));
+        }
+        cpu_spans.push(Span::styled(spark_str, Style::default().fg(cpu_color)));
     }
     lines.push(Line::from(cpu_spans));
 
-    // Memory (live/resident) row — human readable bytes with thousands separators.
-    lines.push(kv_aligned(
-        "Mem (live)",
-        App::format_bytes(mem_live),
-        mem_color,
-        theme,
-        col_w,
-    ));
-
-    // Memory (RSS) row.
-    lines.push(kv_aligned(
-        "Mem (RSS)",
-        App::format_bytes(mem_rss),
-        theme.muted,
-        theme,
-        col_w,
-    ));
-
-    // Memory bar: show RSS as a percentage of total system RAM when the
-    // `torsten_mem_total_bytes` gauge is available.  Fall back to the live/RSS
-    // ratio (an intra-process metric) when total RAM is unknown.
+    // ---- Row 2: Memory ----
     //
-    // The bar is rendered in the theme's `mem_color` (green/warning/error
-    // depending on how much RAM the node is consuming), which is visually
-    // distinct from the muted `gauge_empty` background.  A compact percentage
-    // label to the left of the bar makes the value legible at a glance.
-    let (mem_ratio, mem_pct_label) = if mem_total > 0 {
-        let ratio = (mem_live as f64 / mem_total as f64).clamp(0.0, 1.0);
-        (ratio, format!("{:.1}%", ratio * 100.0))
-    } else if mem_rss > 0 {
-        let ratio = (mem_live as f64 / mem_rss as f64).clamp(0.0, 1.0);
-        (ratio, String::new())
+    // "Memory       1.8 GB  [████░░░░░░]  12.3%"
+    //
+    // The RSS value is shown right-aligned.  When `torsten_mem_total_bytes` is
+    // available, an inline smooth-bar gauge plus a percentage label follows on
+    // the same row so the operator can see RAM pressure at a glance without
+    // needing a separate row for the bar.
+    let mem_rss_str = App::format_bytes(mem_rss);
+    let mem_ratio = if mem_total > 0 {
+        (mem_rss as f64 / mem_total as f64).clamp(0.0, 1.0)
     } else {
-        (0.0, String::new())
+        0.0
     };
-    // Reserve 6 chars for the percentage label (e.g. " 12.3%") when available.
-    let pct_label_w = if mem_pct_label.is_empty() { 0 } else { 6 };
-    let mem_bar_w = col_w
-        .saturating_sub(pct_label_w + 1)
-        .min(inner.width.saturating_sub(4) as usize);
-    if mem_bar_w >= 4 && inner.height >= 4 {
-        let mem_bar = build_smooth_bar(mem_ratio, mem_bar_w, mem_color, theme);
-        let prefix = if mem_pct_label.is_empty() {
-            vec![Span::raw(" ")]
-        } else {
-            vec![
+    // Percentage label, e.g. "12.3%".  Only shown when we have total RAM.
+    let mem_pct_label = if mem_total > 0 {
+        format!(" {:.1}%", mem_ratio * 100.0)
+    } else {
+        String::new()
+    };
+    // Width available for the inline gauge bar: total col_w minus the label,
+    // value, percentage label, and a two-char gap.
+    let gauge_w = col_w
+        .saturating_sub(LABEL_W + VALUE_W + 2 + mem_pct_label.len())
+        .min(16);
+    if gauge_w >= 4 && mem_total > 0 {
+        // Build the row inline: label + value + gap + bar + pct label.
+        let bar_spans = build_smooth_bar(mem_ratio, gauge_w, mem_color, theme);
+        let mut mem_spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<label_w$}", "Memory", label_w = LABEL_W),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("{:>value_w$}", mem_rss_str, value_w = VALUE_W),
+                Style::default().fg(mem_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+        ];
+        mem_spans.extend(bar_spans);
+        mem_spans.push(Span::styled(
+            mem_pct_label,
+            Style::default().fg(mem_color).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(mem_spans));
+    } else {
+        // Narrow panel — just the label and value.
+        lines.push(kv_aligned("Memory", mem_rss_str, mem_color, theme, col_w));
+    }
+
+    // ---- Row 3: Peak RSS ----
+    //
+    // "Peak      2.1 GB"  — high-water mark for process RSS.  Shown in muted
+    // color so it reads as a secondary annotation next to the live Memory row.
+    if mem_peak > 0 {
+        lines.push(kv_aligned(
+            "Peak",
+            App::format_bytes(mem_peak),
+            theme.muted,
+            theme,
+            col_w,
+        ));
+    }
+
+    // ---- Row 4: UTxO Store ----
+    //
+    // "UTxO Store   4,109,330" — formatted with thousands separators so large
+    // numbers remain readable.  Uses the foreground color so it stands out as
+    // a primary metric.
+    lines.push(kv_aligned(
+        "UTxO Store",
+        App::format_number(utxo_count),
+        theme.fg,
+        theme,
+        col_w,
+    ));
+
+    // ---- Row 5: Peers ----
+    //
+    // "Peers           15  out 10 / in 5"
+    //
+    // Total peer count right-aligned as the primary value; outbound/inbound
+    // breakdown appended in muted text when those metrics are available.
+    // The breakdown uses the torsten_peers_outbound / torsten_peers_inbound
+    // gauges published by the P2P governor.
+    let peers_str = App::format_number(peers_total);
+    let have_direction = peers_out > 0 || peers_in > 0;
+    if have_direction {
+        let breakdown = format!("out {} / in {}", peers_out, peers_in);
+        // Compute available width for the breakdown suffix.
+        let suffix_gap = 2usize; // two spaces between value and breakdown
+        let available = col_w.saturating_sub(1 + LABEL_W + VALUE_W + suffix_gap);
+        if available >= breakdown.len() {
+            let mut peer_spans = vec![
                 Span::raw(" "),
                 Span::styled(
-                    format!("{:>5} ", mem_pct_label),
-                    Style::default().fg(mem_color).add_modifier(Modifier::BOLD),
+                    format!("{:<label_w$}", "Peers", label_w = LABEL_W),
+                    Style::default().fg(theme.muted),
                 ),
-            ]
-        };
-        lines.push(Line::from([prefix, mem_bar].concat()));
+                Span::styled(
+                    format!("{:>value_w$}", peers_str, value_w = VALUE_W),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(breakdown, Style::default().fg(theme.muted)),
+            ];
+            // Trim the last span to fit within col_w if terminal is very narrow.
+            let used = 1 + LABEL_W + VALUE_W + suffix_gap + peer_spans[4].content.len();
+            if used > col_w {
+                let trim_to = peer_spans[4].content.len().saturating_sub(used - col_w);
+                let trimmed: String = peer_spans[4].content.chars().take(trim_to).collect();
+                peer_spans[4] = Span::styled(trimmed, Style::default().fg(theme.muted));
+            }
+            lines.push(Line::from(peer_spans));
+        } else {
+            // Not enough space for the breakdown — show total only.
+            lines.push(kv_aligned("Peers", peers_str, theme.success, theme, col_w));
+        }
+    } else {
+        lines.push(kv_aligned("Peers", peers_str, theme.success, theme, col_w));
     }
 
-    // Block rate sparkline — occupies the last available row in the Resources panel.
-    // Rendered directly to the buffer so it overlays the correct row without
-    // interfering with Paragraph layout.
-    let text_rows = lines.len();
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
-
-    // Only draw the sparkline if there is at least one row left after the text rows.
-    let spark_y = inner.y + text_rows as u16;
-    if !app.block_rate_history.is_empty() && spark_y < inner.y + inner.height && inner.width > 2 {
-        let spark_area = Rect {
-            x: inner.x + 1, // 1-char left indent
-            y: spark_y,
-            width: inner.width.saturating_sub(2),
-            height: 1,
-        };
-        // Uniform accent color — all bars the same hue; height carries the meaning.
-        SparklineHistory::with_color(&app.block_rate_history, theme.accent)
-            .render(spark_area, frame.buffer_mut());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,6 +1543,7 @@ fn build_smooth_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) ->
 }
 
 /// Build a minimal inline CPU/mem bar (simpler, for single-row use).
+#[cfg(test)]
 fn build_mini_bar<'a>(ratio: f64, width: usize, fill: Color, theme: &Theme) -> Vec<Span<'a>> {
     if width < 2 {
         return vec![];

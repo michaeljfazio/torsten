@@ -689,12 +689,26 @@ pub(super) fn check_script_data_hash(
         && tx.witness_set.plutus_v2_scripts.is_empty()
         && tx.witness_set.plutus_v3_scripts.is_empty()
     {
-        // Allow script_data_hash when reference inputs carry reference scripts
-        let has_ref_scripts = body.reference_inputs.iter().any(|ref_input| {
-            utxo_set
-                .lookup(ref_input)
-                .is_some_and(|utxo| utxo.script_ref.is_some())
-        });
+        // Allow script_data_hash when reference inputs OR spending inputs
+        // carry reference scripts.
+        //
+        // Per the Cardano ledger spec, `txNonDistinctRefScriptsSize` counts
+        // script_ref bytes from BOTH spending inputs and reference inputs.
+        // A transaction that spends a UTxO carrying a script_ref has a
+        // legitimate cost-model contribution and therefore a legitimate reason
+        // to include a script_data_hash even when it carries no inline Plutus
+        // scripts.  Checking only `reference_inputs` was the bug — spending
+        // inputs carrying script_refs were causing `UnexpectedScriptDataHash`
+        // false positives.
+        let has_ref_scripts = body
+            .reference_inputs
+            .iter()
+            .chain(body.inputs.iter())
+            .any(|inp| {
+                utxo_set
+                    .lookup(inp)
+                    .is_some_and(|utxo| utxo.script_ref.is_some())
+            });
         if !has_ref_scripts {
             errors.push(ValidationError::UnexpectedScriptDataHash);
         }

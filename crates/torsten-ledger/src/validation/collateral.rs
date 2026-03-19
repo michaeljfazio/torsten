@@ -21,7 +21,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::{Hash28, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{Certificate, GovAction, RedeemerTag, ScriptRef, Transaction, Voter};
+use torsten_primitives::transaction::{
+    Certificate, GovAction, RedeemerTag, ScriptRef, Transaction, Voter,
+};
 use torsten_primitives::value::AssetName;
 
 use crate::utxo::UtxoSet;
