@@ -523,18 +523,116 @@ impl Node {
                         let snapshot_slot =
                             snapshot_state.tip.point.slot().map(|s| s.0).unwrap_or(0);
 
-                        // Restore from snapshot and replay forward to rollback point.
-                        // Detach the UtxoStore before replacing state so it survives
-                        // the replacement (bincode snapshot has utxos=0 in LSM mode).
+                        // ─────────────────────────────────────────────────────
+                        // CRITICAL: UTxO store must be rebuilt from the snapshot,
+                        // NOT reused from the pre-rollback state.
+                        //
+                        // The previous approach (detach + re-attach the live store)
+                        // was fundamentally broken:
+                        //
+                        //   1. The live store contains UTxOs from blocks BEYOND the
+                        //      rollback point (the blocks we just rolled back).
+                        //   2. Re-attaching it and then replaying snapshot→rollback
+                        //      re-inserts outputs but never removes the stale outputs
+                        //      from the rolled-back blocks.
+                        //   3. The UTxO store permanently diverges from the canonical
+                        //      chain: stale UTxOs (from rolled-back blocks) remain
+                        //      forever because they are not tracked in any diff.
+                        //   4. On subsequent blocks, inputs spending those stale UTxOs
+                        //      succeed in our store when they should fail (double-spend
+                        //      from our node's perspective) — or conversely, legitimate
+                        //      inputs from blocks we haven't applied yet appear missing
+                        //      because the live store's diff context is wrong.
+                        //
+                        // The CORRECT approach:
+                        //   - If we have an LSM UTxO snapshot ("ledger") saved at or
+                        //     near the ledger snapshot point, restore the UTxO store
+                        //     from that snapshot.  It reflects the exact UTxO set at
+                        //     the snapshot slot — no stale entries.
+                        //   - Then replay ApplyOnly from snapshot_slot → rollback_slot
+                        //     to add the blocks we need to re-apply.
+                        //
+                        // The "ledger" UTxO snapshot is written by save_utxo_snapshot()
+                        // at the same time as each ledger snapshot, so they are always
+                        // in sync.
+                        //
+                        // If no UTxO snapshot exists (e.g., in-memory mode or very
+                        // first run), fall back to reset_ledger_and_replay which does
+                        // a full genesis replay — expensive but correct.
+                        // ─────────────────────────────────────────────────────
+                        let utxo_store_path = self.database_path.join("utxo-store");
+                        let restored_utxo_store = if utxo_store_path.exists() {
+                            // Try to open the UTxO store from the saved "ledger" LSM snapshot.
+                            // This snapshot reflects the exact UTxO set at snapshot_slot.
+                            match torsten_ledger::utxo_store::UtxoStore::open_from_snapshot(
+                                &utxo_store_path,
+                                "ledger",
+                            ) {
+                                Ok(mut store) => {
+                                    // Rebuild the address index and count from the restored snapshot.
+                                    store.count_entries();
+                                    store.set_indexing_enabled(true);
+                                    store.rebuild_address_index();
+                                    info!(
+                                        snapshot_slot,
+                                        utxos = store.len(),
+                                        "UTxO store restored from LSM snapshot for rollback"
+                                    );
+                                    Some(store)
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to open UTxO store from snapshot for rollback: {e} \
+                                         — falling back to full reset+replay"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None // No on-disk UTxO store; in-memory mode uses bincode snapshot
+                        };
+
                         let mut ls = self.ledger_state.write().await;
-                        let utxo_store = ls.utxo_set.detach_store();
-                        *ls = snapshot_state;
-                        if let Some(store) = utxo_store {
+
+                        if let Some(store) = restored_utxo_store {
+                            // LSM mode: replace ledger state and attach the correct UTxO store.
+                            *ls = snapshot_state;
                             ls.attach_utxo_store(store);
+                        } else if utxo_store_path.exists() {
+                            // LSM store path exists but snapshot open failed — do full reset.
+                            drop(ls);
+                            error!(
+                                rollback_slot,
+                                "UTxO store snapshot unavailable for rollback — \
+                                 performing full genesis reset+replay to ensure correctness"
+                            );
+                            self.reset_ledger_and_replay(rollback_slot).await;
+                            // reset_ledger_and_replay acquires the write lock internally;
+                            // we must not hold `ls` here.  Skip the replay below.
+                            // Note: this path is handled by returning early from the else branch.
+                            // The goto-style logic is unavoidable here without restructuring —
+                            // set a flag and fall through to the mempool cleanup below.
+                            //
+                            // For simplicity, we just fall through; the ledger state
+                            // will be at rollback_slot after reset_ledger_and_replay.
+                            // The replay in the block below will be a no-op since
+                            // reset_ledger_and_replay already replayed to rollback_slot.
+                            return; // exit handle_rollback entirely; caller will reconnect
+                        } else {
+                            // Pure in-memory mode (no UTxO store file): the bincode snapshot
+                            // contains all UTxOs.  Detach the current (stale) store so the
+                            // snapshot's in-memory UTxOs take precedence.
+                            let _ = ls.utxo_set.detach_store();
+                            *ls = snapshot_state;
                         }
+
                         let replay_from = snapshot_slot;
 
                         // Replay blocks from snapshot tip to rollback point.
+                        // In-memory UTxOs from the snapshot are correct at snapshot_slot;
+                        // LSM store has been restored from its matching snapshot.
+                        // ApplyOnly mode correctly inserts all outputs without re-running
+                        // validation, ensuring the UTxO set is canonical at rollback_slot.
                         let db = self.chain_db.read().await;
                         let mut current_slot = replay_from;
                         let mut replayed = 0u64;
@@ -573,12 +671,12 @@ impl Node {
                                 }
                             }
                         }
-                        debug!(
+                        info!(
                             snapshot_slot,
                             rollback_slot,
                             replayed,
                             snapshot = %snapshot_path.display(),
-                            "Ledger state restored from snapshot and replayed"
+                            "Ledger state restored from snapshot and replayed to rollback point"
                         );
                     }
                     Err(e) => {
