@@ -161,9 +161,33 @@ enum TxSubcommand {
         /// Number of signing keys (witnesses)
         #[arg(long, default_value = "1")]
         witness_count: u64,
-        /// Protocol parameters file (JSON)
+        /// Protocol parameters file (JSON output of `query protocol-parameters`)
         #[arg(long)]
         protocol_params_file: PathBuf,
+        /// Number of transaction inputs (cardano-cli compatibility flag; ignored when
+        /// the tx body file is present since we measure the actual body size)
+        #[arg(long)]
+        tx_in_count: Option<u64>,
+        /// Number of transaction outputs (cardano-cli compatibility flag; ignored
+        /// when the tx body file is present)
+        #[arg(long)]
+        tx_out_count: Option<u64>,
+    },
+    /// Calculate the minimum lovelace required for a UTxO output
+    ///
+    /// Uses the Babbage/Conway formula:
+    ///   min_ada = max(1_000_000, coinsPerUTxOByte * (output_cbor_size + 160))
+    ///
+    /// Reads `coinsPerUTxOByte` (or `utxoCostPerByte`) from the protocol params
+    /// JSON and estimates the serialised output size from the --tx-out value spec.
+    CalculateMinRequiredUtxo {
+        /// Protocol parameters file (JSON output of `query protocol-parameters`)
+        #[arg(long)]
+        protocol_params_file: PathBuf,
+        /// Output value specification in cardano-cli format: `address+lovelace` or
+        /// `address+lovelace+"policy.asset qty+..."` for multi-asset outputs.
+        #[arg(long = "tx-out")]
+        tx_out: String,
     },
     /// View transaction contents
     View {
@@ -2399,8 +2423,17 @@ impl TransactionCmd {
                 tx_body_file,
                 witness_count,
                 protocol_params_file,
+                // --tx-in-count and --tx-out-count are accepted for cardano-cli
+                // compatibility but are not used: we measure the actual serialised
+                // tx body size rather than estimating it from counts.
+                tx_in_count: _,
+                tx_out_count: _,
             } => {
-                // Read protocol parameters
+                // Read protocol parameters from the JSON file produced by
+                // `query protocol-parameters`.  We accept both the cardano-cli
+                // 10.x names (txFeePerByte / txFeeFixed) and the older names
+                // (minFeeA / minFeeB) so that params files from either version
+                // of the tool work without modification.
                 let pp_content = std::fs::read_to_string(&protocol_params_file)?;
                 let pp: serde_json::Value = serde_json::from_str(&pp_content)?;
 
@@ -2411,9 +2444,9 @@ impl TransactionCmd {
                 let min_fee_b = pp["txFeeFixed"]
                     .as_u64()
                     .or_else(|| pp["minFeeB"].as_u64())
-                    .unwrap_or(155381);
+                    .unwrap_or(155_381);
 
-                // Read tx body to get its size
+                // Read the tx body text envelope and decode the CBOR payload.
                 let content = std::fs::read_to_string(&tx_body_file)?;
                 let envelope: serde_json::Value = serde_json::from_str(&content)?;
                 let cbor_hex = envelope["cborHex"]
@@ -2421,15 +2454,42 @@ impl TransactionCmd {
                     .ok_or_else(|| anyhow::anyhow!("Missing cborHex in tx body file"))?;
                 let tx_body_cbor = hex::decode(cbor_hex)?;
 
-                // Estimate full signed tx size:
-                // tx body + witness overhead per key (vkey 32 + sig 64 + CBOR wrapping ~10)
-                let witness_overhead = witness_count * 106;
-                // Signed tx envelope: array(4) + body + witness_set + bool + null (~4 bytes)
-                let estimated_size = tx_body_cbor.len() as u64 + witness_overhead + 11;
-
-                // fee = min_fee_a * tx_size + min_fee_b
-                let fee = min_fee_a * estimated_size + min_fee_b;
+                // Delegate to the shared fee estimator so the formula is
+                // consistent with auto-balance mode.
+                let fee = estimate_fee(&tx_body_cbor, witness_count, min_fee_a, min_fee_b);
+                // cardano-cli output format: "<fee> Lovelace"
                 println!("{fee} Lovelace");
+                Ok(())
+            }
+            TxSubcommand::CalculateMinRequiredUtxo {
+                protocol_params_file,
+                tx_out,
+            } => {
+                // Parse the protocol params JSON to extract coinsPerUTxOByte.
+                // cardano-cli 10.x uses "coinsPerUTxOByte"; older versions used
+                // "utxoCostPerByte" or "minUTxOValue".
+                let pp_content = std::fs::read_to_string(&protocol_params_file)?;
+                let pp: serde_json::Value = serde_json::from_str(&pp_content)?;
+
+                let coins_per_utxo_byte = pp["coinsPerUTxOByte"]
+                    .as_u64()
+                    .or_else(|| pp["utxoCostPerByte"].as_u64())
+                    .or_else(|| pp["minUTxOValue"].as_u64())
+                    .unwrap_or(4_310); // current mainnet/preview default
+
+                // Parse the --tx-out value spec to extract any native tokens.
+                // We reuse parse_tx_output() which handles both ADA-only and
+                // multi-asset formats.
+                let parsed = parse_tx_output(&tx_out)?;
+
+                // Compute minimum ADA using the Babbage/Conway formula via the
+                // shared helper function.
+                let min_ada = min_ada_for_output(&parsed.tokens, coins_per_utxo_byte);
+
+                // cardano-cli output format: a JSON object with a "lovelace" key
+                // matching `cardano-cli transaction calculate-min-required-utxo`.
+                let out = serde_json::json!({ "lovelace": min_ada });
+                println!("{}", serde_json::to_string_pretty(&out)?);
                 Ok(())
             }
             TxSubcommand::View { tx_file } => {
@@ -4403,5 +4463,118 @@ mod tests {
             }
         }
         assert!(found_key_11, "Field 11 (script_data_hash) must be present");
+    }
+
+    // ── calculate-min-fee: --tx-in-count / --tx-out-count compat flags ────────
+
+    #[test]
+    fn test_estimate_fee_uses_body_size_not_counts() {
+        // Both a small body and a large body should produce different fees even
+        // if the caller passes the same tx-in-count and tx-out-count.  The flags
+        // are cosmetic compat stubs; the fee is derived from the actual CBOR body.
+        let small_body = build_tx_body_cbor(
+            &[(Hash32::from_bytes([0x01; 32]), 0)],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let large_body = build_tx_body_cbor(
+            &[
+                (Hash32::from_bytes([0x01; 32]), 0),
+                (Hash32::from_bytes([0x02; 32]), 1),
+                (Hash32::from_bytes([0x03; 32]), 2),
+            ],
+            &[],
+            0,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let fee_small = estimate_fee(&small_body, 1, 44, 155_381);
+        let fee_large = estimate_fee(&large_body, 1, 44, 155_381);
+        assert!(
+            fee_large > fee_small,
+            "more inputs → larger body → higher fee"
+        );
+    }
+
+    // ── calculate-min-required-utxo: min_ada_for_output ──────────────────────
+
+    #[test]
+    fn test_min_ada_for_output_no_tokens() {
+        // ADA-only output: formula is max(1_000_000, coins_per_utxo_byte * (0 + 160)).
+        // With the current mainnet/preview default of 4_310:
+        //   4_310 * 160 = 689_600 < 1_000_000 → floor at 1 ADA.
+        let result = min_ada_for_output(&[], 4_310);
+        assert_eq!(result, 1_000_000, "ADA-only output must floor at 1 ADA");
+    }
+
+    #[test]
+    fn test_min_ada_for_output_single_native_token() {
+        // One native token raises the required ADA above the 1 ADA floor.
+        // The exact value depends on the size estimate; just verify it exceeds 1 ADA.
+        let tokens = vec![(
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".to_string(),
+            "".to_string(),
+            1_000u64,
+        )];
+        let result = min_ada_for_output(&tokens, 4_310);
+        assert!(
+            result >= 1_000_000,
+            "min ADA with tokens must be at least 1 ADA, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_min_ada_for_output_coins_per_utxo_byte_zero() {
+        // If coinsPerUTxOByte is 0 (pathological), the formula is 0 but the
+        // floor at 1 ADA still applies.
+        let result = min_ada_for_output(&[], 0);
+        assert_eq!(
+            result, 1_000_000,
+            "floor must hold even for zero cost param"
+        );
+    }
+
+    #[test]
+    fn test_min_ada_for_output_multiple_policies() {
+        // Multiple policies should cost more than one policy.
+        let one_policy = vec![(
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".to_string(),
+            "token1".to_string(),
+            1u64,
+        )];
+        let two_policies = vec![
+            (
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".to_string(),
+                "token1".to_string(),
+                1u64,
+            ),
+            (
+                "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5".to_string(),
+                "token2".to_string(),
+                1u64,
+            ),
+        ];
+        let single = min_ada_for_output(&one_policy, 4_310);
+        let multi = min_ada_for_output(&two_policies, 4_310);
+        assert!(
+            multi >= single,
+            "two policies must require at least as much ADA as one"
+        );
     }
 }

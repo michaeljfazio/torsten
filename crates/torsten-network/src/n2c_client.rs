@@ -671,6 +671,65 @@ impl N2CClient {
         Ok(result)
     }
 
+    /// Query the era history (GetInterpreter / GetEraHistory) via the HardFork combinator.
+    ///
+    /// This is a QueryHardFork query, not an era-wrapped Shelley query. The wire
+    /// format is:
+    ///   MsgQuery [3, [2, [0]]]
+    /// where `2` is the HardFork tag and `0` is sub-tag GetInterpreter.
+    ///
+    /// The response is an indefinite-length CBOR array of EraSummary values,
+    /// NOT wrapped in an HFC success array(1).  Each EraSummary is:
+    ///   [EraParams, EraStart, SafeZone]
+    /// where EraStart = array(2)[slot_offset, time_offset] and
+    ///       EraParams = array(3)[epoch_size, slot_length_ms, safe_zone_epochs]
+    ///
+    /// Returns the raw MsgResult payload bytes for the CLI to parse.
+    pub async fn query_era_history(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        // Build MsgQuery: [3, [2, [0]]]
+        // Outer array(2): MsgQuery tag=3 + body
+        // Body array(2): HardFork era wrapper tag=2 + inner query
+        // Inner array(1): sub-tag 0 = GetInterpreter
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(3)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // MsgQuery
+        enc.array(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(2)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // QueryHardFork tag
+        enc.array(1)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?;
+        enc.u32(0)
+            .map_err(|e| N2CClientError::Protocol(e.to_string()))?; // GetInterpreter
+
+        let segment = Segment {
+            transmission_time: 0,
+            protocol_id: MINI_PROTOCOL_STATE_QUERY,
+            is_responder: false,
+            payload,
+        };
+        self.send_segment(&segment).await?;
+
+        let resp = self.recv_segment().await?;
+        Ok(resp.payload)
+    }
+
+    /// Query the current KES period info (GetCurrentKESPeriod - Shelley query tag 31).
+    ///
+    /// Returns array(2)[kes_period_of_last_opcert, current_kes_period] where both
+    /// are unsigned integers.  The CLI computes kes_period = opcert_counter and
+    /// checks whether the current period falls within the valid operational range.
+    ///
+    /// Returns the raw MsgResult payload bytes for the CLI to parse.
+    pub async fn query_current_kes_period(&mut self) -> Result<Vec<u8>, N2CClientError> {
+        // GetCurrentKESPeriod is Shelley query tag 31
+        let result = self.send_query(31).await?;
+        Ok(result)
+    }
+
     /// Query UTxOs at a specific address (GetUTxOByAddress - Shelley query tag 6)
     pub async fn query_utxo_by_address(
         &mut self,

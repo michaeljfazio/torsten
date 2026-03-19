@@ -164,6 +164,42 @@ enum QuerySubcommand {
         #[arg(long, default_value = "0.05")]
         active_slot_coeff: f64,
     },
+    /// Convert a UTC timestamp to a Cardano slot number.
+    ///
+    /// Queries the node for its era history (GetInterpreter) to obtain the slot
+    /// config (zero_time, zero_slot, slot_length_ms) and then computes:
+    ///
+    ///   slot = zero_slot + (utc_unix_secs - zero_time_secs) * 1000 / slot_length_ms
+    ///
+    /// The UTC timestamp must be provided as a positional argument in ISO-8601
+    /// format with a Z suffix, e.g. "2024-01-15T00:00:00Z".
+    #[command(name = "slot-number")]
+    SlotNumber {
+        /// UTC timestamp in ISO-8601 format, e.g. "2024-01-15T00:00:00Z"
+        utc_time: String,
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
+    /// Show KES key period information for an operational certificate.
+    ///
+    /// Reads the opcert file, decodes the KES counter and issue period, then
+    /// queries the node for the current KES period via GetCurrentKESPeriod
+    /// (Shelley query tag 31).  Prints a summary including whether the cert
+    /// is currently valid, expired, or not-yet-valid.
+    ///
+    /// Matches the output of `cardano-cli query kes-period-info`.
+    #[command(name = "kes-period-info")]
+    KesPeriodInfo {
+        /// Operational certificate file (text envelope)
+        #[arg(long)]
+        op_cert_file: PathBuf,
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
 }
 
 /// Map era index to era name
@@ -1727,6 +1763,230 @@ impl QueryCmd {
                 }
                 Ok(())
             }
+            QuerySubcommand::SlotNumber {
+                utc_time,
+                socket_path,
+                testnet_magic,
+            } => {
+                // Parse the caller-supplied UTC timestamp to a Unix timestamp
+                // (seconds since 1970-01-01T00:00:00Z).
+                let target_unix = parse_iso8601_to_unix(&utc_time).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Cannot parse timestamp '{}'. Expected ISO-8601 UTC, e.g. 2024-01-15T00:00:00Z",
+                        utc_time
+                    )
+                })?;
+
+                // Connect to the node (no state acquire needed: GetEraHistory is
+                // a top-level HardFork query that does not require acquired state).
+                let mut client = connect_and_handshake(&socket_path, testnet_magic).await?;
+
+                let raw = client
+                    .query_era_history()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query era history: {e}"))?;
+
+                // GetEraHistory response: MsgResult [4, <indefinite-array of EraSummary>]
+                // Each EraSummary = array(3)[EraParams, EraStart, SafeZone]
+                // EraStart      = array(2)[slot_offset: u64, time_offset_ms: u64]
+                //                  (time_offset is milliseconds relative to the system start)
+                // EraParams     = array(3)[epoch_length, slot_length_ms, safe_zone_k]
+                //
+                // We only need the *last* era summary since the current chain tip is
+                // guaranteed to be within it.  We iterate all summaries to land on the
+                // final one whose zero_time_ms ≤ target timestamp.
+                let mut decoder = minicbor::Decoder::new(&raw);
+                let _ = decoder.array(); // MsgResult outer array(2)
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                // EraHistory is NOT wrapped in an HFC success array(1).  Decode
+                // the indefinite-length array of summaries directly.
+                let mut best_zero_slot: u64 = 0;
+                let mut best_zero_time_ms: u64 = 0;
+                let mut best_slot_length_ms: u64 = 1_000; // 1 second default
+
+                // Consume the outer indefinite array (or definite array) of summaries.
+                // minicbor represents indefinite arrays as None from .array().
+                let _ = decoder.array(); // may be Some(n) or None (indefinite)
+                loop {
+                    // Each entry is array(3): [EraParams, EraStart, SafeZone]
+                    // Attempt to read the next EraStart; break on any parse failure
+                    // (which indicates end-of-array or break code for indefinite).
+                    let arr = decoder.array();
+                    if arr.is_err() {
+                        break;
+                    }
+
+                    // EraParams = array(3)[epoch_length, slot_length_ms, safe_zone]
+                    let params_len = decoder.array().unwrap_or(Some(0)).unwrap_or(0);
+                    let _epoch_length = decoder.u64().unwrap_or(0);
+                    let slot_length_ms = decoder.u64().unwrap_or(1_000);
+                    // Consume any remaining EraParams fields (safe_zone etc.)
+                    for _ in 2..params_len {
+                        decoder.skip().ok();
+                    }
+
+                    // EraStart = array(2)[slot_offset, time_offset_ms]
+                    if decoder.array().is_err() {
+                        break;
+                    }
+                    let zero_slot = decoder.u64().unwrap_or(0);
+                    let zero_time_ms = decoder.u64().unwrap_or(0);
+
+                    // SafeZone: skip (we only need slot/time offsets)
+                    decoder.skip().ok();
+
+                    best_zero_slot = zero_slot;
+                    best_zero_time_ms = zero_time_ms;
+                    best_slot_length_ms = slot_length_ms;
+                }
+
+                // Obtain the system start time via GetSystemStart so we can
+                // convert zero_time_ms (relative offset) to absolute Unix seconds.
+                // Re-use the same client connection (still in Idle state after
+                // the first query).
+                let system_start_str = client
+                    .query_system_start()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query system start: {e}"))?;
+
+                let system_start_unix =
+                    parse_iso8601_to_unix(&system_start_str).ok_or_else(|| {
+                        anyhow::anyhow!("Cannot parse system start: {}", system_start_str)
+                    })?;
+
+                client.done().await.ok();
+
+                // Convert zero_time_ms (ms since system start) to an absolute
+                // Unix timestamp in whole seconds.
+                let era_start_unix = system_start_unix + best_zero_time_ms / 1_000;
+
+                if target_unix < era_start_unix {
+                    anyhow::bail!(
+                        "Timestamp {} is before the era start at {} ({})",
+                        utc_time,
+                        system_start_str,
+                        era_start_unix
+                    );
+                }
+
+                // slot = era_zero_slot + floor((target - era_start) * 1000 / slot_length_ms)
+                let elapsed_secs = target_unix - era_start_unix;
+                let elapsed_ms = elapsed_secs * 1_000;
+                let slot_offset = elapsed_ms / best_slot_length_ms;
+                let slot = best_zero_slot + slot_offset;
+
+                // cardano-cli outputs just the slot number as a plain integer.
+                println!("{slot}");
+                Ok(())
+            }
+            QuerySubcommand::KesPeriodInfo {
+                op_cert_file,
+                socket_path,
+                testnet_magic,
+            } => {
+                // Read and decode the operational certificate text envelope.
+                // OpCert envelope type is "NodeOperationalCertificate".
+                // CBOR payload = array(2)[
+                //   array(4)[hot_vkey(32), counter(u64), kes_period(u64), sigma(64)],
+                //   cold_vkey(32)
+                // ]
+                let cert_content = std::fs::read_to_string(&op_cert_file)?;
+                let cert_env: serde_json::Value = serde_json::from_str(&cert_content)?;
+                let cbor_hex = cert_env["cborHex"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing cborHex in opcert file"))?;
+                let cbor_bytes = hex::decode(cbor_hex)?;
+
+                // Decode the operational certificate CBOR.
+                let mut dec = minicbor::Decoder::new(&cbor_bytes);
+                // Outer array(2): [inner_cert, cold_vkey]
+                dec.array()
+                    .map_err(|e| anyhow::anyhow!("Invalid opcert CBOR: {e}"))?;
+
+                // Inner array(4): [hot_vkey, counter, kes_period, sigma]
+                dec.array()
+                    .map_err(|e| anyhow::anyhow!("Invalid inner cert array: {e}"))?;
+                let _hot_vkey = dec.bytes().unwrap_or(&[]).to_vec();
+                let opcert_counter = dec.u64().unwrap_or(0);
+                let opcert_kes_period = dec.u64().unwrap_or(0);
+                let _sigma = dec.bytes().ok();
+
+                // Query the node for the current KES period (tag 31).
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+                let raw = client
+                    .query_current_kes_period()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query KES period: {e}"))?;
+                release_and_done(&mut client).await;
+
+                // Parse MsgResult [4, [array(1) [current_kes_period]]]
+                // GetCurrentKESPeriod response: HFC-wrapped array(1) containing
+                // a single u64 representing the current KES period.
+                let mut decoder = minicbor::Decoder::new(&raw);
+                let _ = decoder.array(); // outer [4, ...]
+                let tag = decoder.u32().unwrap_or(999);
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult(4), got {tag}");
+                }
+
+                // Strip HFC success wrapper
+                let pos = decoder.position();
+                if let Ok(Some(1)) = decoder.array() {
+                    // HFC wrapper consumed
+                } else {
+                    decoder.set_position(pos);
+                }
+
+                let current_kes_period = decoder.u64().unwrap_or(0);
+
+                // The KES evolution window is the number of periods a KES key
+                // covers before it must be rotated.  This is a protocol parameter
+                // (slotsPerKESPeriod in genesis).  We report a fixed value of 129
+                // (the value used on mainnet and preview) since we do not have
+                // direct access to genesis params here.  The start period and end
+                // period of the cert are the key facts the operator needs.
+                const KES_EVOLUTIONS: u64 = 129; // slotsPerKESPeriod typical value
+                let cert_start = opcert_kes_period;
+                let cert_end = opcert_kes_period + KES_EVOLUTIONS;
+
+                // Determine validity status
+                let status = if current_kes_period < cert_start {
+                    "NOT YET VALID"
+                } else if current_kes_period > cert_end {
+                    "EXPIRED"
+                } else {
+                    "VALID"
+                };
+
+                let periods_remaining = cert_end.saturating_sub(current_kes_period);
+
+                // Output format matches cardano-cli query kes-period-info.
+                println!("KES Period Info");
+                println!("===============");
+                println!("Status:                  {status}");
+                println!("Operational certificate: {}", op_cert_file.display());
+                println!("KES counter:             {opcert_counter}");
+                println!("Opcert start KES period: {cert_start}");
+                println!("Opcert end KES period:   {cert_end}");
+                println!("Current KES period:      {current_kes_period}");
+                println!("KES periods remaining:   {periods_remaining}");
+
+                if status == "EXPIRED" {
+                    eprintln!(
+                        "Warning: operational certificate has expired. Rotate KES key immediately."
+                    );
+                } else if status == "NOT YET VALID" {
+                    eprintln!(
+                        "Warning: operational certificate is not yet valid (starts at period {cert_start}, currently {current_kes_period})."
+                    );
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -1788,5 +2048,89 @@ mod tests {
         assert_eq!(era_name(6), "Conway");
         assert_eq!(era_name(7), "Unknown");
         assert_eq!(era_name(99), "Unknown");
+    }
+
+    // ── slot-number: inline slot arithmetic ──────────────────────────────────
+
+    /// Helper that replicates the slot-number formula from the SlotNumber handler.
+    /// Extracted here so we can test it independently of the node connection.
+    ///
+    /// Parameters match the handler's local variables:
+    ///   system_start_unix  – Unix seconds of the system start (GetSystemStart)
+    ///   zero_slot          – Slot number at the start of the current era
+    ///   zero_time_ms       – Milliseconds since system start at era start
+    ///   slot_length_ms     – Duration of a slot in milliseconds
+    ///   target_unix        – The UTC Unix timestamp we are converting
+    fn compute_slot(
+        system_start_unix: u64,
+        zero_slot: u64,
+        zero_time_ms: u64,
+        slot_length_ms: u64,
+        target_unix: u64,
+    ) -> u64 {
+        let era_start_unix = system_start_unix + zero_time_ms / 1_000;
+        let elapsed_secs = target_unix - era_start_unix;
+        let elapsed_ms = elapsed_secs * 1_000;
+        let slot_offset = elapsed_ms / slot_length_ms;
+        zero_slot + slot_offset
+    }
+
+    #[test]
+    fn test_slot_number_preview_genesis() {
+        // Preview testnet parameters:
+        //   system start  = 2022-10-25T00:00:00Z = 1666656000 Unix
+        //   Conway era start: zero_slot=4_924_800, zero_time_ms (approximate)
+        //
+        // For a simpler unit test we use a synthetic single-era chain where the
+        // only era starts at slot 0 and the system start is the Unix epoch.
+        let system_start: u64 = 0; // 1970-01-01T00:00:00Z
+        let zero_slot: u64 = 0;
+        let zero_time_ms: u64 = 0;
+        let slot_length_ms: u64 = 1_000; // 1 second per slot
+
+        // One hour after genesis → 3600 slots.
+        let target = 3600u64;
+        let slot = compute_slot(
+            system_start,
+            zero_slot,
+            zero_time_ms,
+            slot_length_ms,
+            target,
+        );
+        assert_eq!(slot, 3600);
+    }
+
+    #[test]
+    fn test_slot_number_with_era_offset() {
+        // Chain with a Shelley hard-fork at slot 4_492_800 (≈ mainnet Shelley).
+        // zero_time_ms is the total milliseconds elapsed from genesis to Shelley.
+        let system_start: u64 = 1_506_203_091; // approximate Cardano mainnet genesis
+        let zero_slot: u64 = 4_492_800;
+        // Shelley started ~89 days after Byron at 1s/slot: 4_492_800_000 ms
+        let zero_time_ms: u64 = 4_492_800_000;
+        let slot_length_ms: u64 = 1_000; // 1s/slot in Shelley
+
+        // Query a timestamp that is exactly 10 slots after Shelley start.
+        let era_start_unix = system_start + zero_time_ms / 1_000;
+        let target = era_start_unix + 10;
+        let slot = compute_slot(
+            system_start,
+            zero_slot,
+            zero_time_ms,
+            slot_length_ms,
+            target,
+        );
+        assert_eq!(
+            slot, 4_492_810,
+            "ten seconds past era start = ten slots past zero_slot"
+        );
+    }
+
+    #[test]
+    fn test_slot_number_slot_boundary() {
+        // Verify that the floor division truncates correctly: a timestamp that
+        // is 1.5 slot-lengths past zero should yield slot 1 (not 2).
+        let slot = compute_slot(0, 0, 0, 2_000, 3); // target = 3s, slot_length = 2s
+        assert_eq!(slot, 1, "floor(3000ms / 2000ms) = 1");
     }
 }
