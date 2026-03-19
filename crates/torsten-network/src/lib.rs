@@ -1,6 +1,7 @@
 pub(crate) mod bandwidth;
 pub(crate) mod client;
 pub(crate) mod dns;
+pub mod duplex;
 pub(crate) mod governor;
 pub(crate) mod miniprotocols;
 pub(crate) mod multiplexer;
@@ -27,6 +28,7 @@ pub use miniprotocols::txsubmission::{TxSubmissionClient, TxSubmissionError, TxS
 pub use n2c::{N2CServer, TxValidationError, TxValidator};
 pub use n2c_client::N2CClient;
 // Re-export mempool trait and types from torsten-primitives for convenience
+pub use duplex::{DuplexError, DuplexPeerConnection};
 pub use governor::{Governor, GovernorConfig, GovernorEvent, PeerTargets};
 pub use n2c::encode_query_result;
 pub use n2n_server::{
