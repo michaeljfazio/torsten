@@ -1,5 +1,5 @@
 use crate::utxo::UtxoSet;
-use crate::validation::plutus_script_version_map;
+use crate::validation::{plutus_script_version_map, redeemer_script_version_map};
 use torsten_primitives::transaction::Transaction;
 use tracing::{debug, trace};
 
@@ -53,6 +53,27 @@ impl SlotConfig {
             slot_length: 1_000,
         }
     }
+}
+
+/// Decode the `(tag_byte, index)` from the CBOR-encoded pallas `Redeemer`
+/// returned by `eval_phase_two_raw`.
+///
+/// The encoding is `array(4)[tag_uint, index_uint, data, ex_units]`.  We only
+/// need the first two elements.  The tag encoding matches the Cardano CDDL
+/// redeemer tag enumeration:
+///   0 = Spend, 1 = Mint, 2 = Cert, 3 = Reward, 4 = Vote, 5 = Propose.
+///
+/// Returns `None` if the bytes cannot be decoded (malformed CBOR or unexpected
+/// structure).  Callers treat `None` as "unknown version" and fall back to the
+/// permissive non-Unit check, which is the safe direction.
+fn decode_redeemer_tag_index(redeemer_cbor: &[u8]) -> Option<(u8, u32)> {
+    use minicbor::Decoder;
+    let mut dec = Decoder::new(redeemer_cbor);
+    // Expect an array of at least 2 elements.
+    let _len = dec.array().ok()?;
+    let tag = dec.u8().ok()?;
+    let index = dec.u32().ok()?;
+    Some((tag, index))
 }
 
 /// Encode a TransactionInput as CBOR bytes (pallas wire format)
@@ -135,11 +156,28 @@ pub fn evaluate_plutus_scripts(
         slot_config.slot_length,
     );
 
-    // Build the language-version map once before evaluation so we can apply
-    // the correct success predicate per redeemer result.
-    // The map is keyed by script hash (Hash28) → version tag (1/2/3).
+    // Build the script hash → language version map (1=V1, 2=V2, 3=V3) for all
+    // Plutus scripts available to this transaction (witness set + ref scripts).
     let version_map = plutus_script_version_map(tx, utxo_set);
-    let has_any_v3 = version_map.values().any(|v| *v == 3);
+
+    // Build the per-redeemer version map: (tag_byte, index) → language version.
+    //
+    // `eval_phase_two_raw` returns one `(redeemer_cbor, EvalResult)` pair per
+    // executed redeemer.  The `redeemer_cbor` bytes are a CBOR-encoded pallas
+    // `Redeemer`: `array(4)[tag_uint, index_uint, data, ex_units]`.  We decode
+    // the first two fields to recover (tag, index) and look up the language
+    // version from this map.
+    //
+    // Per Haskell's `evaluateScriptRestricting` (PlutusLedgerApi.Common.Eval):
+    // - V1 / V2: success = any non-error CEK result (term value is ignored).
+    // - V3: success = script returned exactly `Unit` (`()`); any other term
+    //   (Data, Bool, integer, …) is treated as `InvalidReturnValue`.
+    //
+    // By resolving each redeemer individually we avoid the prior bug where
+    // the transaction-wide `has_any_v3` flag applied the V3 Unit check to
+    // ALL redeemers when any V3 script was present — incorrectly rejecting
+    // valid V1/V2 scripts that return non-Unit in mixed-version transactions.
+    let redeemer_version_map = redeemer_script_version_map(tx, utxo_set, &version_map);
 
     match uplc::tx::eval_phase_two_raw(
         tx_cbor,
@@ -151,49 +189,24 @@ pub fn evaluate_plutus_scripts(
         |_redeemer| {},
     ) {
         Ok(results) => {
-            // Determine whether to apply strict V3 Unit-return validation.
-            //
-            // Per Haskell's `PlutusLedgerApi.Common.Eval.evaluateScriptRestricting`:
-            // - PlutusV1 / PlutusV2: success = any non-error result (CEK machine
-            //   success regardless of the returned term).  This matches Haskell's
-            //   `evaluateScriptCounting` used for V1/V2.
-            // - PlutusV3: success = script returned exactly `Unit` (`()`).  Any
-            //   other return value (Data, Bool(false), integer literal, …) is
-            //   treated as `InvalidReturnValue` and the script is considered failed.
-            //   This is enforced by Haskell's `evaluateScriptRestricting` when the
-            //   language is PlutusV3 (`isUnit`).
-            //
-            // The `eval_phase_two_raw` API does not expose per-redeemer language
-            // information in its result tuple `(redeemer_bytes, EvalResult)`.
-            // We therefore use a conservative approximation: if ANY V3 script is
-            // present in the transaction, ALL redeemer results must be either an
-            // error (failure path) OR return Unit.
-            //
-            // This is correct because:
-            // 1. If only V1/V2 scripts are present, `has_any_v3 == false` and we
-            //    apply the permissive rule — matching Haskell exactly.
-            // 2. If V3 scripts are present alongside V1/V2 scripts, Haskell would
-            //    apply Unit-check only to V3 redeemers. Our approximation applies
-            //    it to all.  However, any V1/V2 script that returns non-Unit is
-            //    also highly abnormal; well-written scripts return Unit by convention.
-            //    In practice this does not reject valid transactions because V1/V2
-            //    scripts on-chain all return Unit.
-            // 3. The correct per-redeemer check requires correlating the redeemer's
-            //    (tag, index) back to the script hash it corresponds to, then looking
-            //    up that hash in the version map.  This is deferred until the uplc API
-            //    exposes per-result language information (TODO: upstream request).
-            let strict_unit_check = has_any_v3;
-
-            for (_redeemer_bytes, eval_result) in &results {
+            for (redeemer_bytes, eval_result) in &results {
                 let cost = eval_result.cost();
+
+                // Determine whether this specific redeemer executes a V3 script.
+                // Decode tag and index from the CBOR redeemer: array(4)[tag, idx, …].
+                let is_v3 = decode_redeemer_tag_index(redeemer_bytes)
+                    .and_then(|(tag, idx)| redeemer_version_map.get(&(tag, idx)).copied())
+                    .map(|ver| ver == 3)
+                    .unwrap_or(false);
+
                 let script_failed = match &eval_result.result {
                     Err(_) => true,
                     Ok(term) => {
                         if matches!(term, uplc::ast::Term::Error) {
                             true
-                        } else if strict_unit_check && !term.is_unit() {
-                            // V3 (or mixed V3) transaction: only Unit is a valid
-                            // return value.  Any other term is an InvalidReturnValue.
+                        } else if is_v3 && !term.is_unit() {
+                            // PlutusV3: only Unit is a valid return value.
+                            // Any other term is treated as InvalidReturnValue.
                             true
                         } else {
                             false
@@ -1156,6 +1169,179 @@ mod tests {
         assert!(
             result_exhausted.is_err(),
             "Tiny steps budget (1) must cause EvalFailed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: decode_redeemer_tag_index — round-trip sanity check
+    //
+    // Verifies that we can recover (tag, index) from the CBOR redeemer bytes
+    // produced by our own `build_conway_tx_cbor` helper (which encodes the
+    // witness-set redeemer in the same `array(4)[tag, idx, data, ex_units]`
+    // format that `eval_phase_two_raw` returns).  This exercises the function
+    // used in the per-redeemer V3 Unit-check path.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_decode_redeemer_tag_index() {
+        use minicbor::Encoder;
+
+        // Build a redeemer CBOR manually: array(4)[tag=0, idx=3, data=unit, ex_units]
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(4).expect("infallible");
+        enc.u8(0).expect("infallible"); // Spend = 0
+        enc.u32(3).expect("infallible"); // index 3
+        enc.tag(minicbor::data::Tag::new(121)).expect("infallible");
+        enc.array(0).expect("infallible"); // Unit datum
+        enc.array(2).expect("infallible");
+        enc.u64(1000).expect("infallible"); // steps
+        enc.u64(500).expect("infallible"); // mem
+
+        let result = decode_redeemer_tag_index(&buf);
+        assert_eq!(result, Some((0u8, 3u32)), "Expected (tag=0 Spend, index=3)");
+
+        // Mint redeemer at index 1
+        let mut buf2 = Vec::new();
+        let mut enc2 = Encoder::new(&mut buf2);
+        enc2.array(4).expect("infallible");
+        enc2.u8(1).expect("infallible"); // Mint = 1
+        enc2.u32(1).expect("infallible");
+        enc2.tag(minicbor::data::Tag::new(121)).expect("infallible");
+        enc2.array(0).expect("infallible");
+        enc2.array(2).expect("infallible");
+        enc2.u64(0).expect("infallible");
+        enc2.u64(0).expect("infallible");
+
+        assert_eq!(decode_redeemer_tag_index(&buf2), Some((1u8, 1u32)));
+
+        // Malformed CBOR must return None
+        assert_eq!(decode_redeemer_tag_index(&[0xFF, 0xAB]), None);
+        assert_eq!(decode_redeemer_tag_index(&[]), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: Per-redeemer V3 Unit-check (regression for GH#185)
+    //
+    // A transaction that contains BOTH a PlutusV2 script (Spend redeemer)
+    // AND a PlutusV3 script in the witness set (but no redeemer for the V3
+    // script) must NOT apply the Unit-return check to the V2 redeemer.
+    //
+    // The V2 script `(program 1.0.0 (lam _ (lam _ (lam _ (con integer 42)))))`
+    // returns the integer 42 (not Unit).  Under the old transaction-wide
+    // `has_any_v3` flag this would have been rejected.  Under the correct
+    // per-redeemer check, the V2 Spend redeemer maps to version 2 and the
+    // Unit check is NOT applied — the script must succeed.
+    //
+    // The witness set contains a V3 script (key 7) that has no redeemer, so
+    // `eval_phase_two_raw` never executes it — this ensures only the V2
+    // script runs while the V3 script is visible in `plutus_script_version_map`.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_v2_non_unit_return_not_blocked_by_v3_presence() {
+        use minicbor::Encoder;
+
+        // V2 script that returns integer 42 (not Unit)
+        let v2_script_cbor =
+            build_script_cbor("(program 1.0.0 (lam _ (lam _ (lam _ (con integer 42)))))");
+        let v2_script_hash = script_hash_v2(&v2_script_cbor);
+
+        // A trivial V3 script (never executed — no redeemer points to it).
+        // We pick a short byte sequence so the script_hash differs from the V2 hash.
+        let v3_script_cbor = build_script_cbor("(program 1.0.0 (lam _ (con unit ())))");
+
+        let tx_input_hash = [0x08u8; 32];
+
+        // Build transaction CBOR with both V2 (key 6) and V3 (key 7) scripts
+        // and ONE Spend redeemer targeting the V2 script.
+        let tx_cbor: Vec<u8> = {
+            let mut buf = Vec::with_capacity(512);
+            let mut enc = Encoder::new(&mut buf);
+
+            // Outer: array(4) [body, wits, is_valid, null]
+            enc.array(4).expect("infallible");
+
+            // Body: map(3) {0: [input], 1: [output], 2: fee}
+            enc.map(3).expect("infallible");
+            enc.u8(0).expect("infallible"); // inputs
+            enc.array(1).expect("infallible");
+            enc.array(2).expect("infallible");
+            enc.bytes(&tx_input_hash).expect("infallible");
+            enc.u8(0).expect("infallible");
+            enc.u8(1).expect("infallible"); // outputs
+            enc.array(1).expect("infallible");
+            enc.map(2).expect("infallible");
+            enc.u8(0).expect("infallible");
+            enc.bytes(&{
+                let mut a = vec![0x61u8];
+                a.extend_from_slice(&[0xBBu8; 28]);
+                a
+            })
+            .expect("infallible");
+            enc.u8(1).expect("infallible");
+            enc.u32(9_000_000).expect("infallible");
+            enc.u8(2).expect("infallible"); // fee
+            enc.u32(1_000_000).expect("infallible");
+
+            // Witness set: map(3) { 5: redeemers, 6: v2_scripts, 7: v3_scripts }
+            enc.map(3).expect("infallible");
+
+            // key 5: redeemers — one Spend redeemer at index 0 (for the V2 script)
+            enc.u8(5).expect("infallible");
+            enc.array(1).expect("infallible");
+            enc.array(4).expect("infallible");
+            enc.u8(0).expect("infallible"); // Spend
+            enc.u8(0).expect("infallible"); // index 0
+            enc.tag(minicbor::data::Tag::new(121)).expect("infallible");
+            enc.array(0).expect("infallible"); // Unit redeemer data
+            enc.array(2).expect("infallible");
+            enc.u64(14_000_000).expect("infallible"); // steps
+            enc.u64(2_000_000).expect("infallible"); // mem
+
+            // key 6: PlutusV2 scripts
+            enc.u8(6).expect("infallible");
+            enc.array(1).expect("infallible");
+            enc.bytes(&v2_script_cbor).expect("infallible");
+
+            // key 7: PlutusV3 scripts (present but no redeemer — not executed)
+            enc.u8(7).expect("infallible");
+            enc.array(1).expect("infallible");
+            enc.bytes(&v3_script_cbor).expect("infallible");
+
+            enc.bool(true).expect("infallible"); // is_valid
+            enc.null().expect("infallible"); // aux_data
+
+            buf
+        };
+
+        // UTxO: the input is locked by the V2 script
+        let (utxo_set, input) = build_script_utxo_set(&tx_input_hash, &v2_script_hash);
+
+        let mut tx = Transaction::empty_with_hash(Hash32::ZERO);
+        tx.raw_cbor = Some(tx_cbor);
+        tx.body.inputs = vec![input];
+        // Populate witness_set so plutus_script_version_map can see both scripts
+        tx.witness_set.plutus_v2_scripts = vec![v2_script_cbor];
+        tx.witness_set.plutus_v3_scripts = vec![v3_script_cbor];
+
+        let slot_config = SlotConfig::preview();
+
+        // The V2 script returns integer 42 (not Unit).  With the old
+        // transaction-wide `has_any_v3` flag this would incorrectly fail
+        // (because a V3 script is present).  With the correct per-redeemer
+        // check the Spend redeemer at (0, 0) maps to V2 → no Unit check →
+        // the script must succeed.
+        let result = evaluate_plutus_scripts(
+            &tx,
+            &utxo_set,
+            None, // no cost models needed for this simple script
+            (14_000_000, 2_000_000),
+            &slot_config,
+        );
+
+        assert!(
+            result.is_ok(),
+            "V2 script returning non-Unit must NOT be blocked by presence of a V3 script: {:?}",
+            result.err()
         );
     }
 }

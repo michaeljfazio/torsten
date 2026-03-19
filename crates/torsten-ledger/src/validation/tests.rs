@@ -7942,4 +7942,175 @@ mod tests {
             "Expected UnexpectedScriptDataHash when no ref-scripts exist; got: {errors:?}"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Issue #186 — Treasury value Phase-1 check
+    //
+    // Conway LEDGERS rule: when a transaction body declares `currentTreasuryValue`
+    // (body field 19), `validate_transaction_with_pools` must reject the transaction
+    // if the declared value does not match the `current_treasury` argument.
+    //
+    // Three sub-cases:
+    //   1. Mismatch            → TreasuryValueMismatch
+    //   2. Exact match         → no error
+    //   3. current_treasury=None → check is skipped entirely (pre-Conway mempool)
+    //
+    // Reference: Cardano Blueprint LEDGERS flowchart, "submittedTreasuryValue ==
+    // currentTreasuryValue" predicate; Haskell `conwayLedgerFn` in
+    // `Cardano.Ledger.Conway.Rules.Ledger`.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_issue_186_treasury_value_mismatch_rejects() {
+        // A tx that declares treasury_value = 999 when the ledger holds 500 must
+        // be rejected with TreasuryValueMismatch.
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xD0u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // mainnet_defaults already sets protocol_version_major = 9 (Conway),
+        // confirming the treasury check is enabled.
+        params.protocol_version_major = 9;
+
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        // Declare a treasury value that does NOT match current_treasury.
+        tx.body.treasury_value = Some(Lovelace(999));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,       // current_slot
+            300,       // tx_size
+            None,      // slot_config
+            None,      // registered_pools
+            Some(500), // current_treasury — mismatches declared 999
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected TreasuryValueMismatch when declared treasury != actual; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::TreasuryValueMismatch {
+                    declared: 999,
+                    actual: 500,
+                }
+            )),
+            "Expected TreasuryValueMismatch(declared=999, actual=500); got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_issue_186_treasury_value_match_passes() {
+        // A tx that declares treasury_value matching current_treasury must not
+        // produce a TreasuryValueMismatch error.
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xD1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        // Declared value matches actual.
+        tx.body.treasury_value = Some(Lovelace(500));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            Some(500), // current_treasury matches declared
+        );
+
+        // The tx may still fail other rules, but it must NOT fail with
+        // TreasuryValueMismatch.
+        let has_mismatch = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::TreasuryValueMismatch { .. })
+        }));
+        assert!(
+            !has_mismatch,
+            "Expected no TreasuryValueMismatch when declared treasury matches actual; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_issue_186_treasury_value_none_skips_check() {
+        // When current_treasury is None (e.g. pre-Conway mempool), the check must
+        // be skipped entirely even if treasury_value is present in the tx body.
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xD2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        // Set a non-zero treasury_value in the body.
+        tx.body.treasury_value = Some(Lovelace(12345));
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None,
+            None, // current_treasury = None → check must be skipped
+        );
+
+        // Must not produce TreasuryValueMismatch regardless of the declared value.
+        let has_mismatch = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::TreasuryValueMismatch { .. })
+        }));
+        assert!(
+            !has_mismatch,
+            "Expected no TreasuryValueMismatch when current_treasury is None; got: {result:?}"
+        );
+    }
 }

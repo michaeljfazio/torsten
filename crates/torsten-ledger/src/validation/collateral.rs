@@ -597,3 +597,206 @@ pub(crate) fn plutus_script_version_map(
     }
     map
 }
+
+/// Build a map from `(redeemer_tag_byte, redeemer_index)` → Plutus language
+/// version (1=V1, 2=V2, 3=V3) for every redeemer in the transaction.
+///
+/// The redeemer tag byte matches the Cardano CDDL encoding used by
+/// `eval_phase_two_raw`'s result tuple (the CBOR-encoded pallas `Redeemer`):
+///   0 = Spend, 1 = Mint, 2 = Cert, 3 = Reward, 4 = Vote, 5 = Propose.
+///
+/// This is used by `evaluate_plutus_scripts` to apply the PlutusV3 Unit-return
+/// check only to redeemers that execute a V3 script, not to all redeemers in
+/// a transaction that happens to contain any V3 script.
+///
+/// Resolution logic (matching Haskell's `scriptsNeeded` / Cardano CDDL spec):
+/// - `Spend` at index `i` → `i`-th input in `(txid, txix)` sorted order →
+///   script hash from the payment credential of the input's UTxO address.
+/// - `Mint` at index `i` → `i`-th policy ID in ascending BTreeMap order.
+/// - `Cert` at index `i` → `i`-th certificate's script credential hash.
+/// - `Reward` at index `i` → `i`-th withdrawal's script stake credential
+///   (bytes 1..29 of the reward address).
+/// - `Vote` at index `i` → `i`-th voter's script credential hash.
+/// - `Propose` at index `i` → the proposal's `policy_hash` field.
+///
+/// If a redeemer cannot be resolved to a script (e.g. the UTxO is missing or
+/// the credential is not a script credential) the entry is omitted from the
+/// result.  The caller falls back to the permissive (non-Unit) check for
+/// unresolved redeemers, which is the safe direction.
+pub(crate) fn redeemer_script_version_map(
+    tx: &Transaction,
+    utxo_set: &UtxoSet,
+    version_map: &HashMap<Hash28, u8>,
+) -> HashMap<(u8, u32), u8> {
+    use torsten_primitives::address::Address;
+
+    let body = &tx.body;
+    let mut result: HashMap<(u8, u32), u8> = HashMap::new();
+
+    // ------------------------------------------------------------------ Spend
+    // Inputs are sorted by (tx_hash, output_index) to determine the redeemer
+    // index, matching Haskell's `toSortedList (txins txb)`.
+    let mut sorted_inputs: Vec<_> = body.inputs.iter().collect();
+    sorted_inputs.sort_by(|a, b| {
+        a.transaction_id
+            .cmp(&b.transaction_id)
+            .then(a.index.cmp(&b.index))
+    });
+    for (idx, input) in sorted_inputs.iter().enumerate() {
+        if let Some(utxo) = utxo_set.lookup(input) {
+            let script_hash = match &utxo.address {
+                Address::Base(b) => match &b.payment {
+                    Credential::Script(h) => Some(*h),
+                    _ => None,
+                },
+                Address::Enterprise(e) => match &e.payment {
+                    Credential::Script(h) => Some(*h),
+                    _ => None,
+                },
+                Address::Pointer(p) => match &p.payment {
+                    Credential::Script(h) => Some(*h),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(hash) = script_hash {
+                if let Some(&ver) = version_map.get(&hash) {
+                    // Spend tag = 0
+                    result.insert((0u8, idx as u32), ver);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ Mint
+    // Policy IDs are iterated in BTreeMap ascending order, matching Haskell's
+    // `Map.toAscList (txmint txb)`.
+    for (idx, policy_id) in body.mint.keys().enumerate() {
+        if let Some(&ver) = version_map.get(policy_id) {
+            // Mint tag = 1
+            result.insert((1u8, idx as u32), ver);
+        }
+    }
+
+    // ------------------------------------------------------------------ Cert
+    // Raw positional index (0-based) in the certificate list, matching
+    // Haskell's `zip [0..] (txcerts txb)`.
+    for (idx, cert) in body.certificates.iter().enumerate() {
+        let script_hash: Option<Hash28> = match cert {
+            Certificate::StakeDeregistration(Credential::Script(h)) => Some(*h),
+            Certificate::StakeDelegation {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::ConwayStakeDeregistration {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::VoteDelegation {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::StakeVoteDelegation {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::RegStakeDeleg {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::RegStakeVoteDeleg {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::VoteRegDeleg {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::CommitteeHotAuth {
+                cold_credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::CommitteeColdResign {
+                cold_credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::UnregDRep {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            Certificate::UpdateDRep {
+                credential: Credential::Script(h),
+                ..
+            } => Some(*h),
+            _ => None,
+        };
+        if let Some(hash) = script_hash {
+            if let Some(&ver) = version_map.get(&hash) {
+                // Cert tag = 2
+                result.insert((2u8, idx as u32), ver);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- Reward
+    // Withdrawals are iterated in BTreeMap ascending key order.  Script stake
+    // credentials occupy bytes 1..29 of the reward address.  The header nibble
+    // bit-4 distinguishes script (1) from key (0) credentials:
+    //   0xF0/0xF1 = script stake credential on mainnet/testnet.
+    for (idx, reward_addr) in body.withdrawals.keys().enumerate() {
+        if reward_addr.len() < 29 {
+            continue;
+        }
+        let header = reward_addr[0];
+        // Bit 4 of the first byte: 1 = script credential.
+        if (header & 0x10) == 0 {
+            continue; // key credential — no redeemer required
+        }
+        let hash_bytes: &[u8] = &reward_addr[1..29];
+        if let Ok(hash_arr) = <[u8; 28]>::try_from(hash_bytes) {
+            let hash = Hash28::from_bytes(hash_arr);
+            if let Some(&ver) = version_map.get(&hash) {
+                // Reward tag = 3
+                result.insert((3u8, idx as u32), ver);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ Vote
+    // Voters are iterated in BTreeMap<Voter, _> ascending order.  Only
+    // `ConstitutionalCommittee(Script)` and `DRep(Script)` carry a script
+    // credential.  `StakePool` voters are key hashes and are never scripts.
+    for (idx, voter) in body.voting_procedures.keys().enumerate() {
+        let script_hash: Option<Hash28> = match voter {
+            Voter::ConstitutionalCommittee(Credential::Script(h))
+            | Voter::DRep(Credential::Script(h)) => Some(*h),
+            _ => None,
+        };
+        if let Some(hash) = script_hash {
+            if let Some(&ver) = version_map.get(&hash) {
+                // Vote tag = 4
+                result.insert((4u8, idx as u32), ver);
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- Propose
+    // Only `ParameterChange` and `TreasuryWithdrawals` carry a `policy_hash`.
+    // The policy hash IS the script hash (it is the hash of the constitution
+    // script), so we look it up directly in version_map.
+    for (idx, proposal) in body.proposal_procedures.iter().enumerate() {
+        let policy_hash: Option<Hash28> = match &proposal.gov_action {
+            GovAction::ParameterChange { policy_hash, .. } => *policy_hash,
+            GovAction::TreasuryWithdrawals { policy_hash, .. } => *policy_hash,
+            _ => None,
+        };
+        if let Some(hash) = policy_hash {
+            if let Some(&ver) = version_map.get(&hash) {
+                // Propose tag = 5
+                result.insert((5u8, idx as u32), ver);
+            }
+        }
+    }
+
+    result
+}

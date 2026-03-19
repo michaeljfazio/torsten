@@ -36,6 +36,10 @@ pub(crate) use scripts::calculate_ref_script_size;
 // script hashes to their language version so the evaluator can apply the
 // correct success predicate per-result.
 pub(crate) use collateral::plutus_script_version_map;
+// Re-exported for use by plutus.rs (per-redeemer V3 Unit-return check): maps
+// (redeemer_tag_byte, index) to the language version of the script that
+// redeemer executes, allowing the Unit check to be applied only to V3 redeemers.
+pub(crate) use collateral::redeemer_script_version_map;
 
 use std::collections::HashSet;
 

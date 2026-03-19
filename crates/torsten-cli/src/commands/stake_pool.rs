@@ -424,9 +424,7 @@ impl StakePoolCmd {
                 }
                 Ok(())
             }
-            StakePoolSubcommand::MetadataHash {
-                pool_metadata_file,
-            } => {
+            StakePoolSubcommand::MetadataHash { pool_metadata_file } => {
                 let data = std::fs::read(&pool_metadata_file)?;
                 let hash = blake2b_256(&data);
                 println!("{}", hex::encode(hash.as_bytes()));

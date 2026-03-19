@@ -719,7 +719,11 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         kv_aligned(
             "Duplex",
             App::format_number(duplex),
-            if duplex > 0 { theme.accent } else { theme.muted },
+            if duplex > 0 {
+                theme.accent
+            } else {
+                theme.muted
+            },
             theme,
             col_w,
         ),

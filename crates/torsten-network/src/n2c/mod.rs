@@ -411,9 +411,12 @@ async fn process_segment(
         MINI_PROTOCOL_STATE_QUERY => {
             handle_state_query(&segment.payload, query_handler, *negotiated_version).await
         }
-        MINI_PROTOCOL_TX_SUBMISSION => {
-            handle_tx_submission(&segment.payload, mempool, tx_validator, tx_rejection_counter.as_deref())
-        }
+        MINI_PROTOCOL_TX_SUBMISSION => handle_tx_submission(
+            &segment.payload,
+            mempool,
+            tx_validator,
+            tx_rejection_counter.as_deref(),
+        ),
         MINI_PROTOCOL_TX_MONITOR => {
             handle_tx_monitor(&segment.payload, mempool, query_handler, tx_monitor_cursor).await
         }
