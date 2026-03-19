@@ -8,6 +8,7 @@ Built by [Sandstone Pool](https://www.sandstone.io/)
 
 [![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
 [![Code Scanning](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml)
+[![codecov](https://codecov.io/gh/michaeljfazio/torsten/graph/badge.svg)](https://codecov.io/gh/michaeljfazio/torsten)
 [![Nightly Benchmarks](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml)
 [![Docs](https://github.com/michaeljfazio/torsten/actions/workflows/docs.yml/badge.svg)](https://michaeljfazio.github.io/torsten/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
