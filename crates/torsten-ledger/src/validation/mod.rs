@@ -219,6 +219,7 @@ pub fn validate_transaction(
         tx_size,
         slot_config,
         None,
+        None,
     )
 }
 
@@ -243,6 +244,7 @@ pub fn validate_transaction_with_pools(
     tx_size: u64,
     slot_config: Option<&SlotConfig>,
     registered_pools: Option<&HashSet<Hash28>>,
+    current_treasury: Option<u64>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -268,6 +270,23 @@ pub fn validate_transaction_with_pools(
         registered_pools,
         &mut errors,
     );
+
+    // ------------------------------------------------------------------
+    // Conway LEDGER rule: currentTreasuryValue must match ledger treasury.
+    // This prevents mempool admission of transactions with stale/wrong
+    // treasury assertions, which would cause forged blocks to be rejected.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let (Some(declared), Some(actual)) = (tx.body.treasury_value.as_ref(), current_treasury)
+        {
+            if declared.0 != actual {
+                errors.push(ValidationError::TreasuryValueMismatch {
+                    declared: declared.0,
+                    actual,
+                });
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Rules 11, 11b, 11c, 12 — Plutus-transaction-specific checks

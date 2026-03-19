@@ -2162,6 +2162,7 @@ mod tests {
             300,
             None,
             Some(&registered),
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2207,6 +2208,7 @@ mod tests {
             300,
             None,
             Some(&registered),
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2249,6 +2251,7 @@ mod tests {
             300,
             None,
             Some(&registered),
+            None,
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
