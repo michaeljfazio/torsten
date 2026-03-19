@@ -679,19 +679,6 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         theme,
     );
 
-    // Total connected = outbound + inbound. This replaces the misleading
-    // "Uni/Bi/Duplex" row — those terms describe Haskell's connection-type
-    // negotiation (DataFlow), not direction. We already show In/Out above.
-    let total_connected = outbound + inbound;
-    let ubd_line = peer_state_row(
-        &[
-            ("Out:", outbound, theme.info),
-            ("In:", inbound, theme.accent),
-            ("Total:", total_connected, theme.success),
-        ],
-        theme,
-    );
-
     let mut lines = vec![
         kv_aligned("P2P", p2p_label, p2p_color, theme, col_w),
         kv_aligned(
@@ -709,7 +696,6 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
             col_w,
         ),
         cwh_line,
-        ubd_line,
     ];
 
     // Trim to fit available height.
