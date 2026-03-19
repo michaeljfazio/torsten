@@ -16,16 +16,15 @@ use ratatui::{
     widgets::Widget,
 };
 
+use crate::app::SyncState;
 use crate::theme::Theme;
 
 /// A compact 2-line header bar showing critical node status.
 pub struct HeaderBar<'a> {
     /// Sync progress percentage (0.0 – 100.0).
     pub sync_pct: f64,
-    /// Whether the node is fully synced.
-    pub is_synced: bool,
-    /// Whether the node is stalled.
-    pub is_stalled: bool,
+    /// Current sync state, used for status text and colour selection.
+    pub sync_state: SyncState,
     /// Current epoch number.
     pub epoch: u64,
     /// Tip age in seconds.
@@ -48,11 +47,13 @@ impl Widget for HeaderBar<'_> {
 
         // --- Line 1: status summary ---
         let y = area.top();
+        // Replaying uses warning colour (progress is being made from local
+        // ImmutableDB) rather than error colour; only Stalled uses error.
         let status_color = if !self.connected {
             self.theme.error
-        } else if self.is_synced {
+        } else if self.sync_state.is_synced() {
             self.theme.success
-        } else if self.is_stalled {
+        } else if self.sync_state.is_stalled() {
             self.theme.error
         } else {
             self.theme.warning
@@ -60,12 +61,8 @@ impl Widget for HeaderBar<'_> {
 
         let status_text = if !self.connected {
             "Disconnected".to_string()
-        } else if self.is_synced {
-            format!("Synced {:.2}%", self.sync_pct)
-        } else if self.is_stalled {
-            format!("Stalled {:.2}%", self.sync_pct)
         } else {
-            format!("Syncing {:.2}%", self.sync_pct)
+            format!("{} {:.2}%", self.sync_state.label(), self.sync_pct)
         };
 
         // Render character by character with appropriate styling.
@@ -150,10 +147,14 @@ impl Widget for HeaderBar<'_> {
         let label = format!(" Epoch {:.1}% ", progress * 100.0);
         let label_start = (bar_width.saturating_sub(label.len() as u16)) / 2;
 
-        let bar_color = if self.is_synced {
+        // Replaying uses the accent colour so it is visually distinct from
+        // normal Syncing.  Only Stalled shows the error/red colour.
+        let bar_color = if self.sync_state.is_synced() {
             self.theme.success
-        } else if self.is_stalled {
+        } else if self.sync_state.is_stalled() {
             self.theme.error
+        } else if self.sync_state.is_replaying() {
+            self.theme.accent
         } else {
             self.theme.gauge_fill
         };
@@ -196,13 +197,13 @@ impl Widget for HeaderBar<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::SyncState;
     use crate::theme::THEME_MONOKAI;
 
-    fn make_header(synced: bool, stalled: bool, connected: bool) -> HeaderBar<'static> {
+    fn make_header(sync_state: SyncState, connected: bool) -> HeaderBar<'static> {
         HeaderBar {
-            sync_pct: if synced { 99.99 } else { 50.0 },
-            is_synced: synced,
-            is_stalled: stalled,
+            sync_pct: if sync_state.is_synced() { 99.99 } else { 50.0 },
+            sync_state,
             epoch: 1237,
             tip_age: 12,
             uptime: "1h 5m".to_string(),
@@ -214,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_header_renders_without_panic() {
-        let header = make_header(true, false, true);
+        let header = make_header(SyncState::Synced, true);
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
@@ -227,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_header_syncing_status() {
-        let header = make_header(false, false, true);
+        let header = make_header(SyncState::Syncing, true);
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
@@ -239,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_header_stalled_status() {
-        let header = make_header(false, true, true);
+        let header = make_header(SyncState::Stalled, true);
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
@@ -250,8 +251,20 @@ mod tests {
     }
 
     #[test]
+    fn test_header_replaying_status() {
+        let header = make_header(SyncState::Replaying, true);
+        let area = Rect::new(0, 0, 120, 2);
+        let mut buf = Buffer::empty(area);
+        header.render(area, &mut buf);
+        let line1: String = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(line1.contains("Replaying"));
+    }
+
+    #[test]
     fn test_header_disconnected() {
-        let header = make_header(false, false, false);
+        let header = make_header(SyncState::Syncing, false);
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
@@ -263,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_header_narrow_terminal() {
-        let header = make_header(true, false, true);
+        let header = make_header(SyncState::Synced, true);
         let area = Rect::new(0, 0, 30, 2);
         let mut buf = Buffer::empty(area);
         // Should not panic even on narrow terminals.
@@ -272,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_header_single_line() {
-        let header = make_header(true, false, true);
+        let header = make_header(SyncState::Synced, true);
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         // Should render line 1 only, skip progress bar.
@@ -281,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_header_too_small() {
-        let header = make_header(true, false, true);
+        let header = make_header(SyncState::Synced, true);
         let area = Rect::new(0, 0, 5, 2);
         let mut buf = Buffer::empty(area);
         // Should bail early without panic.
@@ -290,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_epoch_progress_bar_fill() {
-        let mut header = make_header(true, false, true);
+        let mut header = make_header(SyncState::Synced, true);
         header.epoch_progress = 0.0;
         let area = Rect::new(0, 0, 100, 2);
         let mut buf = Buffer::empty(area);
@@ -299,7 +312,7 @@ mod tests {
         let first_char = buf[(0, 1)].symbol().chars().next().unwrap_or(' ');
         assert_ne!(first_char, '\u{2588}');
 
-        let mut header2 = make_header(true, false, true);
+        let mut header2 = make_header(SyncState::Synced, true);
         header2.epoch_progress = 1.0;
         let mut buf2 = Buffer::empty(area);
         header2.render(area, &mut buf2);
@@ -308,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_header_uses_theme_accent_for_logo() {
-        let header = make_header(true, false, true);
+        let header = make_header(SyncState::Synced, true);
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);

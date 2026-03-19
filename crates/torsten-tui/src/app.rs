@@ -31,6 +31,65 @@ pub enum NodeStatus {
     Offline,
 }
 
+/// The sync state of the node, as inferred from Prometheus metrics.
+///
+/// Used by the TUI header pill and status-bar colour coding.  The variants
+/// are ordered from "best" to "worst" for easy comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncState {
+    /// Node is not reachable (Prometheus endpoint unreachable).
+    Offline,
+    /// Node is replaying blocks from its local ImmutableDB chunk files.
+    ///
+    /// During this phase `torsten_blocks_applied_total` remains 0 (blocks are
+    /// replayed internally, not received from peers), while
+    /// `torsten_sync_progress_percent` advances steadily.  This is distinct
+    /// from `Stalled` — progress *is* being made, just not via live chain sync.
+    Replaying,
+    /// Node is receiving and applying blocks from the network but has not yet
+    /// reached the tip of the chain.
+    Syncing,
+    /// Node appears stuck: tip age is high and progress is below 99.9%.
+    ///
+    /// The tip-age threshold is 300 seconds (5 minutes).  A node that is
+    /// simply slow may briefly appear stalled; the label self-corrects as
+    /// soon as new blocks arrive.
+    Stalled,
+    /// Node has reached the chain tip (sync progress ≥ 99.9%).
+    Synced,
+}
+
+impl SyncState {
+    /// Short human-readable label shown in the status pill.
+    pub fn label(self) -> &'static str {
+        match self {
+            SyncState::Offline => "Offline",
+            SyncState::Replaying => "Replaying",
+            SyncState::Syncing => "Syncing",
+            SyncState::Stalled => "Stalled",
+            SyncState::Synced => "Synced",
+        }
+    }
+
+    /// Whether the node is fully caught up to the chain tip.
+    pub fn is_synced(self) -> bool {
+        self == SyncState::Synced
+    }
+
+    /// Whether the node appears to have stopped making progress.
+    ///
+    /// Returns `false` for [`SyncState::Replaying`] even though tip age may be
+    /// high — replay *is* forward progress, just not via live chain sync.
+    pub fn is_stalled(self) -> bool {
+        self == SyncState::Stalled
+    }
+
+    /// Whether the node is replaying blocks from its local ImmutableDB.
+    pub fn is_replaying(self) -> bool {
+        self == SyncState::Replaying
+    }
+}
+
 /// Network name derived from the `torsten_network_magic` metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
@@ -512,27 +571,42 @@ impl App {
         Some(format!("{}..{}", &hex[..6], &hex[hex.len() - 6..]))
     }
 
-    /// Determine current sync status.
+    /// Determine the current sync state.
     ///
-    /// Returns (label, is_synced, is_stalled).
+    /// The returned [`SyncState`] drives the header pill colour and label.
     ///
-    /// When the node is offline this always returns `("Offline", false, false)`
-    /// regardless of the last-known metric values — the header renders the
-    /// offline pill separately.
-    pub fn sync_status(&self) -> (&'static str, bool, bool) {
+    /// Detection rules (evaluated top-to-bottom; first match wins):
+    ///
+    /// 1. **Offline** — node unreachable (regardless of last-known metrics).
+    /// 2. **Synced** — `sync_progress_percent` ≥ 9990 (i.e. ≥ 99.9 %).
+    /// 3. **Replaying** — `blocks_applied_total == 0` AND progress > 0 AND
+    ///    `tip_age > 300`.  The node is reading blocks back from its local
+    ///    ImmutableDB chunk files; no peer blocks have been applied yet.
+    /// 4. **Stalled** — `tip_age > 300` (and we did not match Replaying above,
+    ///    meaning some peer blocks have been applied in the past).
+    /// 5. **Syncing** — catch-all: progress is advancing normally.
+    pub fn sync_status(&self) -> SyncState {
         if self.node_status == NodeStatus::Offline {
-            return ("Offline", false, false);
+            return SyncState::Offline;
         }
+
         let pct_raw = self.metrics.get("torsten_sync_progress_percent");
+        // The metric is stored as a fixed-point value multiplied by 100
+        // (e.g. 9982 means 99.82 %).  Divide by 100 to get a regular percentage.
         let pct = pct_raw / 100.0;
         let tip_age = self.metrics.get_u64("torsten_tip_age_seconds");
+        let blocks_applied = self.metrics.get_u64("torsten_blocks_applied_total");
 
         if pct >= 99.9 {
-            ("Synced", true, false)
+            SyncState::Synced
+        } else if blocks_applied == 0 && pct_raw > 0.0 && tip_age > 300 {
+            // No peer blocks have been applied yet, but sync progress is
+            // advancing — the node is replaying its local ImmutableDB.
+            SyncState::Replaying
         } else if tip_age > 300 && pct < 99.0 {
-            ("Stalled", false, true)
+            SyncState::Stalled
         } else {
-            ("Syncing", false, false)
+            SyncState::Syncing
         }
     }
 
@@ -710,30 +784,72 @@ mod tests {
             ("torsten_sync_progress_percent", 9990.0),
             ("torsten_tip_age_seconds", 5.0),
         ]);
-        let (label, synced, stalled) = app.sync_status();
-        assert_eq!(label, "Synced");
-        assert!(synced);
-        assert!(!stalled);
+        assert_eq!(app.sync_status(), SyncState::Synced);
+        assert!(app.sync_status().is_synced());
+        assert!(!app.sync_status().is_stalled());
+        assert!(!app.sync_status().is_replaying());
 
-        // Syncing
+        // Syncing (blocks from peers, tip age within threshold)
         app.metrics = make_snapshot(vec![
             ("torsten_sync_progress_percent", 5000.0),
             ("torsten_tip_age_seconds", 100.0),
+            ("torsten_blocks_applied_total", 250_000.0),
         ]);
-        let (label, synced, stalled) = app.sync_status();
-        assert_eq!(label, "Syncing");
-        assert!(!synced);
-        assert!(!stalled);
+        assert_eq!(app.sync_status(), SyncState::Syncing);
+        assert!(!app.sync_status().is_synced());
+        assert!(!app.sync_status().is_stalled());
+        assert!(!app.sync_status().is_replaying());
 
-        // Stalled
+        // Stalled (blocks have been applied in the past, but tip is old)
         app.metrics = make_snapshot(vec![
             ("torsten_sync_progress_percent", 5000.0),
             ("torsten_tip_age_seconds", 600.0),
+            ("torsten_blocks_applied_total", 250_000.0),
         ]);
-        let (label, synced, stalled) = app.sync_status();
-        assert_eq!(label, "Stalled");
-        assert!(!synced);
-        assert!(stalled);
+        assert_eq!(app.sync_status(), SyncState::Stalled);
+        assert!(!app.sync_status().is_synced());
+        assert!(app.sync_status().is_stalled());
+        assert!(!app.sync_status().is_replaying());
+    }
+
+    #[test]
+    fn test_sync_status_replaying() {
+        let mut app = App::new();
+        app.node_status = NodeStatus::Online;
+
+        // Replaying: progress is advancing but no peer blocks applied yet,
+        // and the tip_age is high (no live chain sync running).
+        app.metrics = make_snapshot(vec![
+            ("torsten_sync_progress_percent", 3500.0),
+            ("torsten_tip_age_seconds", 86_400.0),
+            ("torsten_blocks_applied_total", 0.0),
+        ]);
+        assert_eq!(app.sync_status(), SyncState::Replaying);
+        assert!(app.sync_status().is_replaying());
+        assert!(!app.sync_status().is_stalled());
+        assert!(!app.sync_status().is_synced());
+        assert_eq!(app.sync_status().label(), "Replaying");
+
+        // Progress = 0: not replaying (node may just be starting).
+        app.metrics = make_snapshot(vec![
+            ("torsten_sync_progress_percent", 0.0),
+            ("torsten_tip_age_seconds", 86_400.0),
+            ("torsten_blocks_applied_total", 0.0),
+        ]);
+        // Should fall through to Stalled (tip_age > 300, pct < 99.0).
+        // Actually pct_raw == 0.0 so the replay guard is not hit; we reach
+        // the stalled branch because tip_age > 300.
+        let state = app.sync_status();
+        assert_ne!(state, SyncState::Replaying, "zero progress should not be Replaying");
+
+        // Once blocks have been applied (replay finished, now syncing from peers)
+        // but tip age is still high — that is Stalled, not Replaying.
+        app.metrics = make_snapshot(vec![
+            ("torsten_sync_progress_percent", 9000.0),
+            ("torsten_tip_age_seconds", 600.0),
+            ("torsten_blocks_applied_total", 1.0),
+        ]);
+        assert_eq!(app.sync_status(), SyncState::Stalled);
     }
 
     /// A disconnected snapshot: no values, connected=false.
@@ -828,10 +944,10 @@ mod tests {
         // Now go offline.
         app.update_metrics(make_disconnected_snapshot("refused"));
         // sync_status must report Offline, not Synced.
-        let (label, is_synced, is_stalled) = app.sync_status();
-        assert_eq!(label, "Offline");
-        assert!(!is_synced);
-        assert!(!is_stalled);
+        assert_eq!(app.sync_status(), SyncState::Offline);
+        assert_eq!(app.sync_status().label(), "Offline");
+        assert!(!app.sync_status().is_synced());
+        assert!(!app.sync_status().is_stalled());
     }
 
     #[test]

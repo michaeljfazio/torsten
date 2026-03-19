@@ -112,7 +112,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
-    let (status_label, is_synced, is_stalled) = app.sync_status();
+    let sync_state = app.sync_status();
     let pct = app.sync_progress_pct();
     let epoch = app.metrics.get_u64("torsten_epoch_number");
     let tip_age = app.metrics.get_u64("torsten_tip_age_seconds");
@@ -124,13 +124,16 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let is_offline = app.node_status == NodeStatus::Offline;
 
     // Status pill — colored background so it reads at a glance.
+    // Replaying uses the same warning colour as Syncing: progress is being
+    // made, just from local ImmutableDB rather than from live peers.
     let status_bg = if is_offline {
         theme.error
-    } else if is_synced {
+    } else if sync_state.is_synced() {
         theme.success
-    } else if is_stalled {
+    } else if sync_state.is_stalled() {
         theme.error
     } else {
+        // Syncing and Replaying both use the warning colour.
         theme.warning
     };
 
@@ -149,7 +152,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             None => " Node Offline ".to_string(),
         }
     } else {
-        format!(" {} {:.2}% ", status_label, pct)
+        format!(" {} {:.2}% ", sync_state.label(), pct)
     };
 
     // Tip age indicator: check mark / warning / X based on age brackets.
@@ -255,7 +258,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 /// all three widget types (HeaderBar, MempoolGauge, SparklineHistory) are
 /// exercised in the main rendering path.
 fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let (_, is_synced, is_stalled) = app.sync_status();
+    let sync_state = app.sync_status();
     let pct = app.sync_progress_pct();
     let epoch = app.metrics.get_u64("torsten_epoch_number");
     let tip_age = app.metrics.get_u64("torsten_tip_age_seconds");
@@ -263,8 +266,7 @@ fn render_compact_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
 
     let header = HeaderBar {
         sync_pct: pct,
-        is_synced,
-        is_stalled,
+        sync_state,
         epoch,
         tip_age,
         uptime: App::format_uptime(uptime_secs),
@@ -490,7 +492,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
 
-    let (_, is_synced, is_stalled) = app.sync_status();
+    let sync_state = app.sync_status();
 
     // Row 0: epoch progress bar (only here — NOT duplicated in header).
     let bar_area = Rect {
@@ -506,10 +508,14 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             app.epoch_time_remaining_secs,
         )
         .with_epoch(app.metrics.get_u64("torsten_epoch_number"))
-        .with_fill_color(if is_synced {
+        .with_fill_color(if sync_state.is_synced() {
             theme.success
-        } else if is_stalled {
+        } else if sync_state.is_stalled() {
             theme.error
+        } else if sync_state.is_replaying() {
+            // During ImmutableDB replay use the accent colour so the operator
+            // can immediately tell at a glance that replay is in progress.
+            theme.accent
         } else {
             theme.gauge_fill
         }),
