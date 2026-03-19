@@ -365,6 +365,7 @@ async fn handle_n2c_connection(
                         &mut chainsync_cursor,
                         &mut tx_monitor_cursor,
                         &mut negotiated_version,
+                        &tx_rejection_counter,
                     )
                     .await?;
                     if let Some(resp_segment) = response {
@@ -396,6 +397,7 @@ async fn process_segment(
     chainsync_cursor: &mut ChainSyncCursor,
     tx_monitor_cursor: &mut TxMonitorCursor,
     negotiated_version: &mut u16,
+    tx_rejection_counter: &Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<Option<Segment>, N2CServerError> {
     match segment.protocol_id {
         MINI_PROTOCOL_HANDSHAKE => {
