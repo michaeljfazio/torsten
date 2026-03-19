@@ -1,0 +1,6 @@
+{
+  "name": "Torsten Sandbox",
+  "description": "Torsten Rust Cardano node - Preview testnet sandbox pool",
+  "ticker": "SAND",
+  "homepage": "https://github.com/michaeljfazio/torsten"
+}

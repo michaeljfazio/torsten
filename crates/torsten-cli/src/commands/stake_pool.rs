@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
+use torsten_primitives::hash::blake2b_256;
 
 #[derive(Args, Debug)]
 pub struct StakePoolCmd {
@@ -97,6 +98,12 @@ enum StakePoolSubcommand {
         metadata_hash: Option<String>,
         #[arg(long)]
         out_file: PathBuf,
+    },
+    /// Compute the blake2b-256 hash of a pool metadata JSON file
+    MetadataHash {
+        /// Path to pool metadata JSON file
+        #[arg(long)]
+        pool_metadata_file: PathBuf,
     },
 }
 
@@ -415,6 +422,14 @@ impl StakePoolCmd {
                 if metadata_url.is_some() {
                     println!("  Metadata URL: {}", metadata_url.as_deref().unwrap_or(""));
                 }
+                Ok(())
+            }
+            StakePoolSubcommand::MetadataHash {
+                pool_metadata_file,
+            } => {
+                let data = std::fs::read(&pool_metadata_file)?;
+                let hash = blake2b_256(&data);
+                println!("{}", hex::encode(hash.as_bytes()));
                 Ok(())
             }
         }
