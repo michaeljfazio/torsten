@@ -3621,6 +3621,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "torsten-monitor"
+version = "0.4.5-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "ratatui",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
 name = "torsten-network"
 version = "0.4.5-alpha"
 dependencies = [
@@ -3758,18 +3770,6 @@ dependencies = [
  "torsten-primitives",
  "torsten-serialization",
  "tracing",
-]
-
-[[package]]
-name = "torsten-tui"
-version = "0.4.5-alpha"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "ratatui",
- "reqwest",
- "tokio",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ members = [
     "crates/torsten-cli",
     "crates/torsten-lsm",
     "crates/torsten-integration-tests",
-    "crates/torsten-tui",
+    "crates/torsten-monitor",
     "tests/conformance",
     "tests/golden",
 ]
@@ -38,7 +38,7 @@ torsten-storage = { path = "crates/torsten-storage" }
 torsten-node = { path = "crates/torsten-node" }
 torsten-cli = { path = "crates/torsten-cli" }
 torsten-lsm = { path = "crates/torsten-lsm" }
-torsten-tui = { path = "crates/torsten-tui" }
+torsten-monitor = { path = "crates/torsten-monitor" }
 
 # Terminal UI
 ratatui = "0.29"
