@@ -307,6 +307,12 @@ pub(crate) fn convert_validation_error(
         VE::MissingRedeemer { tag, index } => TxValidationError::ScriptFailed {
             reason: format!("Missing redeemer for {tag} at index {index}"),
         },
+        VE::MissingDatumWitness(datum_hash) => TxValidationError::ScriptFailed {
+            reason: format!("Missing datum witness for script-locked input: datum hash {datum_hash}"),
+        },
+        VE::ExtraDatumWitness(datum_hash) => TxValidationError::ScriptFailed {
+            reason: format!("Extra (unreferenced) datum witness in transaction: datum hash {datum_hash}"),
+        },
     }
 }
 

@@ -571,6 +571,24 @@ pub(super) fn run_phase1_rules(
     }
 
     // ------------------------------------------------------------------
+    // Rule 9c: Datum witness completeness
+    //
+    // Enforced only when all inputs resolve successfully (Rule 2 found no
+    // missing UTxOs) to avoid confusing secondary errors.  We also skip
+    // when there are already errors that would prevent meaningful datum
+    // checks (e.g. Rule 2 failures leave UTxOs unresolvable).
+    //
+    // Two sub-checks mirror Haskell's Alonzo UTXOW rules:
+    //   - missingRequiredDatums:          script-locked inputs with DatumHash
+    //     but no matching witness datum → MissingDatumWitness
+    //   - notAllowedSupplementalDatums:   witness datums not needed by any
+    //     input or output → ExtraDatumWitness
+    // ------------------------------------------------------------------
+    if errors.is_empty() {
+        super::datum::check_datum_witnesses(tx, utxo_set, errors);
+    }
+
+    // ------------------------------------------------------------------
     // Rule 10: Required signers must have corresponding vkey witnesses
     // ------------------------------------------------------------------
     if !body.required_signers.is_empty() && !tx.witness_set.vkey_witnesses.is_empty() {

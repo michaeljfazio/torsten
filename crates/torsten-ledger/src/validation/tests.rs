@@ -6245,9 +6245,9 @@ mod tests {
         check_script_redeemers(&tx, &utxo_set, &mut errors);
 
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")
+            ),
             "Vote redeemer present at index 0; must not produce MissingRedeemer: {errors:?}"
         );
     }
@@ -6478,9 +6478,9 @@ mod tests {
         check_script_redeemers(&tx, &utxo_set, &mut errors);
 
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")
+            ),
             "Key-credential DRep voter must not require a Vote redeemer, got: {errors:?}"
         );
     }
@@ -6585,9 +6585,9 @@ mod tests {
         check_script_redeemers(&tx, &utxo_set, &mut errors);
 
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")
+            ),
             "SPO voter must not require a Vote redeemer, got: {errors:?}"
         );
     }
@@ -6602,9 +6602,7 @@ mod tests {
     fn test_propose_redeemer_parameter_change_with_policy_hash_missing() {
         use super::super::collateral::check_script_redeemers;
         use torsten_primitives::hash::ScriptHash;
-        use torsten_primitives::transaction::{
-            GovAction, ProposalProcedure, ProtocolParamUpdate,
-        };
+        use torsten_primitives::transaction::{GovAction, ProposalProcedure, ProtocolParamUpdate};
 
         let policy_script_hash: ScriptHash = Hash28::from_bytes([0xF0; 28]);
 
@@ -6817,9 +6815,7 @@ mod tests {
     #[test]
     fn test_propose_redeemer_no_policy_hash_not_required() {
         use super::super::collateral::check_script_redeemers;
-        use torsten_primitives::transaction::{
-            GovAction, ProposalProcedure, ProtocolParamUpdate,
-        };
+        use torsten_primitives::transaction::{GovAction, ProposalProcedure, ProtocolParamUpdate};
 
         let mut utxo_set = UtxoSet::new();
         let input = TransactionInput {
@@ -7011,9 +7007,9 @@ mod tests {
         check_script_redeemers(&tx, &utxo_set, &mut errors);
 
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")),
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")
+            ),
             "HardForkInitiation must not require a Propose redeemer, got: {errors:?}"
         );
     }
@@ -7024,9 +7020,7 @@ mod tests {
     fn test_propose_redeemer_parameter_change_present_ok() {
         use super::super::collateral::check_script_redeemers;
         use torsten_primitives::hash::ScriptHash;
-        use torsten_primitives::transaction::{
-            GovAction, ProposalProcedure, ProtocolParamUpdate,
-        };
+        use torsten_primitives::transaction::{GovAction, ProposalProcedure, ProtocolParamUpdate};
 
         let policy_script_hash: ScriptHash = Hash28::from_bytes([0xF6; 28]);
 
@@ -7126,9 +7120,9 @@ mod tests {
         check_script_redeemers(&tx, &utxo_set, &mut errors);
 
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")),
+            !errors.iter().any(
+                |e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")
+            ),
             "Propose redeemer present at index 0; must not produce MissingRedeemer: {errors:?}"
         );
     }
@@ -7819,5 +7813,4 @@ mod tests {
         check_datum_witnesses(&tx, &utxo_set, &mut errors);
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
-
 }

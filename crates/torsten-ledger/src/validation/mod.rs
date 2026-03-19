@@ -15,6 +15,7 @@
 
 mod collateral;
 mod conway;
+mod datum;
 mod phase1;
 mod scripts;
 
@@ -175,6 +176,23 @@ pub enum ValidationError {
     /// "ccHotKeyOK" predicate from the Haskell implementation.
     #[error("CommitteeHotAuth cold credential is not a current CC member: {cold_credential_hash}")]
     UnelectedCommitteeMember { cold_credential_hash: String },
+    /// Alonzo/Conway Phase-1 rule: a script-locked spending input carries a
+    /// `DatumHash` in its UTxO but no corresponding datum bytes were supplied
+    /// in `tx.witness_set.plutus_data`.
+    ///
+    /// Per Haskell's `checkWitnessesShelley` / Alonzo `UTXOW` rule
+    /// "witsVKeyNeeded" extended with "reqSignerHashes" — every non-inline
+    /// datum referenced by a script-locked input MUST be provided as a witness.
+    #[error("Missing datum witness for script-locked input: datum hash {0}")]
+    MissingDatumWitness(String),
+    /// Alonzo/Conway Phase-1 rule: a datum supplied in
+    /// `tx.witness_set.plutus_data` is not needed by any script-locked input
+    /// or referenced output, making the transaction malformed.
+    ///
+    /// Haskell rejects transactions with extraneous datums under the
+    /// `UTXOW` predicate "allowedSupplementalDatums ⊇ suppliedDatums".
+    #[error("Extra (unreferenced) datum witness in transaction: datum hash {0}")]
+    ExtraDatumWitness(String),
 }
 
 // ---------------------------------------------------------------------------
