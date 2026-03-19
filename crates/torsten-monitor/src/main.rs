@@ -1,4 +1,4 @@
-//! torsten-tui — Terminal UI dashboard for the Torsten Cardano node.
+//! torsten-monitor — Terminal UI dashboard for the Torsten Cardano node.
 //!
 //! Polls the Torsten Prometheus endpoint (default http://localhost:12798/metrics)
 //! every 2 seconds and renders a real-time 5-panel dashboard:
@@ -12,9 +12,9 @@
 //! # Usage
 //!
 //! ```bash
-//! torsten-tui                                         # defaults
-//! torsten-tui --metrics-url http://host:12798/metrics # custom endpoint
-//! torsten-tui --network-magic 2                       # preview testnet epoch length
+//! torsten-monitor                                         # defaults
+//! torsten-monitor --metrics-url http://host:12798/metrics # custom endpoint
+//! torsten-monitor --network-magic 2                       # preview testnet epoch length
 //! ```
 //!
 //! # Key bindings
@@ -54,10 +54,10 @@ const DEFAULT_METRICS_URL: &str = "http://localhost:12798/metrics";
 /// Poll interval for fetching metrics from the Prometheus endpoint.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// CLI arguments for torsten-tui.
+/// CLI arguments for torsten-monitor.
 #[derive(Parser, Debug)]
 #[command(
-    name = "torsten-tui",
+    name = "torsten-monitor",
     about = "Terminal dashboard for the Torsten Cardano node"
 )]
 struct Args {

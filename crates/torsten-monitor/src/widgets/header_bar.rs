@@ -68,8 +68,8 @@ impl Widget for HeaderBar<'_> {
         // Render character by character with appropriate styling.
         let mut x = area.left();
 
-        // "torsten-tui" logo.
-        let prefix = " torsten-tui ";
+        // "torsten-monitor" logo.
+        let prefix = " torsten-monitor ";
         for ch in prefix.chars() {
             if x >= area.right() {
                 break;
@@ -219,11 +219,11 @@ mod tests {
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
-        // Verify the first line contains "torsten-tui".
+        // Verify the first line contains "torsten-monitor".
         let line1: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(line1.contains("torsten-tui"));
+        assert!(line1.contains("torsten-monitor"));
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 2);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
-        // The 't' in "torsten-tui" at cell 1 (0-indexed) should have the accent color.
+        // The 't' in "torsten-monitor" at cell 1 (0-indexed) should have the accent color.
         let cell = &buf[(1, 0)];
         assert_eq!(
             cell.fg, THEME_MONOKAI.accent,

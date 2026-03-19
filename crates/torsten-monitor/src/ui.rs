@@ -1152,7 +1152,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
         Span::styled("  \u{2502}  ", Style::default().fg(theme.border)),
         Span::styled(
-            "torsten-tui",
+            "torsten-monitor",
             Style::default().fg(Color::Rgb(100, 100, 120)),
         ),
     ]);
