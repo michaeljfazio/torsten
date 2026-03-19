@@ -21,6 +21,7 @@ pub(crate) fn handle_tx_submission(
     payload: &[u8],
     mempool: &Arc<dyn MempoolProvider>,
     tx_validator: &Option<Arc<dyn TxValidator>>,
+    rejection_counter: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<Option<Segment>, N2CServerError> {
     let mut decoder = minicbor::Decoder::new(payload);
 
@@ -51,10 +52,18 @@ pub(crate) fn handle_tx_submission(
                 Some((era_id, tx_bytes)) => {
                     let tx_size = tx_bytes.len();
 
+                    // Helper: increment rejection counter when present.
+                    let count_rejection = || {
+                        if let Some(ctr) = rejection_counter {
+                            ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    };
+
                     // Run Phase-1/Phase-2 validation if a validator is available
                     if let Some(validator) = tx_validator {
                         if let Err(e) = validator.validate_tx(era_id, &tx_bytes) {
                             warn!("Transaction validation failed: {e}");
+                            count_rejection();
                             return encode_tx_reject(&e);
                         }
                     }
@@ -75,18 +84,23 @@ pub(crate) fn handle_tx_submission(
                                 }
                                 Err(e) => {
                                     warn!("Transaction rejected: {e}");
+                                    count_rejection();
                                     encode_tx_reject_str(&e.to_string())
                                 }
                             }
                         }
                         Err(e) => {
                             warn!("Failed to decode transaction: {e}");
+                            count_rejection();
                             encode_tx_reject_str(&format!("Failed to decode transaction: {e}"))
                         }
                     }
                 }
                 None => {
                     warn!("Failed to extract transaction from submission");
+                    if let Some(ctr) = rejection_counter {
+                        ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     encode_tx_reject_str("Failed to decode submitted transaction")
                 }
             }

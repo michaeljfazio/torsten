@@ -398,7 +398,7 @@ async fn process_segment(
             handle_state_query(&segment.payload, query_handler, *negotiated_version).await
         }
         MINI_PROTOCOL_TX_SUBMISSION => {
-            handle_tx_submission(&segment.payload, mempool, tx_validator)
+            handle_tx_submission(&segment.payload, mempool, tx_validator, None)
         }
         MINI_PROTOCOL_TX_MONITOR => {
             handle_tx_monitor(&segment.payload, mempool, query_handler, tx_monitor_cursor).await
@@ -1080,7 +1080,7 @@ mod tests {
         let tx_bytes = build_test_tx_cbor(200_000);
         let payload = build_submit_payload(6, &tx_bytes); // Conway era
 
-        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator, None).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1106,8 +1106,8 @@ mod tests {
         let payload = build_submit_payload(6, &tx_bytes);
 
         // Submit twice - both should accept
-        let _ = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
-        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
+        let _ = handle_tx_submission(&payload, &mempool, &no_validator, None).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator, None).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1125,7 +1125,7 @@ mod tests {
         let tx_bytes = vec![0xa0u8]; // not a valid transaction
         let payload = build_submit_payload(6, &tx_bytes);
 
-        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator, None).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1143,13 +1143,13 @@ mod tests {
         // Fill the mempool
         let tx_bytes_1 = build_test_tx_cbor(100_000);
         let payload1 = build_submit_payload(6, &tx_bytes_1);
-        let _ = handle_tx_submission(&payload1, &mempool, &no_validator).unwrap();
+        let _ = handle_tx_submission(&payload1, &mempool, &no_validator, None).unwrap();
 
         // Submit a different tx - should be rejected (full)
         let tx_bytes_2 = build_test_tx_cbor(200_000);
         let payload2 = build_submit_payload(6, &tx_bytes_2);
 
-        let result = handle_tx_submission(&payload2, &mempool, &no_validator).unwrap();
+        let result = handle_tx_submission(&payload2, &mempool, &no_validator, None).unwrap();
         assert!(result.is_some());
 
         let segment = result.unwrap();
@@ -1319,7 +1319,7 @@ mod tests {
         enc.array(1).unwrap();
         enc.u32(3).unwrap();
 
-        let result = handle_tx_submission(&payload, &mempool, &no_validator).unwrap();
+        let result = handle_tx_submission(&payload, &mempool, &no_validator, None).unwrap();
         assert!(result.is_none());
     }
 
