@@ -2276,7 +2276,12 @@ impl Node {
                                 Err(e) => { error!("Chain sync error: {e}"); break; }
                             }
                         }
-                        _ = forge_ticker.tick(), if self.block_producer.is_some() && pipeline_depth <= 1 => {
+                        // Forge ticker runs regardless of pipeline depth — the VRF
+                        // check is fast and try_forge_block() already gates on
+                        // wall-clock slot > tip slot.  Previously this was guarded
+                        // by `pipeline_depth <= 1`, which suppressed all leader
+                        // checks during bulk sync (hours of missed forge windows).
+                        _ = forge_ticker.tick(), if self.block_producer.is_some() => {
                             if let Some(wc) = self.current_wall_clock_slot() {
                                 if wc.0 > last_forge_slot {
                                     last_forge_slot = wc.0;
