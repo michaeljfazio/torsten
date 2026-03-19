@@ -729,7 +729,7 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
             col_w,
         ),
         kv_aligned(
-            "Half-Duplex",
+            "Uni-Direct",
             App::format_number(half_duplex),
             if half_duplex > 0 {
                 theme.warning
