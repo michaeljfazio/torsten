@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::Transaction;
+use torsten_primitives::transaction::{Transaction, TransactionInput};
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, trace, warn};
 
@@ -122,6 +122,12 @@ struct MempoolEntry {
 /// When full, lowest-fee-density transactions are evicted to make room
 /// for higher-density newcomers.
 ///
+/// Input-conflict checking is enforced at admission: a new transaction whose
+/// inputs overlap with any existing mempool transaction is rejected immediately
+/// with `MempoolError::InputConflict`. This matches Haskell cardano-node
+/// behaviour (`Ouroboros.Consensus.Mempool.addTx`) which validates each new
+/// tx against the virtual UTxO state (ledger tip + pending mempool txs).
+///
 /// Dual-FIFO fairness ensures local clients get equal admission weight
 /// to all remote peers combined.
 pub struct Mempool {
@@ -131,6 +137,10 @@ pub struct Mempool {
     order: RwLock<VecDeque<TransactionHash>>,
     /// Fee-density sorted index: iterates highest fee density first
     fee_index: RwLock<BTreeSet<FeeDensityKey>>,
+    /// Input-conflict index: maps each claimed TransactionInput to the hash of
+    /// the mempool tx that spends it.  Allows O(1) conflict detection at
+    /// admission without scanning every existing tx's input set.
+    claimed_inputs: DashMap<TransactionInput, TransactionHash>,
     /// Current total size
     total_bytes: RwLock<usize>,
     /// Current total execution memory units
@@ -163,6 +173,10 @@ pub enum MempoolError {
     ValidationFailed(String),
     #[error("Insufficient priority: new tx fee density too low to evict existing transactions")]
     InsufficientPriority,
+    /// Rejected because another mempool tx already spends the same input.
+    /// `claimed_by` is the hash of the tx that holds the conflicting input.
+    #[error("Input conflict: input already claimed by mempool tx {claimed_by}")]
+    InputConflict { claimed_by: TransactionHash },
 }
 
 /// Result of adding a transaction
@@ -178,6 +192,7 @@ impl Mempool {
             txs: DashMap::new(),
             order: RwLock::new(VecDeque::new()),
             fee_index: RwLock::new(BTreeSet::new()),
+            claimed_inputs: DashMap::new(),
             total_bytes: RwLock::new(0),
             total_ex_mem: AtomicU64::new(0),
             total_ex_steps: AtomicU64::new(0),
@@ -265,13 +280,34 @@ impl Mempool {
         ex_units_steps: u64,
         ref_scripts_bytes: usize,
     ) -> Result<MempoolAddResult, MempoolError> {
-        // Check if already exists
+        // Check if already exists (idempotent re-submission is silently accepted)
         if self.txs.contains_key(&tx_hash) {
             trace!(hash = %tx_hash.to_hex(), "Mempool: tx already exists");
             return Ok(MempoolAddResult::AlreadyExists);
         }
 
-        // Try eviction if any dimension would be exceeded
+        // Input-conflict check: reject if any spending input is already claimed by
+        // a pending mempool tx.  This matches Haskell cardano-node behaviour —
+        // only one tx per UTxO can be in-flight at a time.
+        //
+        // Only `body.inputs` (spending inputs) create exclusive claims.
+        // Collateral inputs are only consumed for phase-2 failing txs; valid txs
+        // never touch them.  Reference inputs are read-only and freely shareable.
+        for input in &tx.body.inputs {
+            if let Some(entry) = self.claimed_inputs.get(input) {
+                let claimed_by = *entry;
+                trace!(
+                    new_hash = %tx_hash.to_hex(),
+                    claimed_by = %claimed_by.to_hex(),
+                    tx_id = %input.transaction_id.to_hex(),
+                    index = input.index,
+                    "Mempool: input conflict detected, rejecting tx"
+                );
+                return Err(MempoolError::InputConflict { claimed_by });
+            }
+        }
+
+        // Try eviction if any capacity dimension would be exceeded
         if !self.ensure_capacity(
             size_bytes,
             fee.0,
@@ -308,8 +344,15 @@ impl Mempool {
             return Err(MempoolError::TooLarge { size: size_bytes });
         }
 
+        // Populate claimed-inputs index before inserting the entry so that any
+        // concurrent admission attempt (from under the all_fifo lock) sees the
+        // inputs as claimed immediately.
+        for input in &tx.body.inputs {
+            self.claimed_inputs.insert(input.clone(), tx_hash);
+        }
+
         let entry = MempoolEntry {
-            tx,
+            tx: tx.clone(),
             tx_hash,
             size_bytes,
             fee,
@@ -437,6 +480,12 @@ impl Mempool {
         if let Some((_, entry)) = self.txs.remove(tx_hash) {
             self.tx_count.fetch_sub(1, Ordering::Relaxed);
             self.order.write().retain(|h| h != tx_hash);
+
+            // Release every spending input claimed by this tx so that
+            // replacement or successor transactions can now be admitted.
+            for input in &entry.tx.body.inputs {
+                self.claimed_inputs.remove(input);
+            }
 
             // Remove from fee-density sorted index
             let key = FeeDensityKey::new(entry.fee.0, entry.size_bytes, *tx_hash);
@@ -604,6 +653,25 @@ impl Mempool {
         count
     }
 
+    /// Sweep transactions whose TTL has expired, using a raw slot number.
+    ///
+    /// This is the public entry-point intended for the forge ticker or any
+    /// periodic timer that works in raw `u64` slots rather than `SlotNo`.
+    /// It is equivalent to calling `evict_expired(SlotNo(current_slot))`.
+    ///
+    /// Returns the number of swept (removed) transactions.
+    pub fn sweep_expired(&self, current_slot: u64) -> usize {
+        self.evict_expired(SlotNo(current_slot))
+    }
+
+    /// Number of spending inputs currently claimed by mempool transactions.
+    ///
+    /// Useful for metrics and diagnostics.  Under normal operation this equals
+    /// the sum of `body.inputs.len()` across all mempool txs.
+    pub fn claimed_inputs_count(&self) -> usize {
+        self.claimed_inputs.len()
+    }
+
     /// Get transactions for block production ordered by fee density (fee/byte, descending).
     /// Transactions with higher fee density are prioritized.
     ///
@@ -696,6 +764,7 @@ impl Mempool {
             }
         }
         self.fee_index.write().clear();
+        self.claimed_inputs.clear();
         *self.total_bytes.write() = 0;
         self.total_ex_mem.store(0, Ordering::Relaxed);
         self.total_ex_steps.store(0, Ordering::Relaxed);
@@ -712,6 +781,7 @@ impl Mempool {
         self.txs.clear();
         self.order.write().clear();
         self.fee_index.write().clear();
+        self.claimed_inputs.clear();
         *self.total_bytes.write() = 0;
         self.total_ex_mem.store(0, Ordering::Relaxed);
         self.total_ex_steps.store(0, Ordering::Relaxed);
@@ -824,13 +894,25 @@ mod tests {
     use torsten_primitives::transaction::*;
     use torsten_primitives::value::Value;
 
+    /// Create a dummy transaction with a unique input derived from an atomic counter.
+    ///
+    /// Each call gets a different `(transaction_id, index)` pair so that tests
+    /// adding multiple `make_dummy_tx()` transactions do not accidentally trigger
+    /// the input-conflict check (which is correct behaviour — two real transactions
+    /// spending the same UTxO cannot coexist in the mempool).
     fn make_dummy_tx() -> Transaction {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrdering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, AOrdering::Relaxed);
+        let mut id_bytes = [0u8; 32];
+        id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
+
         Transaction {
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
-                    transaction_id: Hash32::ZERO,
-                    index: 0,
+                    transaction_id: Hash32::from_bytes(id_bytes),
+                    index: n,
                 }],
                 outputs: vec![TransactionOutput {
                     address: Address::Byron(ByronAddress {
@@ -2741,5 +2823,336 @@ mod tests {
 
         assert!(mempool.is_empty());
         assert_eq!(mempool.total_bytes(), 0);
+    }
+
+    // ========================== Input-conflict detection tests ==========================
+
+    /// Two transactions spending the same UTxO input cannot coexist in the mempool.
+    /// The second submission must be rejected with InputConflict, not silently admitted.
+    #[test]
+    fn test_input_conflict_rejected() {
+        let mempool = Mempool::new(default_config());
+
+        // tx_a spends input d697f98b#0
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([
+                0xd6, 0x97, 0xf9, 0x8b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            index: 0,
+        };
+
+        let mut tx_a = make_dummy_tx();
+        tx_a.body.inputs = vec![shared_input.clone()];
+        let hash_a = Hash32::from_bytes([0xAA; 32]);
+        mempool.add_tx(hash_a, tx_a, 300).unwrap();
+
+        // tx_b also spends d697f98b#0 — must be rejected
+        let mut tx_b = make_dummy_tx();
+        tx_b.body.inputs = vec![shared_input.clone()];
+        let hash_b = Hash32::from_bytes([0xBB; 32]);
+        let result = mempool.add_tx(hash_b, tx_b, 300);
+
+        assert!(
+            matches!(result, Err(MempoolError::InputConflict { claimed_by }) if claimed_by == hash_a),
+            "expected InputConflict(hash_a) but got: {:?}",
+            result
+        );
+        // Only tx_a should be in the mempool
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.contains(&hash_a));
+        assert!(!mempool.contains(&hash_b));
+    }
+
+    /// Regression: the soak test scenario — 50 txs all spending the same input.
+    /// Only the first must be admitted; the remaining 49 must all be rejected.
+    #[test]
+    fn test_input_conflict_stress_50_txs_same_input() {
+        let mempool = Mempool::new(default_config());
+
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([
+                0xd6, 0x97, 0xf9, 0x8b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            index: 0,
+        };
+
+        let mut admitted = 0usize;
+        let mut rejected = 0usize;
+        for i in 0u8..50 {
+            let mut tx = make_dummy_tx();
+            tx.body.inputs = vec![shared_input.clone()];
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0] = i;
+            let hash = Hash32::from_bytes(hash_bytes);
+            match mempool.add_tx(hash, tx, 200) {
+                Ok(MempoolAddResult::Added) => admitted += 1,
+                Err(MempoolError::InputConflict { .. }) => rejected += 1,
+                other => panic!("unexpected result: {:?}", other),
+            }
+        }
+
+        assert_eq!(admitted, 1, "exactly one tx must be admitted");
+        assert_eq!(
+            rejected, 49,
+            "all other 49 must be rejected with InputConflict"
+        );
+        assert_eq!(mempool.len(), 1);
+        // Exactly one entry in the claimed-inputs index
+        assert_eq!(mempool.claimed_inputs_count(), 1);
+    }
+
+    /// After removing the tx that holds a contested input, a new tx spending that
+    /// same input must be admitted successfully.
+    #[test]
+    fn test_input_conflict_cleared_after_remove() {
+        let mempool = Mempool::new(default_config());
+
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x12; 32]),
+            index: 3,
+        };
+
+        // tx_a claims the input
+        let mut tx_a = make_dummy_tx();
+        tx_a.body.inputs = vec![shared_input.clone()];
+        let hash_a = Hash32::from_bytes([0x01; 32]);
+        mempool.add_tx(hash_a, tx_a, 300).unwrap();
+        assert_eq!(mempool.claimed_inputs_count(), 1);
+
+        // tx_b is rejected because tx_a holds the input
+        let mut tx_b = make_dummy_tx();
+        tx_b.body.inputs = vec![shared_input.clone()];
+        let hash_b = Hash32::from_bytes([0x02; 32]);
+        assert!(matches!(
+            mempool.add_tx(hash_b, tx_b.clone(), 300),
+            Err(MempoolError::InputConflict { .. })
+        ));
+
+        // Confirm tx_a (block includes it) — release its inputs
+        mempool.remove_tx(&hash_a);
+        assert_eq!(mempool.len(), 0);
+        assert_eq!(mempool.claimed_inputs_count(), 0);
+
+        // Now tx_b (same input) must be admitted
+        mempool.add_tx(hash_b, tx_b, 300).unwrap();
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.contains(&hash_b));
+        assert_eq!(mempool.claimed_inputs_count(), 1);
+    }
+
+    /// A tx with multiple inputs: conflict is detected even when only one of
+    /// several inputs overlaps with an existing mempool tx.
+    #[test]
+    fn test_input_conflict_partial_overlap() {
+        let mempool = Mempool::new(default_config());
+
+        let input_x = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11; 32]),
+            index: 0,
+        };
+        let input_y = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x22; 32]),
+            index: 0,
+        };
+        let input_z = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x33; 32]),
+            index: 0,
+        };
+
+        // tx_a spends input_x and input_y
+        let mut tx_a = make_dummy_tx();
+        tx_a.body.inputs = vec![input_x.clone(), input_y.clone()];
+        let hash_a = Hash32::from_bytes([0xA0; 32]);
+        mempool.add_tx(hash_a, tx_a, 300).unwrap();
+        assert_eq!(mempool.claimed_inputs_count(), 2);
+
+        // tx_b spends input_y (overlap!) and input_z — must be rejected
+        let mut tx_b = make_dummy_tx();
+        tx_b.body.inputs = vec![input_y.clone(), input_z.clone()];
+        let hash_b = Hash32::from_bytes([0xB0; 32]);
+        let result = mempool.add_tx(hash_b, tx_b, 300);
+        assert!(
+            matches!(result, Err(MempoolError::InputConflict { .. })),
+            "expected InputConflict: {:?}",
+            result
+        );
+
+        // tx_c spends only input_z (no overlap) — must be admitted
+        let mut tx_c = make_dummy_tx();
+        tx_c.body.inputs = vec![input_z.clone()];
+        let hash_c = Hash32::from_bytes([0xC0; 32]);
+        mempool.add_tx(hash_c, tx_c, 200).unwrap();
+
+        assert_eq!(mempool.len(), 2);
+        // input_x, input_y from tx_a plus input_z from tx_c
+        assert_eq!(mempool.claimed_inputs_count(), 3);
+    }
+
+    /// drain_all must clear the claimed-inputs index so the mempool is fully
+    /// reusable after draining (rollback scenario).
+    #[test]
+    fn test_input_conflict_cleared_after_drain_all() {
+        let mempool = Mempool::new(default_config());
+
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xDE; 32]),
+            index: 1,
+        };
+
+        let mut tx_a = make_dummy_tx();
+        tx_a.body.inputs = vec![shared_input.clone()];
+        let hash_a = Hash32::from_bytes([0x01; 32]);
+        mempool.add_tx(hash_a, tx_a, 200).unwrap();
+
+        // Simulate rollback: drain everything
+        let drained = mempool.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            mempool.claimed_inputs_count(),
+            0,
+            "drain_all must clear claimed_inputs"
+        );
+
+        // The same input can now be re-admitted
+        let mut tx_b = make_dummy_tx();
+        tx_b.body.inputs = vec![shared_input.clone()];
+        let hash_b = Hash32::from_bytes([0x02; 32]);
+        mempool.add_tx(hash_b, tx_b, 200).unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    /// clear() must also reset the claimed-inputs index.
+    #[test]
+    fn test_input_conflict_cleared_after_clear() {
+        let mempool = Mempool::new(default_config());
+
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCA; 32]),
+            index: 0,
+        };
+
+        let mut tx = make_dummy_tx();
+        tx.body.inputs = vec![shared_input.clone()];
+        mempool
+            .add_tx(Hash32::from_bytes([0x01; 32]), tx, 200)
+            .unwrap();
+
+        mempool.clear();
+        assert_eq!(
+            mempool.claimed_inputs_count(),
+            0,
+            "clear() must reset claimed_inputs"
+        );
+
+        // Must be re-admittable after clear
+        let mut tx2 = make_dummy_tx();
+        tx2.body.inputs = vec![shared_input.clone()];
+        mempool
+            .add_tx(Hash32::from_bytes([0x02; 32]), tx2, 200)
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    // ========================== sweep_expired tests ==========================
+
+    /// sweep_expired(u64) is equivalent to evict_expired(SlotNo(u64)).
+    #[test]
+    fn test_sweep_expired_removes_past_ttl() {
+        let mempool = Mempool::new(default_config());
+
+        // tx with TTL=100 (expires after slot 100)
+        let mut tx_expiring = make_dummy_tx();
+        tx_expiring.body.ttl = Some(SlotNo(100));
+        mempool
+            .add_tx(Hash32::from_bytes([0x01; 32]), tx_expiring, 200)
+            .unwrap();
+
+        // tx with TTL=200
+        let mut tx_later = make_dummy_tx();
+        tx_later.body.ttl = Some(SlotNo(200));
+        mempool
+            .add_tx(Hash32::from_bytes([0x02; 32]), tx_later, 200)
+            .unwrap();
+
+        // tx with no TTL (never expires)
+        let tx_immortal = make_dummy_tx();
+        mempool
+            .add_tx(Hash32::from_bytes([0x03; 32]), tx_immortal, 200)
+            .unwrap();
+
+        assert_eq!(mempool.len(), 3);
+
+        // At slot 50 nothing has expired yet
+        assert_eq!(mempool.sweep_expired(50), 0);
+        assert_eq!(mempool.len(), 3);
+
+        // At slot 101 the TTL=100 tx has expired
+        assert_eq!(mempool.sweep_expired(101), 1);
+        assert_eq!(mempool.len(), 2);
+        assert!(!mempool.contains(&Hash32::from_bytes([0x01; 32])));
+
+        // At slot 201 the TTL=200 tx has expired
+        assert_eq!(mempool.sweep_expired(201), 1);
+        assert_eq!(mempool.len(), 1);
+        assert!(mempool.contains(&Hash32::from_bytes([0x03; 32]))); // immortal remains
+    }
+
+    /// sweep_expired at the exact TTL slot does NOT evict (boundary: current_slot > ttl).
+    #[test]
+    fn test_sweep_expired_boundary_exact_ttl_slot() {
+        let mempool = Mempool::new(default_config());
+
+        let mut tx = make_dummy_tx();
+        tx.body.ttl = Some(SlotNo(100));
+        mempool
+            .add_tx(Hash32::from_bytes([0x01; 32]), tx, 200)
+            .unwrap();
+
+        // Exactly at TTL slot — not yet expired (TTL is the last valid slot)
+        assert_eq!(mempool.sweep_expired(100), 0);
+        assert_eq!(mempool.len(), 1);
+
+        // One slot past — now expired
+        assert_eq!(mempool.sweep_expired(101), 1);
+        assert_eq!(mempool.len(), 0);
+    }
+
+    /// sweep_expired releases claimed inputs so a replacement tx can be admitted.
+    #[test]
+    fn test_sweep_expired_releases_claimed_inputs() {
+        let mempool = Mempool::new(default_config());
+
+        let shared_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAB; 32]),
+            index: 0,
+        };
+
+        // tx_a spends the input and has a short TTL
+        let mut tx_a = make_dummy_tx();
+        tx_a.body.inputs = vec![shared_input.clone()];
+        tx_a.body.ttl = Some(SlotNo(50));
+        let hash_a = Hash32::from_bytes([0x01; 32]);
+        mempool.add_tx(hash_a, tx_a, 200).unwrap();
+
+        // tx_b spends the same input — conflict while tx_a is alive
+        let mut tx_b = make_dummy_tx();
+        tx_b.body.inputs = vec![shared_input.clone()];
+        let hash_b = Hash32::from_bytes([0x02; 32]);
+        assert!(matches!(
+            mempool.add_tx(hash_b, tx_b.clone(), 200),
+            Err(MempoolError::InputConflict { .. })
+        ));
+
+        // Sweep at slot 51 — tx_a expires, releasing the input
+        let swept = mempool.sweep_expired(51);
+        assert_eq!(swept, 1);
+        assert_eq!(mempool.claimed_inputs_count(), 0);
+
+        // Now tx_b (spending the same input) must be admitted
+        mempool.add_tx(hash_b, tx_b, 200).unwrap();
+        assert_eq!(mempool.len(), 1);
+        assert_eq!(mempool.claimed_inputs_count(), 1);
     }
 }
