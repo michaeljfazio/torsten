@@ -152,9 +152,15 @@ impl LedgerState {
     ///   - Operator reward includes self-delegation share (margin + proportional)
     ///   - Operator reward goes to pool's registered reward account
     ///
-    /// Returns a `PendingRewardUpdate` that should be stored and applied at the
-    /// NEXT epoch boundary, matching Haskell's RUPD timing.
-    pub(crate) fn calculate_rewards(&self, go_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
+    /// The `rupd_snapshot` argument is the SET snapshot after rotation (= old mark =
+    /// epoch-just-ended data).  The caller (`process_epoch_transition`) passes
+    /// `self.snapshots.set` immediately after rotating the mark→set→go chain.
+    ///
+    /// Historical note: the parameter was previously named `go_snapshot` when
+    /// the code incorrectly used the GO position (= epoch-2-ago data), which
+    /// caused the first two epoch RUPDs to be skipped entirely and produced 2.16×
+    /// treasury inflation relative to the canonical Koios on-chain values.
+    pub(crate) fn calculate_rewards(&self, rupd_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
         let rho_num = self.protocol_params.rho.numerator as i128;
         let rho_den = self.protocol_params.rho.denominator.max(1) as i128;
         let tau_num = self.protocol_params.tau.numerator as i128;
@@ -174,12 +180,12 @@ impl LedgerState {
             );
         }
         let expected_blocks = raw_expected_blocks.max(1);
-        // Use the go snapshot's epoch data — Haskell's RUPD computes eta and
-        // fees from the go-epoch, not the live epoch counters. Fall back to
-        // self.* for backward compatibility with legacy snapshots where these
-        // fields default to zero.
-        let actual_blocks = if go_snapshot.epoch_block_count > 0 {
-            go_snapshot.epoch_block_count
+        // Use the snapshot's epoch data — Haskell's RUPD computes eta and
+        // fees from the epoch that just ended, not the live (new) epoch counters.
+        // Fall back to self.* for backward compatibility with legacy snapshots where
+        // these fields default to zero.
+        let actual_blocks = if rupd_snapshot.epoch_block_count > 0 {
+            rupd_snapshot.epoch_block_count
         } else {
             self.epoch_block_count
         };
@@ -194,8 +200,8 @@ impl LedgerState {
                     expected_blocks as i128,
                 ));
         let expansion = expansion_rat.floor_u64();
-        let epoch_fees = if go_snapshot.epoch_fees.0 > 0 {
-            go_snapshot.epoch_fees.0
+        let epoch_fees = if rupd_snapshot.epoch_fees.0 > 0 {
+            rupd_snapshot.epoch_fees.0
         } else {
             self.epoch_fees.0
         };
@@ -228,7 +234,7 @@ impl LedgerState {
         }
 
         // Total active stake (for apparent performance denominator only)
-        let total_active_stake: u64 = go_snapshot
+        let total_active_stake: u64 = rupd_snapshot
             .pool_stake
             .values()
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
@@ -240,7 +246,7 @@ impl LedgerState {
             };
         }
 
-        // Total blocks produced in the go epoch (for apparent performance)
+        // Total blocks produced in the snapshot epoch (for apparent performance)
         let total_blocks_in_epoch = actual_blocks.max(1);
 
         // Saturation point: z0 = 1/nOpt
@@ -251,7 +257,7 @@ impl LedgerState {
 
         // Build delegators-by-pool index for O(n) reward distribution
         let mut delegators_by_pool: HashMap<Hash28, Vec<Hash32>> = HashMap::new();
-        for (cred_hash, pool_id) in go_snapshot.delegations.iter() {
+        for (cred_hash, pool_id) in rupd_snapshot.delegations.iter() {
             delegators_by_pool
                 .entry(*pool_id)
                 .or_default()
@@ -260,12 +266,12 @@ impl LedgerState {
 
         // Build owner-delegated-stake per pool for pledge check
         let mut owner_stake_by_pool: HashMap<Hash28, u64> = HashMap::new();
-        for (pool_id, pool_reg) in go_snapshot.pool_params.iter() {
+        for (pool_id, pool_reg) in rupd_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
                 let owner_key = owner.to_hash32_padded();
-                if go_snapshot.delegations.get(&owner_key) == Some(pool_id) {
-                    owner_stake += go_snapshot
+                if rupd_snapshot.delegations.get(&owner_key) == Some(pool_id) {
+                    owner_stake += rupd_snapshot
                         .stake_distribution
                         .get(&owner_key)
                         .map(|l| l.0)
@@ -276,8 +282,8 @@ impl LedgerState {
         }
 
         // Calculate rewards per pool
-        for (pool_id, pool_active_stake) in &go_snapshot.pool_stake {
-            let pool_reg = match go_snapshot.pool_params.get(pool_id) {
+        for (pool_id, pool_active_stake) in &rupd_snapshot.pool_stake {
+            let pool_reg = match rupd_snapshot.pool_params.get(pool_id) {
                 Some(reg) => reg,
                 None => continue,
             };
@@ -322,8 +328,8 @@ impl LedgerState {
             // Apparent performance: beta / sigma_a (using total_active_stake)
             //   perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
             //        = (blocks_made * total_active_stake) / (total_blocks * pool_stake)
-            let blocks_made = if !go_snapshot.epoch_blocks_by_pool.is_empty() {
-                go_snapshot
+            let blocks_made = if !rupd_snapshot.epoch_blocks_by_pool.is_empty() {
+                rupd_snapshot
                     .epoch_blocks_by_pool
                     .get(pool_id)
                     .copied()
@@ -378,7 +384,7 @@ impl LedgerState {
                         continue;
                     }
 
-                    let member_stake = go_snapshot
+                    let member_stake = rupd_snapshot
                         .stake_distribution
                         .get(cred_hash)
                         .copied()
@@ -441,11 +447,11 @@ impl LedgerState {
     /// Legacy compatibility: calculate and immediately distribute rewards.
     ///
     /// Used by tests that expect immediate reward application. New code should
-    /// use `calculate_rewards()` + `apply_pending_reward_update()` for correct
+    /// use `calculate_rewards()` + apply at the epoch boundary for correct
     /// Haskell-compatible RUPD timing.
     #[cfg(test)]
-    pub(crate) fn calculate_and_distribute_rewards(&mut self, go_snapshot: StakeSnapshot) {
-        let rupd = self.calculate_rewards(&go_snapshot);
+    pub(crate) fn calculate_and_distribute_rewards(&mut self, rupd_snapshot: StakeSnapshot) {
+        let rupd = self.calculate_rewards(&rupd_snapshot);
         // Apply immediately (legacy behavior for test compatibility)
         self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
         self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);

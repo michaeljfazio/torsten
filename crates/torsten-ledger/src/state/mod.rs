@@ -367,7 +367,7 @@ pub struct StakeSnapshot {
     #[serde(default)]
     pub stake_distribution: Arc<HashMap<Hash32, Lovelace>>,
     /// Fee pot from the epoch this snapshot was captured (Haskell's _feeSS).
-    /// Used by `calculate_rewards` in the go snapshot for RUPD deltaT1.
+    /// Used by `calculate_rewards` (via the set snapshot) for RUPD deltaT1.
     #[serde(default = "default_lovelace_zero")]
     pub epoch_fees: Lovelace,
     /// Total blocks produced in the epoch this snapshot was captured.

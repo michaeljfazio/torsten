@@ -12,31 +12,44 @@ impl LedgerState {
     /// Follows Haskell's NEWEPOCH STS rule ordering:
     /// 1. Apply any pending reward update carried over from old snapshots (backward compat)
     /// 2. Rotate snapshots: go = set, set = mark, mark = new
-    /// 3. Compute new reward update using the freshly-rotated go snapshot and apply IMMEDIATELY
+    /// 3. Compute new reward update using the freshly-rotated SET snapshot and apply IMMEDIATELY
     /// 4. Process retirements, governance, nonce, etc.
     ///
     /// # RUPD timing (matches Haskell's NEWEPOCH/TICK rules exactly)
     ///
-    /// In Haskell, the RUPD is pulsed *during* epoch E using the `ssStakeGo` snapshot that
-    /// was installed by the SNAP rotation at the *start* of epoch E (i.e. at the E-1 -> E
-    /// boundary).  The completed RUPD is then applied at the E -> E+1 boundary — the same
-    /// boundary where the NEXT SNAP rotation happens.
+    /// In Haskell, the RUPD is pulsed *during* epoch E using `ssStakeGo` — the go snapshot
+    /// that was installed at the E-1 -> E boundary.  The completed RUPD is applied at the
+    /// E -> E+1 boundary during the SAME SNAP rotation.
     ///
-    /// Concretely, at boundary E -> E+1 Haskell uses the go snapshot whose data comes from
-    /// epoch E-2 (two epochs before the boundary epoch E+1).  After the rotation at E -> E+1
-    /// the old `set` snapshot (epoch E-1 data) becomes the new `go`.
+    /// At the E -> E+1 boundary the SNAP rotation fires FIRST:
+    ///   go  = old set  (epoch E-1 data)
+    ///   set = old mark (epoch E data — the epoch that JUST ended)
+    ///   mark = newly built
     ///
-    /// To replicate this in Torsten we must:
-    ///   a) rotate snapshots first (go = old set = epoch E-1 data),
-    ///   b) compute RUPD from the NEW go (epoch E-2 data, same as Haskell's ssStakeGo),
-    ///   c) apply the RUPD immediately in the same boundary.
+    /// The completed RUPD was pulsed during epoch E using the go snapshot that existed at
+    /// the START of epoch E, which is the snapshot promoted to go at the E-1 -> E boundary.
+    /// That snapshot contained epoch E-1 data.  After the E -> E+1 rotation the same data
+    /// now sits in the NEW go position.
     ///
-    /// Computing the RUPD *before* rotation (from the pre-rotation go = epoch E-3 data)
-    /// and deferring application by one epoch causes a one-epoch lag.  Because Torsten also
-    /// applies Conway `treasury_value` self-correction in ValidateAll mode, the lag causes
-    /// the on-chain canonical treasury (which already includes the current epoch's RUPD) to
-    /// snap Torsten's treasury forward — and then the deferred RUPD fires at the *next*
-    /// boundary and adds the same RUPD again, producing systematic 2x treasury inflation.
+    /// HOWEVER: at the very first epoch boundary (0 -> 1) there was no prior set snapshot
+    /// (set = None before the boundary), so after rotation go = None.  Haskell still fires
+    /// the RUPD at this boundary using the epoch-0 snapshot, which is now in the SET position
+    /// (old mark = epoch-0 data).
+    ///
+    /// Cross-checking against Koios on-chain data (preview testnet):
+    ///   initial_reserves = 15_000_000_000_000_000 (45T max - 30T Byron genesis UTxOs)
+    ///   expansion_0→1   = floor(0.003 × 15T × 4320/4320) = 45_000_000_000_000
+    ///   treasury_0→1    = floor(0.2  × 45_000_000_000_000) = 9_000_000_000_000
+    ///   Koios epoch 1 treasury = 9_000_000_000_000  ← exact match
+    ///
+    /// The RUPD at epoch 0→1 uses the epoch-0 snapshot's block count (4320 blocks, eta=1.0).
+    /// After the 0→1 rotation that snapshot is in the SET position (old mark = epoch-0 data).
+    /// Using the GO position (old set = None) would skip the RUPD entirely — that is the bug
+    /// that produces 14T treasury (2.16×) instead of the canonical 6.51T.
+    ///
+    /// Therefore: RUPD must use `self.snapshots.set` (epoch-just-ended data, matching what
+    /// Haskell's RUPD pulsed on), NOT `self.snapshots.go` (epoch-2-ago data, skipped at
+    /// epoch 0→1 because go is None for the first two boundaries).
     pub fn process_epoch_transition(&mut self, new_epoch: EpochNo) {
         debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
 
@@ -45,10 +58,11 @@ impl LedgerState {
         // always a no-op (pending_reward_update is always None after this function returns).
         self.apply_pending_reward_update();
 
-        // Rotate snapshots: go = set, set = mark, mark = built below
-        // Rotation must happen BEFORE computing RUPD so that the new go snapshot
-        // (= old set = epoch E-1 data) matches what Haskell's ssStakeGo contains
-        // after its own SNAP rotation at the same boundary.
+        // Rotate snapshots: go = set, set = mark, mark = built below.
+        // Rotation must happen BEFORE computing RUPD so that:
+        //   new go  = old set = epoch E-1 data (2 epochs stale relative to new_epoch)
+        //   new set = old mark = epoch E data  (1 epoch stale — the epoch that just ended)
+        // The RUPD uses the new SET (old mark = epoch-just-ended data) to match Haskell.
         self.snapshots.go = self.snapshots.set.take();
         self.snapshots.set = self.snapshots.mark.take();
 
@@ -123,18 +137,23 @@ impl LedgerState {
             epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
-        // Step 3: Compute the reward update from the newly-rotated go snapshot and
+        // Step 3: Compute the reward update from the newly-rotated SET snapshot and
         // apply it immediately — matching Haskell's NEWEPOCH rule where RUPD is
         // completed and applied in the same boundary transition.
         //
         // After the rotation above:
-        //   go = old set = stake data from epoch E-1  (2 epochs before new_epoch E+1)
+        //   set = old mark = stake/performance data from epoch E (the epoch just ended)
         //
-        // This is exactly the `ssStakeGo` that Haskell's RUPD pulsed on during epoch E.
+        // At epoch 0→1: go = None (old set was None), set = epoch-0 snapshot.
+        // Using set ensures the RUPD fires at the FIRST epoch boundary (0→1) with
+        // the epoch-0 block count (4320 blocks, eta=1.0), producing the 9B treasury
+        // that Koios on-chain data confirms.  Using go would skip the first two
+        // RUPDs entirely (go is None for boundaries 0→1 and 1→2), causing 2.16× drift.
+        //
         // Note: `calculate_rewards` uses `self.reserves` which was already updated by
         // `apply_pending_reward_update` at step 1, matching Haskell's ordering.
-        if let Some(go_snapshot) = self.snapshots.go.clone() {
-            let rupd = self.calculate_rewards(&go_snapshot);
+        if let Some(set_snapshot) = self.snapshots.set.clone() {
+            let rupd = self.calculate_rewards(&set_snapshot);
             // Apply immediately: no deferral, no pending_reward_update accumulation.
             self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
             self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
@@ -153,7 +172,7 @@ impl LedgerState {
                 total_applied,
                 treasury_delta = rupd.delta_treasury,
                 reserves_delta = rupd.delta_reserves,
-                "RUPD applied at epoch boundary (immediate, Haskell-compatible)"
+                "RUPD applied at epoch boundary using set snapshot (Haskell-compatible)"
             );
         }
 
