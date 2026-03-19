@@ -1,0 +1,682 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>P2P Governor - Torsten Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../quickstart.html"><strong aria-hidden="true">2.</strong> Quick Start</a></li><li class="chapter-item expanded affix "><li class="part-title">Running a Node</li><li class="chapter-item expanded "><a href="../running/configuration.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../running/topology.html"><strong aria-hidden="true">4.</strong> Topology</a></li><li class="chapter-item expanded "><a href="../running/networks.html"><strong aria-hidden="true">5.</strong> Networks</a></li><li class="chapter-item expanded "><a href="../running/mithril.html"><strong aria-hidden="true">6.</strong> Mithril Snapshot Import</a></li><li class="chapter-item expanded "><a href="../running/logging.html"><strong aria-hidden="true">7.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../running/monitoring.html"><strong aria-hidden="true">8.</strong> Monitoring</a></li><li class="chapter-item expanded "><a href="../running/relay.html"><strong aria-hidden="true">9.</strong> Relay Node</a></li><li class="chapter-item expanded "><a href="../running/block-producer.html"><strong aria-hidden="true">10.</strong> Block Producer</a></li><li class="chapter-item expanded "><a href="../running/kubernetes.html"><strong aria-hidden="true">11.</strong> Kubernetes Deployment</a></li><li class="chapter-item expanded affix "><li class="part-title">CLI Reference</li><li class="chapter-item expanded "><a href="../cli/overview.html"><strong aria-hidden="true">12.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../cli/torsten-node.html"><strong aria-hidden="true">13.</strong> torsten-node</a></li><li class="chapter-item expanded "><a href="../cli/key-generation.html"><strong aria-hidden="true">14.</strong> Key Generation</a></li><li class="chapter-item expanded "><a href="../cli/transactions.html"><strong aria-hidden="true">15.</strong> Transactions</a></li><li class="chapter-item expanded "><a href="../cli/queries.html"><strong aria-hidden="true">16.</strong> Queries</a></li><li class="chapter-item expanded "><a href="../cli/stake-address.html"><strong aria-hidden="true">17.</strong> Stake Address</a></li><li class="chapter-item expanded "><a href="../cli/stake-pool.html"><strong aria-hidden="true">18.</strong> Stake Pool</a></li><li class="chapter-item expanded "><a href="../cli/node-commands.html"><strong aria-hidden="true">19.</strong> Node Commands</a></li><li class="chapter-item expanded "><a href="../cli/governance.html"><strong aria-hidden="true">20.</strong> Governance</a></li><li class="chapter-item expanded affix "><li class="part-title">Architecture</li><li class="chapter-item expanded "><a href="../architecture/overview.html"><strong aria-hidden="true">21.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../architecture/sync-pipeline.html"><strong aria-hidden="true">22.</strong> Sync Pipeline</a></li><li class="chapter-item expanded "><a href="../architecture/storage.html"><strong aria-hidden="true">23.</strong> Storage</a></li><li class="chapter-item expanded "><a href="../architecture/consensus.html"><strong aria-hidden="true">24.</strong> Consensus</a></li><li class="chapter-item expanded "><a href="../architecture/networking.html"><strong aria-hidden="true">25.</strong> Networking</a></li><li class="chapter-item expanded "><a href="../architecture/p2p-governor.html" class="active"><strong aria-hidden="true">26.</strong> P2P Governor</a></li><li class="chapter-item expanded "><a href="../architecture/genesis-support.html"><strong aria-hidden="true">27.</strong> Genesis Support</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/protocol-parameters.html"><strong aria-hidden="true">28.</strong> Protocol Parameters</a></li><li class="chapter-item expanded "><a href="../reference/benchmarks.html"><strong aria-hidden="true">29.</strong> Benchmarks</a></li><li class="chapter-item expanded "><a href="../reference/third-party-licenses.html"><strong aria-hidden="true">30.</strong> Third-Party Licenses</a></li><li class="chapter-item expanded "><a href="../reference/troubleshooting.html"><strong aria-hidden="true">31.</strong> Troubleshooting</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Torsten Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten/edit/main/docs/src/architecture/p2p-governor.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="p2p-governor-upgrade-to-ouroboros-peer-selection"><a class="header" href="#p2p-governor-upgrade-to-ouroboros-peer-selection">P2P Governor: Upgrade to Ouroboros Peer Selection</a></h1>
+<p>This document describes the architecture for upgrading Torsten's peer management
+to a proper implementation of the Haskell cardano-node Ouroboros P2P governor
+(issue #138).</p>
+<hr />
+<h2 id="1-current-state"><a class="header" href="#1-current-state">1. Current State</a></h2>
+<h3 id="what-exists-today"><a class="header" href="#what-exists-today">What Exists Today</a></h3>
+<p>Two modules implement peer management in <code>torsten-network</code>:</p>
+<p><strong><code>peer_manager.rs</code></strong> — The data layer. Tracks every known peer in a flat
+<code>HashMap&lt;SocketAddr, PeerInfo&gt;</code> together with three <code>HashSet</code>s for the
+cold/warm/hot buckets. Key features implemented:</p>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
+<tr><td>Cold / Warm / Hot temperature tracking</td><td>Done</td></tr>
+<tr><td><code>PeerCategory</code> (LocalRoot, PublicRoot, BigLedgerPeer, LedgerPeer, Shared, Bootstrap)</td><td>Done</td></tr>
+<tr><td><code>ConnectionDirection</code> (Inbound / Outbound)</td><td>Done</td></tr>
+<tr><td><code>PeerSource</code> (Config, PeerSharing, Ledger)</td><td>Done</td></tr>
+<tr><td><code>PeerPerformance</code> — EWMA handshake RTT + block fetch latency</td><td>Done</td></tr>
+<tr><td>Reputation scoring (latency + volume + reliability + recency)</td><td>Done</td></tr>
+<tr><td>Circuit breaker (Closed / Open / HalfOpen with exponential cooldown)</td><td>Done</td></tr>
+<tr><td>Subnet diversity penalty for peer selection (/24 IPv4, /48 IPv6)</td><td>Done</td></tr>
+<tr><td>Trustable-first two-tier ordering for <code>peers_to_connect()</code></td><td>Done</td></tr>
+<tr><td>Inbound connection count limit</td><td>Done</td></tr>
+<tr><td><code>DiffusionMode</code> (InitiatorOnly / InitiatorAndResponder)</td><td>Done</td></tr>
+<tr><td>Failure-count time decay (halves every 5 min)</td><td>Done</td></tr>
+</tbody></table>
+</div>
+<p><strong><code>governor.rs</code></strong> — The policy layer. Runs on a 30-second <code>tokio::interval</code> in
+<code>torsten-node</code>. Features implemented:</p>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
+<tr><td><code>PeerTargets</code> (root/known/established/active + BLP variants)</td><td>Done</td></tr>
+<tr><td>Sync-state-aware target switching (<code>PreSyncing</code> / <code>Syncing</code> / <code>CaughtUp</code>)</td><td>Done</td></tr>
+<tr><td>Hard/soft connection limits with <code>ConnectionDecision</code></td><td>Done</td></tr>
+<tr><td>Big-ledger-peer promotion priority</td><td>Done</td></tr>
+<tr><td>Active (hot) peer target enforcement</td><td>Done</td></tr>
+<tr><td>Established (warm+hot) target enforcement</td><td>Done</td></tr>
+<tr><td>Surplus reduction — demote/disconnect by lowest reputation, local-root protected</td><td>Done</td></tr>
+<tr><td>Churn mechanism — 20% target reduction cycle at configurable intervals</td><td>Done</td></tr>
+<tr><td>Default targets matching cardano-node (active=15, established=40, known=85)</td><td>Done</td></tr>
+</tbody></table>
+</div>
+<h3 id="how-it-is-wired"><a class="header" href="#how-it-is-wired">How It Is Wired</a></h3>
+<p>The governor runs as a standalone <code>tokio::spawn</code> task in <code>node/mod.rs</code>.
+Every 30 seconds it:</p>
+<ol>
+<li>Acquires a read lock on <code>Arc&lt;RwLock&lt;PeerManager&gt;&gt;</code> and calls <code>governor.evaluate()</code> and <code>governor.maybe_churn()</code>.</li>
+<li>Acquires a write lock and applies the resulting <code>GovernorEvent</code>s by calling
+<code>promote_to_hot</code>, <code>demote_to_warm</code>, <code>peer_disconnected</code>, and
+<code>recompute_reputations</code>.</li>
+<li><code>GovernorEvent::Connect</code> is acknowledged but not executed here — outbound
+connections originate from the main connection loop via <code>peers_to_connect()</code>.</li>
+</ol>
+<h3 id="honest-assessment-of-the-gaps"><a class="header" href="#honest-assessment-of-the-gaps">Honest Assessment of the Gaps</a></h3>
+<p>The current implementation is a <strong>functional scaffold</strong>, not a production-grade
+Ouroboros peer selection governor. It passes all existing tests and correctly
+manages peer temperatures, but it diverges from the Haskell specification in
+several important ways that affect network health under real conditions:</p>
+<hr />
+<h2 id="2-target-state-the-haskell-ouroboros-governor"><a class="header" href="#2-target-state-the-haskell-ouroboros-governor">2. Target State: The Haskell Ouroboros Governor</a></h2>
+<p>The reference implementation is <code>ouroboros-network/ouroboros-network/src/Ouroboros/Network/PeerSelection/Governor/</code>
+in the Haskell cardano-node repository. The key behavioral contracts are:</p>
+<h3 id="21-peer-selection-state-machine"><a class="header" href="#21-peer-selection-state-machine">2.1 Peer Selection State Machine</a></h3>
+<p>The Haskell governor drives peers through a formal state machine with
+four named states:</p>
+<pre><code>Known (cold)
+  │  promote-to-warm (TCP connect + handshake)
+  ▼
+Established (warm) ◄──── demote-to-cold (disconnect)
+  │  promote-to-hot  (activate mini-protocols)
+  ▼
+Active (hot)        ◄──── demote-to-warm (deactivate mini-protocols)
+  │
+  ▼ demote-to-cold (forceful disconnect)
+Known
+</code></pre>
+<p>Each transition has an associated <strong>timeout</strong> and <strong>backoff</strong> policy so that
+a stuck or slow peer is eventually abandoned rather than blocking the state
+machine. The governor never blocks waiting for a single peer — all transitions
+are concurrent and driven by a single select loop that waits for the earliest
+of: a timer expiry, a target count change, a peer status update, or a churn
+event.</p>
+<h3 id="22-target-counts"><a class="header" href="#22-target-counts">2.2 Target Counts</a></h3>
+<p>The governor maintains <strong>six independent target counts</strong>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Haskell Name</th><th>Default</th></tr></thead><tbody>
+<tr><td>Known peers</td><td><code>TargetNumberOfKnownPeers</code></td><td>100</td></tr>
+<tr><td>Established peers</td><td><code>TargetNumberOfEstablishedPeers</code></td><td>40</td></tr>
+<tr><td>Active peers</td><td><code>TargetNumberOfActivePeers</code></td><td>15</td></tr>
+<tr><td>Known big-ledger peers</td><td><code>TargetNumberOfKnownBigLedgerPeers</code></td><td>15</td></tr>
+<tr><td>Established big-ledger peers</td><td><code>TargetNumberOfEstablishedBigLedgerPeers</code></td><td>10</td></tr>
+<tr><td>Active big-ledger peers</td><td><code>TargetNumberOfActiveBigLedgerPeers</code></td><td>5</td></tr>
+</tbody></table>
+</div>
+<p>When any target is not met, the governor immediately attempts to satisfy the
+deficit. When any target is exceeded, the governor immediately demotes the
+lowest-priority surplus peers. The decision loop runs continuously, sleeping
+only when all targets are satisfied.</p>
+<h3 id="23-local-root-peer-pinning"><a class="header" href="#23-local-root-peer-pinning">2.3 Local Root Peer Pinning</a></h3>
+<p>Local root peers (from <code>localRoots</code> in the topology file) have <strong>pinned
+targets</strong> that override the normal target counts. The governor treats local
+roots as a separate mandatory bucket: if we have fewer connected local-root
+peers than configured, those deficit connections are pursued before any
+non-root target. Local roots are never demoted for surplus reduction and are
+never churned.</p>
+<p>The topology <code>localRoots</code> entry carries a <code>valency</code> field which is the minimum
+number of peers from that root group that must remain connected at all times.
+This is the principal difference from <code>publicRoots</code> (which are just cold seeds
+with no connection guarantee).</p>
+<h3 id="24-churn"><a class="header" href="#24-churn">2.4 Churn</a></h3>
+<p>The Haskell governor performs two types of churn:</p>
+<p><strong>Deadline churn (normal mode)</strong> — Every ~55 minutes, a fraction of established
+and active peers are opportunistically replaced. The governor reduces the known
+peer target by the churn amount (causing cold evictions), then resets the
+target (causing connects to new peers). This rotates approximately 1-2 peers
+per cycle.</p>
+<p><strong>Bulk sync churn</strong> — During active block download, churn cycles are more
+aggressive (~15 minutes) to allow the governor to quickly shed peers with
+poor block-fetch performance and try alternatives.</p>
+<p>Key properties of churn that are NOT present in the current implementation:</p>
+<ul>
+<li>Churn must respect local root protection (local roots never churned).</li>
+<li>Churn must track the actual replaced set so that previously-churned
+peers are not immediately re-selected.</li>
+<li>Churn randomises which peers are replaced (not deterministically
+worst-reputation-first) to avoid repeatedly cycling through the same
+set of mediocre peers.</li>
+<li>The Haskell implementation uses a separate churn governor loop that
+interleaves with the main selection loop via an STM variable; it does
+not modify the targets directly.</li>
+</ul>
+<h3 id="25-peer-sharing-integration"><a class="header" href="#25-peer-sharing-integration">2.5 Peer Sharing Integration</a></h3>
+<p>When the peer table has fewer than <code>TargetNumberOfKnownPeers</code> cold peers, the
+governor triggers peer-sharing requests to warm/hot peers that have the
+<code>PeerSharingEnabled</code> flag set in their handshake. The governor tracks:</p>
+<ul>
+<li>How many peer-sharing requests are in-flight per peer.</li>
+<li>Whether a given peer has already been asked this churn cycle.</li>
+<li>Discovered peers go into a "gossip bucket" rather than being immediately
+used to satisfy established/active targets (they must cool down first).</li>
+</ul>
+<p>The current implementation has the peer-sharing protocol wire format fully
+implemented (<code>peersharing.rs</code>) and can make requests, but the governor does
+not drive the request/response cycle — it happens opportunistically in the
+client connection loop rather than being target-driven.</p>
+<h3 id="26-big-ledger-peer-preference-during-sync"><a class="header" href="#26-big-ledger-peer-preference-during-sync">2.6 Big Ledger Peer Preference During Sync</a></h3>
+<p>Big ledger peers (SPOs in the top 90% of stake, obtained via
+<code>GetLedgerPeerSnapshot</code>) serve as trusted anchors during bulk block download.
+The governor maintains a separate target bucket for them. When <code>SyncState</code> is
+<code>Syncing</code> or <code>PreSyncing</code>, the BLP targets take absolute priority: the governor
+fills BLP targets before any non-BLP target. This is partially implemented but
+the BLP connect deficit (finding and connecting cold BLPs) is not wired — the
+governor emits a comment instead of a concrete <code>Connect</code> event for BLPs.</p>
+<h3 id="27-demotion-timeouts-and-backoff"><a class="header" href="#27-demotion-timeouts-and-backoff">2.7 Demotion Timeouts and Backoff</a></h3>
+<p>The Haskell governor tracks a <strong>demotion timeout</strong> per peer: if a warm-to-hot
+promotion does not complete within N seconds, the peer is demoted back to warm.
+If a cold-to-warm connection does not complete within N seconds, the peer is
+demoted back to cold and a backoff timer is started.</p>
+<p>The current implementation relies entirely on the circuit breaker in
+<code>PeerManager</code> for this behaviour, which is subtly different: the circuit
+breaker fires on the number of consecutive TCP failures, not on protocol-level
+promotion timeouts.</p>
+<hr />
+<h2 id="3-gap-analysis"><a class="header" href="#3-gap-analysis">3. Gap Analysis</a></h2>
+<p>The table below maps each Haskell governor feature against the current
+Torsten implementation:</p>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Current State</th><th>Gap Severity</th></tr></thead><tbody>
+<tr><td>Cold → Warm → Hot state machine</td><td>Implemented (temperature field)</td><td>Low — data model correct</td></tr>
+<tr><td>Transition timeouts (stuck peer detection)</td><td>Missing</td><td>Medium — can hold resources</td></tr>
+<tr><td>Local root valency enforcement</td><td>Partial — local roots not demoted, but valency per-group not tracked</td><td>Medium</td></tr>
+<tr><td>Per-group valency for topology <code>localRoots</code></td><td>Missing — only a flat category flag</td><td>High</td></tr>
+<tr><td>Churn: local root exemption</td><td>Implemented (not demoted)</td><td>Low</td></tr>
+<tr><td>Churn: randomised peer replacement</td><td>Missing — currently worst-reputation-first</td><td>Low-Medium</td></tr>
+<tr><td>Churn: avoid re-selecting recently-churned peers</td><td>Missing</td><td>Low</td></tr>
+<tr><td>Churn: separate churn loop from selection loop</td><td>Missing — single 30s polling loop</td><td>Medium</td></tr>
+<tr><td>Peer-sharing: governor-driven requests when below known-target</td><td>Missing</td><td>Medium</td></tr>
+<tr><td>Peer-sharing: gossip bucket cooldown before promotion</td><td>Missing</td><td>Low</td></tr>
+<tr><td>BLP: governor emits Connect events for cold BLPs</td><td>Missing — connect not emitted</td><td>High</td></tr>
+<tr><td>BLP: prefer BLPs during sync, not just promote warm ones</td><td>Partial</td><td>Medium</td></tr>
+<tr><td>Known peer target enforcement (eviction of excess cold peers)</td><td>Partial — eviction exists but not target-driven</td><td>Medium</td></tr>
+<tr><td>Established peer target: separate from active target</td><td>Implemented</td><td>Low</td></tr>
+<tr><td>Demotion timeout tracking per peer</td><td>Missing</td><td>Medium</td></tr>
+<tr><td>Governor-driven connect rate limiting</td><td>Missing — unlimited connects per cycle</td><td>Medium</td></tr>
+<tr><td>Peer selection diversity: penalise same ASN</td><td>Missing (only /24 subnet)</td><td>Low</td></tr>
+</tbody></table>
+</div>
+<p>The two highest-severity gaps are:</p>
+<ol>
+<li><strong>BLP connect events not emitted</strong> — <code>evaluate_blp()</code> in <code>governor.rs</code> has a
+comment saying "The node will handle connecting cold BLPs through the regular
+connect path" but this is not wired. Cold BLPs are never promoted unless they
+happen to be selected by the general <code>peers_to_connect()</code> path.</li>
+<li><strong>Per-group local root valency</strong> — The Haskell topology allows multiple
+<code>localRoots</code> groups each with their own <code>valency</code> (minimum connections).
+Torsten tracks only a boolean <code>is_local_root</code> flag per peer.</li>
+</ol>
+<hr />
+<h2 id="4-implementation-plan"><a class="header" href="#4-implementation-plan">4. Implementation Plan</a></h2>
+<p>The upgrade is broken into five phases, ordered by impact and dependency. Each
+phase is independently committable and tested. Later phases build on earlier
+ones but do not require a single large refactor.</p>
+<hr />
+<h3 id="phase-1-fix-blp-connect-path-and-add-per-group-valency"><a class="header" href="#phase-1-fix-blp-connect-path-and-add-per-group-valency">Phase 1: Fix BLP Connect Path and Add Per-Group Valency</a></h3>
+<p><strong>Effort:</strong> Small (2-3 days)
+<strong>Issue coverage:</strong> #138 (partial), #156 (partial)</p>
+<p>This is the most impactful single fix because it corrects a silent gap where
+the node never proactively connects to big-ledger peers during sync.</p>
+<p><strong>Changes required:</strong></p>
+<p><code>crates/torsten-network/src/governor.rs</code></p>
+<ul>
+<li>Change <code>evaluate_blp()</code> to emit <code>GovernorEvent::Connect(addr)</code> for cold BLPs
+when the established-BLP count is below <code>targets.established_blp</code>.</li>
+<li>Add a <code>PeerManager::cold_blp_addrs()</code> query method to enumerate cold BLPs
+eligible for connection (not circuit-open, not already in-flight).</li>
+</ul>
+<p><code>crates/torsten-network/src/peer_manager.rs</code></p>
+<ul>
+<li>Add <code>LocalRootGroup</code> struct:
+<pre><code>struct LocalRootGroup {
+    peers: Vec&lt;SocketAddr&gt;,
+    valency: usize,           // minimum connected count
+    advertise: bool,
+}
+</code></pre>
+</li>
+<li>Add <code>local_root_groups: Vec&lt;LocalRootGroup&gt;</code> to <code>PeerManager</code>.</li>
+<li>Add <code>add_local_root_group(peers, valency, advertise)</code> replacing the current
+flat <code>add_config_peer(addr, trustable=true, ...)</code> calls for local roots.</li>
+<li>Add <code>local_root_deficit()</code> → <code>Vec&lt;SocketAddr&gt;</code>: returns addresses from
+local-root groups where connected count &lt; valency.</li>
+</ul>
+<p><code>crates/torsten-network/src/governor.rs</code></p>
+<ul>
+<li>Add <code>evaluate_local_root_deficit()</code> phase before BLP evaluation. If any
+local-root group is below valency, emit <code>Connect</code> events for those peers
+first, before any other policy.</li>
+</ul>
+<p><code>crates/torsten-node/src/config.rs</code></p>
+<ul>
+<li>Parse <code>valency</code> field from <code>localRoots</code> topology entries (already in JSON,
+currently ignored).</li>
+<li>Call <code>add_local_root_group()</code> instead of individual <code>add_config_peer()</code>.</li>
+</ul>
+<p><strong>Key files changed:</strong></p>
+<ul>
+<li><code>crates/torsten-network/src/governor.rs</code></li>
+<li><code>crates/torsten-network/src/peer_manager.rs</code></li>
+<li><code>crates/torsten-node/src/config.rs</code></li>
+<li><code>crates/torsten-node/src/node/mod.rs</code> (call new API)</li>
+</ul>
+<hr />
+<h3 id="phase-2-formalise-the-promotiondemotion-state-machine-with-timeouts"><a class="header" href="#phase-2-formalise-the-promotiondemotion-state-machine-with-timeouts">Phase 2: Formalise the Promotion/Demotion State Machine with Timeouts</a></h3>
+<p><strong>Effort:</strong> Medium (4-5 days)
+<strong>Issue coverage:</strong> #138 (core)</p>
+<p>Replace the implicit <code>PeerTemperature</code> field (mutated from multiple places) with
+an explicit state machine that enforces transition timeouts. This prevents
+resource leaks from half-open connections and stuck promotion attempts.</p>
+<p><strong>New type:</strong></p>
+<p><code>crates/torsten-network/src/peer_manager.rs</code></p>
+<pre><code>/// Ouroboros peer selection state, tracking in-progress transitions.
+enum PeerSelectionState {
+    /// Known but not connected.
+    Cold,
+    /// TCP connect in progress. Started at `started_at`.
+    ConnectingToWarm { started_at: Instant },
+    /// Connected (warm). Ready for promotion.
+    Warm { connected_at: Instant },
+    /// Hot promotion in progress (mini-protocols activating). Started at `started_at`.
+    PromotingToHot { started_at: Instant },
+    /// Fully active (hot).
+    Hot { promoted_at: Instant },
+    /// Demotion in progress (mini-protocols deactivating).
+    DemotingToWarm { started_at: Instant },
+    /// Cold demotion in progress (disconnecting).
+    DemotingToCold { started_at: Instant },
+}
+</code></pre>
+<p>The existing <code>PeerTemperature</code> (Cold/Warm/Hot) is a coarse projection of this
+state and can be derived from it for backwards compatibility with the governor's
+evaluation logic.</p>
+<p>Transition timeouts:</p>
+<ul>
+<li><code>ConnectingToWarm</code> → abandon after 10 seconds (TCP connect timeout)</li>
+<li><code>PromotingToHot</code> → abandon after 30 seconds (protocol activation timeout)</li>
+<li><code>DemotingToWarm</code> → force-complete after 15 seconds</li>
+<li><code>DemotingToCold</code> → force-complete after 10 seconds</li>
+</ul>
+<p><strong>New governor method:</strong></p>
+<p><code>governor.rs</code> — <code>check_transition_timeouts(pm)</code> → <code>Vec&lt;GovernorEvent&gt;</code></p>
+<p>Scans all peers in transitioning states, emits <code>Demote</code> or <code>Disconnect</code> for
+peers that have exceeded their timeout. Called alongside <code>evaluate()</code> and
+<code>maybe_churn()</code> in the node's governor task.</p>
+<p><strong>Key files changed:</strong></p>
+<ul>
+<li><code>crates/torsten-network/src/peer_manager.rs</code> (new state enum)</li>
+<li><code>crates/torsten-network/src/governor.rs</code> (timeout check method)</li>
+<li><code>crates/torsten-node/src/node/mod.rs</code> (call timeout check)</li>
+<li><code>crates/torsten-network/src/client.rs</code> (report promotion success/failure)</li>
+</ul>
+<hr />
+<h3 id="phase-3-improve-churn-randomised-no-re-selection-local-root-exempt"><a class="header" href="#phase-3-improve-churn-randomised-no-re-selection-local-root-exempt">Phase 3: Improve Churn (Randomised, No Re-selection, Local Root Exempt)</a></h3>
+<p><strong>Effort:</strong> Small-Medium (2-3 days)
+<strong>Issue coverage:</strong> #138 (churn correctness)</p>
+<p>The current churn implementation reduces all targets by 20% and then restores
+them. This is structurally correct but has three defects described in section 3.</p>
+<p><strong>Changes:</strong></p>
+<p><code>crates/torsten-network/src/governor.rs</code></p>
+<ul>
+<li>Add <code>churned_this_cycle: HashSet&lt;SocketAddr&gt;</code> to <code>Governor</code>. Reset when churn
+phase completes.</li>
+<li>Change <code>evaluate_surplus()</code> to select surplus peers randomly rather than
+worst-reputation-first when <code>churn_active</code> is true. Use the peer's address
+bytes as an entropy source xored with a per-churn random seed stored in
+<code>Governor</code> (<code>churn_seed: u64</code>, set at churn start from <code>Instant::now().elapsed().subsec_nanos()</code>).</li>
+<li>Skip peers that are in <code>churned_this_cycle</code> when selecting new connections
+after churn, preventing the same peer from being immediately re-selected.
+Peers age out of the churn set when the next full churn cycle begins.</li>
+<li>Explicitly skip local-root peers in the surplus reduction path when
+<code>churn_active</code> is true (they are already skipped for <code>is_local_root()</code> in
+<code>evaluate_surplus</code>, but the check should be documented and tested explicitly
+for churn).</li>
+</ul>
+<p><strong>Key files changed:</strong></p>
+<ul>
+<li><code>crates/torsten-network/src/governor.rs</code></li>
+</ul>
+<hr />
+<h3 id="phase-4-governor-driven-peer-sharing-requests"><a class="header" href="#phase-4-governor-driven-peer-sharing-requests">Phase 4: Governor-Driven Peer Sharing Requests</a></h3>
+<p><strong>Effort:</strong> Medium (3-4 days)
+<strong>Issue coverage:</strong> #138 (gossip-driven peer table growth)</p>
+<p>Currently peer sharing requests are made ad-hoc by the connection loop. The
+governor should drive them when the known-peer count is below target.</p>
+<p><strong>New governor phase in <code>evaluate()</code>:</strong></p>
+<p><code>governor.rs</code> — <code>evaluate_peer_sharing(pm, targets)</code> → <code>Vec&lt;GovernorEvent&gt;</code></p>
+<p>When <code>pm.cold_peer_count() + pm.warm_peer_count() + pm.hot_peer_count() &lt; targets.known_peers</code>:</p>
+<ul>
+<li>Select up to <code>PEER_SHARING_REQUEST_COUNT</code> (default 2) warm/hot peers that
+have <code>peer_sharing_enabled = true</code> and have not been asked within the last
+churn interval.</li>
+<li>Emit a new <code>GovernorEvent::RequestPeerSharing(SocketAddr, amount: u8)</code>.</li>
+</ul>
+<p><strong>New <code>GovernorEvent</code> variant:</strong></p>
+<p><code>governor.rs</code></p>
+<pre><code>GovernorEvent::RequestPeerSharing(SocketAddr, u8)
+</code></pre>
+<p><strong>Node wiring:</strong></p>
+<p><code>node/mod.rs</code> — Governor task handles <code>RequestPeerSharing</code> by spawning a
+short-lived async task that calls <code>request_peers_from()</code> from <code>peersharing.rs</code>
+and feeds results back to the <code>PeerManager</code> via <code>add_shared_peer()</code>.</p>
+<p><strong>Cooldown tracking:</strong></p>
+<p><code>peer_manager.rs</code> — Add <code>last_peer_sharing_request: Option&lt;Instant&gt;</code> to
+<code>PeerInfo</code>. The governor skips peers that have been asked within the current
+churn interval.</p>
+<p><strong>Key files changed:</strong></p>
+<ul>
+<li><code>crates/torsten-network/src/governor.rs</code></li>
+<li><code>crates/torsten-node/src/node/mod.rs</code></li>
+<li><code>crates/torsten-network/src/peer_manager.rs</code></li>
+</ul>
+<hr />
+<h3 id="phase-5-target-count-enforcement-for-known-peers--blp-preference-during-sync"><a class="header" href="#phase-5-target-count-enforcement-for-known-peers--blp-preference-during-sync">Phase 5: Target Count Enforcement for Known Peers + BLP Preference During Sync</a></h3>
+<p><strong>Effort:</strong> Medium (3-4 days)
+<strong>Issue coverage:</strong> #138 (known target), #156 (BLP preference)</p>
+<p>This phase completes the BLP priority story and adds true known-peer-count
+enforcement.</p>
+<p><strong>Part A: Known peer target enforcement</strong></p>
+<p>Currently <code>try_evict_cold_peer()</code> is called reactively when a new peer is
+added and the table is at capacity. The governor should proactively evict cold
+peers when the known count exceeds <code>targets.known_peers</code>.</p>
+<p><code>governor.rs</code> — Add <code>evaluate_known_surplus(pm, targets)</code> → <code>Vec&lt;GovernorEvent&gt;</code>:</p>
+<ul>
+<li>New event: <code>GovernorEvent::EvictColdPeer(SocketAddr)</code></li>
+<li>Emit up to N evictions per cycle (default 3) to avoid large discrete drops.</li>
+<li>Never evict local-root peers.</li>
+<li>Prefer evicting cold peers with the highest failure count and lowest reputation.</li>
+</ul>
+<p><code>node/mod.rs</code> — Handle <code>EvictColdPeer</code> by calling <code>pm.remove_cold_peer(addr)</code>.</p>
+<p><strong>Part B: BLP preference during sync</strong></p>
+<p>When <code>SyncState::Syncing</code>, the governor should not merely promote warm BLPs but
+should actively evict non-BLP warm/hot peers down to a lower threshold to make
+room for BLPs. This matches the Haskell governor's "use big ledger peers for
+genesis lite sync" policy.</p>
+<p><code>governor.rs</code> — During <code>SyncState::Syncing</code> evaluation:</p>
+<ul>
+<li>If active-BLP count &lt; <code>targets.active_blp</code> AND total hot count &gt;= <code>targets.active_peers</code>:
+<ul>
+<li>Demote the lowest-reputation non-BLP hot peer to create a hot slot for a BLP.</li>
+</ul>
+</li>
+<li>If established-BLP count &lt; <code>targets.established_blp</code> AND total warm count &gt;= threshold:
+<ul>
+<li>Disconnect the lowest-reputation non-BLP warm peer to create a slot for a BLP.</li>
+</ul>
+</li>
+</ul>
+<p>This ensures BLPs are not just promoted when slots happen to be available but
+are actively prioritised during sync.</p>
+<p><strong>Key files changed:</strong></p>
+<ul>
+<li><code>crates/torsten-network/src/governor.rs</code></li>
+<li><code>crates/torsten-network/src/peer_manager.rs</code> (<code>remove_cold_peer</code>)</li>
+<li><code>crates/torsten-node/src/node/mod.rs</code></li>
+</ul>
+<hr />
+<h2 id="5-architecture-notes"><a class="header" href="#5-architecture-notes">5. Architecture Notes</a></h2>
+<h3 id="dependency-constraints"><a class="header" href="#dependency-constraints">Dependency Constraints</a></h3>
+<p>All governor/peer-manager changes stay within <code>torsten-network</code>. The node binary
+(<code>torsten-node</code>) only interacts via the public <code>GovernorEvent</code> enum and the
+<code>PeerManager</code> public API. No Cardano-domain types should enter <code>governor.rs</code> or
+<code>peer_manager.rs</code>.</p>
+<h3 id="thread-safety-model"><a class="header" href="#thread-safety-model">Thread Safety Model</a></h3>
+<p>The <code>PeerManager</code> is wrapped in <code>Arc&lt;RwLock&lt;PeerManager&gt;&gt;</code> in the node.
+The governor task acquires a read lock for <code>evaluate()</code> and a write lock only
+for event application. This must remain true after all phases — no phase should
+require the governor to hold a write lock during network I/O.</p>
+<p>Phase 4 (peer sharing requests) introduces async work inside the governor task.
+This must be structured as fire-and-forget spawned tasks, not inline awaits on
+the governor loop, to keep the write-lock window minimal.</p>
+<h3 id="testing-strategy"><a class="header" href="#testing-strategy">Testing Strategy</a></h3>
+<p>Each phase must include unit tests that do not require network access:</p>
+<ul>
+<li>Phase 1: Test that <code>evaluate_blp()</code> emits <code>Connect</code> for cold BLPs at deficit,
+and that <code>local_root_deficit()</code> returns the correct addresses.</li>
+<li>Phase 2: Test that <code>check_transition_timeouts()</code> emits <code>Demote</code>/<code>Disconnect</code>
+for peers that have been in transitioning states beyond their timeout.</li>
+<li>Phase 3: Test that churn-selected peers are not immediately re-selected, and
+that local roots are never in the churned set.</li>
+<li>Phase 4: Test that <code>evaluate_peer_sharing()</code> emits <code>RequestPeerSharing</code> when
+below known-peer target and suppresses requests to peers asked recently.</li>
+<li>Phase 5: Test that known-peer surplus triggers <code>EvictColdPeer</code> respecting
+local-root protection, and that BLP preference during sync demotes non-BLPs
+when BLP targets are unmet.</li>
+</ul>
+<h3 id="rollout-sequencing"><a class="header" href="#rollout-sequencing">Rollout Sequencing</a></h3>
+<p>Phases 1 → 2 → 3 → 4 → 5 is the recommended order because:</p>
+<ul>
+<li>Phase 1 fixes the highest-severity silent bug and is independently valuable.</li>
+<li>Phase 2 provides the state-machine foundation that phases 3-5 build on for
+correct timeout semantics.</li>
+<li>Phase 3 is a contained change to <code>governor.rs</code> only.</li>
+<li>Phases 4 and 5 both add new <code>GovernorEvent</code> variants and touch more of the
+node wiring, so they benefit from phase 2 being stable first.</li>
+</ul>
+<hr />
+<h2 id="6-files-summary"><a class="header" href="#6-files-summary">6. Files Summary</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>File</th><th>Phases</th></tr></thead><tbody>
+<tr><td><code>crates/torsten-network/src/governor.rs</code></td><td>1, 2, 3, 4, 5</td></tr>
+<tr><td><code>crates/torsten-network/src/peer_manager.rs</code></td><td>1, 2, 4, 5</td></tr>
+<tr><td><code>crates/torsten-node/src/config.rs</code></td><td>1</td></tr>
+<tr><td><code>crates/torsten-node/src/node/mod.rs</code></td><td>1, 2, 4, 5</td></tr>
+<tr><td><code>crates/torsten-network/src/client.rs</code></td><td>2</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/networking.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/genesis-support.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/networking.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/genesis-support.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
