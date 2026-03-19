@@ -13,6 +13,7 @@ members = [
     "crates/torsten-lsm",
     "crates/torsten-integration-tests",
     "crates/torsten-monitor",
+    "crates/torsten-config",
     "tests/conformance",
     "tests/golden",
 ]
