@@ -147,6 +147,15 @@ pub struct Node {
     /// the background GSM evaluation task can write state transitions while
     /// the sync pipeline holds a read lock to query `loe_limit()`.
     pub(crate) gsm: Arc<RwLock<crate::gsm::GenesisStateMachine>>,
+    /// Number of consecutive peers that returned Origin as the intersection
+    /// point while we had a non-trivial ledger tip.
+    ///
+    /// A single peer returning Origin can mean it is on a different fork, is
+    /// momentarily stale, or has a corrupted chain.  Only after this counter
+    /// exceeds `ORIGIN_INTERSECT_THRESHOLD` do we conclude that *we* are the
+    /// divergent party and trigger a full ledger reset.  The counter is
+    /// reset whenever any peer returns a non-Origin intersection.
+    pub(crate) consecutive_origin_intersections: u32,
 }
 
 // ─── Node impl: new() ────────────────────────────────────────────────────────
@@ -777,6 +786,7 @@ impl Node {
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
             gsm,
+            consecutive_origin_intersections: 0,
         })
     }
 

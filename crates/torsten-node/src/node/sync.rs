@@ -1529,18 +1529,55 @@ impl Node {
             .map(|s| s.0)
             .unwrap_or(0);
 
-        // Case (A): no intersection found at all — full reset + reconnect.
+        // Case (A): no intersection found at all — multi-peer retry before
+        // full reset.  A single peer returning Origin does NOT prove our chain
+        // has diverged — the peer may be stale, on a minority fork, or have a
+        // corrupted volatile DB.  Only after ORIGIN_INTERSECT_THRESHOLD
+        // consecutive peers all return Origin do we perform the expensive full
+        // ledger reset.
+        const ORIGIN_INTERSECT_THRESHOLD: u32 = 3;
+
         if intersect_at_origin && ledger_slot > 0 {
+            self.consecutive_origin_intersections =
+                self.consecutive_origin_intersections.saturating_add(1);
+
+            if self.consecutive_origin_intersections < ORIGIN_INTERSECT_THRESHOLD {
+                warn!(
+                    ledger_slot,
+                    consecutive = self.consecutive_origin_intersections,
+                    threshold = ORIGIN_INTERSECT_THRESHOLD,
+                    "Fork recovery: peer returned Origin intersection ({}/{}). \
+                     Trying a different peer before triggering full reset.",
+                    self.consecutive_origin_intersections,
+                    ORIGIN_INTERSECT_THRESHOLD,
+                );
+                return Err(anyhow::anyhow!(
+                    "fork recovery: peer returned Origin intersection ({}/{}), \
+                     retrying with different peer",
+                    self.consecutive_origin_intersections,
+                    ORIGIN_INTERSECT_THRESHOLD,
+                ));
+            }
+
+            // All N peers returned Origin — genuinely diverged.
             warn!(
                 ledger_slot,
-                "Fork recovery: intersection fell to Origin — \
-                 no peer recognizes our chain. Resetting ledger and reconnecting."
+                consecutive = self.consecutive_origin_intersections,
+                "Fork recovery: {} consecutive peers returned Origin — \
+                 our chain has diverged. Resetting ledger and reconnecting.",
+                self.consecutive_origin_intersections,
             );
+            self.consecutive_origin_intersections = 0;
 
             {
                 let mut db = self.chain_db.write().await;
                 db.clear_volatile();
             }
+
+            // Reset epoch transition counters so that the subsequent replay
+            // from genesis produces the correct epoch count.
+            self.epoch_transitions_observed = 0;
+            self.live_epoch_transitions = 0;
 
             self.handle_rollback(&Point::Origin).await;
             self.consensus.set_strict_verification(false);
@@ -1548,6 +1585,16 @@ impl Node {
             return Err(anyhow::anyhow!(
                 "fork recovery: reset diverged ledger state, reconnecting"
             ));
+        }
+
+        // Non-Origin intersection found — our chain is canonical.
+        // Reset the consecutive-Origin counter.
+        if !intersect_at_origin && self.consecutive_origin_intersections > 0 {
+            debug!(
+                cleared = self.consecutive_origin_intersections,
+                "Fork recovery: non-Origin intersection, resetting Origin counter"
+            );
+            self.consecutive_origin_intersections = 0;
         }
 
         // Case (B): intersection behind ledger tip — targeted replay.
