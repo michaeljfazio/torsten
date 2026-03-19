@@ -383,12 +383,8 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let network = app.network.label();
     let version = env!("CARGO_PKG_VERSION");
-    let era = app.current_era();
     let uptime_secs = app.metrics.get_u64("torsten_uptime_seconds");
     let uptime = App::format_uptime(uptime_secs);
-    let peers_hot = app.metrics.get_u64("torsten_peers_hot");
-    let peers_warm = app.metrics.get_u64("torsten_peers_warm");
-    let peers_total = peers_hot + peers_warm;
     let blocks_forged = app.metrics.get_u64("torsten_blocks_forged_total");
 
     // When no data has ever been received, use placeholder dashes rather than zeros.
@@ -436,7 +432,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         theme,
         col_w,
     ));
-    lines.push(kv_aligned("Era", era, theme.info, theme, col_w));
+    // Era is shown in the header bar — not duplicated here.
     lines.push(kv_aligned(
         "Uptime",
         if no_data { "--".to_string() } else { uptime },
@@ -444,21 +440,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         theme,
         col_w,
     ));
-    lines.push(kv_aligned(
-        "Peers",
-        if no_data {
-            "--".to_string()
-        } else {
-            App::format_number(peers_total)
-        },
-        if no_data || peers_total == 0 {
-            theme.error
-        } else {
-            theme.success
-        },
-        theme,
-        col_w,
-    ));
+    // Peers are shown in the Connections panel — not duplicated here.
     lines.push(kv_aligned(
         "Blocks Forged",
         if no_data {
@@ -769,15 +751,8 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     // Total system physical memory — used to compute the memory gauge ratio.
     let mem_total = app.metrics.get_u64("torsten_mem_total_bytes");
 
-    // UTxO set size.
-    let utxo_count = app.metrics.get_u64("torsten_utxo_count");
-
-    // Peer counts — total plus optional outbound / inbound breakdown.
-    let peers_hot = app.metrics.get_u64("torsten_peers_hot");
-    let peers_warm = app.metrics.get_u64("torsten_peers_warm");
-    let peers_total = peers_hot + peers_warm;
-    let peers_out = app.metrics.get_u64("torsten_peers_outbound");
-    let peers_in = app.metrics.get_u64("torsten_peers_inbound");
+    // UTxO set size and peer counts are shown in Chain / Connections panels
+    // respectively — not duplicated here.
 
     // ---- Derive colors ----
 
@@ -942,65 +917,10 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         ));
     }
 
-    // ---- Row 4: UTxO Store ----
-    //
-    // "UTxO Store   4,109,330" — formatted with thousands separators so large
-    // numbers remain readable.  Uses the foreground color so it stands out as
-    // a primary metric.
-    lines.push(kv_aligned(
-        "UTxO Store",
-        App::format_number(utxo_count),
-        theme.fg,
-        theme,
-        col_w,
-    ));
-
-    // ---- Row 5: Peers ----
-    //
-    // "Peers           15  out 10 / in 5"
-    //
-    // Total peer count right-aligned as the primary value; outbound/inbound
-    // breakdown appended in muted text when those metrics are available.
-    // The breakdown uses the torsten_peers_outbound / torsten_peers_inbound
-    // gauges published by the P2P governor.
-    let peers_str = App::format_number(peers_total);
-    let have_direction = peers_out > 0 || peers_in > 0;
-    if have_direction {
-        let breakdown = format!("out {} / in {}", peers_out, peers_in);
-        // Compute available width for the breakdown suffix.
-        let suffix_gap = 2usize; // two spaces between value and breakdown
-        let available = col_w.saturating_sub(1 + LABEL_W + VALUE_W + suffix_gap);
-        if available >= breakdown.len() {
-            let mut peer_spans = vec![
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:<label_w$}", "Peers", label_w = LABEL_W),
-                    Style::default().fg(theme.muted),
-                ),
-                Span::styled(
-                    format!("{:>value_w$}", peers_str, value_w = VALUE_W),
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(breakdown, Style::default().fg(theme.muted)),
-            ];
-            // Trim the last span to fit within col_w if terminal is very narrow.
-            let used = 1 + LABEL_W + VALUE_W + suffix_gap + peer_spans[4].content.len();
-            if used > col_w {
-                let trim_to = peer_spans[4].content.len().saturating_sub(used - col_w);
-                let trimmed: String = peer_spans[4].content.chars().take(trim_to).collect();
-                peer_spans[4] = Span::styled(trimmed, Style::default().fg(theme.muted));
-            }
-            lines.push(Line::from(peer_spans));
-        } else {
-            // Not enough space for the breakdown — show total only.
-            lines.push(kv_aligned("Peers", peers_str, theme.success, theme, col_w));
-        }
-    } else {
-        lines.push(kv_aligned("Peers", peers_str, theme.success, theme, col_w));
-    }
+    // UTxO Store and Peers are intentionally NOT shown here — they are
+    // already displayed in the Chain panel and Connections panel respectively.
+    // Duplicating them would waste vertical space and violate the "no duplicate
+    // fields" design goal documented in the module header.
 
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
