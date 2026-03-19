@@ -227,8 +227,10 @@ impl LedgerState {
         let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
         if total_stake == 0 {
             return PendingRewardUpdate {
-                delta_reserves: expansion,
-                delta_treasury: treasury_cut + reward_pot,
+                // Only treasury_cut actually leaves reserves (goes to treasury).
+                // The rest of the expansion is not distributed and stays in reserves.
+                delta_reserves: treasury_cut,
+                delta_treasury: treasury_cut,
                 rewards: HashMap::new(),
             };
         }
@@ -240,8 +242,8 @@ impl LedgerState {
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
         if total_active_stake == 0 {
             return PendingRewardUpdate {
-                delta_reserves: expansion,
-                delta_treasury: treasury_cut + reward_pot,
+                delta_reserves: treasury_cut,
+                delta_treasury: treasury_cut,
                 rewards: HashMap::new(),
             };
         }
@@ -437,10 +439,16 @@ impl LedgerState {
             epoch_fees
         );
 
+        // delta_reserves = treasury_cut + total_distributed (what actually leaves reserves)
+        // Undistributed rewards stay in reserves — they are NOT sent to treasury.
+        // In Haskell: deltaR = deltaR1 - sum(rewards) - deltaT
+        // where deltaR1 is the expansion, deltaT is the treasury cut.
+        // The undistributed portion reduces the net reserve depletion.
+        let actually_leaving_reserves = treasury_cut + total_distributed;
         PendingRewardUpdate {
             rewards: reward_map,
-            delta_treasury: treasury_cut + undistributed,
-            delta_reserves: expansion,
+            delta_treasury: treasury_cut,
+            delta_reserves: actually_leaving_reserves,
         }
     }
 
