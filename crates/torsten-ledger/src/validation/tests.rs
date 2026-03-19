@@ -6018,4 +6018,1806 @@ mod tests {
             "Expected MissingRedeemer {{ tag: Cert, index: 0 }} for CommitteeColdResign with Script cold credential, got: {errors:?}"
         );
     }
+
+    // =========================================================================
+    // Vote redeemer tests (Issue #179)
+    // =========================================================================
+
+    /// A DRep voter with a Script credential and NO matching Vote redeemer must
+    /// produce a `MissingRedeemer { tag: "Vote", index: 0 }` error.
+    #[test]
+    fn test_vote_redeemer_script_drep_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::{GovActionId, Vote, Voter, VotingProcedure};
+
+        let script_hash = Hash28::from_bytes([0xE0; 28]);
+
+        // Build a UTxO with a key-locked input (so Spend redeemer is not needed).
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA0; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // One DRep voter with a Script credential. No Vote redeemer provided.
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0xB0; 32]),
+            action_index: 0,
+        };
+        let mut votes: BTreeMap<GovActionId, VotingProcedure> = BTreeMap::new();
+        votes.insert(
+            gov_action_id,
+            VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+        voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures,
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                // Include a V2 script so has_plutus_scripts() returns true.
+                plutus_v2_scripts: vec![vec![0xE1]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Vote redeemer — this is what we are testing.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Vote")),
+            "Expected MissingRedeemer {{ tag: Vote, index: 0 }} for Script DRep voter, got: {errors:?}"
+        );
+    }
+
+    /// A DRep voter with a Script credential and a matching Vote redeemer at
+    /// index 0 must NOT produce a MissingRedeemer error.
+    #[test]
+    fn test_vote_redeemer_script_drep_present_ok() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::{GovActionId, Vote, Voter, VotingProcedure};
+
+        let script_hash = Hash28::from_bytes([0xE2; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA1; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0xB1; 32]),
+            action_index: 0,
+        };
+        let mut votes: BTreeMap<GovActionId, VotingProcedure> = BTreeMap::new();
+        votes.insert(
+            gov_action_id,
+            VotingProcedure {
+                vote: Vote::No,
+                anchor: None,
+            },
+        );
+        voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures,
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xE2]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Vote redeemer at index 0 — matches the script DRep voter.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Vote,
+                    index: 0,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            "Vote redeemer present at index 0; must not produce MissingRedeemer: {errors:?}"
+        );
+    }
+
+    /// A Vote redeemer at the wrong index must produce a MissingRedeemer error
+    /// at the correct index (0) even though index 1 has a redeemer.
+    #[test]
+    fn test_vote_redeemer_wrong_index_rejected() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::{GovActionId, Vote, Voter, VotingProcedure};
+
+        let script_hash = Hash28::from_bytes([0xE3; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA2; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Script DRep voter is at BTreeMap position 0.
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0xB2; 32]),
+            action_index: 0,
+        };
+        let mut votes: BTreeMap<GovActionId, VotingProcedure> = BTreeMap::new();
+        votes.insert(
+            gov_action_id,
+            VotingProcedure {
+                vote: Vote::Abstain,
+                anchor: None,
+            },
+        );
+        voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures,
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xE3]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // Redeemer at index 1, but the script voter is at position 0.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Vote,
+                    index: 1,
+                    data: PlutusData::Integer(0),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        // The script voter at index 0 has no redeemer — expect MissingRedeemer.
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Vote")),
+            "Expected MissingRedeemer {{ tag: Vote, index: 0 }} when only index 1 has a redeemer, got: {errors:?}"
+        );
+    }
+
+    /// A key-credential DRep voter does NOT require a Vote redeemer — no error
+    /// should be produced even without a redeemer.
+    #[test]
+    fn test_vote_redeemer_key_drep_no_redeemer_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::transaction::{GovActionId, Vote, Voter, VotingProcedure};
+
+        // VerificationKey credential — not a script.
+        let drep_key_hash = Hash28::from_bytes([0xE4; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA3; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0xB3; 32]),
+            action_index: 0,
+        };
+        let mut votes: BTreeMap<GovActionId, VotingProcedure> = BTreeMap::new();
+        votes.insert(
+            gov_action_id,
+            VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+        // VerificationKey credential DRep — redeemer not required.
+        voting_procedures.insert(
+            Voter::DRep(Credential::VerificationKey(drep_key_hash)),
+            votes,
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures,
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xE4]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Vote redeemer — but none is required for a key-credential voter.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            "Key-credential DRep voter must not require a Vote redeemer, got: {errors:?}"
+        );
+    }
+
+    /// An SPO voter (`StakePool`) never requires a Vote redeemer regardless of
+    /// the pool ID hash value — SPOs are always key-based.
+    #[test]
+    fn test_vote_redeemer_spo_voter_no_redeemer_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::transaction::{GovActionId, Vote, Voter, VotingProcedure};
+
+        let pool_id = Hash32::from_bytes([0xE5; 32]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA4; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0xB4; 32]),
+            action_index: 0,
+        };
+        let mut votes: BTreeMap<GovActionId, VotingProcedure> = BTreeMap::new();
+        votes.insert(
+            gov_action_id,
+            VotingProcedure {
+                vote: Vote::No,
+                anchor: None,
+            },
+        );
+        voting_procedures.insert(Voter::StakePool(pool_id), votes);
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(4_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures,
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xE5]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Vote")),
+            "SPO voter must not require a Vote redeemer, got: {errors:?}"
+        );
+    }
+
+    // =========================================================================
+    // Propose redeemer tests (Issue #179)
+    // =========================================================================
+
+    /// A `ParameterChange` proposal with a non-None `policy_hash` and no
+    /// matching Propose redeemer must produce `MissingRedeemer { tag: "Propose", index: 0 }`.
+    #[test]
+    fn test_propose_redeemer_parameter_change_with_policy_hash_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::hash::ScriptHash;
+        use torsten_primitives::transaction::{
+            GovAction, ProposalProcedure, ProtocolParamUpdate,
+        };
+
+        let policy_script_hash: ScriptHash = Hash28::from_bytes([0xF0; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC0; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(100_000_000),
+                    return_addr: vec![0xE0, 0x01, 0x02],
+                    gov_action: GovAction::ParameterChange {
+                        prev_action_id: None,
+                        protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                        policy_hash: Some(policy_script_hash),
+                    },
+                    anchor: torsten_primitives::transaction::Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::from_bytes([0xD0; 32]),
+                    },
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                // Include the constitutionality script so check_script_redeemers
+                // treats this as a Plutus transaction.
+                plutus_v3_scripts: vec![vec![0xF1]],
+                plutus_v2_scripts: vec![],
+                plutus_data: vec![],
+                // No Propose redeemer — this is what we are testing.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Propose")),
+            "Expected MissingRedeemer {{ tag: Propose, index: 0 }} for ParameterChange with policy_hash, got: {errors:?}"
+        );
+    }
+
+    /// A `TreasuryWithdrawals` proposal with a non-None `policy_hash` and no
+    /// matching Propose redeemer must produce `MissingRedeemer { tag: "Propose", index: 0 }`.
+    #[test]
+    fn test_propose_redeemer_treasury_withdrawals_with_policy_hash_missing() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::hash::ScriptHash;
+        use torsten_primitives::transaction::{GovAction, ProposalProcedure};
+
+        let policy_script_hash: ScriptHash = Hash28::from_bytes([0xF2; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC1; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // TreasuryWithdrawals with policy_hash set.
+        let mut treasury_withdrawals: BTreeMap<Vec<u8>, Lovelace> = BTreeMap::new();
+        treasury_withdrawals.insert(vec![0xE1, 0x02, 0x03], Lovelace(500_000_000));
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(100_000_000),
+                    return_addr: vec![0xE1, 0x02, 0x03],
+                    gov_action: GovAction::TreasuryWithdrawals {
+                        withdrawals: treasury_withdrawals,
+                        policy_hash: Some(policy_script_hash),
+                    },
+                    anchor: torsten_primitives::transaction::Anchor {
+                        url: "https://example.com/treasury".to_string(),
+                        data_hash: Hash32::from_bytes([0xD1; 32]),
+                    },
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v3_scripts: vec![vec![0xF3]],
+                plutus_v2_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, index: 0 } if tag == "Propose")),
+            "Expected MissingRedeemer {{ tag: Propose, index: 0 }} for TreasuryWithdrawals with policy_hash, got: {errors:?}"
+        );
+    }
+
+    /// A `ParameterChange` proposal WITHOUT a `policy_hash` does NOT require a
+    /// Propose redeemer.
+    #[test]
+    fn test_propose_redeemer_no_policy_hash_not_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::transaction::{
+            GovAction, ProposalProcedure, ProtocolParamUpdate,
+        };
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC2; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                // ParameterChange with policy_hash = None — no redeemer needed.
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(100_000_000),
+                    return_addr: vec![0xE2, 0x02, 0x03],
+                    gov_action: GovAction::ParameterChange {
+                        prev_action_id: None,
+                        protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                        policy_hash: None,
+                    },
+                    anchor: torsten_primitives::transaction::Anchor {
+                        url: "https://example.com/pchange".to_string(),
+                        data_hash: Hash32::from_bytes([0xD2; 32]),
+                    },
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xF4]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                // No Propose redeemer — must not be required when policy_hash is None.
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")),
+            "ParameterChange without policy_hash must not require a Propose redeemer, got: {errors:?}"
+        );
+    }
+
+    /// A `HardForkInitiation` proposal never requires a Propose redeemer
+    /// regardless of content.
+    #[test]
+    fn test_propose_redeemer_hard_fork_not_required() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::transaction::{GovAction, ProposalProcedure};
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC3; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                // HardForkInitiation — no policy_hash, never requires a Propose redeemer.
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(100_000_000),
+                    return_addr: vec![0xE3, 0x02, 0x03],
+                    gov_action: GovAction::HardForkInitiation {
+                        prev_action_id: None,
+                        protocol_version: (10, 0),
+                    },
+                    anchor: torsten_primitives::transaction::Anchor {
+                        url: "https://example.com/hf".to_string(),
+                        data_hash: Hash32::from_bytes([0xD3; 32]),
+                    },
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0xF5]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")),
+            "HardForkInitiation must not require a Propose redeemer, got: {errors:?}"
+        );
+    }
+
+    /// A `ParameterChange` with `policy_hash` provided WITH a matching Propose
+    /// redeemer at index 0 must NOT produce a MissingRedeemer error.
+    #[test]
+    fn test_propose_redeemer_parameter_change_present_ok() {
+        use super::super::collateral::check_script_redeemers;
+        use torsten_primitives::hash::ScriptHash;
+        use torsten_primitives::transaction::{
+            GovAction, ProposalProcedure, ProtocolParamUpdate,
+        };
+
+        let policy_script_hash: ScriptHash = Hash28::from_bytes([0xF6; 28]);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xC4; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(100_000_000),
+                    return_addr: vec![0xE4, 0x02, 0x03],
+                    gov_action: GovAction::ParameterChange {
+                        prev_action_id: None,
+                        protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                        policy_hash: Some(policy_script_hash),
+                    },
+                    anchor: torsten_primitives::transaction::Anchor {
+                        url: "https://example.com/ppresent".to_string(),
+                        data_hash: Hash32::from_bytes([0xD4; 32]),
+                    },
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v3_scripts: vec![vec![0xF6]],
+                plutus_v2_scripts: vec![],
+                plutus_data: vec![],
+                // Propose redeemer at index 0 — matches the ParameterChange proposal.
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Propose,
+                    index: 0,
+                    data: PlutusData::Integer(1),
+                    ex_units: ExUnits {
+                        mem: 200,
+                        steps: 200,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_script_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRedeemer { tag, .. } if tag == "Propose")),
+            "Propose redeemer present at index 0; must not produce MissingRedeemer: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 9c: Datum witness completeness tests
+    //
+    // These tests exercise `datum::check_datum_witnesses` directly (the
+    // function that implements Rule 9c), plus edge cases covering all six
+    // scenarios mandated by the spec.
+    // -----------------------------------------------------------------------
+
+    // Helper: build a script-locked enterprise address from an arbitrary Hash28.
+    fn script_enterprise_address(script_hash: Hash28) -> Address {
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+        Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::Script(script_hash),
+        })
+    }
+
+    // Helper: build a VKey-locked enterprise address (for datum tests).
+    fn vk_enterprise_address_datum(key_hash: Hash28) -> Address {
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+        Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(key_hash),
+        })
+    }
+
+    // Helper: compute datum hash = blake2b_256(CBOR(datum)).
+    fn datum_hash_of(datum: &PlutusData) -> Hash32 {
+        let cbor = torsten_serialization::encode_plutus_data(datum);
+        torsten_primitives::hash::blake2b_256(&cbor)
+    }
+
+    /// Script-locked input with DatumHash but no matching datum in the witness
+    /// set must produce `MissingDatumWitness`.
+    #[test]
+    fn test_datum_witness_missing_for_script_locked_input() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum = PlutusData::Integer(42);
+        let hash = datum_hash_of(&datum);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA1u8; 32]),
+            index: 0,
+        };
+        // UTxO is script-locked and carries a DatumHash.
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: script_enterprise_address(Hash28::from_bytes([0xAA; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::DatumHash(hash),
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // No datum witness supplied — must trigger MissingDatumWitness.
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingDatumWitness(_))),
+            "Expected MissingDatumWitness, got: {errors:?}"
+        );
+    }
+
+    /// Script-locked input with DatumHash and the matching datum in the witness
+    /// set must pass without errors.
+    #[test]
+    fn test_datum_witness_present_for_script_locked_input_ok() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum = PlutusData::Integer(42);
+        let hash = datum_hash_of(&datum);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA2u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: script_enterprise_address(Hash28::from_bytes([0xBB; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::DatumHash(hash),
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // Matching datum supplied — no error expected.
+                plutus_data: vec![datum],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    /// Script-locked input with `OutputDatum::InlineDatum` does NOT require a
+    /// datum witness — the datum is already embedded in the UTxO itself.
+    #[test]
+    fn test_datum_witness_inline_datum_no_witness_needed() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum = PlutusData::Integer(99);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA3u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: script_enterprise_address(Hash28::from_bytes([0xCC; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::InlineDatum {
+                    data: datum,
+                    raw_cbor: None,
+                },
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // No witness datum — inline UTxO datum is sufficient.
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Expected no errors for inline datum UTxO, got: {errors:?}"
+        );
+    }
+
+    /// A VKey-locked input with a DatumHash on its UTxO does NOT require a
+    /// datum witness — only script-locked inputs need one.
+    #[test]
+    fn test_datum_witness_non_script_input_datum_hash_no_witness_needed() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum = PlutusData::Bytes(vec![0xDE, 0xAD]);
+        let hash = datum_hash_of(&datum);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA4u8; 32]),
+            index: 0,
+        };
+        // VKey-locked input carrying a DatumHash — unusual but not forbidden.
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: vk_enterprise_address_datum(Hash28::from_bytes([0xDD; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::DatumHash(hash),
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // No datum witness — VKey input, none required.
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Expected no errors for VKey input with DatumHash, got: {errors:?}"
+        );
+    }
+
+    /// A datum in the witness set whose hash is not referenced by any spending
+    /// input UTxO or any transaction output must produce `ExtraDatumWitness`.
+    #[test]
+    fn test_datum_witness_extra_unreferenced_datum_rejected() {
+        use super::super::datum::check_datum_witnesses;
+
+        // Spurious datum — no input or output needs this.
+        let spurious = PlutusData::Integer(12345);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA5u8; 32]),
+            index: 0,
+        };
+        // Plain VKey-locked input with no datum.
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: vk_enterprise_address_datum(Hash28::from_bytes([0xEE; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // Spurious datum not needed by any input or output.
+                plutus_data: vec![spurious],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ExtraDatumWitness(_))),
+            "Expected ExtraDatumWitness for unreferenced datum, got: {errors:?}"
+        );
+    }
+
+    /// Both needed datums present and no extras — must pass cleanly.
+    #[test]
+    fn test_datum_witness_all_needed_present_no_extras_ok() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum_a = PlutusData::Integer(1);
+        let datum_b = PlutusData::Bytes(vec![0x01, 0x02, 0x03]);
+        let hash_a = datum_hash_of(&datum_a);
+        let hash_b = datum_hash_of(&datum_b);
+
+        let mut utxo_set = UtxoSet::new();
+
+        let input_a = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA6u8; 32]),
+            index: 0,
+        };
+        let input_b = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA7u8; 32]),
+            index: 0,
+        };
+
+        utxo_set.insert(
+            input_a.clone(),
+            TransactionOutput {
+                address: script_enterprise_address(Hash28::from_bytes([0x11; 28])),
+                value: Value::lovelace(3_000_000),
+                datum: OutputDatum::DatumHash(hash_a),
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        utxo_set.insert(
+            input_b.clone(),
+            TransactionOutput {
+                address: script_enterprise_address(Hash28::from_bytes([0x22; 28])),
+                value: Value::lovelace(3_000_000),
+                datum: OutputDatum::DatumHash(hash_b),
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input_a, input_b],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // Exactly the two needed datums — no extras.
+                plutus_data: vec![datum_a, datum_b],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Expected no errors when all needed datums present, got: {errors:?}"
+        );
+    }
+
+    /// A transaction output that declares a `DatumHash` makes the corresponding
+    /// datum bytes an "allowed supplemental" datum.  Supplying those bytes as a
+    /// witness must NOT produce `ExtraDatumWitness`.
+    #[test]
+    fn test_datum_witness_output_datum_hash_allows_supplemental_witness() {
+        use super::super::datum::check_datum_witnesses;
+
+        let datum = PlutusData::List(vec![PlutusData::Integer(7)]);
+        let hash = datum_hash_of(&datum);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA8u8; 32]),
+            index: 0,
+        };
+        // Plain VKey-locked input — no datum witness required for the input.
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: vk_enterprise_address_datum(Hash28::from_bytes([0x33; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                // Output declares a DatumHash — witness datum is supplemental.
+                outputs: vec![TransactionOutput {
+                    address: script_enterprise_address(Hash28::from_bytes([0x44; 28])),
+                    value: Value::lovelace(4_000_000),
+                    datum: OutputDatum::DatumHash(hash),
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(1_000_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                // Supplemental datum matching the output's DatumHash.
+                plutus_data: vec![datum],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Expected no errors for supplemental output datum witness, got: {errors:?}"
+        );
+    }
+
+    /// A transaction with no datums anywhere (no script inputs, no output datum
+    /// hashes, no witness datums) must pass cleanly — nothing to check.
+    #[test]
+    fn test_datum_witness_no_datums_anywhere_ok() {
+        use super::super::datum::check_datum_witnesses;
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xA9u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: vk_enterprise_address_datum(Hash28::from_bytes([0x55; 28])),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        let mut errors = Vec::new();
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
 }

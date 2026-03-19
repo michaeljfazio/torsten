@@ -13,13 +13,15 @@
 //! - Missing Reward redeemer for script-locked withdrawals (Rule 11c, Haskell `scriptsNeeded`)
 //! - Missing Mint redeemer for Plutus minting policies (Rule 11c, Haskell `scriptsNeeded`)
 //! - Missing Cert redeemer for script-credential certificates (Rule 11c, Haskell `conwayCertsNeeded`)
+//! - Missing Vote redeemer for script-credential voters (Rule 11c, Haskell `conwayVotesNeeded`)
+//! - Missing Propose redeemer for governed proposals with a policy_hash (Rule 11c)
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::{Hash28, PolicyId};
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{Certificate, RedeemerTag, ScriptRef, Transaction};
+use torsten_primitives::transaction::{Certificate, GovAction, RedeemerTag, ScriptRef, Transaction, Voter};
 use torsten_primitives::value::AssetName;
 
 use crate::utxo::UtxoSet;
@@ -161,6 +163,17 @@ fn check_ex_units(
 
 /// Rule 11b: Check that each redeemer's index is within the valid range for
 /// its tag type.
+///
+/// For Vote redeemers, the valid index range is `[0, vote_voter_count)` where
+/// `vote_voter_count` is the total number of voters in `voting_procedures` whose
+/// credential is a `Script`.  The index is the position in the full canonically
+/// sorted voter list (BTreeMap iteration order: CC < DRep < SPO by enum
+/// discriminant, then by credential hash within each type).
+///
+/// For Propose redeemers, the valid index range is `[0, propose_count)` where
+/// `propose_count` is the number of `proposal_procedures` entries that carry a
+/// `policy_hash` (i.e. `ParameterChange` or `TreasuryWithdrawals` with a
+/// non-None `policy_hash`).
 fn check_redeemer_indices(tx: &Transaction, errors: &mut Vec<ValidationError>) {
     let body = &tx.body;
     let input_count = body.inputs.len();
@@ -168,15 +181,30 @@ fn check_redeemer_indices(tx: &Transaction, errors: &mut Vec<ValidationError>) {
     let cert_count = body.certificates.len();
     let withdrawal_count = body.withdrawals.len();
 
+    // Count voters with script credentials — the upper bound for Vote redeemer indices.
+    // The index is the position in the full BTreeMap-ordered voter list (all voter types),
+    // not re-numbered to exclude key-credential voters.  So the max valid index is the
+    // last position that holds a script voter.  For simplicity, and matching Haskell's
+    // `conwayVotesNeeded` which enumerates all voters, we bound by the total voter count.
+    let vote_voter_count = body.voting_procedures.len();
+
+    // Count proposal procedures that carry a policy_hash — the upper bound for Propose
+    // redeemer indices.  Only ParameterChange and TreasuryWithdrawals with a non-None
+    // policy_hash are governed by a constitutionality script and require a redeemer.
+    let propose_count = body
+        .proposal_procedures
+        .iter()
+        .filter(|p| govaction_has_policy_hash(&p.gov_action))
+        .count();
+
     for redeemer in &tx.witness_set.redeemers {
         let (max, tag_name) = match redeemer.tag {
             RedeemerTag::Spend => (input_count, "Spend"),
             RedeemerTag::Mint => (mint_count, "Mint"),
             RedeemerTag::Cert => (cert_count, "Cert"),
             RedeemerTag::Reward => (withdrawal_count, "Reward"),
-            // Vote and Propose have dynamic counts not easily bounded here
-            RedeemerTag::Vote => continue,
-            RedeemerTag::Propose => continue,
+            RedeemerTag::Vote => (vote_voter_count, "Vote"),
+            RedeemerTag::Propose => (propose_count, "Propose"),
         };
         if redeemer.index as usize >= max {
             errors.push(ValidationError::RedeemerIndexOutOfRange {
@@ -395,6 +423,101 @@ pub(crate) fn check_script_redeemers(
                 });
             }
         }
+    }
+
+    // ------------------------------------------------------------------ Vote
+    // Per Haskell's `conwayVotesNeeded` (Cardano.Ledger.Conway.Rules.Certs),
+    // every voter in `voting_procedures` whose credential is a script hash must
+    // have a matching `Vote` redeemer.  The redeemer index is the voter's 0-based
+    // position in the full canonically sorted voter list.
+    //
+    // Canonical voter ordering (matching Haskell's `OMap` / CBOR map order in
+    // the `voting_procedures` body field):
+    //   ConstitutionalCommittee < DRep < StakePool  (by enum discriminant order)
+    //   Within each group: sorted by credential hash bytes.
+    //
+    // SPO voters (`StakePool(Hash32)`) are identified by a pool ID (a key hash)
+    // and can never be a script credential — they never require a Vote redeemer.
+    // Only `ConstitutionalCommittee(Credential::Script(_))` and
+    // `DRep(Credential::Script(_))` require one.
+    //
+    // The `Voter` enum derives `Ord`, which uses Rust's discriminant order followed
+    // by field comparison.  `BTreeMap<Voter, _>` iteration therefore produces the
+    // same canonical order that Haskell uses.
+    let vote_indices: HashSet<u32> = tx
+        .witness_set
+        .redeemers
+        .iter()
+        .filter(|r| r.tag == RedeemerTag::Vote)
+        .map(|r| r.index)
+        .collect();
+
+    for (idx, voter) in body.voting_procedures.keys().enumerate() {
+        // Extract the script credential from voters that can carry one.
+        // `StakePool` voters are pool key hashes, never scripts.
+        let is_script_voter = match voter {
+            Voter::ConstitutionalCommittee(cred) | Voter::DRep(cred) => {
+                matches!(cred, Credential::Script(_))
+            }
+            Voter::StakePool(_) => false,
+        };
+        if is_script_voter && !vote_indices.contains(&(idx as u32)) {
+            errors.push(ValidationError::MissingRedeemer {
+                tag: "Vote".to_string(),
+                index: idx as u32,
+            });
+        }
+    }
+
+    // --------------------------------------------------------------- Propose
+    // Per the Conway ledger spec (Section 4.9 "Proposals"), a governance action
+    // that carries a `policy_hash` (i.e. `ParameterChange` or
+    // `TreasuryWithdrawals` with a non-None `policy_hash`) requires a
+    // constitutionality script to approve it.  The script must be executed via
+    // a `Propose` redeemer at the action's 0-based position in
+    // `proposal_procedures`.
+    //
+    // All other action types (HardForkInitiation, NoConfidence, UpdateCommittee,
+    // NewConstitution, InfoAction) do not carry a policy_hash and never require
+    // a Propose redeemer.
+    //
+    // The index is the raw positional index in `proposal_procedures` (not
+    // re-numbered by skipping non-governed actions), matching Haskell's
+    // `zip [0..] (toList (txProposalProcedures txb))`.
+    let propose_indices: HashSet<u32> = tx
+        .witness_set
+        .redeemers
+        .iter()
+        .filter(|r| r.tag == RedeemerTag::Propose)
+        .map(|r| r.index)
+        .collect();
+
+    for (idx, proposal) in body.proposal_procedures.iter().enumerate() {
+        if govaction_has_policy_hash(&proposal.gov_action)
+            && !propose_indices.contains(&(idx as u32))
+        {
+            errors.push(ValidationError::MissingRedeemer {
+                tag: "Propose".to_string(),
+                index: idx as u32,
+            });
+        }
+    }
+}
+
+/// Return `true` if a governance action requires a constitutionality script
+/// witness (i.e. carries a non-None `policy_hash`).
+///
+/// Only `ParameterChange` and `TreasuryWithdrawals` can carry a `policy_hash`.
+/// All other action types never require a Propose redeemer.
+fn govaction_has_policy_hash(action: &GovAction) -> bool {
+    match action {
+        GovAction::ParameterChange { policy_hash, .. } => policy_hash.is_some(),
+        GovAction::TreasuryWithdrawals { policy_hash, .. } => policy_hash.is_some(),
+        GovAction::HardForkInitiation { .. }
+        | GovAction::NoConfidence { .. }
+        | GovAction::UpdateCommittee { .. }
+        | GovAction::NewConstitution { .. }
+        | GovAction::InfoAction => false,
     }
 }
 

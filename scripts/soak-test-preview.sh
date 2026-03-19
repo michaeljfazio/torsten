@@ -403,6 +403,63 @@ check_logs_for_errors() {
             tail -200 "$lf" 2>/dev/null | grep "ERROR" | sed 's/.*ERROR //' | sort | uniq -c | sort -rn | head -3 >> "$REPORT_FILE" 2>/dev/null
         done
     fi
+
+    # ── Koios cross-validation of rejected blocks/transactions ──────────
+    # When the node rejects a block or transaction, query Koios to check
+    # whether that block/tx exists on the canonical chain.  If Koios has
+    # it, our rejection was WRONG (validation divergence).
+    local koios_base="https://preview.koios.rest/api/v1"
+    local checked=0
+    local divergences=0
+
+    for lf in "${log_files[@]}"; do
+        # Check rejected transactions (Phase-1 validation divergence on confirmed blocks)
+        while IFS= read -r line; do
+            local tx_hash
+            tx_hash=$(echo "$line" | grep -oE 'tx_hash=[a-f0-9]{64}' | head -1 | cut -d= -f2)
+            if [[ -z "$tx_hash" ]]; then continue; fi
+            checked=$((checked + 1))
+
+            # Query Koios for this tx
+            local koios_resp
+            koios_resp=$(curl -s --max-time 5 -X POST "${koios_base}/tx_info" \
+                -H "Content-Type: application/json" \
+                -d "{\"_tx_hashes\":[\"${tx_hash}\"]}" 2>/dev/null)
+
+            if echo "$koios_resp" | grep -q "$tx_hash"; then
+                log ERROR "KOIOS DIVERGENCE: tx $tx_hash was rejected by our node but EXISTS on canonical chain!"
+                divergences=$((divergences + 1))
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            fi
+        done < <(tail -200 "$lf" 2>/dev/null | grep -i "Phase-1 validation divergence\|validation failed.*tx_hash" | tail -5)
+
+        # Check rejected blocks (does not connect to tip)
+        while IFS= read -r line; do
+            local block_hash
+            block_hash=$(echo "$line" | grep -oE 'hash=[a-f0-9]{64}' | head -1 | cut -d= -f2)
+            if [[ -z "$block_hash" ]]; then continue; fi
+            checked=$((checked + 1))
+
+            local koios_resp
+            koios_resp=$(curl -s --max-time 5 -X POST "${koios_base}/block_info" \
+                -H "Content-Type: application/json" \
+                -d "{\"_block_hashes\":[\"${block_hash}\"]}" 2>/dev/null)
+
+            if echo "$koios_resp" | grep -q "$block_hash"; then
+                log ERROR "KOIOS DIVERGENCE: block $block_hash was rejected by our node but EXISTS on canonical chain!"
+                divergences=$((divergences + 1))
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            fi
+        done < <(tail -200 "$lf" 2>/dev/null | grep "Failed to apply block\|does not connect to tip" | grep -v "during replay" | tail -5)
+    done
+
+    if (( checked > 0 )); then
+        if (( divergences > 0 )); then
+            log ERROR "Koios cross-validation: $divergences divergences in $checked checks!"
+        else
+            log OK "Koios cross-validation: $checked rejections verified correct"
+        fi
+    fi
 }
 
 query_tip() {
@@ -533,8 +590,47 @@ submit_valid_tx() {
     txid=$("$CLI" transaction txid --tx-file "$tx_signed" 2>/dev/null || echo "unknown")
     log TX "TxID: $txid"
 
+    # Koios verification: after 60s, check if accepted tx appears on-chain
+    if [[ "$txid" != "unknown" ]]; then
+        (sleep 60 && koios_verify_tx_accepted "$txid") &
+    fi
+
     rm -f "$tx_raw" "$tx_signed"
     return 0
+}
+
+# Verify an accepted tx appears on Koios (called async after delay)
+koios_verify_tx_accepted() {
+    local tx_hash="$1"
+    local koios_base="https://preview.koios.rest/api/v1"
+    local resp
+    resp=$(curl -s --max-time 10 -X POST "${koios_base}/tx_info" \
+        -H "Content-Type: application/json" \
+        -d "{\"_tx_hashes\":[\"${tx_hash}\"]}" 2>/dev/null)
+
+    if echo "$resp" | grep -q "$tx_hash"; then
+        log OK "KOIOS CONFIRMED: tx $tx_hash found on canonical chain"
+    else
+        log WARN "KOIOS: tx $tx_hash not yet visible (may need more confirmations)"
+    fi
+}
+
+# Verify a rejected tx does NOT appear on Koios
+koios_verify_tx_rejected() {
+    local tx_hash="$1"
+    local reason="$2"
+    local koios_base="https://preview.koios.rest/api/v1"
+    local resp
+    resp=$(curl -s --max-time 10 -X POST "${koios_base}/tx_info" \
+        -H "Content-Type: application/json" \
+        -d "{\"_tx_hashes\":[\"${tx_hash}\"]}" 2>/dev/null)
+
+    if echo "$resp" | grep -q "$tx_hash"; then
+        log ERROR "KOIOS DIVERGENCE: rejected tx $tx_hash ($reason) EXISTS on canonical chain!"
+        ISSUES_FOUND=$((ISSUES_FOUND + 1))
+    else
+        log OK "KOIOS VERIFIED: rejected tx $tx_hash correctly absent from chain"
+    fi
 }
 
 submit_valid_tx_with_metadata() {
@@ -663,6 +759,8 @@ submit_invalid_expired_ttl() {
     else
         log OK "Expired TTL tx correctly rejected: $submit_output"
         TX_INVALID=$((TX_INVALID + 1))
+        local txhash; txhash=$("$CLI" transaction txid --tx-file "$tx_signed" 2>/dev/null || echo "")
+        [[ -n "$txhash" ]] && koios_verify_tx_rejected "$txhash" "expired TTL"
     fi
 
     rm -f "$tx_raw" "$tx_signed"
@@ -719,6 +817,8 @@ submit_invalid_insufficient_fee() {
     else
         log OK "Insufficient fee tx correctly rejected: $submit_output"
         TX_INVALID=$((TX_INVALID + 1))
+        local txhash; txhash=$("$CLI" transaction txid --tx-file "$tx_signed" 2>/dev/null || echo "")
+        [[ -n "$txhash" ]] && koios_verify_tx_rejected "$txhash" "insufficient fee"
     fi
 
     rm -f "$tx_raw" "$tx_signed"
@@ -763,6 +863,8 @@ submit_invalid_spent_utxo() {
     else
         log OK "Spent UTxO tx correctly rejected: $submit_output"
         TX_INVALID=$((TX_INVALID + 1))
+        local txhash; txhash=$("$CLI" transaction txid --tx-file "$tx_signed" 2>/dev/null || echo "")
+        [[ -n "$txhash" ]] && koios_verify_tx_rejected "$txhash" "spent UTxO"
     fi
 
     rm -f "$tx_raw" "$tx_signed"
@@ -868,6 +970,8 @@ submit_invalid_value_not_conserved() {
     else
         log OK "Value-not-conserved tx correctly rejected: $submit_output"
         TX_INVALID=$((TX_INVALID + 1))
+        local txhash; txhash=$("$CLI" transaction txid --tx-file "$tx_signed" 2>/dev/null || echo "")
+        [[ -n "$txhash" ]] && koios_verify_tx_rejected "$txhash" "value not conserved"
     fi
 
     rm -f "$tx_raw" "$tx_signed"
