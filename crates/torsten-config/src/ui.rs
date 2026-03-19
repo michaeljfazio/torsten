@@ -960,9 +960,24 @@ fn cursor_to_flat(app: &App) -> usize {
     let mut flat = 0usize;
     for (sec_idx, section) in app.sections.iter().enumerate() {
         if sec_idx == app.cursor_section {
-            if section.expanded {
-                flat += app.cursor_item;
+            // cursor_item 0 = section header (flat_row = flat)
+            // cursor_item 1+ = child items (flat_row = flat + 1 + cursor_item - 1)
+            //                                         = flat + cursor_item
+            // Wait — app uses cursor_item=0 for the first CHILD, not the header.
+            // The section header is implicit: when cursor is on a section,
+            // the header gets highlighted at flat_row, and items start at flat_row+1.
+            //
+            // Actually checking render_section_header vs parameter rows:
+            // - Section header rendered at flat_row, then flat_row += 1
+            // - Item 0 rendered at the NEXT flat_row
+            //
+            // So cursor_item=0 → first child item → needs flat + 1
+            // But cursor on collapsed section also has cursor_item=0 → header
+            if section.expanded && !section.items.is_empty() {
+                // Cursor is on child item: +1 for header, +cursor_item for offset
+                return flat + 1 + app.cursor_item;
             }
+            // Cursor is on section header (collapsed or empty)
             return flat;
         }
         flat += 1; // section header
