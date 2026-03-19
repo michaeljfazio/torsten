@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Torsten is organized as a 10-crate Cargo workspace. Each crate has a focused responsibility and well-defined dependencies.
+Torsten is organized as a 14-crate Cargo workspace. Each crate has a focused responsibility and well-defined dependencies.
 
 ## Crate Workspace
 
@@ -9,13 +9,16 @@ Torsten is organized as a 10-crate Cargo workspace. Each crate has a focused res
 | `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron through Conway) |
 | `torsten-crypto` | Ed25519 keys, VRF, KES, text envelope format |
 | `torsten-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
+| `torsten-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, and snapshots |
 | `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N client/server, N2C server, multi-peer block fetch pool |
 | `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
 | `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation, ledger state, certificate processing, native script evaluation, reward calculation |
-| `torsten-mempool` | Thread-safe transaction mempool |
+| `torsten-mempool` | Thread-safe transaction mempool with input-conflict checking and TTL sweep |
 | `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
-| `torsten-node` | Main binary, config, topology, pipelined chain sync loop |
-| `torsten-cli` | cardano-cli compatible CLI |
+| `torsten-node` | Main binary, config, topology, pipelined chain sync loop, Mithril import, block forging |
+| `torsten-cli` | cardano-cli compatible CLI (38+ subcommands) |
+| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
+| `torsten-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, and diff view |
 
 ## Crate Dependency Graph
 
@@ -30,6 +33,8 @@ graph TD
     CLI --> PRIM[torsten-primitives]
     CLI --> CRYPTO[torsten-crypto]
     CLI --> SER[torsten-serialization]
+    MON[torsten-monitor] --> PRIM
+    CFG[torsten-config] --> PRIM
     NET --> PRIM
     NET --> CRYPTO
     NET --> SER
@@ -39,6 +44,7 @@ graph TD
     LEDGER --> PRIM
     LEDGER --> CRYPTO
     LEDGER --> SER
+    LEDGER --> LSM[torsten-lsm]
     STORE --> PRIM
     STORE --> SER
     POOL --> PRIM

@@ -10,6 +10,7 @@
 # Running a Node
 
 - [Configuration](./running/configuration.md)
+- [Configuration Editor (torsten-config)](./running/config-editor.md)
 - [Topology](./running/topology.md)
 - [Networks](./running/networks.md)
 - [Mithril Snapshot Import](./running/mithril.md)

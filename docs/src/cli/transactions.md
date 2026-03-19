@@ -161,7 +161,11 @@ torsten-cli transaction calculate-min-fee \
   --protocol-params-file protocol-params.json
 ```
 
-The fee is calculated as: `fee = txFeePerByte * tx_size + txFeeFixed`
+The fee calculation accounts for:
+
+- Base fee: `txFeeFixed + txFeePerByte * tx_size`
+- Script execution: `executionUnitPrices * total_ExUnits` for any Plutus witnesses
+- Reference script surcharge: CIP-0112 tiered fee for reference scripts (25KiB tiers, 1.2x multiplier per tier)
 
 To get the current protocol parameters:
 
@@ -170,6 +174,24 @@ torsten-cli query protocol-parameters \
   --socket-path ./node.sock \
   --out-file protocol-params.json
 ```
+
+## Calculate Minimum Required UTxO
+
+Compute the minimum lovelace required for a transaction output to satisfy the `minUTxOValue` protocol parameter:
+
+```bash
+torsten-cli transaction calculate-min-required-utxo \
+  --protocol-params-file protocol-params.json \
+  --tx-out "addr_test1qz...+0+\"policy1.asset1 100\""
+```
+
+Output:
+
+```
+Minimum required lovelace: 1724100
+```
+
+This is particularly useful when constructing outputs that carry native tokens, since the minimum lovelace depends on the byte-size of the value bundle (number of policy IDs, asset names, and quantities).
 
 ## Creating Witnesses
 

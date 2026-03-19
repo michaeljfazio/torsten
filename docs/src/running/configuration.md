@@ -117,3 +117,48 @@ All other fields use sensible defaults. When no genesis files are specified, the
 ## Format Support
 
 Torsten supports both JSON (`.json`) and TOML (`.toml`) configuration files. The format is determined by the file extension. JSON files use the cardano-node compatible PascalCase format shown above.
+
+## Interactive Configuration Editor (torsten-config)
+
+`torsten-config` is a standalone TUI tool for creating and editing Torsten configuration files interactively, without needing to remember field names or valid value ranges.
+
+### Installation
+
+Built as part of the standard workspace:
+
+```bash
+cargo build --release -p torsten-config
+```
+
+### Commands
+
+```bash
+# Interactively create a new configuration file
+torsten-config init --out-file config.json
+
+# Launch the interactive editor for an existing config file
+torsten-config edit config.json
+
+# Validate a configuration file and report errors
+torsten-config validate config.json
+
+# Get the value of a specific field
+torsten-config get config.json TargetNumberOfActivePeers
+
+# Set the value of a specific field
+torsten-config set config.json TargetNumberOfActivePeers 30
+```
+
+### Interactive Editor Features
+
+The editor provides a tree view of all configuration fields with inline editing:
+
+- **Tree navigation** — expand/collapse sections, navigate fields with arrow keys
+- **Inline editing** — press `Enter` on any field to edit its value in place
+- **Type validation** — invalid values are rejected with an inline error message and a description of the expected type and range
+- **Tuning hints** — contextual hints appear alongside each field explaining the impact of changes (for example, peer count targets and their effect on network connectivity)
+- **Search/filter** — press `/` to search fields by name
+- **Diff view** — press `d` to see a side-by-side diff of your changes before saving
+- **Save/discard** — `Ctrl+S` to save, `Ctrl+Q` or `Esc` to discard
+
+The editor validates the full configuration on save and will not write an invalid file.

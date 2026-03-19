@@ -119,6 +119,34 @@ torsten-cli stake-pool registration-certificate \
 | `--testnet` | No | Use testnet network ID for the reward account |
 | `--out-file` | Yes | Output path for the certificate |
 
+## metadata-hash
+
+Compute the Blake2b-256 hash of a pool metadata file:
+
+```bash
+torsten-cli stake-pool metadata-hash \
+  --pool-metadata-file pool-metadata.json
+```
+
+Output:
+
+```
+a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+```
+
+This hash is required when registering a pool. The metadata file must be served at the URL specified in the registration certificate and the hash must match. The file contents at that URL are checked by other nodes during pool discovery.
+
+**Example pool metadata file:**
+
+```json
+{
+  "name": "Sandstone Pool",
+  "description": "A Cardano stake pool running Torsten",
+  "ticker": "SAND",
+  "homepage": "https://sandstone.io"
+}
+```
+
 ## retirement-certificate
 
 Create a stake pool retirement certificate:

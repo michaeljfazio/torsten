@@ -51,7 +51,7 @@ The storage layer is pure Rust with no system dependencies. cardano-lsm (used fo
 
 ## Architecture
 
-10-crate Cargo workspace under `crates/`. Dependency flow:
+14-crate Cargo workspace under `crates/`. Dependency flow:
 
 ```
 torsten-node (binary: main node, config, pipelined sync, Mithril import, block forging)
@@ -59,9 +59,11 @@ torsten-node (binary: main node, config, pipelined sync, Mithril import, block f
 ├── torsten-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
 ├── torsten-ledger (UTxO set via UTxO-HD, tx validation, ledger state, certificates, rewards, governance)
 ├── torsten-storage (ChainDB = ImmutableDB append-only chunk files + VolatileDB in-memory)
-└── torsten-mempool (thread-safe tx mempool)
+└── torsten-mempool (thread-safe tx mempool with input-conflict checking and TTL sweep)
 
-torsten-cli (binary: cardano-cli compatible, 33+ subcommands)
+torsten-cli (binary: cardano-cli compatible, 38+ subcommands)
+torsten-monitor (binary: terminal monitoring dashboard, ratatui-based, real-time metrics)
+torsten-config (binary: interactive TUI configuration editor with tree navigation, inline editing, diff view)
 
 torsten-serialization (CBOR encode/decode via pallas)
 torsten-crypto (Ed25519, VRF, KES, text envelope)
@@ -91,7 +93,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 - Pallas 28-byte hash types (DRep keys, pool voter keys, required signers) must be padded to 32 bytes — do not use `Hash<32>::from()` directly on 28-byte hashes
 
 ## Current Focus
-Integration testing — run against testnet/mainnet, verify block sync to tip.
+Soak testing on preview testnet (Sandstone Pool [SAND], pool ID 6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856). Automated restart cycles, transaction submission via scripts/soak-test.sh, Koios cross-validation. Stability and block production verification.
 
 ## Running the Node
 

@@ -310,6 +310,55 @@ Expired proposals: 2
 Delayed:           false
 ```
 
+## Slot Number
+
+Convert a wall-clock time to a Cardano slot number:
+
+```bash
+torsten-cli query slot-number \
+  --socket-path ./node.sock \
+  --testnet-magic 2 \
+  --utc-time "2026-03-20T12:00:00Z"
+```
+
+Output:
+
+```
+Slot: 73851200
+```
+
+This is useful for computing TTL values or verifying that a specific point in time falls within a given epoch.
+
+## KES Period Info
+
+Query KES period information for an operational certificate:
+
+```bash
+torsten-cli query kes-period-info \
+  --socket-path ./node.sock \
+  --op-cert-file opcert.cert
+```
+
+Output:
+
+```
+KES Period Info
+===============
+On-chain: yes
+Operational certificate counter on-chain: 3
+Certificate issue counter: 3
+
+Current KES period: 418
+Operational certificate start KES period: 418
+KES max evolutions: 62
+KES periods remaining: 62
+
+Node start time: 2026-03-19T08:00:00Z
+KES key expiry: 2026-09-14T08:00:00Z
+```
+
+Use this command to verify that a KES key is current and to determine when rotation is needed.
+
 ## Leadership Schedule
 
 Compute the leader schedule for a stake pool:

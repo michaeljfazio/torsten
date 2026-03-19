@@ -1,5 +1,37 @@
 # Monitoring
 
+Torsten provides two complementary monitoring tools: a terminal dashboard (`torsten-monitor`) for quick at-a-glance status, and a Prometheus-compatible metrics endpoint for production alerting and dashboards.
+
+## Terminal Dashboard (torsten-monitor)
+
+`torsten-monitor` is a standalone binary that renders a real-time status dashboard in the terminal by polling the node's Prometheus endpoint. It requires no external infrastructure and works over SSH.
+
+```bash
+# Monitor a local node (default: http://localhost:12798/metrics)
+torsten-monitor
+
+# Monitor a remote node
+torsten-monitor --metrics-url http://192.168.1.100:12798/metrics
+
+# Custom refresh interval (default: 2 seconds)
+torsten-monitor --refresh-interval 5
+```
+
+The dashboard displays four panels:
+
+- **Chain Status** — sync progress, current slot/block/epoch, tip age, GSM state
+- **Peers** — out/in/total connection counts, hot/warm/cold breakdown, EWMA latency
+- **Performance** — block rate sparkline, replay throughput, transaction counts
+- **Governance** — treasury balance, DRep count, active proposals, pool count
+
+Color-coded health indicators (green/yellow/red) reflect tip age and sync progress. The block rate sparkline shows the last 30 data points so you can spot throughput trends at a glance.
+
+Keyboard navigation: `q` to quit, `Tab` to cycle panels, `j`/`k` (vim-style) to scroll within a panel.
+
+---
+
+## Prometheus Metrics Endpoint
+
 Torsten exposes a Prometheus-compatible metrics endpoint for monitoring node health and sync progress.
 
 ## Metrics Endpoint

@@ -57,7 +57,7 @@ See the [full documentation](https://michaeljfazio.github.io/torsten/) for detai
 
 ## Architecture
 
-Torsten is organized as a 12-crate Cargo workspace:
+Torsten is organized as a 14-crate Cargo workspace:
 
 | Crate | Description |
 |-------|-------------|
@@ -68,11 +68,12 @@ Torsten is organized as a 12-crate Cargo workspace:
 | `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N/N2C multiplexer |
 | `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, VRF slot leader checks |
 | `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation (Phase-1/Phase-2), ledger state, certificates, rewards, governance |
-| `torsten-mempool` | Thread-safe transaction mempool with Phase-1/Phase-2 admission control |
+| `torsten-mempool` | Thread-safe transaction mempool with Phase-1/Phase-2 admission control, input-conflict checking, and TTL sweep |
 | `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
 | `torsten-node` | Main binary: config, topology, pipelined sync, Mithril import, block forging, Prometheus metrics |
-| `torsten-cli` | cardano-cli compatible CLI (33+ subcommands) |
-| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics) |
+| `torsten-cli` | cardano-cli compatible CLI (38+ subcommands) |
+| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
+| `torsten-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, diff view, and init/validate/get/set CLI subcommands |
 
 ```mermaid
 graph TD
@@ -85,6 +86,8 @@ graph TD
     CLI --> PRIM[torsten-primitives]
     CLI --> CRYPTO[torsten-crypto]
     CLI --> SER[torsten-serialization]
+    MON[torsten-monitor] --> PRIM
+    CFG[torsten-config] --> PRIM
     NET --> PRIM
     NET --> CRYPTO
     NET --> SER
@@ -180,15 +183,16 @@ graph TD
 - **Key management**: `key gen`, `key sign`, `key verify`, `key convert-itn`
 - **Address**: `address build`, `address key-gen`, `address info`, `address key-hash`
 - **Node operations**: `node key-gen`, `node key-gen-kes`, `node key-gen-vrf`, `node issue-op-cert`, `node new-counter`
-- **Transactions**: `transaction build`, `transaction build-raw`, `transaction sign`, `transaction submit`, `transaction txid`, `transaction calculate-min-fee`, `transaction view`, `transaction witness`, `transaction assemble`, `transaction policyid`
-- **Queries**: `query tip`, `query utxo`, `query protocol-parameters`, `query stake-distribution`, `query stake-address-info`, `query gov-state`, `query drep-state`, `query committee-state`, `query tx-mempool`, `query stake-pools`, `query stake-snapshot`, `query pool-params`, `query treasury`, `query constitution`, `query ratify-state`, `query leadership-schedule`
+- **Transactions**: `transaction build`, `transaction build-raw`, `transaction sign`, `transaction submit`, `transaction txid`, `transaction calculate-min-fee`, `transaction calculate-min-required-utxo`, `transaction view`, `transaction witness`, `transaction assemble`, `transaction policyid`
+- **Queries**: `query tip`, `query utxo`, `query protocol-parameters`, `query stake-distribution`, `query stake-address-info`, `query gov-state`, `query drep-state`, `query committee-state`, `query tx-mempool`, `query stake-pools`, `query stake-snapshot`, `query pool-params`, `query treasury`, `query constitution`, `query ratify-state`, `query leadership-schedule`, `query slot-number`, `query kes-period-info`
 - **Staking**: `stake-address gen`, `stake-address key-gen`, `stake-address registration-certificate`, `stake-address deregistration-certificate`, `stake-address delegate-vote`, `stake-address stake-and-vote-deleg-certificate`
 - **Pools**: `stake-pool registration-certificate`, `stake-pool deregistration-certificate`, `stake-pool id`, `stake-pool metadata-hash`
 - **Governance**: `governance vote`, `governance action`, `governance query-constitution`
 
 ### Observability
 - **28+ Prometheus metrics** on port 12798 (blocks, slots, epochs, UTxO count, delegations, treasury, mempool, peers, transactions, DReps, proposals, pools, disk, memory, uptime, tip age)
-- **torsten-monitor**: Beautiful terminal monitoring dashboard with real-time sync progress, block rate sparkline, peer breakdown, governance summary, and color-coded health indicators. Run: `torsten-monitor --metrics-url http://localhost:12798/metrics`
+- **torsten-monitor**: Terminal monitoring dashboard with real-time sync progress, block rate sparkline, peer breakdown (out/in/total, hot/warm/cold), governance summary, and color-coded health indicators. Run: `torsten-monitor --metrics-url http://localhost:12798/metrics`
+- **torsten-config**: Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, and diff view. Subcommands: `init`, `edit`, `validate`, `get`, `set`
 - **Structured logging** with tracing-subscriber (env-filter, JSON output, journald)
 - **SIGHUP topology reload** for live configuration updates
 - **GSM state tracking**: PreSyncing/Syncing/CaughtUp with tip age monitoring
@@ -350,6 +354,28 @@ Torsten supports configurable storage profiles via `--storage-profile`:
   --utxo-memtable-size-mb 256 \
   --utxo-block-cache-size-mb 1024 ...
 ```
+
+## Soak Testing
+
+Torsten is actively soak-tested on the **Cardano preview testnet** via **Sandstone Pool [SAND]**:
+
+| Field | Value |
+|-------|-------|
+| Pool ID | `6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856` |
+| Ticker | SAND |
+| Homepage | [https://sandstone.io](https://sandstone.io) |
+| Margin | 0% |
+| Fixed cost | 170 ADA |
+| Network | Preview (magic=2) |
+
+The soak test script (`scripts/soak-test.sh`) automates:
+
+- Periodic node restart cycles to test recovery and snapshot consistency
+- Transaction submission to verify mempool admission and propagation
+- Koios cross-validation of UTxO counts, pool stake, and governance state
+- Error log monitoring with automated alerting on unexpected failures
+
+Results from each soak run are logged with timestamps and compared against the previous run to detect regressions.
 
 ## License
 
