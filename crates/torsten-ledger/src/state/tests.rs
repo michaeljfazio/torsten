@@ -8418,6 +8418,158 @@ fn test_evolving_nonce_all_zeros_input() {
     );
 }
 
+// -----------------------------------------------------------------------
+// epoch_nonce_for_slot — pre-computes the correct VRF nonce for any slot
+// -----------------------------------------------------------------------
+
+/// epoch_nonce_for_slot returns epoch_nonce unchanged for a slot in the
+/// current epoch.
+#[test]
+fn test_epoch_nonce_for_slot_same_epoch() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    // Use a pure Shelley-only setup (no Byron era) so slot math is simple.
+    state.epoch = EpochNo(10);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+    state.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
+    state.candidate_nonce = Hash32::from_bytes([0xBB; 32]);
+    state.last_epoch_block_nonce = Hash32::from_bytes([0xCC; 32]);
+
+    // Epoch 10 spans slots 1000..1100 (epoch_length=100, no Byron offset).
+    let slot_in_epoch_10 = 1050u64;
+    assert_eq!(state.epoch_of_slot(slot_in_epoch_10), 10);
+    assert_eq!(
+        state.epoch_nonce_for_slot(slot_in_epoch_10),
+        Hash32::from_bytes([0xAA; 32]),
+        "same-epoch slot must return the current epoch_nonce"
+    );
+}
+
+/// epoch_nonce_for_slot pre-computes TICKN for a slot in the immediately
+/// following epoch — this is the key fix for the stale-nonce-after-restart bug.
+///
+/// The expected nonce = blake2b_256(candidate || last_epoch_block_nonce),
+/// exactly matching process_epoch_transition Step 1.
+#[test]
+fn test_epoch_nonce_for_slot_next_epoch() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch = EpochNo(10);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+    state.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
+
+    let candidate = Hash32::from_bytes([0xBB; 32]);
+    let prev_hash = Hash32::from_bytes([0xCC; 32]);
+    state.candidate_nonce = candidate;
+    state.last_epoch_block_nonce = prev_hash;
+
+    // Slot in epoch 11 (first slot after the boundary).
+    let slot_in_epoch_11 = 1100u64;
+    assert_eq!(state.epoch_of_slot(slot_in_epoch_11), 11);
+
+    // Expected = blake2b_256(candidate || last_epoch_block_nonce)
+    let mut buf = Vec::with_capacity(64);
+    buf.extend_from_slice(candidate.as_bytes());
+    buf.extend_from_slice(prev_hash.as_bytes());
+    let expected = torsten_primitives::hash::blake2b_256(&buf);
+
+    let computed = state.epoch_nonce_for_slot(slot_in_epoch_11);
+    assert_eq!(
+        computed, expected,
+        "next-epoch slot must return TICKN-computed nonce"
+    );
+    // Must differ from both the current epoch_nonce and the raw candidate.
+    assert_ne!(computed, Hash32::from_bytes([0xAA; 32]));
+}
+
+/// epoch_nonce_for_slot with NeutralNonce (ZERO) for last_epoch_block_nonce:
+/// result = candidate (identity element of Nonce combine).
+#[test]
+fn test_epoch_nonce_for_slot_next_epoch_neutral_prev() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch = EpochNo(0);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let candidate = Hash32::from_bytes([0xDD; 32]);
+    state.candidate_nonce = candidate;
+    state.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
+
+    // Slot in epoch 1.
+    let slot_in_epoch_1 = 100u64;
+    assert_eq!(state.epoch_of_slot(slot_in_epoch_1), 1);
+    assert_eq!(
+        state.epoch_nonce_for_slot(slot_in_epoch_1),
+        candidate,
+        "candidate ⭒ NeutralNonce = candidate (identity)"
+    );
+}
+
+/// epoch_nonce_for_slot for a slot more than 1 epoch ahead returns the
+/// current epoch_nonce (best-effort fallback — can't predict future nonces).
+#[test]
+fn test_epoch_nonce_for_slot_far_future_epoch() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch = EpochNo(10);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+    state.epoch_nonce = Hash32::from_bytes([0xEE; 32]);
+
+    // Slot 2 epochs ahead — beyond our prediction horizon.
+    let slot_far_ahead = 1200u64;
+    assert_eq!(state.epoch_of_slot(slot_far_ahead), 12);
+    assert_eq!(
+        state.epoch_nonce_for_slot(slot_far_ahead),
+        Hash32::from_bytes([0xEE; 32]),
+        "slots >1 epoch ahead fall back to the current epoch_nonce"
+    );
+}
+
+/// Verify that epoch_nonce_for_slot is consistent with what
+/// process_epoch_transition actually produces: applying a transition to
+/// epoch N+1 and then reading epoch_nonce must equal epoch_nonce_for_slot
+/// evaluated at any slot in epoch N+1 BEFORE the transition.
+#[test]
+fn test_epoch_nonce_for_slot_matches_transition_result() {
+    use torsten_primitives::time::EpochNo;
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch = EpochNo(5);
+    state.epoch_length = 100;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+    state.needs_stake_rebuild = false;
+
+    // Set up non-trivial nonce inputs.
+    state.candidate_nonce = Hash32::from_bytes([0x01; 32]);
+    state.last_epoch_block_nonce = Hash32::from_bytes([0x02; 32]);
+    state.epoch_nonce = Hash32::from_bytes([0xFF; 32]); // current (epoch 5)
+    state.lab_nonce = Hash32::from_bytes([0x03; 32]);
+
+    // Pre-compute what the nonce *should* be for epoch 6 before transition.
+    let slot_in_epoch_6 = 600u64;
+    assert_eq!(state.epoch_of_slot(slot_in_epoch_6), 6);
+    let predicted = state.epoch_nonce_for_slot(slot_in_epoch_6);
+
+    // Now actually run the transition and verify epoch_nonce matches.
+    state.process_epoch_transition(EpochNo(6));
+
+    assert_eq!(
+        state.epoch_nonce, predicted,
+        "epoch_nonce_for_slot must predict the same value that \
+         process_epoch_transition produces"
+    );
+}
+
 /// NeutralNonce identity in epoch nonce combine: when prevHashNonce is zero
 /// (NeutralNonce), epoch_nonce = candidate_nonce (identity element).
 #[test]

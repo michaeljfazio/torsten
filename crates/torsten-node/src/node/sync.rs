@@ -681,7 +681,6 @@ impl Node {
         {
             // Read ledger state once for the whole batch
             let ls = self.ledger_state.read().await;
-            let epoch_nonce = ls.epoch_nonce;
 
             // Per Praos spec, leader eligibility uses the "set" snapshot
             // (stake distribution from the previous epoch boundary).
@@ -704,6 +703,21 @@ impl Node {
 
                 // Populate epoch_nonce — the wire format does not include the nonce;
                 // it must be injected from ledger state before VRF verification.
+                //
+                // A single `epoch_nonce` snapshot at batch-start is WRONG when the
+                // batch spans an epoch boundary: the first block of the new epoch must
+                // be validated with the NEW epoch's nonce (computed by the TICKN rule),
+                // not the old one.  `epoch_nonce_for_slot` pre-computes the correct
+                // nonce for any block that crosses into the immediately-next epoch,
+                // mirroring the TICKN logic in `process_epoch_transition` without
+                // mutating any state.  This fixes the "stale nonce after restart"
+                // VRF failure that permanently blocked epoch transitions:
+                //
+                //   1. Node restarts, replays immutable blocks → nonce_established=true
+                //   2. First live block is the first block of epoch E+1
+                //   3. Old code used epoch E nonce → VRF failure → batch rejected
+                //   4. Ledger never advanced → epoch E+1 nonce never computed → stuck
+                let epoch_nonce = ls.epoch_nonce_for_slot(block.slot().0);
                 let mut header_with_nonce = block.header.clone();
                 header_with_nonce.epoch_nonce = epoch_nonce;
 
@@ -2428,6 +2442,19 @@ impl Node {
             db_tip_slot, blocks_behind, "Replaying ledger from ChainDB (LSM mode)",
         );
         self.replay_from_lsm(db_tip, shutdown_rx).await;
+        // Mirror the chunk-file replay path: record the epoch reached so that
+        // enable_strict_verification() can set nonce_established=true.
+        let replay_epoch = self.ledger_state.read().await.epoch.0;
+        if replay_epoch > 0 {
+            self.epoch_transitions_observed = self
+                .epoch_transitions_observed
+                .saturating_add(replay_epoch as u32);
+            info!(
+                epoch = replay_epoch,
+                epoch_transitions_observed = self.epoch_transitions_observed,
+                "LSM replay epoch transitions counted"
+            );
+        }
     }
 
     /// Fast replay: read blocks sequentially from chunk files.

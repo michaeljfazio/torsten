@@ -569,6 +569,66 @@ impl LedgerState {
         }
     }
 
+    /// Return the epoch nonce that should be used to verify a block at `slot`.
+    ///
+    /// During normal (non-epoch-crossing) processing, this is `self.epoch_nonce`.
+    /// When a block is the first block of the NEXT epoch (i.e. the epoch-transition
+    /// block), its VRF proof was generated with the *new* epoch's nonce, which is
+    /// computed by the TICKN rule at the epoch boundary:
+    ///
+    ///   epochNonce' = candidateNonce ⭒ lastEpochBlockNonce
+    ///
+    /// The ledger does not advance the epoch nonce until `apply_block` fires
+    /// `process_epoch_transition`.  Therefore, if validation runs before apply
+    /// (as in the batch-then-apply pattern in `process_forward_blocks`), the
+    /// first block of a new epoch would be validated against the *old* nonce,
+    /// causing a spurious VRF failure that then blocks the epoch transition from
+    /// ever firing — permanently stalling the node.
+    ///
+    /// This function pre-computes the TICKN nonce for `slot` without mutating any
+    /// state, so the validation loop can inject the correct nonce before calling
+    /// `validate_header_full`.
+    ///
+    /// For blocks in the same epoch as the current ledger state, the existing
+    /// `self.epoch_nonce` is returned directly.  For blocks exactly one epoch
+    /// ahead, the next-epoch nonce is computed from `candidate_nonce` and
+    /// `last_epoch_block_nonce`.  For blocks more than one epoch ahead (which
+    /// should not occur at tip), `self.epoch_nonce` is returned as a fallback
+    /// (VRF verification will fail non-fatally if `nonce_established` is false,
+    /// or produce an informative error if strict).
+    pub fn epoch_nonce_for_slot(&self, slot: u64) -> Hash32 {
+        let block_epoch = self.epoch_of_slot(slot);
+        if block_epoch <= self.epoch.0 {
+            // Same epoch (or behind, should not happen at tip): use current nonce.
+            return self.epoch_nonce;
+        }
+        if block_epoch == self.epoch.0.saturating_add(1) {
+            // Block is in the immediately following epoch.  Pre-compute the TICKN
+            // nonce: epochNonce' = candidate ⭒ lastEpochBlockNonce.
+            // This mirrors process_epoch_transition Step 1 exactly.
+            let candidate = self.candidate_nonce;
+            let prev_hash_nonce = self.last_epoch_block_nonce;
+            let zero = Hash32::ZERO;
+            return if candidate == zero && prev_hash_nonce == zero {
+                zero
+            } else if candidate == zero {
+                prev_hash_nonce
+            } else if prev_hash_nonce == zero {
+                candidate
+            } else {
+                let mut buf = Vec::with_capacity(64);
+                buf.extend_from_slice(candidate.as_bytes());
+                buf.extend_from_slice(prev_hash_nonce.as_bytes());
+                torsten_primitives::hash::blake2b_256(&buf)
+            };
+        }
+        // Block is more than one epoch ahead.  We cannot pre-compute the nonce
+        // because the intermediate epochs' VRF contributions are unknown.
+        // Return the current nonce; validation will fail non-fatally (or produce
+        // an informative error), and the node will retry after catching up.
+        self.epoch_nonce
+    }
+
     /// Set the Shelley genesis hash.
     ///
     /// Initializes the Praos nonce state machine per Haskell's initialChainDepState
