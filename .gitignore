@@ -30,3 +30,4 @@ result-*
 
 .claude/settings.local.json
 logs/
+fuzz/target/
