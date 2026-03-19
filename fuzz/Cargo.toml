@@ -9,9 +9,12 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+bincode = "1"
+minicbor = { version = "0.25", features = ["std"] }
 torsten-serialization = { path = "../crates/torsten-serialization" }
 torsten-network = { path = "../crates/torsten-network" }
 torsten-primitives = { path = "../crates/torsten-primitives" }
+torsten-ledger = { path = "../crates/torsten-ledger" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -35,4 +38,39 @@ doc = false
 [[bin]]
 name = "fuzz_nonce_update"
 path = "fuzz_targets/nonce_update.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_n2c_query"
+path = "fuzz_targets/n2c_query.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_handshake"
+path = "fuzz_targets/handshake.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_chainsync_msg"
+path = "fuzz_targets/chainsync_msg.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_protocol_params"
+path = "fuzz_targets/protocol_params.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_address"
+path = "fuzz_targets/address.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_governance"
+path = "fuzz_targets/governance.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ledger_snapshot"
+path = "fuzz_targets/ledger_snapshot.rs"
 doc = false
