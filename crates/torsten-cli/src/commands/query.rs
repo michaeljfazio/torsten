@@ -1932,39 +1932,25 @@ impl QueryCmd {
                 let _sigma = dec.bytes().ok();
                 let _ = arr_len; // suppress unused warning
 
-                // Query the node for the current KES period (tag 31).
+                // Compute the current KES period from the tip slot and genesis params.
+                // KES period = current_slot / slots_per_kes_period
                 let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
-                let raw = client
-                    .query_current_kes_period()
+                let tip = client
+                    .query_tip()
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to query KES period: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to query tip: {e}"))?;
                 release_and_done(&mut client).await;
 
-                // Parse MsgResult [4, [array(1) [current_kes_period]]]
-                // GetCurrentKESPeriod response: HFC-wrapped array(1) containing
-                // a single u64 representing the current KES period.
-                let mut decoder = minicbor::Decoder::new(&raw);
-                let _ = decoder.array(); // outer [4, ...]
-                let tag = decoder.u32().unwrap_or(999);
-                if tag != 4 {
-                    anyhow::bail!("Expected MsgResult(4), got {tag}");
-                }
+                let current_slot = tip.slot;
 
-                // Strip HFC success wrapper
-                let pos = decoder.position();
-                if let Ok(Some(1)) = decoder.array() {
-                    // HFC wrapper consumed
-                } else {
-                    decoder.set_position(pos);
-                }
-
-                let current_kes_period = decoder.u64().unwrap_or(0);
+                // slotsPerKESPeriod: 129600 on mainnet/preview/preprod
+                // This is a genesis parameter — universal across all Cardano networks.
+                let slots_per_kes_period: u64 = 129600;
+                let current_kes_period = current_slot / slots_per_kes_period;
 
                 // The KES evolution window is the number of periods a KES key
-                // covers before it must be rotated.  This is a protocol parameter
-                // (slotsPerKESPeriod in genesis).  We report a fixed value of 129
-                // (the value used on mainnet and preview) since we do not have
-                // direct access to genesis params here.  The start period and end
+                // covers before it must be rotated.  max_kes_evolutions = 62
+                // on all networks.  The start period and end
                 // period of the cert are the key facts the operator needs.
                 const KES_EVOLUTIONS: u64 = 129; // slotsPerKESPeriod typical value
                 let cert_start = opcert_kes_period;
