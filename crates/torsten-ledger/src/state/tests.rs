@@ -5602,13 +5602,17 @@ fn test_reward_expansion_no_i128_overflow() {
     // This should NOT panic from i128 overflow
     state.calculate_and_distribute_rewards(go_snapshot);
 
-    // With rho=1 and eta=1 (effective==expected when active_slot_coeff=0.05):
-    // expected_blocks = floor(0.05 * 432000) = 21600
-    // effective_blocks = min(21600, 21600) = 21600
-    // expansion = floor(1 * reserves * 21600/21600) = reserves = 45e15
+    // With rho=1 and reserves=MAX_LOVELACE_SUPPLY, total_stake=0 (no circulation).
+    // This hits the no-pool early return where only treasury_cut leaves reserves.
+    // treasury_cut = floor(2/10 * expansion) = floor(2/10 * 45e15) = 9e15.
+    // The main purpose of this test is verifying no i128 overflow in expansion calc.
+    let expected_treasury_cut = Rat::new(2, 10)
+        .mul(&Rat::new(MAX_LOVELACE_SUPPLY as i128, 1))
+        .floor_u64();
     assert_eq!(
-        state.reserves.0, 0,
-        "All reserves should be expanded with rho=1"
+        state.reserves.0,
+        MAX_LOVELACE_SUPPLY - expected_treasury_cut,
+        "Reserves should decrease by treasury_cut only (no pools, no circulation)"
     );
 }
 
@@ -5644,12 +5648,20 @@ fn test_reward_expansion_large_rho_numerator() {
     // Should not panic
     state.calculate_and_distribute_rewards(go_snapshot);
 
-    // expansion ≈ reserves * (u64::MAX-1)/u64::MAX ≈ reserves - 1
-    // After subtracting expansion, reserves should be approximately 0-2
-    assert!(
-        state.reserves.0 <= 3,
-        "Reserves should be nearly zero with rho ≈ 1, got {}",
-        state.reserves.0
+    // With reserves=MAX_LOVELACE_SUPPLY, total_stake=0 (no circulation).
+    // Hits no-pool early return: only treasury_cut leaves reserves.
+    // The main purpose is verifying no i128 overflow with large rho numerator.
+    // Compute expansion exactly: floor(rho * reserves * eta) where rho ≈ 1, eta = 1.
+    let expansion = Rat::new((u64::MAX - 1) as i128, u64::MAX as i128)
+        .mul(&Rat::new(MAX_LOVELACE_SUPPLY as i128, 1))
+        .floor_u64();
+    let expected_treasury_cut = Rat::new(2, 10)
+        .mul(&Rat::new(expansion as i128, 1))
+        .floor_u64();
+    assert_eq!(
+        state.reserves.0,
+        MAX_LOVELACE_SUPPLY - expected_treasury_cut,
+        "Reserves should decrease by treasury_cut only (no pools, no circulation)"
     );
 }
 
@@ -6094,13 +6106,12 @@ fn test_reward_tau_zero_no_treasury_cut() {
     };
     state.calculate_and_distribute_rewards(snapshot);
 
-    // tau=0: treasury cut = floor(0 * total_rewards) = 0
-    // But undistributed rewards (no pools) all go to treasury
-    // So treasury increases by reward_pot (all undistributed)
-    // Since tau=0, treasury_cut=0 but undistributed goes to treasury
-    assert!(
-        state.treasury.0 > treasury_before,
-        "Treasury should receive undistributed rewards even with tau=0"
+    // tau=0: treasury_cut = floor(0 * total_rewards) = 0.
+    // With no pools, undistributed rewards stay in reserves (not sent to treasury).
+    // So treasury remains unchanged when tau=0 and there are no pools.
+    assert_eq!(
+        state.treasury.0, treasury_before,
+        "Treasury should not change when tau=0 and no pools (undistributed stays in reserves)"
     );
 }
 
@@ -6123,11 +6134,15 @@ fn test_reward_tau_one_all_to_treasury() {
     };
     state.calculate_and_distribute_rewards(snapshot);
 
-    // tau=1: treasury_cut = floor(1 * total_rewards) = total_rewards
-    // reward_pot = total_rewards - treasury_cut = 0
-    // So treasury gets everything
-    let expansion = reserves_before - state.reserves.0;
-    let total_rewards = expansion + 100_000_000;
+    // tau=1: treasury_cut = floor(1 * (expansion + fees)) = expansion + fees.
+    // With no pools, delta_reserves = treasury_cut = expansion + fees.
+    // Treasury receives treasury_cut = expansion + fees.
+    // Compute expansion directly from the formula (not from reserves change,
+    // because reserves change now equals treasury_cut which includes fees).
+    let expected_expansion = Rat::new(3, 1000)
+        .mul(&Rat::new(reserves_before as i128, 1))
+        .floor_u64();
+    let total_rewards = expected_expansion + 100_000_000;
     assert_eq!(
         state.treasury.0,
         treasury_before + total_rewards,
@@ -6155,34 +6170,35 @@ fn test_reward_reserves_decrease_treasury_increase() {
     };
     state.calculate_and_distribute_rewards(snapshot);
 
-    let expansion = reserves_before - state.reserves.0;
-    assert!(
-        expansion > 0,
-        "Expansion should be positive with non-zero reserves and rho"
-    );
-
-    // Verify monetary expansion formula: expansion ~ floor(rho * reserves * eta)
+    // Compute expected monetary expansion: floor(rho * reserves * eta)
     // With rho=3/1000 and full block production eta=1
     let expected_expansion = Rat::new(3, 1000)
         .mul(&Rat::new(initial_reserves as i128, 1))
         .floor_u64();
-    assert_eq!(
-        expansion, expected_expansion,
-        "Expansion should match rho * reserves"
-    );
 
-    // Treasury should increase (gets tau * total_rewards + undistributed)
+    // Treasury cut = floor(tau * (expansion + fees)) = floor(2/10 * (expansion + 50M))
+    let total_rewards = expected_expansion + 50_000_000;
+    let expected_treasury_cut = Rat::new(2, 10)
+        .mul(&Rat::new(total_rewards as i128, 1))
+        .floor_u64();
+
+    // With no pools, only treasury_cut leaves reserves (undistributed stays).
+    // delta_reserves = treasury_cut, delta_treasury = treasury_cut.
+    let reserves_decrease = reserves_before - state.reserves.0;
     assert!(
-        state.treasury.0 > treasury_before,
-        "Treasury should increase each epoch"
+        reserves_decrease > 0,
+        "Reserves should decrease with non-zero rho and tau"
+    );
+    assert_eq!(
+        reserves_decrease, expected_treasury_cut,
+        "Reserves should decrease by treasury_cut (no pools, undistributed stays in reserves)"
     );
 
-    // Total ADA conservation: reserves_decrease = expansion, which goes to rewards+treasury
-    // Reserves decreased by exactly the expansion amount
+    // Treasury should increase by treasury_cut
     assert_eq!(
-        state.reserves.0,
-        reserves_before - expansion,
-        "Reserves should decrease by exactly the expansion amount"
+        state.treasury.0,
+        treasury_before + expected_treasury_cut,
+        "Treasury should increase by treasury_cut each epoch"
     );
 }
 
@@ -11435,26 +11451,24 @@ fn test_reward_cross_validation_epoch_1239() {
     //
     // With an empty pool snapshot:
     //   total_active_stake = 0  → early return path in calculate_rewards
-    //   delta_reserves  = expansion
-    //   delta_treasury  = treasury_cut + undistributed = treasury_cut + reward_pot
-    //                   = treasury_cut + (expansion + fees - treasury_cut)
-    //                   = expansion + fees                (all rewards go to treasury)
+    //   Undistributed rewards stay in reserves (not sent to treasury).
+    //   delta_reserves  = treasury_cut  (only the tau cut leaves reserves)
+    //   delta_treasury  = treasury_cut
     let rupd = state.calculate_rewards(&go_snapshot);
 
-    // Verify delta_reserves equals expansion exactly
+    // Verify delta_reserves equals treasury_cut (not full expansion)
     assert_eq!(
-        rupd.delta_reserves, expected_expansion,
-        "delta_reserves must equal monetary expansion: \
-         expected={expected_expansion}, got={}",
+        rupd.delta_reserves, expected_treasury_cut,
+        "delta_reserves (no-pool case) must equal treasury_cut: \
+         expected={expected_treasury_cut}, got={}",
         rupd.delta_reserves
     );
 
-    // Verify delta_treasury = expansion + fees (no-pool case: all rewards undistributed)
-    let expected_delta_treasury_no_pools = expected_expansion + FEES_1239;
+    // Verify delta_treasury equals treasury_cut
     assert_eq!(
-        rupd.delta_treasury, expected_delta_treasury_no_pools,
-        "delta_treasury (no-pool case) must equal expansion + fees: \
-         expected={expected_delta_treasury_no_pools}, got={}",
+        rupd.delta_treasury, expected_treasury_cut,
+        "delta_treasury (no-pool case) must equal treasury_cut: \
+         expected={expected_treasury_cut}, got={}",
         rupd.delta_treasury
     );
 
@@ -11465,13 +11479,17 @@ fn test_reward_cross_validation_epoch_1239() {
         rupd.rewards.len()
     );
 
-    // ---- Step 4: cross-check against Koios delta_reserves ----
+    // ---- Step 4: cross-check expansion formula against Koios delta_reserves ----
     //
     // The Koios-observed delta_reserves = 3_521_925_387_276 falls between
     // expansion(613) and expansion(614).  Our formula with actual_blocks=613
     // should be within one block's expansion (5_740_681_460) of the Koios value.
-    // This proves the formula is correct; the sub-lovelace difference arises
-    // because we don't have the exact go-snapshot block count from the chain.
+    // This proves the expansion formula is correct; the sub-lovelace difference
+    // arises because we don't have the exact go-snapshot block count from the chain.
+    //
+    // Note: We compare expected_expansion (the pure expansion formula result),
+    // not rupd.delta_reserves, because our no-pool RUPD returns treasury_cut
+    // as delta_reserves (undistributed stays in reserves).
     const KOIOS_DELTA_RESERVES: u64 = 3_521_925_387_276;
     // Per-block expansion step = floor(3 * reserves / (1000 * 4320))
     let per_block_step: u64 =
@@ -11479,13 +11497,12 @@ fn test_reward_cross_validation_epoch_1239() {
     assert_eq!(per_block_step, 5_740_681_460, "per-block expansion step");
 
     let formula_vs_koios_diff =
-        (KOIOS_DELTA_RESERVES as i64 - rupd.delta_reserves as i64).unsigned_abs();
+        (KOIOS_DELTA_RESERVES as i64 - expected_expansion as i64).unsigned_abs();
     assert!(
         formula_vs_koios_diff < per_block_step + 1,
-        "our formula (actual_blocks=613) must be within one block of Koios delta_reserves: \
-         formula={}, koios={KOIOS_DELTA_RESERVES}, diff={formula_vs_koios_diff}, \
+        "our expansion formula (actual_blocks=613) must be within one block of Koios delta_reserves: \
+         formula={expected_expansion}, koios={KOIOS_DELTA_RESERVES}, diff={formula_vs_koios_diff}, \
          one_block_step={per_block_step}",
-        rupd.delta_reserves
     );
 
     // ---- Step 5: treasury cut formula check against Koios values ----
@@ -13399,8 +13416,8 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     let expansion = (3u128 * initial_reserves as u128 * effective_blocks as u128)
         / (1000u128 * expected_blocks as u128);
     let total = expansion as u64 + epoch0_fees;
-    // No pools → all reward_pot goes to treasury.
-    let expected_delta = total;
+    // No pools → undistributed rewards stay in reserves. Only treasury_cut goes to treasury.
+    let expected_delta = (2u128 * total as u128 / 10) as u64; // floor(tau * total)
 
     let treasury_after_epoch2 = state.treasury.0;
     let diff = (treasury_after_epoch2 as i128 - expected_delta as i128).unsigned_abs();
@@ -13547,10 +13564,17 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
     // floor(rho * reserves * eta) = floor(0.003 * 15T * 1.0) = 45_000_000_000_000
     const CANONICAL_EXPANSION: u64 = 45_000_000_000_000;
 
-    // No-pool case: all expansion goes to treasury (no stakers to receive rewards)
+    // No-pool case: undistributed rewards stay in reserves. Only treasury_cut
+    // (tau * expansion) goes to treasury. delta_reserves = delta_treasury = treasury_cut.
+    // treasury_cut = floor(0.2 * 45B) = 9_000_000_000_000
+    let expected_treasury_cut = Rat::new(2, 10)
+        .mul(&Rat::new(CANONICAL_EXPANSION as i128, 1))
+        .floor_u64();
+    assert_eq!(expected_treasury_cut, 9_000_000_000_000);
+
     assert_eq!(
-        state.treasury.0, CANONICAL_EXPANSION,
-        "Treasury after epoch 1→2 (no-pool): must equal full expansion=45B. \
+        state.treasury.0, expected_treasury_cut,
+        "Treasury after epoch 1→2 (no-pool): must equal treasury_cut=9B. \
          Got {} — if 0 the RUPD was skipped (set=None/go=None bug).",
         state.treasury.0
     );
@@ -13559,11 +13583,11 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
         "RUPD must have fired: treasury must be non-zero after first epoch"
     );
 
-    // Reserves must have decreased by exactly the expansion amount.
-    let expected_reserves = 15_000_000_000_000_000u64 - CANONICAL_EXPANSION;
+    // Reserves decrease by treasury_cut only (undistributed stays in reserves).
+    let expected_reserves = 15_000_000_000_000_000u64 - expected_treasury_cut;
     assert_eq!(
         state.reserves.0, expected_reserves,
-        "Reserves after first RUPD must be initial - expansion: \
+        "Reserves after first RUPD must be initial - treasury_cut: \
          expected={expected_reserves}, got={}",
         state.reserves.0
     );
@@ -13574,15 +13598,15 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
 ///
 /// Preview params: rho=0.003, tau=0.2, full blocks each epoch, no active pools.
 ///
-/// In the no-pool case all reward_pot is undistributed → delta_treasury = full
-/// expansion (NOT tau * expansion).  The Koios canonical 9B at epoch 1 arises
-/// because active pools distribute 36B to stakers, leaving only the tau cut in
-/// the treasury.  Here we test compounding monotonicity, not the pool-split path.
+/// In the no-pool case, undistributed rewards stay in reserves. Only treasury_cut
+/// (tau * expansion) goes to treasury. delta_reserves = delta_treasury = treasury_cut.
 ///
 /// Formula (no-pool case):
-///   epoch 1→2: expansion1 = floor(0.003 * R0) = 45B; treasury += 45B; R1 = R0 - 45B
-///   epoch 2→3: expansion2 = floor(0.003 * R1) ≈ 44.865B; treasury += 44.865B; R2 = R1 - 44.865B
-///   epoch 3→4: expansion3 = floor(0.003 * R2), etc.
+///   epoch 1→2: expansion1 = floor(0.003 * R0) = 45B; tc1 = floor(0.2 * 45B) = 9B;
+///              treasury += 9B; R1 = R0 - 9B
+///   epoch 2→3: expansion2 = floor(0.003 * R1); tc2 = floor(0.2 * expansion2);
+///              treasury += tc2; R2 = R1 - tc2
+///   epoch 3→4: expansion3 = floor(0.003 * R2); tc3 = floor(0.2 * expansion3); etc.
 #[test]
 fn test_rupd_compounding_treasury_over_three_epochs() {
     let mut params = ProtocolParameters::mainnet_defaults();
@@ -13614,26 +13638,28 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
 
     // Epoch 1 (full blocks) → first RUPD fires (uses epoch0 snapshot from set=mark1).
     // expansion1 = floor(0.003 * 15T * 4320/4320) = 45_000_000_000_000
-    // No-pool case: delta_treasury = expansion1 = 45B, delta_reserves = 45B
+    // No-pool case: only treasury_cut goes to treasury, undistributed stays in reserves.
+    // treasury_cut1 = floor(0.2 * 45B) = 9_000_000_000_000
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.process_epoch_transition(EpochNo(2));
     let t1 = state.treasury.0;
     let r1 = state.reserves.0;
     let expansion1 = 45_000_000_000_000u64; // floor(0.003 * 15T)
+    let tc1 = (2u128 * expansion1 as u128 / 10) as u64; // floor(0.2 * expansion1)
     assert_eq!(
-        t1, expansion1,
-        "Treasury after epoch 1 (no-pool): full expansion={expansion1}B flows to treasury"
+        t1, tc1,
+        "Treasury after epoch 1 (no-pool): treasury_cut={tc1} flows to treasury"
     );
     assert_eq!(
         r1,
-        initial_reserves - expansion1,
-        "Reserves after epoch 1 should be initial - expansion1"
+        initial_reserves - tc1,
+        "Reserves after epoch 1 should be initial - treasury_cut1"
     );
 
     // Epoch 2 (full blocks) → second RUPD fires (uses epoch1 snapshot from set=mark2).
-    // mark2 was captured during the 1→2 transition with full_blocks=4320 and fees=0.
-    // expansion2 = floor(0.003 * r1) = floor(0.003 * 14_955_000_000_000_000) = 44_865_000_000_000
+    // expansion2 = floor(0.003 * r1)
+    // treasury_cut2 = floor(0.2 * expansion2)
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.process_epoch_transition(EpochNo(3));
@@ -13641,16 +13667,16 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     let r2 = state.reserves.0;
 
     let expansion2 = (3u128 * r1 as u128 / 1000) as u64;
-    // No-pool: delta_treasury = expansion2
+    let tc2 = (2u128 * expansion2 as u128 / 10) as u64;
     assert_eq!(
         t2,
-        t1 + expansion2,
-        "Treasury after epoch 2 should be t1({t1}) + expansion2({expansion2}), got {t2}"
+        t1 + tc2,
+        "Treasury after epoch 2 should be t1({t1}) + tc2({tc2}), got {t2}"
     );
     assert_eq!(
         r2,
-        r1 - expansion2,
-        "Reserves after epoch 2 should be r1({r1}) - expansion2({expansion2}), got {r2}"
+        r1 - tc2,
+        "Reserves after epoch 2 should be r1({r1}) - tc2({tc2}), got {r2}"
     );
 
     // Epoch 3 (full blocks) → third RUPD fires.
@@ -13661,30 +13687,31 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     let r3 = state.reserves.0;
 
     let expansion3 = (3u128 * r2 as u128 / 1000) as u64;
+    let tc3 = (2u128 * expansion3 as u128 / 10) as u64;
     assert_eq!(
         t3,
-        t2 + expansion3,
-        "Treasury after epoch 3 should be t2({t2}) + expansion3({expansion3}), got {t3}"
+        t2 + tc3,
+        "Treasury after epoch 3 should be t2({t2}) + tc3({tc3}), got {t3}"
     );
     assert_eq!(
         r3,
-        r2 - expansion3,
-        "Reserves after epoch 3 should be r2({r2}) - expansion3({expansion3}), got {r3}"
+        r2 - tc3,
+        "Reserves after epoch 3 should be r2({r2}) - tc3({tc3}), got {r3}"
     );
 
     // Confirm monotonic: treasury grows, reserves shrink each epoch.
     assert!(t3 > t2 && t2 > t1, "Treasury must grow each epoch");
     assert!(r3 < r2 && r2 < r1, "Reserves must shrink each epoch");
 
-    // Confirm each expansion is strictly smaller (compounding effect: smaller reserve base).
-    let expansion_ratio_1_2 = expansion1 as f64 / expansion2 as f64;
-    let expansion_ratio_2_3 = expansion2 as f64 / expansion3 as f64;
+    // Confirm each treasury_cut is strictly smaller (compounding effect: smaller reserve base).
+    let tc_ratio_1_2 = tc1 as f64 / tc2 as f64;
+    let tc_ratio_2_3 = tc2 as f64 / tc3 as f64;
     assert!(
-        expansion_ratio_1_2 > 1.0 && expansion_ratio_1_2 < 1.01,
-        "Each epoch's expansion should be slightly smaller than the prior: ratio_1_2={expansion_ratio_1_2}"
+        tc_ratio_1_2 > 1.0 && tc_ratio_1_2 < 1.01,
+        "Each epoch's treasury_cut should be slightly smaller than the prior: ratio_1_2={tc_ratio_1_2}"
     );
     assert!(
-        expansion_ratio_2_3 > 1.0 && expansion_ratio_2_3 < 1.01,
-        "Each epoch's expansion should be slightly smaller than the prior: ratio_2_3={expansion_ratio_2_3}"
+        tc_ratio_2_3 > 1.0 && tc_ratio_2_3 < 1.01,
+        "Each epoch's treasury_cut should be slightly smaller than the prior: ratio_2_3={tc_ratio_2_3}"
     );
 }
