@@ -21,18 +21,6 @@ Built by [Sandstone Pool](https://www.sandstone.io/)
 > **Torsten is in early development and is NOT recommended for production use.**
 > APIs, storage formats, and on-chain behavior may change without notice. Ledger validation is incomplete and may accept invalid transactions or reject valid ones. **Do not use this software to operate a stake pool, manage real funds, or participate in mainnet governance.** Use at your own risk on testnets only.
 
-## Support Development
-
-Torsten is an open-source project built with passion. If you find it useful, consider supporting continued development:
-
-<p align="center">
-  <img src="donate.png" alt="Donate to Torsten development" width="200" />
-</p>
-
-<p align="center">
-  <code>addr1q9ugmmm7pt0e2mvjdarrzxzl8dsmrmtv6m0yn6uf5l0445766pcfqqma5zvzv0e2kfsnz4spjq3dcn99s7e0m8ekpadsrulphg</code>
-</p>
-
 ## Quick Start
 
 ```bash
