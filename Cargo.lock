@@ -3479,6 +3479,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "torsten-config"
+version = "0.4.5-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "torsten-conformance"
 version = "0.4.5-alpha"
 dependencies = [

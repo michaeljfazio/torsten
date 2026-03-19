@@ -3,7 +3,7 @@
 //! Each [`ParamDef`] describes a single JSON key that may appear in a Cardano
 //! node configuration file: its display name, the logical section it belongs
 //! to, its value type (with optional constraints), a human-readable
-//! description, and its documented default value.
+//! description, its documented default value, and an operator tuning hint.
 //!
 //! Unknown keys found in the loaded JSON file are displayed as raw JSON values
 //! (editable as strings) and reported under the [`SECTION_UNKNOWN`] sentinel.
@@ -118,6 +118,12 @@ pub struct ParamDef {
     pub default: &'static str,
     /// Human-readable description shown in the right-hand description panel.
     pub description: &'static str,
+    /// Practical operator tuning guidance shown below the description.
+    ///
+    /// An empty string means no hint is shown.  Hints explain the *why*
+    /// behind a setting — what to change and when — rather than repeating
+    /// what the description already says.
+    pub tuning_hint: &'static str,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +146,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "Mainnet",
         description: "Cardano network identifier. 'Mainnet' for the main chain; \
                       'Testnet' for any test network (requires NetworkMagic).",
+        tuning_hint: "Set to 'Testnet' for Preview/Preprod/private deployments \
+                      and ensure NetworkMagic matches the genesis file.",
     },
     ParamDef {
         key: "NetworkMagic",
@@ -151,6 +159,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "764824073",
         description: "Network magic number. Mainnet = 764824073, Preview = 2, Preprod = 1. \
                       Must match the genesis files and all connecting peers.",
+        tuning_hint: "Mainnet = 764824073, Preview = 2, Preprod = 1. \
+                      A mismatched magic will cause all peer handshakes to fail immediately.",
     },
     ParamDef {
         key: "RequiresNetworkMagic",
@@ -161,6 +171,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "RequiresMagic",
         description: "Controls whether the network magic is enforced on peer handshakes. \
                       Use 'RequiresMagic' for all non-mainnet deployments.",
+        tuning_hint: "Use 'RequiresMagic' for all testnets, 'RequiresNoMagic' for mainnet.",
     },
     ParamDef {
         key: "EnableP2P",
@@ -170,6 +181,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Enable the Ouroboros P2P networking stack. When true, Torsten \
                       uses the diffusion layer for peer discovery and connection management. \
                       Set to false only for legacy non-P2P relay configurations.",
+        tuning_hint: "Always enable for production. \
+                      Disable only for isolated testing or legacy topology setups.",
     },
     ParamDef {
         key: "PeerSharing",
@@ -181,6 +194,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Peer sharing policy. 'PeerSharingPublic' allows this node to share \
                       its known peers with others. 'PeerSharingPrivate' refuses peer share \
                       requests. 'NoPeerSharing' disables the mini-protocol entirely.",
+        tuning_hint: "Use 'PeerSharingPublic' for public relays to help decentralise \
+                      peer discovery. Block producers may prefer 'PeerSharingPrivate'.",
     },
     ParamDef {
         key: "TargetNumberOfActivePeers",
@@ -190,6 +205,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target number of fully active (hot) peers — connections where \
                       block headers and bodies are exchanged. Raising this improves \
                       propagation at the cost of higher CPU and bandwidth.",
+        tuning_hint: "20 is good for public relays. \
+                      Block producers may want 10-15 for lower latency and less noise.",
     },
     ParamDef {
         key: "TargetNumberOfEstablishedPeers",
@@ -199,6 +216,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target number of established (warm) peers — TCP connections that \
                       are open but not yet doing full block exchange. Acts as a reservoir \
                       to promote to hot when needed.",
+        tuning_hint: "Keep at 2-3x TargetNumberOfActivePeers to ensure a healthy \
+                      promotion reservoir. 40 is a sensible default for most relays.",
     },
     ParamDef {
         key: "TargetNumberOfKnownPeers",
@@ -208,6 +227,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target size of the known-peers set (cold + warm + hot). The peer \
                       governor will attempt to keep at least this many addresses in its \
                       address book at all times.",
+        tuning_hint: "100 is a good default. \
+                      Increase to 200+ for higher network resilience on busy relays.",
     },
     ParamDef {
         key: "TargetNumberOfRootPeers",
@@ -217,6 +238,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target number of root peers — connections maintained to the \
                       topology file entries (trusted relays). These anchor the node to \
                       the network before ledger peer discovery kicks in.",
+        tuning_hint: "Match or slightly exceed your topology file entry count. \
+                      Root peers keep the node anchored during initial bootstrap.",
     },
     ParamDef {
         key: "TargetNumberOfActiveBigLedgerPeers",
@@ -226,6 +249,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target number of active connections to 'big ledger' peers — \
                       well-staked SPO relays discovered from the on-chain pool params \
                       after useLedgerAfterSlot is reached.",
+        tuning_hint: "5-10 is sufficient for most relays. \
+                      Big ledger peers are high-quality but may be geographically distant.",
     },
     ParamDef {
         key: "TargetNumberOfEstablishedBigLedgerPeers",
@@ -233,6 +258,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::U64 { min: 0, max: 100 },
         default: "10",
         description: "Target number of established (warm) connections to big ledger peers.",
+        tuning_hint: "Keep at 2x TargetNumberOfActiveBigLedgerPeers \
+                      to allow smooth promotion without cold-start delays.",
     },
     ParamDef {
         key: "TargetNumberOfKnownBigLedgerPeers",
@@ -240,6 +267,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::U64 { min: 0, max: 200 },
         default: "15",
         description: "Target size of the known big-ledger-peer set (cold + warm + hot).",
+        tuning_hint: "15-25 gives a good pool of candidates for ledger peer selection \
+                      without excessive churn.",
     },
     // --- Genesis section ---------------------------------------------------
     ParamDef {
@@ -249,6 +278,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "byron-genesis.json",
         description: "Path to the Byron-era genesis JSON file. Can be relative to the \
                       config file's directory or absolute. Must match ByronGenesisHash.",
+        tuning_hint: "Must match the network. Do not change unless switching networks. \
+                      Use paths relative to the config file for portability.",
     },
     ParamDef {
         key: "ByronGenesisHash",
@@ -257,6 +288,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "",
         description: "Blake2b-256 hash (hex) of the Byron genesis file. \
                       The node verifies this on startup to detect genesis mismatches.",
+        tuning_hint: "Must exactly match the hash of the genesis file at ByronGenesisFile. \
+                      An incorrect hash will prevent the node from starting.",
     },
     ParamDef {
         key: "ShelleyGenesisFile",
@@ -265,6 +298,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "shelley-genesis.json",
         description: "Path to the Shelley-era genesis JSON file. Contains network \
                       parameters, initial delegation, protocol magic, and epoch length.",
+        tuning_hint: "Must match the network. Do not change unless switching networks.",
     },
     ParamDef {
         key: "ShelleyGenesisHash",
@@ -272,6 +306,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::String,
         default: "",
         description: "Blake2b-256 hash (hex) of the Shelley genesis file.",
+        tuning_hint: "Must exactly match the hash of the file at ShelleyGenesisFile.",
     },
     ParamDef {
         key: "AlonzoGenesisFile",
@@ -280,6 +315,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "alonzo-genesis.json",
         description: "Path to the Alonzo-era genesis JSON file. Contains initial Plutus \
                       cost model parameters and collateral percentage.",
+        tuning_hint: "Must match the network. Do not change unless switching networks.",
     },
     ParamDef {
         key: "AlonzoGenesisHash",
@@ -287,6 +323,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::String,
         default: "",
         description: "Blake2b-256 hash (hex) of the Alonzo genesis file.",
+        tuning_hint: "Must exactly match the hash of the file at AlonzoGenesisFile.",
     },
     ParamDef {
         key: "ConwayGenesisFile",
@@ -295,6 +332,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "conway-genesis.json",
         description: "Path to the Conway-era genesis JSON file. Contains governance \
                       bootstrap DReps, committee members, and Plutus V3 cost models.",
+        tuning_hint: "Must match the network. Do not change unless switching networks.",
     },
     ParamDef {
         key: "ConwayGenesisHash",
@@ -302,6 +340,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::String,
         default: "",
         description: "Blake2b-256 hash (hex) of the Conway genesis file.",
+        tuning_hint: "Must exactly match the hash of the file at ConwayGenesisFile.",
     },
     // --- Protocol section --------------------------------------------------
     ParamDef {
@@ -314,6 +353,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Consensus protocol. 'Cardano' runs the full Hard Fork Combinator \
                       covering all eras from Byron to Conway. 'TPraos' and 'Praos' are \
                       single-era modes used only for isolated test networks.",
+        tuning_hint: "Always use 'Cardano' for mainnet and public testnets. \
+                      'TPraos'/'Praos' are for private devnet experiments only.",
     },
     ParamDef {
         key: "TraceBlockFetchClient",
@@ -322,6 +363,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "false",
         description: "Emit detailed block-fetch client trace events. Useful for \
                       diagnosing slow block propagation but very verbose at high sync rates.",
+        tuning_hint: "Enable only for debugging slow block propagation. \
+                      Increases log volume significantly; disable in production.",
     },
     ParamDef {
         key: "TraceBlockFetchServer",
@@ -330,6 +373,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "false",
         description: "Emit detailed block-fetch server trace events (blocks served \
                       to downstream peers).",
+        tuning_hint: "Enable only for debugging. Increases log volume significantly.",
     },
     ParamDef {
         key: "TraceChainSyncClient",
@@ -337,6 +381,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::Bool,
         default: "false",
         description: "Emit chain-sync client trace events (header fetch from upstream).",
+        tuning_hint: "Enable only for debugging chain-sync issues. \
+                      Very verbose during initial sync; keep off in production.",
     },
     ParamDef {
         key: "TraceChainSyncHeaderServer",
@@ -345,6 +391,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "false",
         description: "Emit chain-sync header server trace events (headers served to \
                       downstream peers).",
+        tuning_hint: "Enable only for debugging. Increases log volume significantly.",
     },
     ParamDef {
         key: "TraceChainSyncBlockServer",
@@ -352,6 +399,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         param_type: ParamType::Bool,
         default: "false",
         description: "Emit chain-sync block server trace events.",
+        tuning_hint: "Enable only for debugging. Increases log volume significantly.",
     },
     // --- Logging section ---------------------------------------------------
     ParamDef {
@@ -373,6 +421,9 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Minimum log severity. Messages below this level are silently \
                       discarded. 'Debug' is very verbose; 'Warning' is suitable for \
                       production deployments.",
+        tuning_hint: "'Info' is the recommended default. \
+                      Use 'Warning' for quiet production nodes. \
+                      Use 'Debug' only for active troubleshooting sessions.",
     },
     ParamDef {
         key: "TurnOnLogMetrics",
@@ -381,6 +432,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "true",
         description: "Enable the EKG / Prometheus metrics endpoint. When true, metrics \
                       are published on port 12798 and can be scraped by Prometheus.",
+        tuning_hint: "Keep enabled. Disabling removes Prometheus scraping capability \
+                      and breaks monitoring dashboards.",
     },
     ParamDef {
         key: "TurnOnScripting",
@@ -389,6 +442,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "false",
         description: "Enable scripted log routing (cardano-node legacy logging system). \
                       Not applicable to Torsten's tracing-subscriber backend.",
+        tuning_hint: "Leave disabled for Torsten. This setting is a legacy flag \
+                      that has no effect on Torsten's tracing-subscriber backend.",
     },
     // --- Advanced section --------------------------------------------------
     ParamDef {
@@ -399,6 +454,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Maximum number of parallel block-fetch workers during bulk \
                       (catch-up) sync. Higher values saturate bandwidth faster at the \
                       cost of higher memory usage.",
+        tuning_hint: "4-8 on fast hardware/NVMe with ample RAM. \
+                      Lower to 2 if memory is constrained below 8 GB.",
     },
     ParamDef {
         key: "MaxConcurrencyDeadline",
@@ -407,6 +464,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "4",
         description: "Maximum number of parallel block-fetch workers when near the tip \
                       (deadline mode). Lower than bulk to reduce latency jitter.",
+        tuning_hint: "Keep lower than MaxConcurrencyBulkSync. \
+                      2-4 is optimal; higher values add latency jitter near tip.",
     },
     ParamDef {
         key: "SnapshotInterval",
@@ -419,6 +478,9 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Interval in minutes between ledger state snapshots. \
                       Snapshots allow faster restart after an unclean shutdown. \
                       0 disables periodic snapshotting (not recommended).",
+        tuning_hint: "72 minutes (default) matches the Haskell node. \
+                      Never set to 0 in production — recovery from an unclean \
+                      shutdown will require a full replay from genesis.",
     },
     ParamDef {
         key: "ExperimentalHardForksEnabled",
@@ -428,6 +490,9 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Allow the node to follow experimental hard fork transitions. \
                       Enable only when instructed by the Cardano Foundation for \
                       testnet protocol upgrades.",
+        tuning_hint: "Leave disabled unless you have been explicitly asked to enable it \
+                      for a specific testnet upgrade. Enabling prematurely can cause \
+                      chain divergence on mainnet.",
     },
     ParamDef {
         key: "EnableP2P",
@@ -436,6 +501,8 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         default: "true",
         description: "Duplicate of the Network section entry — shown here only if the \
                       key is encountered in the Advanced section context.",
+        tuning_hint: "Always enable for production. \
+                      Disable only for isolated testing or legacy topology setups.",
     },
 ];
 
@@ -473,6 +540,134 @@ pub fn section_priority(section: &str) -> usize {
         .iter()
         .position(|s| *s == section)
         .unwrap_or(SECTION_ORDER.len())
+}
+
+// ---------------------------------------------------------------------------
+// Network default values (used by `init` subcommand)
+// ---------------------------------------------------------------------------
+
+/// The recognised networks for the `init` subcommand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    Mainnet,
+    Preview,
+    Preprod,
+}
+
+impl Network {
+    /// Parse a network name string (case-insensitive).
+    pub fn from_str(s: &str) -> Option<Network> {
+        match s.to_lowercase().as_str() {
+            "mainnet" => Some(Network::Mainnet),
+            "preview" => Some(Network::Preview),
+            "preprod" => Some(Network::Preprod),
+            _ => None,
+        }
+    }
+
+    /// The network magic integer for this network.
+    pub fn magic(self) -> u64 {
+        match self {
+            Network::Mainnet => 764_824_073,
+            Network::Preview => 2,
+            Network::Preprod => 1,
+        }
+    }
+
+    /// Whether network magic enforcement is needed (mainnet uses RequiresNoMagic).
+    pub fn requires_magic(self) -> &'static str {
+        match self {
+            Network::Mainnet => "RequiresNoMagic",
+            Network::Preview | Network::Preprod => "RequiresMagic",
+        }
+    }
+
+    /// Display name used in genesis file path prefixes.
+    pub fn genesis_prefix(self) -> &'static str {
+        match self {
+            Network::Mainnet => "mainnet",
+            Network::Preview => "preview",
+            Network::Preprod => "preprod",
+        }
+    }
+}
+
+/// Build a `serde_json::Map` with sensible defaults for the given network.
+///
+/// The returned map is ready to be pretty-printed and written to disk as a
+/// starter configuration file.  All paths use the conventional relative
+/// names expected alongside an official Cardano node config directory.
+pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::{json, Map, Value};
+
+    let prefix = network.genesis_prefix();
+    let magic = network.magic();
+    let req_magic = network.requires_magic();
+    let network_str = match network {
+        Network::Mainnet => "Mainnet",
+        _ => "Testnet",
+    };
+
+    let mut map = Map::new();
+
+    // Network identity.
+    map.insert("Network".into(), json!(network_str));
+    map.insert("NetworkMagic".into(), json!(magic));
+    map.insert("RequiresNetworkMagic".into(), json!(req_magic));
+
+    // P2P networking.
+    map.insert("EnableP2P".into(), json!(true));
+    map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
+    map.insert("TargetNumberOfActivePeers".into(), json!(20));
+    map.insert("TargetNumberOfEstablishedPeers".into(), json!(40));
+    map.insert("TargetNumberOfKnownPeers".into(), json!(100));
+    map.insert("TargetNumberOfRootPeers".into(), json!(60));
+    map.insert("TargetNumberOfActiveBigLedgerPeers".into(), json!(5));
+    map.insert("TargetNumberOfEstablishedBigLedgerPeers".into(), json!(10));
+    map.insert("TargetNumberOfKnownBigLedgerPeers".into(), json!(15));
+
+    // Genesis files (conventional relative paths).
+    map.insert(
+        "ByronGenesisFile".into(),
+        Value::String(format!("{prefix}-byron-genesis.json")),
+    );
+    map.insert("ByronGenesisHash".into(), json!(""));
+    map.insert(
+        "ShelleyGenesisFile".into(),
+        Value::String(format!("{prefix}-shelley-genesis.json")),
+    );
+    map.insert("ShelleyGenesisHash".into(), json!(""));
+    map.insert(
+        "AlonzoGenesisFile".into(),
+        Value::String(format!("{prefix}-alonzo-genesis.json")),
+    );
+    map.insert("AlonzoGenesisHash".into(), json!(""));
+    map.insert(
+        "ConwayGenesisFile".into(),
+        Value::String(format!("{prefix}-conway-genesis.json")),
+    );
+    map.insert("ConwayGenesisHash".into(), json!(""));
+
+    // Protocol.
+    map.insert("Protocol".into(), json!("Cardano"));
+    map.insert("TraceBlockFetchClient".into(), json!(false));
+    map.insert("TraceBlockFetchServer".into(), json!(false));
+    map.insert("TraceChainSyncClient".into(), json!(false));
+    map.insert("TraceChainSyncHeaderServer".into(), json!(false));
+    map.insert("TraceChainSyncBlockServer".into(), json!(false));
+
+    // Logging.
+    map.insert("MinSeverity".into(), json!("Info"));
+    map.insert("TurnOnLogMetrics".into(), json!(true));
+    map.insert("TurnOnScripting".into(), json!(false));
+
+    // Advanced.
+    map.insert("MaxConcurrencyBulkSync".into(), json!(2));
+    map.insert("MaxConcurrencyDeadline".into(), json!(4));
+    map.insert("SnapshotInterval".into(), json!(72));
+    map.insert("ExperimentalHardForksEnabled".into(), json!(false));
+
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -536,5 +731,61 @@ mod tests {
         assert_eq!(ParamType::String.label(), "string");
         assert_eq!(ParamType::Enum { values: &["a"] }.label(), "enum");
         assert_eq!(ParamType::Path.label(), "path");
+    }
+
+    #[test]
+    fn test_all_params_have_tuning_hints() {
+        // Every entry in KNOWN_PARAMS must carry a non-empty tuning hint so
+        // the description panel always has operator guidance to show.
+        for def in KNOWN_PARAMS {
+            assert!(
+                !def.tuning_hint.is_empty(),
+                "ParamDef '{}' is missing a tuning_hint",
+                def.key
+            );
+        }
+    }
+
+    #[test]
+    fn test_network_defaults_mainnet_magic() {
+        let map = network_defaults(Network::Mainnet);
+        assert_eq!(map["NetworkMagic"], serde_json::json!(764_824_073_u64));
+        assert_eq!(
+            map["RequiresNetworkMagic"],
+            serde_json::json!("RequiresNoMagic")
+        );
+        assert_eq!(map["Network"], serde_json::json!("Mainnet"));
+    }
+
+    #[test]
+    fn test_network_defaults_preview_magic() {
+        let map = network_defaults(Network::Preview);
+        assert_eq!(map["NetworkMagic"], serde_json::json!(2_u64));
+        assert_eq!(
+            map["RequiresNetworkMagic"],
+            serde_json::json!("RequiresMagic")
+        );
+        assert_eq!(map["Network"], serde_json::json!("Testnet"));
+    }
+
+    #[test]
+    fn test_network_defaults_genesis_paths() {
+        let map = network_defaults(Network::Preview);
+        assert_eq!(
+            map["ByronGenesisFile"],
+            serde_json::json!("preview-byron-genesis.json")
+        );
+        assert_eq!(
+            map["ConwayGenesisFile"],
+            serde_json::json!("preview-conway-genesis.json")
+        );
+    }
+
+    #[test]
+    fn test_network_from_str() {
+        assert_eq!(Network::from_str("mainnet"), Some(Network::Mainnet));
+        assert_eq!(Network::from_str("PREVIEW"), Some(Network::Preview));
+        assert_eq!(Network::from_str("preprod"), Some(Network::Preprod));
+        assert_eq!(Network::from_str("devnet"), None);
     }
 }

@@ -10,6 +10,8 @@
 //! - Unsaved-changes flag (derived from [`LoadedConfig::is_modified`]).
 //! - Quit-requested flag.
 //! - Feedback message (shown in the footer for one frame after an action).
+//! - Search mode (press `/` to enter, `Esc` to clear).
+//! - Diff overlay (press `Ctrl+D` to show, `Esc` to close).
 //!
 //! # Section / item model
 //!
@@ -23,6 +25,7 @@
 use std::collections::HashMap;
 
 use crate::config::{ConfigEntry, LoadedConfig};
+use crate::diff::OriginalValues;
 use crate::schema::{build_lookup, section_priority, ParamDef, ParamType, SECTION_UNKNOWN};
 
 // ---------------------------------------------------------------------------
@@ -91,15 +94,38 @@ pub struct App {
     /// Set to `true` after `q` when there are unsaved changes — triggers the
     /// "unsaved changes — press q again to discard" prompt.
     pub quit_prompt: bool,
+
+    // -----------------------------------------------------------------------
+    // Search state
+    // -----------------------------------------------------------------------
+    /// Whether search mode is currently active (entered with `/`).
+    pub search_active: bool,
+    /// The current search query string (accumulated keystrokes since `/`).
+    pub search_query: String,
+    /// Flat (section_idx, item_idx) pairs of items matching the current query,
+    /// sorted by relevance score descending.  Empty when search is inactive
+    /// or the query is empty.
+    pub filtered_items: Vec<(usize, usize)>,
+
+    // -----------------------------------------------------------------------
+    // Diff overlay state
+    // -----------------------------------------------------------------------
+    /// Whether the diff overlay is currently visible (`Ctrl+D` to toggle).
+    pub show_diff: bool,
+    /// Original values captured at load time (ground truth for diff).
+    pub originals: OriginalValues,
 }
 
 impl App {
     /// Construct an [`App`] from a loaded config file.
     ///
     /// All sections start expanded.  The cursor starts at section 0, item 0.
+    /// The [`OriginalValues`] snapshot is captured immediately so that diffs
+    /// remain accurate even after multiple edits.
     pub fn new(config: LoadedConfig) -> Self {
         let lookup = build_lookup();
         let sections = build_sections(&config, &lookup);
+        let originals = OriginalValues::from_entries(&config.entries);
 
         App {
             config,
@@ -110,6 +136,11 @@ impl App {
             feedback: None,
             should_quit: false,
             quit_prompt: false,
+            search_active: false,
+            search_query: String::new(),
+            filtered_items: Vec::new(),
+            show_diff: false,
+            originals,
         }
     }
 
@@ -122,6 +153,17 @@ impl App {
         if self.edit_mode != EditMode::None {
             return;
         }
+        // In search mode navigate the filtered list instead.
+        if self.search_active && !self.filtered_items.is_empty() {
+            let pos = self.filtered_position();
+            if pos > 0 {
+                let (sec, item) = self.filtered_items[pos - 1];
+                self.cursor_section = sec;
+                self.cursor_item = item;
+            }
+            return;
+        }
+
         let (sec, item) = (self.cursor_section, self.cursor_item);
 
         if item > 0 {
@@ -149,6 +191,17 @@ impl App {
         if self.edit_mode != EditMode::None {
             return;
         }
+        // In search mode navigate the filtered list instead.
+        if self.search_active && !self.filtered_items.is_empty() {
+            let pos = self.filtered_position();
+            if pos + 1 < self.filtered_items.len() {
+                let (sec, item) = self.filtered_items[pos + 1];
+                self.cursor_section = sec;
+                self.cursor_item = item;
+            }
+            return;
+        }
+
         let sec = self.cursor_section;
         let expanded = self.sections[sec].expanded;
         let item_count = self.sections[sec].items.len();
@@ -287,6 +340,113 @@ impl App {
     /// Discard the current edit and return to browse mode.
     pub fn cancel_edit(&mut self) {
         self.edit_mode = EditMode::None;
+    }
+
+    // -----------------------------------------------------------------------
+    // Search mode
+    // -----------------------------------------------------------------------
+
+    /// Enter search mode.  Called when the user presses `/` in browse mode.
+    pub fn enter_search(&mut self) {
+        self.search_active = true;
+        self.search_query.clear();
+        self.filtered_items.clear();
+    }
+
+    /// Append a character to the search query and recompute the filter.
+    pub fn search_type_char(&mut self, c: char) {
+        self.search_query.push(c);
+        self.recompute_filter();
+    }
+
+    /// Remove the last character from the search query and recompute.
+    pub fn search_backspace(&mut self) {
+        self.search_query.pop();
+        self.recompute_filter();
+    }
+
+    /// Clear search mode and restore the full parameter tree.
+    pub fn clear_search(&mut self) {
+        self.search_active = false;
+        self.search_query.clear();
+        self.filtered_items.clear();
+    }
+
+    /// Recompute `filtered_items` from the current `search_query`.
+    fn recompute_filter(&mut self) {
+        use crate::search::search as do_search;
+
+        if self.search_query.is_empty() {
+            self.filtered_items.clear();
+            return;
+        }
+
+        // Build an iterator of (section_idx, item_idx, key, description, tuning_hint).
+        let lookup = build_lookup();
+        let iter = self.sections.iter().enumerate().flat_map(|(sec_idx, sec)| {
+            sec.items
+                .iter()
+                .enumerate()
+                .map(move |(item_idx, item)| (sec_idx, item_idx, item))
+        });
+
+        // We can't capture `self.config` inside the iterator directly because
+        // `self` is borrowed mutably.  Collect the item tuples first.
+        let tuples: Vec<(usize, usize, String, String, String)> = iter
+            .map(|(sec_idx, item_idx, item)| {
+                let entry = &self.config.entries[item.entry_idx];
+                let def = lookup.get(entry.key.as_str()).copied();
+                let key = entry.key.clone();
+                let description = def.map(|d| d.description).unwrap_or("").to_string();
+                let tuning_hint = def.map(|d| d.tuning_hint).unwrap_or("").to_string();
+                (sec_idx, item_idx, key, description, tuning_hint)
+            })
+            .collect();
+
+        let results = do_search(
+            &self.search_query,
+            tuples
+                .iter()
+                .map(|(si, ii, k, d, h)| (*si, *ii, k.as_str(), d.as_str(), h.as_str())),
+        );
+
+        self.filtered_items = results
+            .into_iter()
+            .map(|r| (r.section_idx, r.item_idx))
+            .collect();
+
+        // Move the cursor to the first match, if any.
+        if let Some(&(sec, item)) = self.filtered_items.first() {
+            self.cursor_section = sec;
+            self.cursor_item = item;
+        }
+    }
+
+    /// Return the index of the current cursor in `filtered_items`, or 0.
+    fn filtered_position(&self) -> usize {
+        self.filtered_items
+            .iter()
+            .position(|&(s, i)| s == self.cursor_section && i == self.cursor_item)
+            .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Diff overlay
+    // -----------------------------------------------------------------------
+
+    /// Toggle the diff overlay on/off.
+    pub fn toggle_diff(&mut self) {
+        self.show_diff = !self.show_diff;
+    }
+
+    /// Close the diff overlay without changing other state.
+    pub fn close_diff(&mut self) {
+        self.show_diff = false;
+    }
+
+    /// Compute the current diff for rendering.
+    pub fn diff_entries(&self) -> Vec<crate::diff::DiffEntry> {
+        crate::diff::compute_diff(&self.config.entries, &self.originals)
     }
 
     // -----------------------------------------------------------------------
@@ -563,5 +723,108 @@ mod tests {
         let log_pos = names.iter().position(|n| *n == "Logging").unwrap();
         assert!(net_pos < gen_pos, "Network before Genesis");
         assert!(gen_pos < log_pos, "Genesis before Logging");
+    }
+
+    // -----------------------------------------------------------------------
+    // Search tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_enter_search_activates_search_mode() {
+        let mut app = make_app(r#"{"EnableP2P": true, "MinSeverity": "Info"}"#);
+        assert!(!app.search_active);
+        app.enter_search();
+        assert!(app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_search_type_filters_items() {
+        let mut app =
+            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#);
+        app.enter_search();
+        app.search_type_char('E');
+        app.search_type_char('n');
+        app.search_type_char('a');
+        app.search_type_char('b');
+        app.search_type_char('l');
+        app.search_type_char('e');
+        // "Enable" is a prefix of "EnableP2P" — should appear in filtered items.
+        assert!(!app.filtered_items.is_empty());
+        // Cursor should have moved to the match.
+        let (sec, item) = app.filtered_items[0];
+        assert_eq!(app.cursor_section, sec);
+        assert_eq!(app.cursor_item, item);
+    }
+
+    #[test]
+    fn test_clear_search_restores_all() {
+        let mut app = make_app(r#"{"EnableP2P": true, "MinSeverity": "Info"}"#);
+        app.enter_search();
+        app.search_type_char('E');
+        assert!(!app.filtered_items.is_empty());
+        app.clear_search();
+        assert!(!app.search_active);
+        assert!(app.filtered_items.is_empty());
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_search_backspace_updates_filter() {
+        let mut app =
+            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#);
+        app.enter_search();
+        app.search_type_char('E');
+        let count_after_e = app.filtered_items.len();
+        app.search_type_char('n');
+        app.search_backspace(); // back to "E"
+        assert_eq!(app.filtered_items.len(), count_after_e);
+    }
+
+    // -----------------------------------------------------------------------
+    // Diff tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_diff_empty_initially() {
+        let app = make_app(r#"{"EnableP2P": true}"#);
+        assert!(app.diff_entries().is_empty());
+    }
+
+    #[test]
+    fn test_diff_captures_change() {
+        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        app.begin_edit(); // toggle bool: true -> false
+        let diff = app.diff_entries();
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].key, "EnableP2P");
+        assert_eq!(diff[0].original, "true");
+        assert_eq!(diff[0].current, "false");
+    }
+
+    #[test]
+    fn test_toggle_diff_overlay() {
+        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        assert!(!app.show_diff);
+        app.toggle_diff();
+        assert!(app.show_diff);
+        app.toggle_diff();
+        assert!(!app.show_diff);
+    }
+
+    #[test]
+    fn test_close_diff_overlay() {
+        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        app.show_diff = true;
+        app.close_diff();
+        assert!(!app.show_diff);
+    }
+
+    #[test]
+    fn test_originals_snapshot_is_immutable_after_edits() {
+        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        app.begin_edit(); // toggle: true -> false
+                          // The original snapshot must still say "true".
+        assert_eq!(app.originals.get("EnableP2P"), Some("true"));
     }
 }

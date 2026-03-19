@@ -5,6 +5,8 @@
 //! ```text
 //! ┌─── Header (1 line) ───────────────────────────────────────────┐
 //! │ torsten-config  preview-config.json  [Modified]               │
+//! ├─── Search bar (1 line, shown only when search is active) ──────┤
+//! │  /EnableP2P_                                                  │
 //! ├─── Left panel (60%) ──────────────────────────────────────────┤
 //! │  Network                           (section header)           │
 //! │    EnableP2P                     true  (modified *)           │
@@ -18,6 +20,8 @@
 //! │                                                               │
 //! │  Enable the Ouroboros P2P networking                          │
 //! │  stack...                                                     │
+//! │                                                               │
+//! │  Hint: Always enable for production...                        │
 //! ├─── Footer (1 line) ───────────────────────────────────────────┤
 //! │  j/k Navigate  Enter Edit  Tab Expand/Collapse  Ctrl+S Save  │
 //! └───────────────────────────────────────────────────────────────┘
@@ -25,6 +29,9 @@
 //!
 //! When the terminal is narrower than 80 columns, the right panel is hidden
 //! and the left panel expands to the full width.
+//!
+//! A diff overlay (`Ctrl+D`) renders on top of the body area, showing only
+//! the changed parameters with original vs. current values side by side.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -36,7 +43,9 @@ use ratatui::{
 
 use crate::app::{App, Section};
 use crate::config::ConfigEntry;
+use crate::diff::DiffEntry;
 use crate::schema::{ParamDef, ParamType, SECTION_UNKNOWN};
+use crate::search::highlight_ranges;
 
 // ---------------------------------------------------------------------------
 // Color palette (hard-coded Slate theme matching torsten-monitor)
@@ -53,6 +62,11 @@ const C_BORDER: Color = Color::Rgb(70, 70, 85);
 const C_BORDER_ACTIVE: Color = Color::Rgb(100, 149, 237);
 const C_SECTION_HDR: Color = Color::Rgb(180, 200, 255); // light periwinkle
 const C_MODIFIED: Color = Color::Rgb(255, 165, 80); // orange
+const C_HINT: Color = Color::Rgb(130, 200, 130); // soft green for tuning hints
+const C_SEARCH_BAR: Color = Color::Rgb(60, 60, 80); // dark highlight for search bar
+const C_SEARCH_MATCH: Color = Color::Rgb(255, 220, 80); // amber for highlighted match text
+const C_DIFF_ORIG: Color = Color::Rgb(255, 100, 100); // red for removed/original value
+const C_DIFF_NEW: Color = Color::Rgb(80, 220, 100); // green for new/current value
 
 /// Minimum terminal width to show the right (description) panel.
 const MIN_WIDTH_TWO_PANEL: u16 = 80;
@@ -71,26 +85,45 @@ pub fn draw(frame: &mut Frame, app: &App) {
         area,
     );
 
-    // Vertical split: header | body | footer.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(0),    // body
-            Constraint::Length(1), // footer
-        ])
-        .split(area);
+    // Vertical split: header | [search bar] | body | footer.
+    let rows = if app.search_active {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // search bar
+                Constraint::Min(0),    // body
+                Constraint::Length(1), // footer
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // header
+                Constraint::Length(0), // (no search bar)
+                Constraint::Min(0),    // body
+                Constraint::Length(1), // footer
+            ])
+            .split(area)
+    };
 
     let header_area = rows[0];
-    let body_area = rows[1];
-    let footer_area = rows[2];
+    let search_area = rows[1];
+    let body_area = rows[2];
+    let footer_area = rows[3];
 
     draw_header(frame, app, header_area);
+    if app.search_active {
+        draw_search_bar(frame, app, search_area);
+    }
     draw_body(frame, app, body_area);
     draw_footer(frame, app, footer_area);
 
-    // Quit confirmation overlay (rendered last so it sits on top).
-    if app.quit_prompt {
+    // Overlays rendered last (highest z-order).
+    if app.show_diff {
+        draw_diff_overlay(frame, app, area);
+    } else if app.quit_prompt {
         draw_quit_overlay(frame, area);
     }
 }
@@ -132,6 +165,47 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Search bar
+// ---------------------------------------------------------------------------
+
+/// Render the single-line search bar shown while search is active.
+fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let match_count = app.filtered_items.len();
+    let count_str = if app.search_query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  ({match_count} match{})",
+            if match_count == 1 { "" } else { "es" }
+        )
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            " / ",
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.search_query.clone(),
+            Style::default().fg(C_FG).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "_",
+            Style::default()
+                .fg(C_ACCENT)
+                .add_modifier(Modifier::RAPID_BLINK),
+        ),
+        Span::styled(count_str, Style::default().fg(C_MUTED)),
+        Span::styled("   Esc: clear search", Style::default().fg(C_MUTED)),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(C_SEARCH_BAR)),
+        area,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Body
 // ---------------------------------------------------------------------------
 
@@ -156,19 +230,31 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_left_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let border_color = if !app.is_typing() {
+    let border_color = if !app.is_typing() && !app.search_active {
         C_BORDER_ACTIVE
+    } else if app.search_active {
+        C_WARNING
     } else {
         C_BORDER
+    };
+
+    // Title shows the search query inline when searching.
+    let title = if app.search_active && !app.search_query.is_empty() {
+        Span::styled(
+            format!(" Parameters (/{}) ", app.search_query),
+            Style::default().fg(C_WARNING).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            " Parameters ",
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        )
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(
-            " Parameters ",
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-        ))
+        .title(title)
         .style(Style::default().bg(C_BG))
         .padding(Padding::horizontal(1));
 
@@ -183,19 +269,23 @@ fn draw_left_panel(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Build the flat list of [`ListItem`]s for every visible row.
 ///
-/// The list is flat (no native tree widget) — sections are manually indented
-/// and the cursor highlight is applied by inspecting `app.cursor_*`.
+/// In normal mode the full tree is rendered.  In search mode only matching
+/// items are rendered (the section header is still shown above each match for
+/// context, but collapsed sections are treated as expanded for display
+/// purposes so that filtered results inside them are still visible).
 fn build_list_items(app: &App, panel_width: u16) -> Vec<ListItem<'static>> {
     // Usable width inside the block (border already subtracted by `inner`).
     let w = panel_width as usize;
     let mut items: Vec<ListItem<'static>> = Vec::new();
 
-    // Current flat row index for cursor tracking.
+    // Flat row index for cursor tracking.
     let mut flat_row: usize = 0;
-    // We'll compare against the cursor position to decide whether to highlight.
-    // `highlight_rows` is a set of flat indices that should be highlighted.
-    // We compute the cursor's flat index here.
     let cursor_flat = cursor_to_flat(app);
+
+    // If search is active and there are results, render a flat filtered list.
+    if app.search_active && !app.search_query.is_empty() {
+        return build_search_items(app, w);
+    }
 
     for (sec_idx, section) in app.sections.iter().enumerate() {
         // --- Section header row ---
@@ -216,7 +306,6 @@ fn build_list_items(app: &App, panel_width: u16) -> Vec<ListItem<'static>> {
 
             let entry = &app.config.entries[item.entry_idx];
             let display_value = if is_selected && app.is_typing() {
-                // Show the live typing buffer instead of the stored value.
                 app.typing_buffer().to_string()
             } else {
                 entry.display_value()
@@ -228,11 +317,60 @@ fn build_list_items(app: &App, panel_width: u16) -> Vec<ListItem<'static>> {
                 &display_value,
                 is_cursor,
                 is_selected && app.is_typing(),
+                &[], // no highlights in normal mode
                 w,
             );
             items.push(row);
             flat_row += 1;
         }
+    }
+
+    items
+}
+
+/// Build the filtered result list shown during active search.
+fn build_search_items(app: &App, w: usize) -> Vec<ListItem<'static>> {
+    let mut items: Vec<ListItem<'static>> = Vec::new();
+
+    if app.filtered_items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  No matches",
+            Style::default().fg(C_MUTED),
+        ))));
+        return items;
+    }
+
+    for &(sec_idx, item_idx) in &app.filtered_items {
+        let section = &app.sections[sec_idx];
+        let item = &section.items[item_idx];
+        let entry = &app.config.entries[item.entry_idx];
+        let is_cursor = sec_idx == app.cursor_section && item_idx == app.cursor_item;
+
+        let display_value = if is_cursor && app.is_typing() {
+            app.typing_buffer().to_string()
+        } else {
+            entry.display_value()
+        };
+
+        // Compute highlight ranges for the key.
+        let key_ranges = highlight_ranges(&app.search_query, &entry.key);
+
+        // Prepend a section tag in muted text for context.
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  [{}]", section.name),
+            Style::default().fg(C_MUTED),
+        ))));
+
+        let row = render_item_row(
+            entry,
+            item.def,
+            &display_value,
+            is_cursor,
+            is_cursor && app.is_typing(),
+            &key_ranges,
+            w,
+        );
+        items.push(row);
     }
 
     items
@@ -260,13 +398,14 @@ fn render_section_header(section: &Section, is_cursor: bool, width: usize) -> Li
     ListItem::new(Line::from(Span::styled(padded, style)))
 }
 
-/// Render a single parameter row.
+/// Render a single parameter row, with optional search highlight ranges.
 fn render_item_row(
     entry: &ConfigEntry,
     def: Option<&ParamDef>,
     display_value: &str,
     is_cursor: bool,
     is_typing: bool,
+    key_ranges: &[(usize, usize)],
     width: usize,
 ) -> ListItem<'static> {
     // Key label (2-space indent).
@@ -274,7 +413,7 @@ fn render_item_row(
 
     // Value colour depends on type and state.
     let value_color = if is_typing {
-        C_WARNING // yellow while editing
+        C_WARNING
     } else if entry.modified {
         C_MODIFIED
     } else {
@@ -284,10 +423,8 @@ fn render_item_row(
     // Modified indicator.
     let mod_indicator = if entry.modified { "*" } else { " " };
 
-    // Right-align the value within the available space.
-    // Row format: "  <key><spaces><value><mod>"
-    // Reserve 2 chars for mod_indicator + space.
-    let reserved = 3usize; // " * " suffix
+    // Reserve space for " * " suffix.
+    let reserved = 3usize;
     let key_len = key_label.len().min(width.saturating_sub(reserved + 1));
     let key_display = if key_label.len() > key_len {
         format!("{:.key_len$}", key_label)
@@ -307,13 +444,11 @@ fn render_item_row(
         display_value.to_string()
     };
 
-    // Build the right side: spaces + value + modified marker.
+    // Spacing between key and value.
     let gap = width
         .saturating_sub(key_display.len())
         .saturating_sub(value_display.len())
         .saturating_sub(2);
-
-    let row_str = format!("{key_display}{:gap$}{value_display} {mod_indicator}", "");
 
     let (bg, fg_key, fg_value) = if is_cursor {
         (C_ACCENT, C_BG, C_BG)
@@ -321,39 +456,104 @@ fn render_item_row(
         (C_BG, C_MUTED, value_color)
     };
 
-    // Build a two-span line: key (muted) + value (colored).
-    let key_span_end = key_display.len();
-    let value_span_start = key_span_end + gap + 1; // +1 for the leading space of gap
-    let _ = value_span_start; // suppress unused-variable warning
-
-    // For cursor highlight, we use a single uniform span.
-    let line = if is_cursor {
-        Line::from(Span::styled(
-            row_str,
-            Style::default()
-                .fg(fg_key)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        // Split: key part (muted) and value part (colored).
+    // Build the line.  When there are search highlight ranges and we are not
+    // on the cursor row, we split the key into highlighted / non-highlighted
+    // spans.  On the cursor row a single solid span is used.
+    let line = if is_cursor || key_ranges.is_empty() {
+        // Simple two-span line: key (muted) + value (colored).
         let key_part = format!("{key_display}{:gap$}", "");
         let val_part = format!("{value_display} {mod_indicator}");
 
-        Line::from(vec![
-            Span::styled(key_part, Style::default().fg(fg_key).bg(bg)),
-            Span::styled(
-                val_part,
+        if is_cursor {
+            Line::from(Span::styled(
+                format!("{key_part}{val_part}"),
                 Style::default()
-                    .fg(fg_value)
+                    .fg(fg_key)
                     .bg(bg)
-                    .add_modifier(if entry.modified {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-        ])
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(key_part, Style::default().fg(fg_key).bg(bg)),
+                Span::styled(
+                    val_part,
+                    Style::default()
+                        .fg(fg_value)
+                        .bg(bg)
+                        .add_modifier(if entry.modified {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        }
+    } else {
+        // Build a highlighted key with match ranges marked in amber.
+        // `key_display` includes the 2-space indent; highlight ranges are
+        // relative to `entry.key` (no indent), so offset by 2.
+        let indent_offset = 2usize; // "  " prefix length
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let key_bytes = key_display.as_bytes();
+        let mut cursor_pos: usize = 0;
+
+        // Map ranges from entry.key offsets to key_display offsets.
+        let adjusted: Vec<(usize, usize)> = key_ranges
+            .iter()
+            .filter_map(|&(s, e)| {
+                let s2 = s + indent_offset;
+                let e2 = e + indent_offset;
+                if s2 < key_display.len() {
+                    Some((s2, e2.min(key_display.len())))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (hs, he) in &adjusted {
+            if *hs > cursor_pos {
+                spans.push(Span::styled(
+                    key_display[cursor_pos..*hs].to_string(),
+                    Style::default().fg(fg_key).bg(bg),
+                ));
+            }
+            if *hs < key_bytes.len() {
+                spans.push(Span::styled(
+                    key_display[*hs..*he].to_string(),
+                    Style::default()
+                        .fg(C_SEARCH_MATCH)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            cursor_pos = *he;
+        }
+        if cursor_pos < key_display.len() {
+            spans.push(Span::styled(
+                key_display[cursor_pos..].to_string(),
+                Style::default().fg(fg_key).bg(bg),
+            ));
+        }
+
+        // Gap + value + modifier.
+        spans.push(Span::styled(
+            format!("{:gap$}", ""),
+            Style::default().fg(fg_key).bg(bg),
+        ));
+        spans.push(Span::styled(
+            format!("{value_display} {mod_indicator}"),
+            Style::default()
+                .fg(fg_value)
+                .bg(bg)
+                .add_modifier(if entry.modified {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+
+        Line::from(spans)
     };
 
     ListItem::new(line)
@@ -377,7 +577,7 @@ fn value_color_for(def: Option<&ParamDef>, value: &str) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Right panel — parameter description
+// Right panel — parameter description + tuning hint
 // ---------------------------------------------------------------------------
 
 fn draw_right_panel(frame: &mut Frame, app: &App, area: Rect) {
@@ -401,7 +601,7 @@ fn draw_right_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, inner);
 }
 
-/// Build the text content for the description panel.
+/// Build the text content for the description panel, including tuning hints.
 fn build_description_content(app: &App) -> Vec<Line<'static>> {
     let Some(item) = app.selected_item() else {
         return vec![Line::from(Span::styled(
@@ -465,6 +665,19 @@ fn build_description_content(app: &App) -> Vec<Line<'static>> {
             def.description,
             Style::default().fg(C_FG),
         )));
+
+        // Tuning hint (shown only when non-empty).
+        if !def.tuning_hint.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Hint:",
+                Style::default().fg(C_HINT).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                def.tuning_hint,
+                Style::default().fg(C_HINT),
+            )));
+        }
     } else {
         // Unknown key.
         lines.push(Line::from(vec![
@@ -525,7 +738,15 @@ fn build_description_content(app: &App) -> Vec<Line<'static>> {
 // ---------------------------------------------------------------------------
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if app.is_typing() {
+    let line = if app.search_active {
+        // Search mode footer.
+        Line::from(vec![
+            key_hint("Type", "Search"),
+            key_hint("Backspace", "Delete"),
+            key_hint("j/k", "Navigate matches"),
+            key_hint("Esc", "Clear search"),
+        ])
+    } else if app.is_typing() {
         // Typing mode footer.
         Line::from(vec![
             key_hint("Enter", "Confirm"),
@@ -550,6 +771,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             key_hint("j/k", "Navigate"),
             key_hint("Enter", "Edit"),
             key_hint("Tab", "Expand"),
+            key_hint("/", "Search"),
+            key_hint("^D", "Diff"),
             key_hint("^S", "Save"),
             key_hint("q", "Quit"),
             modified_hint,
@@ -565,6 +788,116 @@ fn key_hint(key: &'static str, action: &'static str) -> Span<'static> {
 }
 
 // ---------------------------------------------------------------------------
+// Diff overlay
+// ---------------------------------------------------------------------------
+
+/// Render a full-width overlay showing original vs. current values for all
+/// modified parameters.
+fn draw_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    // Centre a box occupying ~80% of the terminal width/height.
+    let w = (area.width * 4 / 5).max(60).min(area.width);
+    let h = (area.height * 4 / 5).max(10).min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let overlay = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, overlay);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(C_ACCENT))
+        .title(Span::styled(
+            " Diff — modified parameters (Esc to close) ",
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(C_BG))
+        .padding(Padding::new(1, 1, 1, 1));
+
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+
+    let diff = app.diff_entries();
+    let content = build_diff_content(&diff, inner.width);
+
+    let para = Paragraph::new(content)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().bg(C_BG));
+    frame.render_widget(para, inner);
+}
+
+/// Build the diff content lines for rendering inside the overlay.
+fn build_diff_content(diff: &[DiffEntry], panel_width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if diff.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No changes.",
+            Style::default().fg(C_MUTED),
+        )));
+        return lines;
+    }
+
+    // Header row.
+    let col_key = 30usize.min(panel_width as usize / 3);
+    let col_val = (panel_width as usize).saturating_sub(col_key * 2 + 6) / 2;
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<col_key$}", "Parameter"),
+            Style::default().fg(C_MUTED).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {:<col_val$}", "Original"),
+            Style::default()
+                .fg(C_DIFF_ORIG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {:<col_val$}", "Current"),
+            Style::default().fg(C_DIFF_NEW).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Separator.
+    lines.push(Line::from(Span::styled(
+        "-".repeat(panel_width as usize),
+        Style::default().fg(C_BORDER),
+    )));
+
+    for entry in diff {
+        let key_display = if entry.key.len() > col_key {
+            format!("{:.col_key$}", entry.key)
+        } else {
+            format!("{:<col_key$}", entry.key)
+        };
+        let orig_display = if entry.original.len() > col_val {
+            format!("{}...", &entry.original[..col_val.saturating_sub(3)])
+        } else {
+            format!("{:<col_val$}", entry.original)
+        };
+        let curr_display = if entry.current.len() > col_val {
+            format!("{}...", &entry.current[..col_val.saturating_sub(3)])
+        } else {
+            format!("{:<col_val$}", entry.current)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(key_display, Style::default().fg(C_FG)),
+            Span::styled(
+                format!("  {orig_display}"),
+                Style::default().fg(C_DIFF_ORIG),
+            ),
+            Span::styled(
+                format!("  {curr_display}"),
+                Style::default().fg(C_DIFF_NEW).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+// ---------------------------------------------------------------------------
 // Quit confirmation overlay
 // ---------------------------------------------------------------------------
 
@@ -576,7 +909,6 @@ fn draw_quit_overlay(frame: &mut Frame, area: Rect) {
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let overlay = Rect::new(x, y, w, h);
 
-    // Clear the area under the overlay.
     frame.render_widget(Clear, overlay);
 
     let block = Block::default()
@@ -629,7 +961,6 @@ fn cursor_to_flat(app: &App) -> usize {
     for (sec_idx, section) in app.sections.iter().enumerate() {
         if sec_idx == app.cursor_section {
             if section.expanded {
-                // cursor_item 0 means first item row, not the header.
                 flat += app.cursor_item;
             }
             return flat;
