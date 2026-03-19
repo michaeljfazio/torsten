@@ -460,6 +460,46 @@ impl PipelinedPeerClient {
     pub async fn abort(self) {
         self._plexer.abort().await;
     }
+
+    /// Construct a `PipelinedPeerClient` from raw connection components.
+    ///
+    /// Used by [`crate::duplex::DuplexPeerConnection::into_pipelined`] to
+    /// re-wrap an already-established full-duplex connection so that the same
+    /// `chain_sync_loop` code can drive it for pipelined ChainSync.
+    ///
+    /// No `txsub_channel` is supplied here because a full-duplex connection
+    /// uses the TxSubmission2 protocol in *server* mode (subscribe_server),
+    /// not client mode.  The caller must not attempt to spawn a TxSubmission2
+    /// client on this connection.
+    #[allow(clippy::too_many_arguments)] // inherent to unwrapping a connection struct
+    pub(crate) fn from_duplex_parts(
+        cs_buf: ChannelBuffer,
+        bf_client: pallas_network::miniprotocols::blockfetch::Client,
+        keepalive: KeepAliveHandle,
+        plexer: RunningPlexer,
+        peersharing_channel: pallas_network::multiplexer::AgentChannel,
+        remote_addr: std::net::SocketAddr,
+        in_flight: usize,
+        byron_epoch_length: u64,
+    ) -> Self {
+        PipelinedPeerClient {
+            cs_buf,
+            bf_client,
+            _keepalive: keepalive,
+            _plexer: plexer,
+            _peersharing_channel: peersharing_channel,
+            remote_addr,
+            in_flight,
+            // No TxSubmission2 client channel — the duplex connection uses
+            // subscribe_server for TX_SUBMISSION (responder mode), so there
+            // is no initiator channel to expose here.
+            txsub_channel: None,
+            byron_epoch_length,
+            await_reply_timeout: Duration::from_secs(
+                crate::tcp::TimeoutConfig::default().await_reply_timeout_secs,
+            ),
+        }
+    }
 }
 
 /// Result of decoding a single ChainSync header.

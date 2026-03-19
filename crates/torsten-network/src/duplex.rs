@@ -270,6 +270,41 @@ impl DuplexPeerConnection {
         self._txsub_responder.abort();
         self._plexer.abort().await;
     }
+
+    /// Convert this `DuplexPeerConnection` into a `PipelinedPeerClient` for
+    /// use by the pipelined ChainSync loop.
+    ///
+    /// The full-duplex connection already has ChainSync and BlockFetch client
+    /// channels set up identically to those in a `PipelinedPeerClient`.  This
+    /// method moves those channels into the pipelined client so the sync loop
+    /// can drive them without needing a second TCP connection.
+    ///
+    /// The TxSubmission2 **responder** task is returned as a separate
+    /// `JoinHandle` — the caller MUST keep it alive for as long as the sync
+    /// session is active.  Dropping the handle aborts the responder task,
+    /// which is the correct behavior when the peer disconnects.
+    ///
+    /// Byron epoch length is preserved from the duplex connection; the
+    /// await-reply timeout is initialised to the default and can be overridden
+    /// via `PipelinedPeerClient::set_await_reply_timeout()`.
+    pub fn into_pipelined(
+        self,
+    ) -> (
+        crate::pipelined::PipelinedPeerClient,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let client = crate::pipelined::PipelinedPeerClient::from_duplex_parts(
+            self.cs_buf,
+            self.bf_client,
+            self._keepalive,
+            self._plexer,
+            self._peersharing_channel,
+            self.remote_addr,
+            self.in_flight,
+            self.byron_epoch_length,
+        );
+        (client, self._txsub_responder)
+    }
 }
 
 // ─── Phase 2: TxSubmission2 server ─────────────────────────────────────────

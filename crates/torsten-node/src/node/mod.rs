@@ -25,9 +25,9 @@ use torsten_ledger::{BlockValidationMode, LedgerState};
 use torsten_mempool::{Mempool, MempoolConfig};
 use torsten_network::server::NodeServerConfig;
 use torsten_network::{
-    BlockFetchPool, DiffusionMode, Governor, GovernorEvent, N2CServer, NodeServer,
-    NodeToNodeClient, PeerManager, PeerManagerConfig, PipelinedPeerClient, QueryHandler,
-    TxValidator,
+    BlockFetchPool, DiffusionMode, DuplexPeerConnection, Governor, GovernorEvent, N2CServer,
+    NodeServer, NodeToNodeClient, PeerManager, PeerManagerConfig, PipelinedPeerClient,
+    QueryHandler, TxValidator,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -1876,68 +1876,153 @@ impl Node {
                 info!(fetchers = fetch_pool.len(), "Block fetchers ready");
             }
 
-            // Create pipelined ChainSync connection to same peer for high-throughput headers
+            // Create pipelined ChainSync connection to the primary peer for
+            // high-throughput headers.
+            //
+            // Phase 3 — full-duplex upgrade:
+            //   We first attempt `DuplexPeerConnection::connect()`, which
+            //   negotiates InitiatorAndResponder mode and starts a background
+            //   TxSubmission2 responder so the peer can pull our mempool txs.
+            //   On success the connection is converted to a `PipelinedPeerClient`
+            //   (same ChainSync/BlockFetch channels) and the peer manager records
+            //   the duplex flag.
+            //
+            //   If the duplex connect fails (e.g. the peer only supports
+            //   InitiatorOnly mode or a transient TCP error), we fall back to a
+            //   plain `PipelinedPeerClient::connect()` so sync is never blocked by
+            //   the duplex upgrade attempt.
             if *shutdown_rx.borrow() {
                 break;
             }
+
+            // `_txsub_responder` must be kept alive for the duration of the sync
+            // session: dropping it would abort the TxSubmission2 responder task.
+            // Declared here (outside the block) so it lives as long as `pipelined_client`.
+            let mut _txsub_responder_handle: Option<tokio::task::JoinHandle<()>> = None;
+
             let pipelined_client = {
                 let target = peer_addr.to_string();
-                let connect_result = tokio::select! {
-                    r = PipelinedPeerClient::connect(&*target, network_magic) => r,
+                let mempool_for_duplex = self.mempool.clone();
+                // Build a block_provider for DuplexPeerConnection (currently unused
+                // inside duplex — kept for future ChainSync/BlockFetch server tasks).
+                let block_provider_for_duplex: Arc<dyn torsten_network::BlockProvider> =
+                    Arc::new(serve::ChainDBBlockProvider {
+                        chain_db: self.chain_db.clone(),
+                    });
+
+                // ── Attempt full-duplex connection ───────────────────────────
+                let duplex_result = tokio::select! {
+                    r = tokio::time::timeout(
+                        connect_timeout,
+                        DuplexPeerConnection::connect(
+                            &*target,
+                            network_magic,
+                            mempool_for_duplex,
+                            block_provider_for_duplex,
+                        ),
+                    ) => r.unwrap_or_else(|_| Err(torsten_network::DuplexError::Connection(
+                        format!("{target}: duplex connect timed out after {}s", connect_timeout.as_secs()),
+                    ))),
                     _ = shutdown_rx.changed() => { break; }
                 };
-                match connect_result {
-                    Ok(mut pc) => {
+
+                match duplex_result {
+                    Ok(duplex_conn) => {
+                        // Convert DuplexPeerConnection → PipelinedPeerClient.
+                        // The responder task handle is kept alive in the outer scope.
+                        info!(peer = %target, "Full-duplex connection established (InitiatorAndResponder)");
+                        let (mut pc, responder_handle) = duplex_conn.into_pipelined();
                         pc.set_byron_epoch_length(self.byron_epoch_length);
                         pc.set_await_reply_timeout(self.timeout_config.await_reply_timeout());
-                        debug!("Pipelined ChainSync client connected to {target}");
-                        // Take the TxSubmission channel and spawn a background tx fetcher
-                        if let Some(txsub_channel) = pc.take_txsub_channel() {
-                            let mempool = self.mempool.clone();
-                            let ledger = self.ledger_state.clone();
-                            let slot_config = self.ledger_state.read().await.slot_config;
-                            let shutdown = shutdown_rx.clone();
-                            let txsub_metrics = self.metrics.clone();
-                            tokio::spawn(async move {
-                                let validator: Option<Arc<dyn TxValidator>> =
-                                    Some(Arc::new(serve::LedgerTxValidator {
-                                        ledger,
-                                        slot_config,
-                                        metrics: txsub_metrics,
-                                    }));
-                                let mut client =
-                                    torsten_network::TxSubmissionClient::new(txsub_channel);
-                                let mut shutdown = shutdown;
-                                tokio::select! {
-                                    result = client.run(mempool, validator) => {
-                                        match result {
-                                            Ok(stats) => {
-                                                debug!(
-                                                    "TxSubmission2 session ended (rx={}, ok={}, rej={}, dup={})",
-                                                    stats.received, stats.accepted, stats.rejected, stats.duplicate,
-                                                );
-                                            }
-                                            Err(e) => {
-                                                debug!("TxSubmission2 client error: {e}");
-                                            }
-                                        }
-                                        // Keep the client (and its AgentChannel) alive until
-                                        // the connection is closed. Dropping the channel would
-                                        // cause the demuxer to crash when the peer sends a
-                                        // delayed response on the TxSubmission2 protocol.
-                                        shutdown.changed().await.ok();
-                                    }
-                                    _ = shutdown.changed() => {
-                                        debug!("TxSubmission2 client: shutdown");
-                                    }
-                                }
-                            });
+
+                        // Record the duplex flag in the peer manager so the
+                        // TUI and metrics can surface it.
+                        {
+                            let mut pm = peer_manager.write().await;
+                            pm.mark_peer_duplex(&peer_addr);
                         }
+                        // Update the Prometheus duplex peer gauge.
+                        {
+                            let pm = peer_manager.read().await;
+                            self.metrics.peers_duplex.store(
+                                pm.duplex_peer_count() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+
+                        // Keep the responder task alive until `pipelined_client` is dropped.
+                        _txsub_responder_handle = Some(responder_handle);
+
                         Some(pc)
                     }
-                    Err(e) => {
-                        warn!("Pipelined client failed, using serial headers: {e}");
-                        None
+                    Err(duplex_err) => {
+                        // Duplex upgrade failed — fall back to plain pipelined connection.
+                        // This is non-fatal: the peer may only support InitiatorOnly mode.
+                        debug!(peer = %target, "Duplex connect failed ({duplex_err}), falling back to InitiatorOnly pipelined client");
+
+                        let connect_result = tokio::select! {
+                            r = PipelinedPeerClient::connect(&*target, network_magic) => r,
+                            _ = shutdown_rx.changed() => { break; }
+                        };
+                        match connect_result {
+                            Ok(mut pc) => {
+                                pc.set_byron_epoch_length(self.byron_epoch_length);
+                                pc.set_await_reply_timeout(
+                                    self.timeout_config.await_reply_timeout(),
+                                );
+                                debug!("Pipelined ChainSync client connected to {target} (InitiatorOnly fallback)");
+
+                                // Spawn a TxSubmission2 CLIENT on the fallback connection
+                                // so that we receive mempool txs from the peer.
+                                // (On the duplex path the peer receives OUR txs instead.)
+                                if let Some(txsub_channel) = pc.take_txsub_channel() {
+                                    let mempool = self.mempool.clone();
+                                    let ledger = self.ledger_state.clone();
+                                    let slot_config = self.ledger_state.read().await.slot_config;
+                                    let shutdown = shutdown_rx.clone();
+                                    let txsub_metrics = self.metrics.clone();
+                                    tokio::spawn(async move {
+                                        let validator: Option<Arc<dyn TxValidator>> =
+                                            Some(Arc::new(serve::LedgerTxValidator {
+                                                ledger,
+                                                slot_config,
+                                                metrics: txsub_metrics,
+                                            }));
+                                        let mut client =
+                                            torsten_network::TxSubmissionClient::new(txsub_channel);
+                                        let mut shutdown = shutdown;
+                                        tokio::select! {
+                                            result = client.run(mempool, validator) => {
+                                                match result {
+                                                    Ok(stats) => {
+                                                        debug!(
+                                                            "TxSubmission2 session ended \
+                                                             (rx={}, ok={}, rej={}, dup={})",
+                                                            stats.received, stats.accepted,
+                                                            stats.rejected, stats.duplicate,
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        debug!("TxSubmission2 client error: {e}");
+                                                    }
+                                                }
+                                                // Keep the channel alive until the connection closes
+                                                // so the demuxer doesn't crash on delayed responses.
+                                                shutdown.changed().await.ok();
+                                            }
+                                            _ = shutdown.changed() => {
+                                                debug!("TxSubmission2 client: shutdown");
+                                            }
+                                        }
+                                    });
+                                }
+                                Some(pc)
+                            }
+                            Err(e) => {
+                                warn!("Pipelined client failed, using serial headers: {e}");
+                                None
+                            }
+                        }
                     }
                 }
             };
@@ -1957,6 +2042,15 @@ impl Node {
                 Ok(()) => {
                     active_client.disconnect().await;
                     peer_manager.write().await.peer_disconnected(&peer_addr);
+                    // Refresh the duplex peer count after disconnection
+                    // (peer_disconnected clears the duplex flag).
+                    {
+                        let pm = peer_manager.read().await;
+                        self.metrics.peers_duplex.store(
+                            pm.duplex_peer_count() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     if *shutdown_rx.borrow() {
                         break;
                     }
@@ -1968,6 +2062,16 @@ impl Node {
                     // This is important after sleep/hibernate where stale peers
                     // should be avoided in favor of responsive ones.
                     peer_manager.write().await.peer_failed(&peer_addr);
+                    // Refresh the duplex peer count after a failed sync session.
+                    // peer_failed does not clear the duplex flag directly, but we
+                    // know the connection is gone so count what the manager reports.
+                    {
+                        let pm = peer_manager.read().await;
+                        self.metrics.peers_duplex.store(
+                            pm.duplex_peer_count() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     warn!("Sync error: {e}, will reconnect...");
                 }
             }

@@ -138,6 +138,10 @@ pub struct PeerInfo {
     pub circuit_state: CircuitState,
     /// Consecutive failures (resets on success)
     pub consecutive_failures: u32,
+    /// Whether the primary sync connection to this peer is full-duplex
+    /// (InitiatorAndResponder), meaning the peer can pull our mempool txs
+    /// via TxSubmission2 in the reverse direction.
+    pub duplex: bool,
 }
 
 /// Performance metrics tracked per peer for adaptive selection
@@ -269,6 +273,7 @@ impl PeerInfo {
             performance: PeerPerformance::default(),
             circuit_state: CircuitState::Closed,
             consecutive_failures: 0,
+            duplex: false,
         }
     }
 
@@ -669,6 +674,26 @@ impl PeerManager {
         }
     }
 
+    /// Mark a peer connection as full-duplex (InitiatorAndResponder).
+    ///
+    /// Called after the primary sync connection to a peer is successfully
+    /// upgraded to `DuplexPeerConnection`, which means the remote peer can
+    /// push its mempool transactions back to us via TxSubmission2.
+    ///
+    /// Clears the flag automatically in `peer_disconnected()`.
+    pub fn mark_peer_duplex(&mut self, addr: &SocketAddr) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            info.duplex = true;
+            debug!(%addr, "Peer marked as full-duplex (InitiatorAndResponder)");
+        }
+    }
+
+    /// Returns how many currently connected peers are running full-duplex
+    /// connections (InitiatorAndResponder mode).
+    pub fn duplex_peer_count(&self) -> usize {
+        self.peers.values().filter(|p| p.duplex).count()
+    }
+
     /// Promote a warm peer to hot (start syncing)
     pub fn promote_to_hot(&mut self, addr: &SocketAddr) {
         if let Some(info) = self.peers.get_mut(addr) {
@@ -702,6 +727,8 @@ impl PeerManager {
             info.temperature = PeerTemperature::Cold;
             info.version = None;
             info.direction = None;
+            // Clear the duplex flag — the connection is gone.
+            info.duplex = false;
             self.hot_peers.remove(addr);
             self.warm_peers.remove(addr);
             self.cold_peers.insert(*addr);
@@ -721,6 +748,8 @@ impl PeerManager {
             info.temperature = PeerTemperature::Cold;
             info.version = None;
             info.direction = None;
+            // Clear duplex flag — the connection has been lost.
+            info.duplex = false;
             self.hot_peers.remove(addr);
             self.warm_peers.remove(addr);
             self.cold_peers.insert(*addr);
