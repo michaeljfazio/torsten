@@ -1917,7 +1917,8 @@ impl QueryCmd {
                     .map_err(|e| anyhow::anyhow!("Invalid opcert CBOR: {e}"))?;
 
                 // Peek at the first element type to detect format
-                let first_type = dec.datatype()
+                let first_type = dec
+                    .datatype()
                     .map_err(|e| anyhow::anyhow!("Invalid opcert CBOR element: {e}"))?;
 
                 if first_type == minicbor::data::Type::Array {

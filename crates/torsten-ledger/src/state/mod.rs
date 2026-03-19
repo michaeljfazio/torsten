@@ -158,15 +158,18 @@ pub struct LedgerState {
     /// During replay from genesis, incremental tracking is always correct.
     #[serde(skip)]
     pub needs_stake_rebuild: bool,
-    /// Pending reward update computed at one epoch boundary and applied at the
-    /// next, matching Haskell's RUPD (Reward UPDate) / pulsing reward scheme.
+    /// Pending reward update retained for backward compatibility with snapshots
+    /// written by the old deferred-RUPD code path.
     ///
-    /// At boundary E -> E+1:
-    ///   1. Apply `pending_reward_update` (computed at E-1 -> E boundary)
-    ///   2. Rotate snapshots, build new mark snapshot
-    ///   3. Compute new rewards using go snapshot -> store in `pending_reward_update`
+    /// The corrected RUPD implementation computes AND applies the reward update in
+    /// the same `process_epoch_transition` call (matching Haskell's NEWEPOCH rule
+    /// exactly).  This field is therefore always `None` after a transition runs
+    /// under the new code.  It is kept here so that snapshots produced by older
+    /// node versions can still be loaded: the single pending update they carry will
+    /// be applied once at the very next epoch boundary and the field will be cleared.
     ///
-    /// This defers reward application by one epoch, matching Haskell exactly.
+    /// Do NOT populate this field in new code.  Use `apply_pending_reward_update`
+    /// only for the one-time migration path.
     #[serde(default)]
     pub pending_reward_update: Option<PendingRewardUpdate>,
     /// Script-type stake credentials (credential_type = 1 for N2C queries).
