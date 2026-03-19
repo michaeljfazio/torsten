@@ -8141,7 +8141,7 @@ fn make_conway_state_with_treasury(treasury: u64) -> LedgerState {
 /// (field 19) and the value does not match the ledger's treasury balance, the
 /// block must be rejected.
 #[test]
-fn test_treasury_value_mismatch_rejects_block() {
+fn test_treasury_value_mismatch_corrects_treasury() {
     // Ledger treasury = 1_000_000 lovelace
     let mut state = make_conway_state_with_treasury(1_000_000);
 
@@ -8151,12 +8151,12 @@ fn test_treasury_value_mismatch_rejects_block() {
     tx.body.treasury_value = Some(Lovelace(9_999));
 
     let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
-    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
-
-    assert!(
-        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
-            if errors.contains("TreasuryValueMismatch")),
-        "A mismatched treasury_value must reject the block; got: {result:?}"
+    // On confirmed blocks, treasury mismatch is a warning — the ledger
+    // self-corrects by adopting the on-chain declared value.
+    let _result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert_eq!(
+        state.treasury.0, 9_999,
+        "Treasury must be corrected to match the on-chain declared value"
     );
 }
 
@@ -8227,14 +8227,15 @@ fn make_conway_state_with_cc_member(cold_key: torsten_primitives::hash::Hash32) 
 /// is NOT present in `committee_expiration` must be rejected ("failOnNonEmpty
 /// unelected" predicate in Haskell `conwayCertsPredFailure`).
 #[test]
-fn test_committee_hot_auth_unelected_cold_credential_rejected() {
+fn test_committee_hot_auth_unelected_cold_credential_warned_not_rejected() {
     // CC member's cold key
     let cold_cred = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
     let cold_key = credential_to_hash(&cold_cred);
     let mut state = make_conway_state_with_cc_member(cold_key);
 
     // Attacker tries to authorize a hot key for a DIFFERENT cold credential
-    // that is NOT in the committee.
+    // that is NOT in the committee.  On confirmed blocks this is a warning
+    // (not a hard error) to prevent UTxO cascade divergence.
     let outsider_cold = Credential::VerificationKey(Hash28::from_bytes([99u8; 28]));
     let hot_cred = Credential::VerificationKey(Hash28::from_bytes([77u8; 28]));
 
@@ -8246,13 +8247,11 @@ fn test_committee_hot_auth_unelected_cold_credential_rejected() {
     }];
 
     let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
-    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
-
-    assert!(
-        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
-            if errors.contains("UnelectedCommitteeMember")),
-        "CommitteeHotAuth for non-member cold key must be rejected; got: {result:?}"
-    );
+    // For confirmed blocks, unelected committee member is a warning (logged),
+    // not a hard error — the block is applied to avoid UTxO cascade corruption.
+    let _result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // The block should be applied (no Err).  The cert processing logs a
+    // warning but doesn't prevent output insertion.
 }
 
 /// Conway LEDGERS rule: a `CommitteeHotAuth` certificate whose cold credential
@@ -8974,7 +8973,7 @@ fn test_treasury_value_match_passes() {
 
 /// Verify that a Conway transaction with mismatched treasury_value is rejected.
 #[test]
-fn test_treasury_value_mismatch_rejected() {
+fn test_treasury_value_mismatch_corrects_and_applies() {
     let mut params = ProtocolParameters::mainnet_defaults();
     params.protocol_version_major = 9;
     let mut state = LedgerState::new(params);
@@ -9016,11 +9015,11 @@ fn test_treasury_value_mismatch_rejected() {
     tx.body.fee = Lovelace(1_000_000);
 
     let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
-    let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
-    assert!(
-        matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
-            if errors.contains("TreasuryValueMismatch")),
-        "Mismatched treasury value must be rejected; got: {result:?}"
+    // Treasury mismatch is now a warning — block is applied and treasury corrected.
+    let _result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    assert_eq!(
+        state.treasury.0, 999_999_999_999,
+        "Treasury must be corrected to the on-chain declared value"
     );
 }
 
@@ -12001,4 +12000,374 @@ fn test_partial_rollback_then_reapply() {
     assert!(state.utxo_set.contains(&utxo_n_prime));
     assert!(!state.utxo_set.contains(&utxo_y));
     assert!(state.utxo_set.contains(&utxo_m));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Regression tests for the cascade-failure bug (slot 107229218 / tx 26b1e945)
+//
+// Root cause: confirmed on-chain blocks with TreasuryValueMismatch or
+// UnelectedCommitteeMember errors hard-returned `Err(...)` from `apply_block`,
+// preventing the block's outputs from being inserted into the UTxO store.
+// The sync loop then `break`s, leaving the block in ChainDB but missing from
+// the ledger.  Downstream txs spending those outputs get InputNotFound, which
+// triggers the "Phase-1 divergence" path.  The node continues on the wrong
+// UTxO set and can forge a block rejected by the network.
+//
+// Fix: demote both hard returns to `warn!()` + self-correct + fall through.
+// These tests confirm that:
+//   1. A block with a `treasury_value` that disagrees with `state.treasury`
+//      is still applied correctly — outputs are inserted, treasury is corrected.
+//   2. A block whose tx carries a `CommitteeHotAuth` for an un-elected CC cold
+//      credential is still applied correctly — outputs are inserted.
+//   3. A downstream tx spending outputs from such a block succeeds (no cascade).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a tx that declares `treasury_value` in its body while spending
+/// `inputs` and producing `outputs`.
+fn make_tx_with_treasury(
+    tx_hash_byte: u8,
+    inputs: Vec<TransactionInput>,
+    outputs: Vec<TransactionOutput>,
+    treasury_value: Lovelace,
+) -> Transaction {
+    Transaction {
+        hash: Hash32::from_bytes([tx_hash_byte; 32]),
+        body: TransactionBody {
+            inputs,
+            outputs,
+            fee: Lovelace(200_000),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: Some(treasury_value),
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+/// Build a tx that carries a `CommitteeHotAuth` certificate for the given cold
+/// credential while spending `inputs` and producing `outputs`.
+fn make_tx_with_committee_hot_auth(
+    tx_hash_byte: u8,
+    inputs: Vec<TransactionInput>,
+    outputs: Vec<TransactionOutput>,
+    cold_credential: Credential,
+    hot_credential: Credential,
+) -> Transaction {
+    Transaction {
+        hash: Hash32::from_bytes([tx_hash_byte; 32]),
+        body: TransactionBody {
+            inputs,
+            outputs,
+            fee: Lovelace(200_000),
+            ttl: None,
+            certificates: vec![Certificate::CommitteeHotAuth {
+                cold_credential,
+                hot_credential,
+            }],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+/// Regression: TreasuryValueMismatch must NOT abort apply_block for confirmed
+/// on-chain blocks.
+///
+/// Scenario: our `state.treasury` is 0, but a Conway block contains a tx with
+/// `treasury_value = 5_000_000_000`.  Prior to the fix, `apply_block` returned
+/// `Err(TreasuryValueMismatch)` and the block's outputs were never inserted.
+/// After the fix, the block applies successfully, the outputs are in the UTxO
+/// set, and `state.treasury` is updated to the declared value.
+///
+/// The treasury check only fires in `ValidateAll` mode (at-tip validation),
+/// not in `ApplyOnly` mode (bulk replay).  This test uses `ValidateAll` to
+/// reproduce the exact failure path from slot 107229218.
+#[test]
+fn test_treasury_mismatch_does_not_abort_apply_block() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Conway (protocol >= 9) so that the treasury check fires.
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+
+    // Seed input UTxO.
+    let genesis_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xA0u8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(genesis_input.clone(), make_lovelace_output(10_000_000));
+
+    // state.treasury starts at 0 (default).
+    assert_eq!(state.treasury.0, 0);
+
+    // Declare a treasury value that disagrees with ledger state.
+    let declared_treasury = Lovelace(5_000_000_000);
+    let tx = make_tx_with_treasury(
+        0xB0,
+        vec![genesis_input],
+        vec![make_lovelace_output(9_800_000)],
+        declared_treasury,
+    );
+
+    let block = make_test_block(1000, 100, Hash32::ZERO, vec![tx]);
+
+    // Use ValidateAll — this is the mode that triggers the treasury check and
+    // was the exact code path that caused the cascade failure at slot 107229218.
+    state
+        .apply_block(&block, BlockValidationMode::ValidateAll)
+        .expect("TreasuryValueMismatch must not abort apply_block for confirmed blocks");
+
+    // Block output MUST be in UTxO set.
+    let produced = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xB0u8; 32]),
+        index: 0,
+    };
+    assert!(
+        state.utxo_set.contains(&produced),
+        "Block output must be inserted despite treasury mismatch"
+    );
+
+    // Treasury MUST be corrected to the declared value.
+    assert_eq!(
+        state.treasury.0, declared_treasury.0,
+        "state.treasury must self-correct to the declared on-chain value"
+    );
+}
+
+/// Regression: cascading InputNotFound after TreasuryValueMismatch.
+///
+/// Block A: tx_a has treasury_value mismatch → pre-fix: apply_block aborts,
+///   outputs of tx_a never inserted.
+/// Block B (next): tx_b spends tx_a's output → pre-fix: InputNotFound
+///   (cascade failure), node forks from network.
+///
+/// After the fix: tx_a's output is inserted normally, tx_b succeeds.
+#[test]
+fn test_treasury_mismatch_no_cascade_in_downstream_block() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+
+    // Seed an input for Block A's tx.
+    let seed_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xC0u8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(seed_input.clone(), make_lovelace_output(10_000_000));
+
+    // Block A: spend seed_input, produce output_a, declare wrong treasury.
+    // Use ValidateAll to trigger the treasury check (ApplyOnly skips it).
+    let tx_a = make_tx_with_treasury(
+        0xC1,
+        vec![seed_input],
+        vec![make_lovelace_output(9_800_000)],
+        Lovelace(99_000_000_000), // wrong treasury
+    );
+    let block_a = make_test_block(1000, 100, Hash32::ZERO, vec![tx_a]);
+    state
+        .apply_block(&block_a, BlockValidationMode::ValidateAll)
+        .expect("Block A must apply despite treasury mismatch");
+
+    let output_a = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xC1u8; 32]),
+        index: 0,
+    };
+    assert!(
+        state.utxo_set.contains(&output_a),
+        "output_a must be in UTxO set after Block A"
+    );
+
+    // Block B: spend output_a — must NOT get InputNotFound.
+    let block_a_hash = Hash32::from_bytes([100u8; 32]); // header_hash from make_test_block
+    let tx_b = make_simple_tx(0xC2, vec![output_a.clone()], vec![make_lovelace_output(9_600_000)]);
+    let block_b = make_test_block(1001, 101, block_a_hash, vec![tx_b]);
+    state
+        .apply_block(&block_b, BlockValidationMode::ApplyOnly)
+        .expect("Block B must apply — output_a must be visible (no cascade from treasury mismatch)");
+
+    // output_a must be consumed.
+    assert!(
+        !state.utxo_set.contains(&output_a),
+        "output_a must be consumed by Block B"
+    );
+}
+
+/// Regression: UnelectedCommitteeMember must NOT abort apply_block for
+/// confirmed on-chain blocks.
+///
+/// Scenario: a Conway block contains a CommitteeHotAuth cert for a cold
+/// credential that is NOT in our committee_expiration map (i.e. our committee
+/// state is stale).  Prior to the fix, apply_block returned
+/// `Err(UnelectedCommitteeMember)` and the block's outputs were never inserted.
+/// After the fix, the block applies successfully and outputs are in the UTxO set.
+#[test]
+fn test_unelected_committee_member_does_not_abort_apply_block() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+
+    // Ensure the cold credential is NOT in committee_expiration (stale state).
+    let cold_cred = Credential::VerificationKey(Hash28::from_bytes([0xD0u8; 28]));
+    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([0xD1u8; 28]));
+    // governance.committee_expiration is empty by default for a new LedgerState.
+
+    // Seed input UTxO.
+    let seed_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xD2u8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(seed_input.clone(), make_lovelace_output(10_000_000));
+
+    let tx = make_tx_with_committee_hot_auth(
+        0xD3,
+        vec![seed_input],
+        vec![make_lovelace_output(9_800_000)],
+        cold_cred,
+        hot_cred,
+    );
+
+    let block = make_test_block(2000, 200, Hash32::ZERO, vec![tx]);
+
+    // Use ValidateAll — this is the mode that triggers the committee check
+    // and was the exact code path that caused the cascade failure.
+    state
+        .apply_block(&block, BlockValidationMode::ValidateAll)
+        .expect("UnelectedCommitteeMember must not abort apply_block for confirmed blocks");
+
+    // Block output MUST be in UTxO set.
+    let produced = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xD3u8; 32]),
+        index: 0,
+    };
+    assert!(
+        state.utxo_set.contains(&produced),
+        "Block output must be inserted despite unelected committee member cert"
+    );
+}
+
+/// Regression: cascading InputNotFound after UnelectedCommitteeMember.
+///
+/// Block A: tx_a has an UnelectedCommitteeMember cert → pre-fix: abort, outputs
+///   never inserted.
+/// Block B (next): tx_b spends tx_a's output → pre-fix: InputNotFound.
+///
+/// After the fix: tx_a's output is inserted normally, tx_b succeeds.
+#[test]
+fn test_unelected_committee_member_no_cascade_in_downstream_block() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.protocol_version_major = 9;
+    let mut state = LedgerState::new(params);
+
+    let cold_cred = Credential::VerificationKey(Hash28::from_bytes([0xE0u8; 28]));
+    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([0xE1u8; 28]));
+
+    // Seed input for Block A.
+    let seed_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xE2u8; 32]),
+        index: 0,
+    };
+    state
+        .utxo_set
+        .insert(seed_input.clone(), make_lovelace_output(10_000_000));
+
+    // Block A: CommitteeHotAuth for un-elected cold credential.
+    // Use ValidateAll to trigger the committee check (ApplyOnly skips it).
+    let tx_a = make_tx_with_committee_hot_auth(
+        0xE3,
+        vec![seed_input],
+        vec![make_lovelace_output(9_800_000)],
+        cold_cred,
+        hot_cred,
+    );
+    let block_a = make_test_block(2000, 200, Hash32::ZERO, vec![tx_a]);
+    state
+        .apply_block(&block_a, BlockValidationMode::ValidateAll)
+        .expect("Block A must apply despite unelected committee member cert");
+
+    let output_a = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xE3u8; 32]),
+        index: 0,
+    };
+    assert!(
+        state.utxo_set.contains(&output_a),
+        "output_a must be in UTxO set after Block A"
+    );
+
+    // Block B: spend output_a.
+    let block_a_hash = Hash32::from_bytes([200u8; 32]);
+    let tx_b = make_simple_tx(0xE4, vec![output_a.clone()], vec![make_lovelace_output(9_600_000)]);
+    let block_b = make_test_block(2001, 201, block_a_hash, vec![tx_b]);
+    state
+        .apply_block(&block_b, BlockValidationMode::ApplyOnly)
+        .expect("Block B must apply — output_a must be visible (no cascade from unelected committee cert)");
+
+    assert!(
+        !state.utxo_set.contains(&output_a),
+        "output_a must be consumed by Block B"
+    );
 }
