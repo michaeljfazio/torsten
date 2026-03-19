@@ -1902,18 +1902,35 @@ impl QueryCmd {
                 let cbor_bytes = hex::decode(cbor_hex)?;
 
                 // Decode the operational certificate CBOR.
+                //
+                // Two formats exist:
+                //   (a) Flat: array(4)[hot_vkey, counter, kes_period, sigma]
+                //       — produced by torsten-cli/cardano-cli node issue-op-cert
+                //   (b) Wrapped: array(2)[array(4)[hot_vkey, counter, kes_period, sigma], cold_vkey]
+                //       — full on-chain representation
+                //
+                // We detect the format by checking the first element's type:
+                // if it's bytes → flat (a); if it's an array → wrapped (b).
                 let mut dec = minicbor::Decoder::new(&cbor_bytes);
-                // Outer array(2): [inner_cert, cold_vkey]
-                dec.array()
+                let arr_len = dec
+                    .array()
                     .map_err(|e| anyhow::anyhow!("Invalid opcert CBOR: {e}"))?;
 
-                // Inner array(4): [hot_vkey, counter, kes_period, sigma]
-                dec.array()
-                    .map_err(|e| anyhow::anyhow!("Invalid inner cert array: {e}"))?;
+                // Peek at the first element type to detect format
+                let first_type = dec.datatype()
+                    .map_err(|e| anyhow::anyhow!("Invalid opcert CBOR element: {e}"))?;
+
+                if first_type == minicbor::data::Type::Array {
+                    // Wrapped format (b): skip into the inner array(4)
+                    dec.array()
+                        .map_err(|e| anyhow::anyhow!("Invalid inner cert array: {e}"))?;
+                }
+                // Now positioned at: hot_vkey, counter, kes_period, sigma
                 let _hot_vkey = dec.bytes().unwrap_or(&[]).to_vec();
                 let opcert_counter = dec.u64().unwrap_or(0);
                 let opcert_kes_period = dec.u64().unwrap_or(0);
                 let _sigma = dec.bytes().ok();
+                let _ = arr_len; // suppress unused warning
 
                 // Query the node for the current KES period (tag 31).
                 let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
