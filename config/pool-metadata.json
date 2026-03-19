@@ -1,6 +1,6 @@
 {
-  "name": "Torsten Sandbox",
-  "description": "Torsten Rust Cardano node - Preview testnet sandbox pool",
+  "name": "Sandstone Pool",
+  "description": "Sandstone Pool - Powered by Torsten, a Rust implementation of the Cardano node",
   "ticker": "SAND",
-  "homepage": "https://github.com/michaeljfazio/torsten"
+  "homepage": "https://sandstone.io"
 }
