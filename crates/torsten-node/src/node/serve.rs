@@ -138,10 +138,16 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
 // ─── LedgerTxValidator ───────────────────────────────────────────────────────
 
 /// Validates transactions against the live ledger state (Phase-1 + Phase-2 Plutus).
+///
+/// When `mempool` is provided, validation uses a `CompositeUtxoView` that
+/// overlays mempool virtual UTxOs on top of the on-chain set.  This enables
+/// chained/dependent transaction submission (spending outputs of unconfirmed
+/// mempool txs).
 pub(crate) struct LedgerTxValidator {
     pub ledger: Arc<RwLock<LedgerState>>,
     pub slot_config: torsten_ledger::plutus::SlotConfig,
     pub metrics: Arc<crate::metrics::NodeMetrics>,
+    pub mempool: Option<Arc<torsten_mempool::Mempool>>,
 }
 
 impl TxValidator for LedgerTxValidator {
@@ -159,9 +165,19 @@ impl TxValidator for LedgerTxValidator {
         let tx_size = tx_bytes.len() as u64;
         let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
 
+        // Build the UTxO view: on-chain set + optional mempool virtual overlay.
+        // This enables chained tx submission (spending unconfirmed mempool outputs).
+        let virtual_utxos = self
+            .mempool
+            .as_ref()
+            .map(|mp| mp.virtual_utxo_snapshot())
+            .unwrap_or_default();
+        let utxo_view =
+            torsten_ledger::utxo::CompositeUtxoView::new(&ledger.utxo_set, virtual_utxos);
+
         torsten_ledger::validation::validate_transaction(
             &tx,
-            &ledger.utxo_set,
+            &utxo_view,
             &ledger.protocol_params,
             current_slot,
             tx_size,

@@ -1033,6 +1033,7 @@ impl Node {
             ledger: self.ledger_state.clone(),
             slot_config,
             metrics: self.metrics.clone(),
+            mempool: Some(self.mempool.clone()),
         }));
         n2c_server.set_block_provider(Arc::new(serve::ChainDBBlockProvider {
             chain_db: self.chain_db.clone(),
@@ -2172,6 +2173,7 @@ impl Node {
                                                 ledger,
                                                 slot_config,
                                                 metrics: txsub_metrics,
+                                                mempool: None, // N2N TxSubmission doesn't need chaining
                                             }));
                                         let mut client =
                                             torsten_network::TxSubmissionClient::new(txsub_channel);
