@@ -9258,6 +9258,58 @@ fn test_snapshot_roundtrip_nonce_fields() {
     );
 }
 
+/// Verify that a snapshot loaded at a non-zero epoch correctly preserves the
+/// epoch nonce, so the node can trust it is established after restore.
+///
+/// This is the contract that fixes issue #197: when the node restores from a
+/// snapshot and catches up to tip without crossing an epoch boundary, it must
+/// know the nonce was already established.  The node infers this from
+/// `ledger.epoch.0 > 0`, which in turn depends on epoch surviving the round-trip.
+///
+/// The epoch number is the right proxy because every `process_epoch_transition`
+/// call (which advances the epoch counter) also updates the epoch nonce via VRF
+/// accumulation — so epoch > 0 means the nonce has been built from real VRF
+/// contributions and is reliable for strict verification.
+#[test]
+fn test_snapshot_epoch_implies_nonce_established() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("ledger-snapshot.bin");
+
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Simulate a state at epoch 500 with a correctly-accumulated nonce.
+    state.epoch = EpochNo(500);
+    state.epoch_nonce = Hash32::from_bytes([0xAB; 32]);
+    state.evolving_nonce = Hash32::from_bytes([0xCD; 32]);
+    state.candidate_nonce = Hash32::from_bytes([0xEF; 32]);
+    state.last_epoch_block_nonce = Hash32::from_bytes([0x12; 32]);
+
+    state.save_snapshot(&snap_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snap_path).unwrap();
+
+    // The epoch must survive the round-trip; the node uses this to prime
+    // epoch_transitions_observed, which gates nonce_established.
+    assert_eq!(
+        loaded.epoch,
+        EpochNo(500),
+        "epoch must survive snapshot round-trip so the node can set nonce_established=true"
+    );
+    // The nonce itself must survive — this is the value the consensus engine will
+    // use for VRF verification after restore.
+    assert_eq!(
+        loaded.epoch_nonce,
+        Hash32::from_bytes([0xAB; 32]),
+        "epoch_nonce must survive snapshot round-trip"
+    );
+    // Non-zero epoch after load: the node must treat this as established.
+    // (In Node::new(), epoch_transitions_observed = loaded.epoch.0 = 500 >= 1)
+    assert!(
+        loaded.epoch.0 > 0,
+        "non-zero epoch proves nonce is established — node can set nonce_established=true"
+    );
+}
+
 /// Verify that snapshot checksum catches corruption.
 #[test]
 fn test_snapshot_checksum_detects_corruption() {

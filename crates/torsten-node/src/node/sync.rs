@@ -2532,15 +2532,14 @@ impl Node {
                     "Replaying ledger from chunk files",
                 );
                 self.replay_from_chunk_files(dir, shutdown_rx.clone()).await;
-                // After a full replay from genesis, the ledger has processed
-                // all epoch transitions. Record this so that
-                // enable_strict_verification() can set nonce_established=true
-                // and the block producer can forge blocks at tip.
+                // After replay the ledger's epoch is the authoritative count of
+                // transitions that have been processed (snapshot + any new blocks
+                // replayed here).  Assign directly rather than accumulating so
+                // that if epoch_transitions_observed was primed from a snapshot
+                // epoch we don't double-count.
                 let replay_epoch = self.ledger_state.read().await.epoch.0;
                 if replay_epoch > 0 {
-                    self.epoch_transitions_observed = self
-                        .epoch_transitions_observed
-                        .saturating_add(replay_epoch as u32);
+                    self.epoch_transitions_observed = replay_epoch as u32;
                     info!(
                         epoch = replay_epoch,
                         epoch_transitions_observed = self.epoch_transitions_observed,
@@ -2594,13 +2593,13 @@ impl Node {
             db_tip_slot, blocks_behind, "Replaying ledger from ChainDB (LSM mode)",
         );
         self.replay_from_lsm(db_tip, shutdown_rx).await;
-        // Mirror the chunk-file replay path: record the epoch reached so that
-        // enable_strict_verification() can set nonce_established=true.
+        // After replay the ledger's epoch is the authoritative count of transitions
+        // processed (snapshot + any new blocks replayed here).  Assign directly
+        // rather than accumulating to avoid double-counting with the snapshot epoch
+        // that was already primed into epoch_transitions_observed in Node::new().
         let replay_epoch = self.ledger_state.read().await.epoch.0;
         if replay_epoch > 0 {
-            self.epoch_transitions_observed = self
-                .epoch_transitions_observed
-                .saturating_add(replay_epoch as u32);
+            self.epoch_transitions_observed = replay_epoch as u32;
             info!(
                 epoch = replay_epoch,
                 epoch_transitions_observed = self.epoch_transitions_observed,

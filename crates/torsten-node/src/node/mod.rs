@@ -584,6 +584,24 @@ impl Node {
             ledger.recompute_snapshot_pool_stakes();
         }
 
+        // Capture the ledger epoch before the ledger is moved into the Arc.
+        // A snapshot saved at epoch N means N epoch transitions were processed
+        // before the snapshot was taken, so the epoch nonce in the snapshot is
+        // already reliable. We prime epoch_transitions_observed from this value
+        // so that enable_strict_verification() can set nonce_established=true
+        // immediately at tip — no live epoch boundary is required after restore.
+        //
+        // This fixes the bug where a node restored from a snapshot and catching
+        // up to tip without crossing an epoch boundary would leave nonce_established
+        // false, disabling strict VRF verification and blocking block forging.
+        //
+        // The epoch number is the correct proxy because:
+        //   - Every epoch transition runs process_epoch_transition() which
+        //     accumulates VRF nonce contributions before the snapshot is saved.
+        //   - A snapshot at epoch 0 (fresh start) correctly gives 0 here,
+        //     meaning the node must observe a live boundary before forging.
+        let snapshot_epoch_transitions: u32 = ledger.epoch.0 as u32;
+
         let ledger_state = Arc::new(RwLock::new(ledger));
 
         let consensus = if let Some(ref genesis) = shelley_genesis {
@@ -779,7 +797,12 @@ impl Node {
             expected_byron_genesis_hash,
             expected_shelley_genesis_hash,
             genesis_validated: false,
-            epoch_transitions_observed: 0,
+            // Primed from the snapshot epoch so the nonce is immediately
+            // considered established after a restore (see comment above where
+            // snapshot_epoch_transitions is assigned).  Starts at 0 for a
+            // fresh start with no snapshot, meaning a live epoch boundary must
+            // be observed before nonce_established becomes true.
+            epoch_transitions_observed: snapshot_epoch_transitions,
             live_epoch_transitions: 0,
             timeout_config: Default::default(),
             consensus_mode: args.consensus_mode,
@@ -912,12 +935,12 @@ impl Node {
             return Ok(());
         }
 
-        // NOTE: epoch_transitions_observed is NOT initialized from snapshot state.
-        // The epoch nonce may be stale after restore (VRF contributions from the
-        // current epoch may have evolved the nonce since the snapshot was taken).
-        // nonce_established stays false until a live epoch transition recalibrates it.
-        // However, forging is still attempted (nonce_established only gates strict
-        // VRF verification of incoming blocks, not our own forging).
+        // epoch_transitions_observed is primed from the snapshot epoch in Node::new().
+        // A snapshot at epoch N means the epoch nonce has been correctly established
+        // through N prior transitions, so nonce_established becomes true immediately
+        // at tip without requiring a live epoch boundary.  For a fresh start (no
+        // snapshot, epoch=0) or after a full reset the value starts at 0 and
+        // nonce_established remains false until the first live boundary is crossed.
 
         // If running as block producer, log the pool's stake in the set snapshot
         // so operators can immediately diagnose eligibility issues.
