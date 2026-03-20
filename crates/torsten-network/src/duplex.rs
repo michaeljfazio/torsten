@@ -1282,15 +1282,26 @@ fn encode_request_tx_ids(blocking: bool, ack_count: u16, req_count: u16) -> Vec<
 ///
 /// Each element is `[bytes(tx_hash), uint(size)]`.  An empty slice produces
 /// `[1, _ []]`, which is the correct non-blocking empty reply.
+/// Encode `MsgReplyTxIds = [1, [[GenTxId, size], ...]]`.
+///
+/// Each tx ID is HFC-wrapped as `GenTxId = [era_index, tx_hash_bytes]`.
+/// Conway is era index 5 in the Haskell HFC encoding.
+/// Uses indefinite-length arrays to match Haskell wire format.
 fn encode_reply_tx_ids(ids: &[([u8; 32], u32)]) -> Vec<u8> {
+    // Conway era index in the HFC GenTxId encoding
+    const CONWAY_ERA_INDEX: u32 = 5;
+
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).expect("encode outer array");
     enc.u32(1).expect("encode tag");
-    // Use indefinite-length array to match Haskell pallas wire format.
     enc.begin_array().expect("begin indefinite array");
     for (hash, size) in ids {
-        enc.array(2).expect("encode pair");
+        // Each entry: [GenTxId, size]
+        enc.array(2).expect("encode id+size pair");
+        // GenTxId: [era_index, tx_hash_bytes]
+        enc.array(2).expect("encode GenTxId");
+        enc.u32(CONWAY_ERA_INDEX).expect("encode era index");
         enc.bytes(hash.as_slice()).expect("encode hash");
         enc.u32(*size).expect("encode size");
     }
@@ -1317,13 +1328,24 @@ fn encode_request_txs(hashes: &[[u8; 32]]) -> Vec<u8> {
 /// Encode `MsgReplyTxs = [3, [tx_cbor, ...]]`.
 ///
 /// Uses **indefinite-length** encoding for the inner list to match Haskell.
+/// Encode `MsgReplyTxs = [3, [GenTx, ...]]`.
+///
+/// Each tx body is HFC-wrapped as `GenTx = [era_index, tag(24, tx_cbor)]`.
+/// The tag(24) wrapping matches Haskell's `Serialised` encoding.
 fn encode_reply_txs(bodies: &[Vec<u8>]) -> Vec<u8> {
+    const CONWAY_ERA_INDEX: u32 = 5;
+
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).expect("encode outer array");
     enc.u32(3).expect("encode tag");
     enc.begin_array().expect("begin indefinite array");
     for body in bodies {
+        // GenTx: [era_index, tag(24, tx_cbor_bytes)]
+        enc.array(2).expect("encode GenTx");
+        enc.u32(CONWAY_ERA_INDEX).expect("encode era index");
+        enc.tag(minicbor::data::Tag::new(24))
+            .expect("encode tag 24");
         enc.bytes(body).expect("encode tx cbor");
     }
     enc.end().expect("end indefinite array");
