@@ -144,10 +144,10 @@ const TXSUB_BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// `initiator_only_diffusion_mode = false` (InitiatorAndResponder) in the
 /// handshake, and starts two background tasks for bidirectional TxSubmission2.
 pub struct DuplexPeerConnection {
-    /// ChainSync raw buffer (bypasses pallas state machine for pipelining).
-    pub cs_buf: pallas_network::multiplexer::ChannelBuffer,
-    /// BlockFetch client (pallas managed).
-    pub bf_client: pallas_network::miniprotocols::blockfetch::Client,
+    /// ChainSync raw buffer (None for governor-only connections that skip ChainSync).
+    pub cs_buf: Option<pallas_network::multiplexer::ChannelBuffer>,
+    /// BlockFetch client (None for governor-only connections that skip BlockFetch).
+    pub bf_client: Option<pallas_network::miniprotocols::blockfetch::Client>,
     /// KeepAlive handle (spawned background loop).
     pub _keepalive: pallas_network::facades::KeepAliveHandle,
     /// Running plexer (demuxer + muxer tasks).
@@ -178,11 +178,36 @@ impl DuplexPeerConnection {
     /// - `mempool`        — local mempool; served to the remote Server (Client task),
     ///   and also receives incoming txs from the remote Client (Server task)
     /// - `block_provider` — chain storage (reserved for future ChainSync/BlockFetch server tasks)
+    /// Open a TCP connection to `addr` and establish a full-duplex N2N session.
+    ///
+    /// When `subscribe_chainsync` is false, ChainSync and BlockFetch channels
+    /// are NOT subscribed on the mux plexer. This is critical for governor-managed
+    /// connections that only need TxSubmission2 + KeepAlive — subscribing without
+    /// reading causes the demuxer to stall when the peer sends chain data (the
+    /// bounded mpsc channel fills → demuxer blocks → all protocols die).
     pub async fn connect(
         addr: impl ToSocketAddrs + std::fmt::Display + Copy,
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
         _block_provider: Arc<dyn BlockProvider>,
+    ) -> Result<Self, DuplexError> {
+        Self::connect_inner(addr, network_magic, mempool, true).await
+    }
+
+    /// Governor-only variant: no ChainSync/BlockFetch subscriptions.
+    pub async fn connect_no_chainsync(
+        addr: impl ToSocketAddrs + std::fmt::Display + Copy,
+        network_magic: u64,
+        mempool: Arc<dyn MempoolProvider>,
+    ) -> Result<Self, DuplexError> {
+        Self::connect_inner(addr, network_magic, mempool, false).await
+    }
+
+    async fn connect_inner(
+        addr: impl ToSocketAddrs + std::fmt::Display + Copy,
+        network_magic: u64,
+        mempool: Arc<dyn MempoolProvider>,
+        subscribe_chainsync: bool,
     ) -> Result<Self, DuplexError> {
         debug!("duplex: connecting to {addr}");
 
@@ -206,11 +231,19 @@ impl DuplexPeerConnection {
         // Handshake: always initiator-side (we propose versions).
         let hs_channel = plexer.subscribe_client(PROTOCOL_N2N_HANDSHAKE);
 
-        // ChainSync: initiator (we request headers).
-        let cs_channel = plexer.subscribe_client(PROTOCOL_N2N_CHAIN_SYNC);
-
-        // BlockFetch: initiator (we request blocks).
-        let bf_channel = plexer.subscribe_client(PROTOCOL_N2N_BLOCK_FETCH);
+        // ChainSync and BlockFetch: only subscribe when the caller will read them.
+        // Governor connections set subscribe_chainsync=false to prevent demuxer stall.
+        // Unsubscribed protocol messages are silently dropped by the demuxer.
+        let cs_channel = if subscribe_chainsync {
+            Some(plexer.subscribe_client(PROTOCOL_N2N_CHAIN_SYNC))
+        } else {
+            None
+        };
+        let bf_channel = if subscribe_chainsync {
+            Some(plexer.subscribe_client(PROTOCOL_N2N_BLOCK_FETCH))
+        } else {
+            None
+        };
 
         // TxSubmission2 CLIENT channel (subscribe_client):
         //   We send on bit-15=0: MsgInit, MsgReplyTxIds, MsgReplyTxs, MsgDone
@@ -261,10 +294,10 @@ impl DuplexPeerConnection {
         .spawn();
 
         // --- ChainSync buffer (raw, for pipelining) ------------------------------
-        let cs_buf = pallas_network::multiplexer::ChannelBuffer::new(cs_channel);
+        let cs_buf = cs_channel.map(pallas_network::multiplexer::ChannelBuffer::new);
 
         // --- BlockFetch client ---------------------------------------------------
-        let bf_client = pallas_network::miniprotocols::blockfetch::Client::new(bf_channel);
+        let bf_client = bf_channel.map(pallas_network::miniprotocols::blockfetch::Client::new);
 
         let remote_addr_str = format!("{addr}");
         let remote_addr: SocketAddr = remote_addr_str
@@ -326,8 +359,11 @@ impl DuplexPeerConnection {
     }
 
     /// Access the BlockFetch client for fetching full blocks.
+    /// Panics if the connection was created without ChainSync subscription.
     pub fn blockfetch(&mut self) -> &mut pallas_network::miniprotocols::blockfetch::Client {
-        &mut self.bf_client
+        self.bf_client
+            .as_mut()
+            .expect("blockfetch() requires ChainSync subscription")
     }
 
     /// Abort the connection (kills the plexer and responder tasks).
@@ -360,8 +396,10 @@ impl DuplexPeerConnection {
         tokio::task::JoinHandle<()>,
     ) {
         let client = crate::pipelined::PipelinedPeerClient::from_duplex_parts(
-            self.cs_buf,
-            self.bf_client,
+            self.cs_buf
+                .expect("into_pipelined requires ChainSync subscription"),
+            self.bf_client
+                .expect("into_pipelined requires BlockFetch subscription"),
             self._keepalive,
             self._plexer,
             self._peersharing_channel,
@@ -497,6 +535,36 @@ async fn serve_tx_submission_inner(
                                 mempool.get_tx_size(h).map(|sz| (*h.as_bytes(), sz as u32))
                             })
                             .collect()
+                    };
+
+                    // When blocking=true and no txs available, we MUST NOT
+                    // reply with an empty list — that's a protocol violation.
+                    // The Haskell Server expects us to block until we have txs.
+                    // Poll the mempool every 5 seconds until txs appear.
+                    let new_ids = if new_ids.is_empty() && blocking {
+                        let mut poll_ids = new_ids;
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            let snapshot = mempool.snapshot();
+                            poll_ids = snapshot
+                                .tx_hashes
+                                .iter()
+                                .filter(|h| {
+                                    let bytes = *h.as_bytes();
+                                    !inflight.iter().any(|inf| inf == &bytes)
+                                })
+                                .take(capped_req)
+                                .filter_map(|h| {
+                                    mempool.get_tx_size(h).map(|sz| (*h.as_bytes(), sz as u32))
+                                })
+                                .collect::<Vec<_>>();
+                            if !poll_ids.is_empty() {
+                                break poll_ids;
+                            }
+                            // Continue polling — we must block until txs arrive
+                        }
+                    } else {
+                        new_ids
                     };
 
                     // Record newly sent IDs as inflight.

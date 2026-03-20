@@ -1665,7 +1665,7 @@ impl Node {
                             let task_byron = gov_byron_epoch_length;
                             let task_done_tx = connect_done_tx.clone();
                             let task_mempool = gov_mempool.clone();
-                            let task_block_provider = gov_block_provider.clone();
+                            let _task_block_provider = gov_block_provider.clone();
                             let task_duplex_conns = gov_duplex_conns.clone();
                             tokio::spawn(async move {
                                 let target = addr.to_string();
@@ -1673,11 +1673,14 @@ impl Node {
                                 let connect_start = std::time::Instant::now();
                                 let connect_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(GOV_CONNECT_TIMEOUT_SECS),
-                                    DuplexPeerConnection::connect(
+                                    // Governor connections use connect_no_chainsync to avoid
+                                    // demuxer stall: subscribing to ChainSync/BlockFetch without
+                                    // reading fills the bounded channel, blocking the demuxer
+                                    // and killing all protocols including KeepAlive.
+                                    DuplexPeerConnection::connect_no_chainsync(
                                         &*target,
                                         task_magic,
                                         task_mempool,
-                                        task_block_provider,
                                     ),
                                 )
                                 .await

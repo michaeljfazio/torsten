@@ -143,8 +143,8 @@ impl Default for GovernorConfig {
             soft_limit: 384,
             churn_interval_normal_secs: 3300, // 55 minutes
             churn_interval_sync_secs: 900,    // 15 minutes
-            stall_demotion_cycles: u32::MAX,  // Disabled: governor connections don't run ChainSync
-            error_demotion_threshold: 5,      // 5 accumulated failures
+            stall_demotion_cycles: 6, // 6 × 30s = 3 min; only affects sync-capable connections
+            error_demotion_threshold: 5, // 5 accumulated failures
         }
     }
 }
@@ -1002,12 +1002,23 @@ impl Governor {
             // If we have a snapshot from the previous cycle, check whether the
             // block count has grown.  If not, increment the stale counter; if
             // it has exceeded the threshold, demote.
+            //
+            // Skip peers that have NEVER served any blocks — these are likely
+            // governor-managed connections that don't run ChainSync (only
+            // TxSubmission2 + KeepAlive).  Stall demotion is meaningless for
+            // them since they were never expected to serve blocks.
             let current_blocks = pm
                 .peer_performance(&addr)
                 .map(|p| p.blocks_fetched)
                 .unwrap_or(0);
 
             if let Some(&(snapshot_blocks, stale_cycles)) = self.hot_peer_stall.get(&addr) {
+                // Only apply stall check to peers that have served at least one block.
+                // Governor-managed connections (TxSubmission2-only) never serve blocks.
+                if current_blocks == 0 {
+                    // This peer has never served blocks — skip stall check.
+                    continue;
+                }
                 if current_blocks == snapshot_blocks {
                     // No new blocks this cycle.
                     let new_stale = stale_cycles + 1;

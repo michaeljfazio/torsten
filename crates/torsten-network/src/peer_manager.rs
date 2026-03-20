@@ -1274,12 +1274,37 @@ impl PeerManager {
     ///
     /// Local root peers bypass this check entirely — they are trusted topology
     /// entries and should always be promoted to maintain their hot valency.
-    pub fn is_promotion_ready(&self, _addr: &SocketAddr) -> bool {
-        // Governor-managed connections don't run ChainSync and therefore
-        // can never demonstrate block-fetch liveness.  Until we have a way
-        // to distinguish sync peers from governor peers, always allow
-        // promotion so connections stay stable.
-        true
+    pub fn is_promotion_ready(&self, addr: &SocketAddr) -> bool {
+        let info = match self.peers.get(addr) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        // Local root peers are always eligible for promotion.
+        if info.category == PeerCategory::LocalRoot {
+            return true;
+        }
+
+        let perf = &info.performance;
+
+        // Peers that have served blocks are clearly active.
+        if perf.blocks_fetched > 0 {
+            return true;
+        }
+
+        // Peers with a known-good fetch history (re-promoted peer).
+        if perf.last_good_fetch.is_some() {
+            return true;
+        }
+
+        // Peers with zero failures are eligible — this covers governor-managed
+        // connections (TxSubmission2-only) that never serve blocks but are still
+        // useful for tx propagation.
+        if info.failure_count == 0 {
+            return true;
+        }
+
+        false
     }
 
     /// Get the list of hot peer addresses
