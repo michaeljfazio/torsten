@@ -699,19 +699,26 @@ impl Mempool {
     /// Get transactions for block production (up to max count/size).
     /// Transactions are sorted by fee density (fee/byte) descending to maximize block revenue.
     /// Uses the persistent sorted index for O(n) iteration instead of O(n log n) sorting.
+    /// Select transactions for block production in **FIFO order** (matching Haskell).
+    ///
+    /// The Haskell node takes the longest FIFO prefix from the mempool that fits
+    /// within block capacity. This naturally preserves dependency ordering since
+    /// chained txs are admitted parent-first. Using fee-density ordering would
+    /// break dependency chains (child selected before parent = invalid block).
     pub fn get_txs_for_block(&self, max_count: usize, max_size: usize) -> Vec<Transaction> {
-        let fee_index = self.fee_index.read();
+        let order = self.order.read();
         let mut result = Vec::new();
         let mut total_size = 0;
 
-        for key in fee_index.iter() {
+        // Take FIFO prefix (oldest first) that fits within block capacity.
+        for tx_hash in order.iter() {
             if result.len() >= max_count {
                 break;
             }
-            if let Some(entry) = self.txs.get(&key.tx_hash) {
+            if let Some(entry) = self.txs.get(tx_hash) {
                 if total_size + entry.size_bytes > max_size {
-                    // Skip this tx but continue — smaller txs may still fit
-                    continue;
+                    // Block is full — stop (strict prefix, no skipping)
+                    break;
                 }
                 result.push(entry.tx.clone());
                 total_size += entry.size_bytes;

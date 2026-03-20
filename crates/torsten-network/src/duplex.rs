@@ -109,8 +109,8 @@ impl From<DuplexError> for ClientError {
 const MAX_TX_IDS_PER_REPLY: usize = 100;
 
 /// Maximum inflight tx IDs (sent to a single peer, not yet acknowledged).
-/// Haskell maxUnacknowledgedTxIds = 100.
-const MAX_TX_INFLIGHT: usize = 100;
+/// Haskell V2 maxUnacknowledgedTxIds = 10.
+const MAX_TX_INFLIGHT: usize = 10;
 
 /// Maximum tx bodies we serve per MsgRequestTxs.
 /// Haskell V1 maxTxToRequest = 2, V2 varies. Keep generous for V2.
