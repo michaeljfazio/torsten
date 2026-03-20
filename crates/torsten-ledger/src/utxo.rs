@@ -13,6 +13,89 @@ fn default_indexing_enabled() -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// UtxoLookup trait — abstraction over UTxO lookup
+// ---------------------------------------------------------------------------
+
+/// Read-only UTxO lookup interface.
+///
+/// This trait allows the transaction validation pipeline to work against both
+/// the authoritative on-chain `UtxoSet` and the `CompositeUtxoView` (which
+/// overlays unconfirmed mempool outputs on top of the on-chain set).
+///
+/// All `validate_transaction_*` functions are generic over this trait so that
+/// the mempool validator can pass a composite view without modifying the live
+/// ledger state.
+pub trait UtxoLookup {
+    /// Look up a UTxO by spending input reference.
+    fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput>;
+
+    /// Check if a UTxO exists.
+    fn contains(&self, input: &TransactionInput) -> bool {
+        self.lookup(input).is_some()
+    }
+}
+
+impl UtxoLookup for UtxoSet {
+    fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput> {
+        UtxoSet::lookup(self, input)
+    }
+
+    fn contains(&self, input: &TransactionInput) -> bool {
+        UtxoSet::contains(self, input)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompositeUtxoView — on-chain UTxO set + virtual mempool overlay
+// ---------------------------------------------------------------------------
+
+/// A read-only composite UTxO view that consults the on-chain `UtxoSet` first
+/// and falls back to a virtual overlay (from the mempool) on a miss.
+///
+/// This allows chained (dependent) transactions to be validated against pending
+/// mempool outputs without modifying the live ledger state, matching the
+/// behaviour of Haskell cardano-node's virtual UTxO.
+///
+/// # Thread safety
+/// `CompositeUtxoView` holds a shared reference to the on-chain `UtxoSet` and
+/// an owned snapshot of the mempool's virtual UTxO entries.  Lookups are
+/// read-only and therefore safe for concurrent use.
+pub struct CompositeUtxoView<'a> {
+    /// Primary: the authoritative on-chain UTxO set (behind a read-lock borrow).
+    on_chain: &'a UtxoSet,
+    /// Fallback: a snapshot of virtual UTxO entries from pending mempool txs.
+    /// Keyed by `TransactionInput { transaction_id = mempool_tx_hash, index }`.
+    virtual_utxo: HashMap<TransactionInput, TransactionOutput>,
+}
+
+impl<'a> CompositeUtxoView<'a> {
+    /// Create a composite view from an on-chain `UtxoSet` reference and a
+    /// virtual UTxO snapshot taken from the mempool.
+    pub fn new(
+        on_chain: &'a UtxoSet,
+        virtual_utxo: HashMap<TransactionInput, TransactionOutput>,
+    ) -> Self {
+        CompositeUtxoView {
+            on_chain,
+            virtual_utxo,
+        }
+    }
+}
+
+impl<'a> UtxoLookup for CompositeUtxoView<'a> {
+    /// Look up an input: check on-chain first, then the virtual overlay.
+    fn lookup(&self, input: &TransactionInput) -> Option<TransactionOutput> {
+        self.on_chain
+            .lookup(input)
+            .or_else(|| self.virtual_utxo.get(input).cloned())
+    }
+
+    fn contains(&self, input: &TransactionInput) -> bool {
+        self.on_chain.contains(input) || self.virtual_utxo.contains_key(input)
+    }
+}
+
 /// The UTxO set: maps transaction inputs to their unspent outputs.
 ///
 /// Supports two backends:

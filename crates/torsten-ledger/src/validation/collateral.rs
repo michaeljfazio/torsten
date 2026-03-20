@@ -26,7 +26,7 @@ use torsten_primitives::transaction::{
 };
 use torsten_primitives::value::AssetName;
 
-use crate::utxo::UtxoSet;
+use crate::utxo::UtxoLookup;
 
 use super::scripts::compute_script_ref_hash;
 use super::ValidationError;
@@ -36,7 +36,7 @@ use super::ValidationError;
 /// This function is only called when `has_plutus_scripts(tx)` is true.
 pub(crate) fn check_collateral(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     errors: &mut Vec<ValidationError>,
 ) {
@@ -229,7 +229,7 @@ fn check_redeemer_indices(tx: &Transaction, errors: &mut Vec<ValidationError>) {
 ///   policy ID that matches a script in the witness set or reference inputs).
 pub(crate) fn check_script_redeemers(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
@@ -529,7 +529,7 @@ fn govaction_has_policy_hash(action: &GovAction) -> bool {
 ///
 /// This mirrors the Plutus subset of Haskell's `scriptsProvided`, limited to
 /// Plutus language scripts (native scripts do not use redeemers).
-fn collect_plutus_script_hashes(tx: &Transaction, utxo_set: &UtxoSet) -> HashSet<Hash28> {
+fn collect_plutus_script_hashes(tx: &Transaction, utxo_set: &dyn UtxoLookup) -> HashSet<Hash28> {
     // Collect all Plutus scripts with their version tag for hashing.
     // Map from hash → present (we only need membership).
     let mut hashes: HashSet<Hash28> = HashSet::new();
@@ -570,7 +570,7 @@ fn collect_plutus_script_hashes(tx: &Transaction, utxo_set: &UtxoSet) -> HashSet
 /// scripts executing in a given transaction are PlutusV3.
 pub(crate) fn plutus_script_version_map(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
 ) -> HashMap<Hash28, u8> {
     let mut map: HashMap<Hash28, u8> = HashMap::new();
     for s in &tx.witness_set.plutus_v1_scripts {
@@ -625,7 +625,7 @@ pub(crate) fn plutus_script_version_map(
 /// unresolved redeemers, which is the safe direction.
 pub(crate) fn redeemer_script_version_map(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     version_map: &HashMap<Hash28, u8>,
 ) -> HashMap<(u8, u32), u8> {
     use torsten_primitives::address::Address;

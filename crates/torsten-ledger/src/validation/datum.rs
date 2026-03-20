@@ -43,7 +43,7 @@ use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::{DatumHash, Hash32};
 use torsten_primitives::transaction::{OutputDatum, Transaction};
 
-use crate::utxo::UtxoSet;
+use crate::utxo::UtxoLookup;
 
 use super::ValidationError;
 
@@ -79,7 +79,7 @@ fn hash_plutus_datum(datum: &torsten_primitives::transaction::PlutusData) -> Has
 /// been confirmed (so UTxO lookups are safe).
 pub(super) fn check_datum_witnesses(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     errors: &mut Vec<ValidationError>,
 ) {
     // ------------------------------------------------------------------

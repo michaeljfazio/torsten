@@ -19,7 +19,7 @@ use torsten_primitives::transaction::{
 use torsten_primitives::value::Lovelace;
 use tracing::debug;
 
-use crate::utxo::UtxoSet;
+use crate::utxo::UtxoLookup;
 
 use super::ValidationError;
 
@@ -109,7 +109,7 @@ pub(super) fn compute_script_ref_hash(script_ref: &ScriptRef) -> Hash28 {
 /// (Rule 3c).
 pub(super) fn collect_available_script_hashes(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
 ) -> HashSet<Hash28> {
     let mut hashes = HashSet::new();
 
@@ -190,7 +190,7 @@ pub(super) fn collect_available_script_hashes(
 pub(crate) fn calculate_ref_script_size(
     inputs: &[TransactionInput],
     reference_inputs: &[TransactionInput],
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
 ) -> u64 {
     let mut total_size: u64 = 0;
     // Iterate both spending inputs and reference inputs, matching Haskell's
@@ -466,7 +466,7 @@ pub(super) fn cbor_uint_size(value: u64) -> u64 {
 /// needed (i.e. `has_redeemers`).
 pub(super) fn check_script_data_hash(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     errors: &mut Vec<ValidationError>,
 ) {
@@ -730,7 +730,7 @@ pub(super) fn has_plutus_scripts(tx: &Transaction) -> bool {
 pub(super) fn ref_script_fee(
     inputs: &[TransactionInput],
     reference_inputs: &[TransactionInput],
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     min_fee_ref_script_cost_per_byte: u64,
 ) -> u64 {
     let size = calculate_ref_script_size(inputs, reference_inputs, utxo_set);
@@ -828,7 +828,7 @@ fn fee_tx_size(tx: &Transaction, tx_size: u64) -> u64 {
 /// which omits the `is_valid` boolean from the size for Alonzo+ transactions.
 pub(super) fn compute_min_fee(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     tx_size: u64,
 ) -> Lovelace {

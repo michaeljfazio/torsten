@@ -49,7 +49,7 @@ use torsten_primitives::transaction::Transaction;
 use tracing::{debug, trace, warn};
 
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
-use crate::utxo::UtxoSet;
+use crate::utxo::UtxoLookup;
 
 // ---------------------------------------------------------------------------
 // Public error type
@@ -221,9 +221,13 @@ pub enum ValidationError {
 ///
 /// This is a convenience wrapper around [`validate_transaction_with_pools`] that
 /// treats all pool registrations as new (no re-registration discount).
+///
+/// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
+/// including the standard on-chain `&UtxoSet` and the composite
+/// `CompositeUtxoView` used by the mempool validator for chained tx support.
 pub fn validate_transaction(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     current_slot: u64,
     tx_size: u64,
@@ -248,6 +252,10 @@ pub fn validate_transaction(
 /// registrations do. When `None`, all pool registrations are treated as new
 /// (deposit always charged).
 ///
+/// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
+/// including the standard on-chain `&UtxoSet` and the composite
+/// `CompositeUtxoView` used by the mempool validator for chained tx support.
+///
 /// The validation pipeline is:
 /// 1. Phase-1 structural rules (Rules 1–10, 13–14) via [`phase1::run_phase1_rules`].
 /// 2. For Plutus transactions: collateral rules (Rules 11, 11b, 11c) and
@@ -257,7 +265,7 @@ pub fn validate_transaction(
 #[allow(clippy::too_many_arguments)] // validation entry point legitimately needs all context parameters
 pub fn validate_transaction_with_pools(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     current_slot: u64,
     tx_size: u64,

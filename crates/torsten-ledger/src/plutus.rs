@@ -1,3 +1,5 @@
+use crate::utxo::UtxoLookup;
+#[cfg(test)]
 use crate::utxo::UtxoSet;
 use crate::validation::{plutus_script_version_map, redeemer_script_version_map};
 use torsten_primitives::transaction::Transaction;
@@ -102,7 +104,7 @@ fn encode_input_cbor(input: &torsten_primitives::transaction::TransactionInput) 
 /// Returns Ok(()) if all scripts pass, or Err with details of failure.
 pub fn evaluate_plutus_scripts(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     cost_models_cbor: Option<&[u8]>,
     max_tx_ex_units: (u64, u64),
     slot_config: &SlotConfig,

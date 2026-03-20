@@ -1,10 +1,10 @@
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::{Transaction, TransactionInput};
+use torsten_primitives::transaction::{Transaction, TransactionInput, TransactionOutput};
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, trace, warn};
 
@@ -141,6 +141,27 @@ pub struct Mempool {
     /// the mempool tx that spends it.  Allows O(1) conflict detection at
     /// admission without scanning every existing tx's input set.
     claimed_inputs: DashMap<TransactionInput, TransactionHash>,
+    /// Virtual UTxO set: tracks unspent outputs of pending (unconfirmed) mempool
+    /// transactions so that chained/dependent transactions can be validated
+    /// against them.
+    ///
+    /// Key:   TransactionInput { transaction_id = pending_tx.hash, index }
+    /// Value: the TransactionOutput at that index in the pending tx
+    ///
+    /// Entries are added when a tx is admitted and removed when it is evicted,
+    /// confirmed, or cascaded away.
+    virtual_utxo: DashMap<TransactionInput, TransactionOutput>,
+    /// Dependency graph: maps parent tx hash → list of child tx hashes.
+    ///
+    /// When tx B spends an output of tx A (which is still unconfirmed), B is a
+    /// "child" of A in this graph.  If A is removed for any reason (confirmed,
+    /// evicted, expired), all its children are cascade-removed as well so that
+    /// no tx can reference a no-longer-available virtual UTxO output.
+    ///
+    /// Stored under a single `RwLock` rather than a `DashMap<…, DashMap>` to
+    /// keep the cascade walk atomic (no child can be re-added between the point
+    /// we read the children list and the point we remove them).
+    dependents: RwLock<HashMap<TransactionHash, Vec<TransactionHash>>>,
     /// Current total size
     total_bytes: RwLock<usize>,
     /// Current total execution memory units
@@ -193,6 +214,8 @@ impl Mempool {
             order: RwLock::new(VecDeque::new()),
             fee_index: RwLock::new(BTreeSet::new()),
             claimed_inputs: DashMap::new(),
+            virtual_utxo: DashMap::new(),
+            dependents: RwLock::new(HashMap::new()),
             total_bytes: RwLock::new(0),
             total_ex_mem: AtomicU64::new(0),
             total_ex_steps: AtomicU64::new(0),
@@ -351,6 +374,44 @@ impl Mempool {
             self.claimed_inputs.insert(input.clone(), tx_hash);
         }
 
+        // Build the dependency graph: for each spending input, check whether it
+        // references an output of a currently-pending mempool tx via the virtual
+        // UTxO set.  If so, record this tx as a child of that parent so that
+        // cascading removal works correctly when the parent is removed.
+        //
+        // Note: `claimed_inputs` was populated just above for this tx's own
+        // inputs.  We use `virtual_utxo` as the authoritative lookup because
+        // virtual_utxo is keyed by (parent_tx_hash, output_index) — exactly
+        // the structure of a TransactionInput.  When an input resolves via
+        // virtual_utxo, the parent tx hash is `input.transaction_id`.
+        {
+            let mut dep_map = self.dependents.write();
+            for input in &tx.body.inputs {
+                if self.virtual_utxo.contains_key(input) {
+                    // This spending input references an output from a pending
+                    // mempool tx.  Record the dependency so we can cascade
+                    // on removal.
+                    let parent_hash = input.transaction_id;
+                    // Guard against a tx referencing its own hash (impossible
+                    // in practice but defensive).
+                    if parent_hash != tx_hash {
+                        dep_map.entry(parent_hash).or_default().push(tx_hash);
+                    }
+                }
+            }
+        }
+
+        // Publish this tx's outputs into the virtual UTxO set so that
+        // subsequent (chained) transactions can reference them during
+        // Phase-1 validation.
+        for (index, output) in tx.body.outputs.iter().enumerate() {
+            let virt_input = TransactionInput {
+                transaction_id: tx_hash,
+                index: index as u32,
+            };
+            self.virtual_utxo.insert(virt_input, output.clone());
+        }
+
         let entry = MempoolEntry {
             tx: tx.clone(),
             tx_hash,
@@ -475,39 +536,136 @@ impl Mempool {
         false
     }
 
-    /// Remove a transaction (when included in a block)
+    /// Remove a transaction (when included in a block, evicted, or expired).
+    ///
+    /// In addition to the standard cleanup (claimed inputs, fee index, counters),
+    /// this method:
+    /// 1. Removes all of the tx's outputs from the virtual UTxO set.
+    /// 2. **Cascade-removes** every dependent tx that spends one of those virtual
+    ///    outputs.  The cascade is breadth-first so arbitrarily deep chains are
+    ///    handled without recursion.
+    ///
+    /// Returns only the directly-removed transaction (not the cascaded ones).
     pub fn remove_tx(&self, tx_hash: &TransactionHash) -> Option<Transaction> {
-        if let Some((_, entry)) = self.txs.remove(tx_hash) {
-            self.tx_count.fetch_sub(1, Ordering::Relaxed);
-            self.order.write().retain(|h| h != tx_hash);
+        self.remove_tx_inner(tx_hash, true)
+    }
 
-            // Release every spending input claimed by this tx so that
-            // replacement or successor transactions can now be admitted.
-            for input in &entry.tx.body.inputs {
-                self.claimed_inputs.remove(input);
+    /// Inner removal logic.
+    ///
+    /// `cascade` controls whether dependent transactions are recursively removed.
+    /// It is always `true` for external callers; the flag exists to prevent
+    /// double-cascade during the BFS loop below.
+    fn remove_tx_inner(&self, tx_hash: &TransactionHash, cascade: bool) -> Option<Transaction> {
+        let (_, entry) = match self.txs.remove(tx_hash) {
+            Some(pair) => pair,
+            None => {
+                trace!(hash = %tx_hash.to_hex(), "Mempool: tx not found for removal");
+                return None;
             }
+        };
 
-            // Remove from fee-density sorted index
-            let key = FeeDensityKey::new(entry.fee.0, entry.size_bytes, *tx_hash);
-            self.fee_index.write().remove(&key);
+        self.tx_count.fetch_sub(1, Ordering::Relaxed);
+        self.order.write().retain(|h| h != tx_hash);
 
-            *self.total_bytes.write() -= entry.size_bytes;
-            self.total_ex_mem
-                .fetch_sub(entry.ex_units_mem, Ordering::Relaxed);
-            self.total_ex_steps
-                .fetch_sub(entry.ex_units_steps, Ordering::Relaxed);
-            self.total_ref_scripts_bytes
-                .fetch_sub(entry.ref_scripts_bytes, Ordering::Relaxed);
-            debug!(
-                hash = %tx_hash.to_hex(),
-                remaining = self.tx_count.load(Ordering::Relaxed),
-                "Mempool: transaction removed"
-            );
-            Some(entry.tx)
-        } else {
-            trace!(hash = %tx_hash.to_hex(), "Mempool: tx not found for removal");
-            None
+        // Release every spending input claimed by this tx so that
+        // replacement or successor transactions can now be admitted.
+        for input in &entry.tx.body.inputs {
+            self.claimed_inputs.remove(input);
         }
+
+        // Remove this tx's outputs from the virtual UTxO.  Any dependent txs
+        // that spend these outputs will be cascade-removed next.
+        for (index, _output) in entry.tx.body.outputs.iter().enumerate() {
+            let virt_input = TransactionInput {
+                transaction_id: *tx_hash,
+                index: index as u32,
+            };
+            self.virtual_utxo.remove(&virt_input);
+        }
+
+        // Remove from fee-density sorted index
+        let key = FeeDensityKey::new(entry.fee.0, entry.size_bytes, *tx_hash);
+        self.fee_index.write().remove(&key);
+
+        *self.total_bytes.write() -= entry.size_bytes;
+        self.total_ex_mem
+            .fetch_sub(entry.ex_units_mem, Ordering::Relaxed);
+        self.total_ex_steps
+            .fetch_sub(entry.ex_units_steps, Ordering::Relaxed);
+        self.total_ref_scripts_bytes
+            .fetch_sub(entry.ref_scripts_bytes, Ordering::Relaxed);
+
+        debug!(
+            hash = %tx_hash.to_hex(),
+            remaining = self.tx_count.load(Ordering::Relaxed),
+            "Mempool: transaction removed"
+        );
+
+        let removed_tx = entry.tx;
+
+        if cascade {
+            // BFS cascade: collect the direct children of this tx, then for
+            // each child collect its children, until no more dependents remain.
+            // We do not recurse to avoid stack overflow on deep chains.
+            let mut queue: Vec<TransactionHash> = {
+                let mut dep_map = self.dependents.write();
+                dep_map.remove(tx_hash).unwrap_or_default()
+            };
+
+            while !queue.is_empty() {
+                let mut next_queue: Vec<TransactionHash> = Vec::new();
+                for child_hash in &queue {
+                    // Collect this child's own children before removing it
+                    let grandchildren: Vec<TransactionHash> = {
+                        let mut dep_map = self.dependents.write();
+                        dep_map.remove(child_hash).unwrap_or_default()
+                    };
+                    next_queue.extend(grandchildren);
+
+                    // Remove the child without triggering another cascade
+                    // (we handle it in this BFS loop instead).
+                    if let Some((_, child_entry)) = self.txs.remove(child_hash) {
+                        self.tx_count.fetch_sub(1, Ordering::Relaxed);
+                        self.order.write().retain(|h| h != child_hash);
+
+                        for input in &child_entry.tx.body.inputs {
+                            self.claimed_inputs.remove(input);
+                        }
+                        for (index, _) in child_entry.tx.body.outputs.iter().enumerate() {
+                            let virt_input = TransactionInput {
+                                transaction_id: *child_hash,
+                                index: index as u32,
+                            };
+                            self.virtual_utxo.remove(&virt_input);
+                        }
+
+                        let child_key = FeeDensityKey::new(
+                            child_entry.fee.0,
+                            child_entry.size_bytes,
+                            *child_hash,
+                        );
+                        self.fee_index.write().remove(&child_key);
+                        *self.total_bytes.write() -= child_entry.size_bytes;
+                        self.total_ex_mem
+                            .fetch_sub(child_entry.ex_units_mem, Ordering::Relaxed);
+                        self.total_ex_steps
+                            .fetch_sub(child_entry.ex_units_steps, Ordering::Relaxed);
+                        self.total_ref_scripts_bytes
+                            .fetch_sub(child_entry.ref_scripts_bytes, Ordering::Relaxed);
+
+                        debug!(
+                            hash = %child_hash.to_hex(),
+                            parent = %tx_hash.to_hex(),
+                            remaining = self.tx_count.load(Ordering::Relaxed),
+                            "Mempool: cascade-removed dependent transaction"
+                        );
+                    }
+                }
+                queue = next_queue;
+            }
+        }
+
+        Some(removed_tx)
     }
 
     /// Remove multiple transactions (batch removal after block)
@@ -768,6 +926,10 @@ impl Mempool {
         }
         self.fee_index.write().clear();
         self.claimed_inputs.clear();
+        // Clear virtual UTxO and dependency graph so they don't carry stale
+        // entries that could corrupt the next round of re-admission after rollback.
+        self.virtual_utxo.clear();
+        self.dependents.write().clear();
         *self.total_bytes.write() = 0;
         self.total_ex_mem.store(0, Ordering::Relaxed);
         self.total_ex_steps.store(0, Ordering::Relaxed);
@@ -785,6 +947,9 @@ impl Mempool {
         self.order.write().clear();
         self.fee_index.write().clear();
         self.claimed_inputs.clear();
+        // Clear virtual UTxO and dependency graph so no stale entries remain.
+        self.virtual_utxo.clear();
+        self.dependents.write().clear();
         *self.total_bytes.write() = 0;
         self.total_ex_mem.store(0, Ordering::Relaxed);
         self.total_ex_steps.store(0, Ordering::Relaxed);
@@ -792,6 +957,44 @@ impl Mempool {
         if count > 0 {
             info!(removed = count, "Mempool: cleared all transactions");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Virtual UTxO access
+    // -------------------------------------------------------------------------
+
+    /// Look up a transaction output in the mempool's virtual UTxO set.
+    ///
+    /// Returns `Some(output)` when the given input references an unconfirmed
+    /// output from a pending mempool transaction.  Returns `None` otherwise.
+    ///
+    /// Callers (e.g. `LedgerTxValidator`) use this to build a composite UTxO
+    /// view — on-chain UTxO first, virtual UTxO as a fallback — enabling Phase-1
+    /// validation of transactions that chain off unconfirmed mempool outputs.
+    pub fn lookup_virtual_utxo(&self, input: &TransactionInput) -> Option<TransactionOutput> {
+        self.virtual_utxo.get(input).map(|r| r.clone())
+    }
+
+    /// Return a snapshot of the current virtual UTxO entries.
+    ///
+    /// The snapshot is taken under a brief per-shard lock (DashMap semantics)
+    /// and therefore represents a consistent-at-collection-time view.  Callers
+    /// that need a stable, immutable view for the duration of a validation pass
+    /// should use this snapshot (a `HashMap`) rather than `lookup_virtual_utxo`
+    /// to avoid seeing partial updates from concurrent admissions.
+    pub fn virtual_utxo_snapshot(&self) -> HashMap<TransactionInput, TransactionOutput> {
+        self.virtual_utxo
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
+    }
+
+    /// Number of entries currently in the virtual UTxO set.
+    ///
+    /// Under normal conditions this equals the sum of `body.outputs.len()`
+    /// across all pending mempool transactions.  Useful for diagnostics.
+    pub fn virtual_utxo_count(&self) -> usize {
+        self.virtual_utxo.len()
     }
 }
 
@@ -3157,5 +3360,527 @@ mod tests {
         mempool.add_tx(hash_b, tx_b, 200).unwrap();
         assert_eq!(mempool.len(), 1);
         assert_eq!(mempool.claimed_inputs_count(), 1);
+    }
+
+    // ========================= Virtual UTxO tests =========================
+
+    /// Build a transaction whose outputs can be used as virtual UTxO entries.
+    /// `outputs` is a slice of lovelace values; each becomes one output.
+    fn make_tx_with_outputs(outputs: &[u64]) -> (Transaction, TransactionHash) {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrdering};
+        static VTXO_COUNTER: AtomicU32 = AtomicU32::new(1000);
+        let n = VTXO_COUNTER.fetch_add(1, AOrdering::Relaxed);
+        let mut id_bytes = [0u8; 32];
+        id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
+        let tx_hash = Hash32::from_bytes(id_bytes);
+
+        let outs: Vec<TransactionOutput> = outputs
+            .iter()
+            .map(|&lovelace| TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0; 32],
+                }),
+                value: Value::lovelace(lovelace),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            })
+            .collect();
+
+        // The tx body inputs use a distinct ID so they don't collide with the outputs.
+        let mut in_bytes = [0xFFu8; 32];
+        in_bytes[28..32].copy_from_slice(&n.to_be_bytes());
+
+        let tx = Transaction {
+            hash: tx_hash,
+            body: TransactionBody {
+                inputs: vec![TransactionInput {
+                    transaction_id: Hash32::from_bytes(in_bytes),
+                    index: 0,
+                }],
+                outputs: outs,
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: std::collections::BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: std::collections::BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: std::collections::BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: torsten_primitives::transaction::TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+        (tx, tx_hash)
+    }
+
+    /// Make a transaction that spends a specific virtual UTxO output.
+    fn make_tx_spending_virtual(parent_hash: TransactionHash, output_index: u32) -> Transaction {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrdering};
+        static SPEND_COUNTER: AtomicU32 = AtomicU32::new(2000);
+        let n = SPEND_COUNTER.fetch_add(1, AOrdering::Relaxed);
+        let mut id_bytes = [0u8; 32];
+        id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
+
+        Transaction {
+            hash: Hash32::from_bytes(id_bytes),
+            body: TransactionBody {
+                inputs: vec![TransactionInput {
+                    transaction_id: parent_hash,
+                    index: output_index,
+                }],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0; 32],
+                    }),
+                    value: Value::lovelace(500_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: std::collections::BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: std::collections::BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: std::collections::BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: torsten_primitives::transaction::TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Virtual UTxO population and lookup
+    // -----------------------------------------------------------------------
+
+    /// After adding a tx, its outputs must appear in the virtual UTxO set.
+    #[test]
+    fn test_virtual_utxo_populated_on_add() {
+        let mempool = Mempool::new(default_config());
+        let (tx, tx_hash) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+
+        mempool.add_tx(tx_hash, tx, 300).unwrap();
+
+        // Both outputs should be in the virtual UTxO
+        assert_eq!(mempool.virtual_utxo_count(), 2);
+
+        let key0 = TransactionInput {
+            transaction_id: tx_hash,
+            index: 0,
+        };
+        let key1 = TransactionInput {
+            transaction_id: tx_hash,
+            index: 1,
+        };
+        assert!(
+            mempool.lookup_virtual_utxo(&key0).is_some(),
+            "output 0 should be in virtual UTxO"
+        );
+        assert!(
+            mempool.lookup_virtual_utxo(&key1).is_some(),
+            "output 1 should be in virtual UTxO"
+        );
+
+        let out0 = mempool.lookup_virtual_utxo(&key0).unwrap();
+        assert_eq!(out0.value.coin.0, 1_000_000);
+        let out1 = mempool.lookup_virtual_utxo(&key1).unwrap();
+        assert_eq!(out1.value.coin.0, 2_000_000);
+    }
+
+    /// After removing a tx, its outputs must be removed from the virtual UTxO set.
+    #[test]
+    fn test_virtual_utxo_cleared_on_remove() {
+        let mempool = Mempool::new(default_config());
+        let (tx, tx_hash) = make_tx_with_outputs(&[1_000_000]);
+
+        mempool.add_tx(tx_hash, tx, 300).unwrap();
+        assert_eq!(mempool.virtual_utxo_count(), 1);
+
+        mempool.remove_tx(&tx_hash);
+        assert_eq!(mempool.virtual_utxo_count(), 0);
+
+        let key = TransactionInput {
+            transaction_id: tx_hash,
+            index: 0,
+        };
+        assert!(
+            mempool.lookup_virtual_utxo(&key).is_none(),
+            "output should be removed from virtual UTxO after tx removal"
+        );
+    }
+
+    /// After `clear()`, the virtual UTxO set must be empty.
+    #[test]
+    fn test_virtual_utxo_cleared_on_clear() {
+        let mempool = Mempool::new(default_config());
+
+        let (tx1, h1) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+        let (tx2, h2) = make_tx_with_outputs(&[3_000_000]);
+        mempool.add_tx(h1, tx1, 200).unwrap();
+        mempool.add_tx(h2, tx2, 200).unwrap();
+
+        assert_eq!(mempool.virtual_utxo_count(), 3); // 2 + 1
+
+        mempool.clear();
+        assert_eq!(mempool.virtual_utxo_count(), 0);
+        assert_eq!(mempool.len(), 0);
+    }
+
+    /// After `drain_all()`, the virtual UTxO set must be empty.
+    #[test]
+    fn test_virtual_utxo_cleared_on_drain_all() {
+        let mempool = Mempool::new(default_config());
+        let (tx, tx_hash) = make_tx_with_outputs(&[1_000_000]);
+        mempool.add_tx(tx_hash, tx, 200).unwrap();
+        assert_eq!(mempool.virtual_utxo_count(), 1);
+
+        let drained = mempool.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(mempool.virtual_utxo_count(), 0);
+        assert!(mempool.dependents.read().is_empty());
+    }
+
+    /// `virtual_utxo_snapshot()` must return all currently-pending outputs.
+    #[test]
+    fn test_virtual_utxo_snapshot() {
+        let mempool = Mempool::new(default_config());
+        let (tx, tx_hash) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+        mempool.add_tx(tx_hash, tx, 300).unwrap();
+
+        let snapshot = mempool.virtual_utxo_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.contains_key(&TransactionInput {
+            transaction_id: tx_hash,
+            index: 0
+        }));
+        assert!(snapshot.contains_key(&TransactionInput {
+            transaction_id: tx_hash,
+            index: 1
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cascade removal
+    // -----------------------------------------------------------------------
+
+    /// A child tx whose input references a parent tx output should be
+    /// cascade-removed when the parent is removed.
+    #[test]
+    fn test_cascade_removal_direct_child() {
+        let mempool = Mempool::new(default_config());
+
+        // Parent tx: has one output
+        let (parent_tx, parent_hash) = make_tx_with_outputs(&[1_000_000]);
+        mempool.add_tx(parent_hash, parent_tx, 300).unwrap();
+
+        // Child tx: spends parent's output 0
+        let child_tx = make_tx_spending_virtual(parent_hash, 0);
+        let child_hash = child_tx.hash;
+        mempool.add_tx(child_hash, child_tx, 300).unwrap();
+
+        assert_eq!(mempool.len(), 2);
+        // The child's dependency should be recorded
+        assert!(mempool.dependents.read().contains_key(&parent_hash));
+
+        // Remove the parent — the child must be cascade-removed
+        mempool.remove_tx(&parent_hash);
+
+        assert_eq!(
+            mempool.len(),
+            0,
+            "child should be cascade-removed with parent"
+        );
+        assert_eq!(
+            mempool.virtual_utxo_count(),
+            0,
+            "all virtual UTxO entries should be gone"
+        );
+        assert_eq!(
+            mempool.claimed_inputs_count(),
+            0,
+            "no claimed inputs should remain"
+        );
+    }
+
+    /// A multi-level chain: grandchild cascades when grandparent is removed.
+    /// tx_a → tx_b (spends tx_a output) → tx_c (spends tx_b output)
+    #[test]
+    fn test_cascade_removal_multi_level() {
+        let mempool = Mempool::new(default_config());
+
+        // tx_a: root
+        let (tx_a, hash_a) = make_tx_with_outputs(&[3_000_000]);
+        mempool.add_tx(hash_a, tx_a, 200).unwrap();
+
+        // tx_b: spends tx_a output 0
+        let tx_b = make_tx_spending_virtual(hash_a, 0);
+        let hash_b = tx_b.hash;
+        mempool.add_tx(hash_b, tx_b, 200).unwrap();
+
+        // tx_c: spends tx_b output 0
+        let tx_c = make_tx_spending_virtual(hash_b, 0);
+        let hash_c = tx_c.hash;
+        mempool.add_tx(hash_c, tx_c, 200).unwrap();
+
+        assert_eq!(mempool.len(), 3);
+
+        // Remove tx_a — tx_b and tx_c should both cascade out
+        mempool.remove_tx(&hash_a);
+
+        assert_eq!(
+            mempool.len(),
+            0,
+            "tx_b and tx_c should be cascade-removed transitively"
+        );
+        assert_eq!(mempool.virtual_utxo_count(), 0);
+        assert_eq!(mempool.claimed_inputs_count(), 0);
+        assert!(mempool.dependents.read().is_empty());
+    }
+
+    /// Removing a child directly (without removing the parent) must NOT remove
+    /// the parent, and must leave the parent's virtual UTxO entries intact.
+    #[test]
+    fn test_cascade_does_not_remove_parent() {
+        let mempool = Mempool::new(default_config());
+
+        let (parent_tx, parent_hash) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+        mempool.add_tx(parent_hash, parent_tx, 300).unwrap();
+
+        let child_tx = make_tx_spending_virtual(parent_hash, 0);
+        let child_hash = child_tx.hash;
+        mempool.add_tx(child_hash, child_tx, 300).unwrap();
+
+        // Remove only the child
+        mempool.remove_tx(&child_hash);
+
+        // Parent should still be present
+        assert_eq!(mempool.len(), 1);
+        assert!(
+            mempool.contains(&parent_hash),
+            "parent must not be removed when child is removed"
+        );
+        // Parent's virtual UTxO entries should still be there
+        // (the child's output entry was removed)
+        assert!(
+            mempool
+                .lookup_virtual_utxo(&TransactionInput {
+                    transaction_id: parent_hash,
+                    index: 0,
+                })
+                .is_some(),
+            "parent output 0 should still be in virtual UTxO"
+        );
+        assert!(
+            mempool
+                .lookup_virtual_utxo(&TransactionInput {
+                    transaction_id: parent_hash,
+                    index: 1,
+                })
+                .is_some(),
+            "parent output 1 should still be in virtual UTxO"
+        );
+    }
+
+    /// An unrelated tx should not be removed when a parent is cascade-removed.
+    #[test]
+    fn test_cascade_does_not_affect_unrelated_txs() {
+        let mempool = Mempool::new(default_config());
+
+        // Parent + child chain
+        let (parent_tx, parent_hash) = make_tx_with_outputs(&[1_000_000]);
+        mempool.add_tx(parent_hash, parent_tx, 200).unwrap();
+
+        let child_tx = make_tx_spending_virtual(parent_hash, 0);
+        let child_hash = child_tx.hash;
+        mempool.add_tx(child_hash, child_tx, 200).unwrap();
+
+        // Unrelated tx
+        let (unrelated_tx, unrelated_hash) = make_tx_with_outputs(&[500_000]);
+        mempool.add_tx(unrelated_hash, unrelated_tx, 200).unwrap();
+
+        assert_eq!(mempool.len(), 3);
+
+        // Remove parent — parent + child cascade out, unrelated stays
+        mempool.remove_tx(&parent_hash);
+
+        assert_eq!(mempool.len(), 1);
+        assert!(
+            mempool.contains(&unrelated_hash),
+            "unrelated tx should not be affected by cascade removal"
+        );
+    }
+
+    /// TTL expiry of a parent should cascade-remove dependent children.
+    #[test]
+    fn test_cascade_on_ttl_expiry() {
+        let mempool = Mempool::new(default_config());
+
+        // Parent has TTL = 100
+        let (mut parent_tx, parent_hash) = make_tx_with_outputs(&[1_000_000]);
+        parent_tx.body.ttl = Some(SlotNo(100));
+        mempool.add_tx(parent_hash, parent_tx, 200).unwrap();
+
+        // Child spends parent output
+        let child_tx = make_tx_spending_virtual(parent_hash, 0);
+        let child_hash = child_tx.hash;
+        mempool.add_tx(child_hash, child_tx, 200).unwrap();
+
+        assert_eq!(mempool.len(), 2);
+
+        // Sweep at slot 101: parent expires
+        let evicted = mempool.evict_expired(SlotNo(101));
+
+        // The parent is directly expired; the child is cascade-removed
+        assert_eq!(evicted, 1, "only 1 tx is directly evicted (parent)");
+        // After cascade, mempool is empty
+        assert_eq!(
+            mempool.len(),
+            0,
+            "child should be cascade-removed when parent expires"
+        );
+        assert_eq!(mempool.virtual_utxo_count(), 0);
+        assert_eq!(mempool.claimed_inputs_count(), 0);
+    }
+
+    /// `dependency_count()` should equal the number of parent→child edges.
+    #[test]
+    fn test_dependency_graph_size() {
+        let mempool = Mempool::new(default_config());
+
+        let (tx_a, hash_a) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+        mempool.add_tx(hash_a, tx_a, 200).unwrap();
+
+        // Two children: each spends a different output of tx_a
+        let child1 = make_tx_spending_virtual(hash_a, 0);
+        let child1_hash = child1.hash;
+        mempool.add_tx(child1_hash, child1, 200).unwrap();
+
+        let child2 = make_tx_spending_virtual(hash_a, 1);
+        let child2_hash = child2.hash;
+        mempool.add_tx(child2_hash, child2, 200).unwrap();
+
+        {
+            let dep_map = mempool.dependents.read();
+            let children = dep_map.get(&hash_a).expect("tx_a should have children");
+            assert_eq!(children.len(), 2, "tx_a should have exactly 2 children");
+            assert!(children.contains(&child1_hash));
+            assert!(children.contains(&child2_hash));
+        }
+
+        // Remove one child — the other child + parent should remain
+        mempool.remove_tx(&child1_hash);
+        assert_eq!(mempool.len(), 2);
+    }
+
+    /// Multiple outputs: only the unspent virtual outputs should remain after
+    /// a child is added (child spends output 0; output 1 is still available).
+    #[test]
+    fn test_virtual_utxo_partial_spend() {
+        let mempool = Mempool::new(default_config());
+
+        let (tx, tx_hash) = make_tx_with_outputs(&[1_000_000, 2_000_000]);
+        mempool.add_tx(tx_hash, tx, 300).unwrap();
+
+        // Only output 0 is spent by the child
+        let child = make_tx_spending_virtual(tx_hash, 0);
+        let child_hash = child.hash;
+        mempool.add_tx(child_hash, child, 200).unwrap();
+
+        // Total virtual UTxO entries: 2 (parent) + 1 (child) = 3
+        assert_eq!(mempool.virtual_utxo_count(), 3);
+
+        // Output 0 AND output 1 of the parent are still in virtual UTxO
+        assert!(mempool
+            .lookup_virtual_utxo(&TransactionInput {
+                transaction_id: tx_hash,
+                index: 0
+            })
+            .is_some());
+        assert!(mempool
+            .lookup_virtual_utxo(&TransactionInput {
+                transaction_id: tx_hash,
+                index: 1
+            })
+            .is_some());
+
+        // Child's output is also in virtual UTxO
+        assert!(mempool
+            .lookup_virtual_utxo(&TransactionInput {
+                transaction_id: child_hash,
+                index: 0
+            })
+            .is_some());
+    }
+
+    /// A tx that does NOT spend any mempool outputs should not create
+    /// any entries in the dependency graph.
+    #[test]
+    fn test_no_false_dependencies_for_on_chain_spends() {
+        let mempool = Mempool::new(default_config());
+
+        // Independent tx using an "on-chain" input (not in virtual UTxO)
+        let (tx, hash) = make_tx_with_outputs(&[1_000_000]);
+        mempool.add_tx(hash, tx, 200).unwrap();
+
+        // The dependency map should be empty (no virtual UTxO parents)
+        assert!(
+            mempool.dependents.read().is_empty(),
+            "no dependencies should be recorded for a tx spending on-chain UTxOs"
+        );
     }
 }

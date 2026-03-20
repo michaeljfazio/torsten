@@ -34,7 +34,7 @@ use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::Transaction;
 
-use crate::utxo::UtxoSet;
+use crate::utxo::UtxoLookup;
 
 use super::scripts::{
     collect_available_script_hashes, compute_min_fee, estimate_value_cbor_size,
@@ -77,7 +77,7 @@ pub(super) fn extract_reward_credential(reward_account: &[u8]) -> Option<Credent
 // ---------------------------------------------------------------------------
 
 /// Return `true` when any input UTxO or output carries non-ADA tokens.
-pub(super) fn has_multi_assets_in_tx(tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+pub(super) fn has_multi_assets_in_tx(tx: &Transaction, utxo_set: &dyn UtxoLookup) -> bool {
     for input in &tx.body.inputs {
         if let Some(output) = utxo_set.lookup(input) {
             if !output.value.multi_asset.is_empty() {
@@ -188,7 +188,7 @@ fn verify_witness_signatures<W: HasWitnessFields>(
 /// can pass it to the value-conservation check without re-scanning inputs.
 pub(super) fn run_phase1_rules(
     tx: &Transaction,
-    utxo_set: &UtxoSet,
+    utxo_set: &dyn UtxoLookup,
     params: &ProtocolParameters,
     current_slot: u64,
     tx_size: u64,
