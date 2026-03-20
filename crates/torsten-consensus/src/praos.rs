@@ -42,6 +42,12 @@ pub enum ConsensusError {
     EmptyVrfKey,
     #[error("Empty issuer verification key")]
     EmptyIssuerVkey,
+    #[error("Checkpoint mismatch at block {block_no}: expected {expected}, got {got}")]
+    CheckpointMismatch {
+        block_no: u64,
+        expected: Hash32,
+        got: Hash32,
+    },
     #[error("VRF verification error: {0}")]
     VrfVerification(String),
     #[error("Operational cert sequence number regression: got {got}, expected > {expected}")]
@@ -165,6 +171,11 @@ pub struct OuroborosPraos {
     /// correct stake distributions. When false, VRF leader eligibility failures
     /// are non-fatal even in strict mode.
     pub snapshots_established: bool,
+    /// Lightweight checkpoints: static map of (block_number → expected_header_hash).
+    /// Checked during header validation — if a block's number matches a checkpoint
+    /// but its hash doesn't, the header is rejected (anti-eclipse defense).
+    /// Empty on testnets; populated from mainnet-checkpoints.json on mainnet.
+    pub checkpoints: HashMap<u64, Hash32>,
     /// Tracked opcert sequence numbers per pool (cold key hash → highest seen sequence number).
     /// Used to detect opcert counter regressions (replay protection).
     opcert_counters: HashMap<Hash28, u64>,
@@ -184,6 +195,7 @@ impl OuroborosPraos {
             strict_verification: false,
             nonce_established: false,
             snapshots_established: false,
+            checkpoints: HashMap::new(),
             opcert_counters: HashMap::new(),
         }
     }
@@ -205,6 +217,7 @@ impl OuroborosPraos {
             strict_verification: false,
             nonce_established: false,
             snapshots_established: false,
+            checkpoints: HashMap::new(),
             opcert_counters: HashMap::new(),
         }
     }
@@ -228,6 +241,7 @@ impl OuroborosPraos {
             strict_verification: false,
             nonce_established: false,
             snapshots_established: false,
+            checkpoints: HashMap::new(),
             opcert_counters: HashMap::new(),
         }
     }
@@ -285,6 +299,26 @@ impl OuroborosPraos {
             mode = ?mode,
             "Praos: validating block header"
         );
+
+        // Lightweight checkpoint validation (LCP): if this block number has a
+        // checkpoint entry, verify the header hash matches. Mismatch means the
+        // peer is serving a chain that diverges from the known-good historical
+        // chain — reject immediately (anti-eclipse defense).
+        if let Some(expected_hash) = self.checkpoints.get(&header.block_number.0) {
+            if header.header_hash != *expected_hash {
+                warn!(
+                    block_no = header.block_number.0,
+                    expected = %expected_hash.to_hex(),
+                    got = %header.header_hash.to_hex(),
+                    "Praos: CHECKPOINT MISMATCH — rejecting block from alternative chain"
+                );
+                return Err(ConsensusError::CheckpointMismatch {
+                    block_no: header.block_number.0,
+                    expected: *expected_hash,
+                    got: header.header_hash,
+                });
+            }
+        }
 
         // Block must not be from the future
         if header.slot > current_slot {
@@ -2377,4 +2411,65 @@ mod tests {
             "Expected VrfVerification error for invalid proof in strict mode with nonce established, got: {result:?}"
         );
     }
+
+    // ─── Lightweight checkpoint tests ──────────────────────────────────
+
+    #[test]
+    fn test_checkpoint_match_passes() {
+        let mut praos = OuroborosPraos::new();
+        let expected_hash = Hash32::from_bytes([0xAA; 32]);
+        praos.checkpoints.insert(1000, expected_hash);
+
+        let mut header = make_valid_header(5000);
+        header.block_number = BlockNo(1000);
+        header.header_hash = expected_hash; // matches checkpoint
+
+        let result = praos.validate_header(&header, SlotNo(10000), ValidationMode::Replay);
+        assert!(result.is_ok(), "checkpoint match should pass: {result:?}");
+    }
+
+    #[test]
+    fn test_checkpoint_mismatch_rejected() {
+        let mut praos = OuroborosPraos::new();
+        praos
+            .checkpoints
+            .insert(1000, Hash32::from_bytes([0xAA; 32]));
+
+        let mut header = make_valid_header(5000);
+        header.block_number = BlockNo(1000);
+        header.header_hash = Hash32::from_bytes([0xBB; 32]); // MISMATCH
+
+        let result = praos.validate_header(&header, SlotNo(10000), ValidationMode::Replay);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConsensusError::CheckpointMismatch { block_no: 1000, .. }
+        ));
+    }
+
+    #[test]
+    fn test_no_checkpoint_at_block_passes() {
+        let mut praos = OuroborosPraos::new();
+        praos
+            .checkpoints
+            .insert(2000, Hash32::from_bytes([0xAA; 32]));
+
+        let mut header = make_valid_header(5000);
+        header.block_number = BlockNo(1500); // No checkpoint here
+
+        let result = praos.validate_header(&header, SlotNo(10000), ValidationMode::Replay);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_empty_checkpoints_no_effect() {
+        let praos = OuroborosPraos::new();
+        assert!(praos.checkpoints.is_empty());
+
+        let header = make_valid_header(5000);
+        let result = praos.validate_header(&header, SlotNo(10000), ValidationMode::Replay);
+        assert!(result.is_ok());
+    }
 }
+
+// Checkpoint loader lives in torsten-node (has serde_json/hex deps).
