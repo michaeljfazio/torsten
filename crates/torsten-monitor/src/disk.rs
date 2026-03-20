@@ -152,7 +152,10 @@ mod tests {
         assert!(stats.is_some(), "expected disk stats for '.'");
         let s = stats.unwrap();
         assert!(s.total_bytes > 0, "total_bytes should be > 0");
-        assert!(s.free_bytes <= s.total_bytes, "free should not exceed total");
+        assert!(
+            s.free_bytes <= s.total_bytes,
+            "free should not exceed total"
+        );
         assert!(s.usage_ratio() <= 1.0, "usage ratio should not exceed 1.0");
     }
 
