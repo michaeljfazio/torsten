@@ -105,16 +105,19 @@ impl LedgerState {
             }
         }
 
-        // Block body size check — reject blocks exceeding max_block_body_size
-        if block.header.body_size > 0
+        // Block body size check — only in ValidateAll mode (not during replay).
+        // During replay, max_block_body_size may differ from when the block was
+        // originally produced, producing spurious warnings.
+        if mode == BlockValidationMode::ValidateAll
+            && block.header.body_size > 0
             && self.protocol_params.max_block_body_size > 0
             && block.header.body_size > self.protocol_params.max_block_body_size
         {
-            debug!(
+            warn!(
                 body_size = block.header.body_size,
                 limit = self.protocol_params.max_block_body_size,
                 slot = block.slot().0,
-                "Block body exceeds max_block_body_size (expected during replay before PP updates)"
+                "Block body exceeds max_block_body_size"
             );
         }
 
@@ -225,17 +228,24 @@ impl LedgerState {
             return Ok(());
         }
 
-        // Block-level execution unit budget check
-        let mut block_mem: u64 = 0;
-        let mut block_steps: u64 = 0;
-        for tx in &block.transactions {
-            if tx.is_valid {
-                for r in &tx.witness_set.redeemers {
-                    block_mem = block_mem.saturating_add(r.ex_units.mem);
-                    block_steps = block_steps.saturating_add(r.ex_units.steps);
+        // Block-level execution unit budget check (ValidateAll mode only).
+        // In ApplyOnly mode, the block was already validated on-chain and the
+        // protocol parameters may have changed since production (governance).
+        let (block_mem, block_steps) = if mode == BlockValidationMode::ValidateAll {
+            let mut mem: u64 = 0;
+            let mut steps: u64 = 0;
+            for tx in &block.transactions {
+                if tx.is_valid {
+                    for r in &tx.witness_set.redeemers {
+                        mem = mem.saturating_add(r.ex_units.mem);
+                        steps = steps.saturating_add(r.ex_units.steps);
+                    }
                 }
             }
-        }
+            (mem, steps)
+        } else {
+            (0, 0) // Skip accumulation during replay
+        };
         if block_mem > self.protocol_params.max_block_ex_units.mem {
             if mode == BlockValidationMode::ValidateAll {
                 // Hard error at the live tip: a block whose execution unit memory

@@ -4673,7 +4673,9 @@ fn test_pool_reregistration_only_cancels_own_retirement() {
 
 #[test]
 fn test_stake_deregistration_rejected_with_nonzero_balance() {
-    // Bug 4: Shelley-era deregistration should fail if reward balance > 0
+    // The zero-balance check is a Phase-1 tx validation rule, not a block
+    // application rule. During block application, deregistrations are applied
+    // unconditionally — the block was already validated on-chain.
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
 
@@ -4689,13 +4691,12 @@ fn test_stake_deregistration_rejected_with_nonzero_balance() {
         .get_mut(&key)
         .unwrap() = Lovelace(500_000);
 
-    // Try to deregister — should be rejected because balance > 0
+    // Deregister — applied unconditionally during block application
     state.process_certificate(&Certificate::StakeDeregistration(cred.clone()));
 
-    // Stake should still be registered
-    assert!(state.reward_accounts.contains_key(&key));
-    assert!(state.stake_distribution.stake_map.contains_key(&key));
-    assert_eq!(state.reward_accounts[&key], Lovelace(500_000));
+    // Stake IS deregistered (no balance re-check during block application)
+    assert!(!state.reward_accounts.contains_key(&key));
+    assert!(!state.stake_distribution.stake_map.contains_key(&key));
 }
 
 #[test]
@@ -5854,15 +5855,16 @@ fn test_reward_account_to_hash_header_byte_ignored() {
 
 #[test]
 fn test_era_gating_conway_cert_rejected_pre_conway() {
-    // Conway-only certificates should be rejected when protocol < 9
+    // Era-gating is a Phase-1 tx validation rule, not a block application rule.
+    // During block application, Conway certs are applied unconditionally
+    // regardless of in-state protocol version.
     let mut params = ProtocolParameters::mainnet_defaults();
     params.protocol_version_major = 8; // Babbage
     let mut state = LedgerState::new(params);
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xAAu8; 28]));
 
-    // RegDRep should be silently skipped in pre-Conway
-    let drep_count_before = state.governance.dreps.len();
+    // RegDRep IS applied during block application (no era re-check)
     state.process_certificate(&Certificate::RegDRep {
         credential: cred.clone(),
         deposit: Lovelace(500_000_000),
@@ -5870,8 +5872,8 @@ fn test_era_gating_conway_cert_rejected_pre_conway() {
     });
     assert_eq!(
         state.governance.dreps.len(),
-        drep_count_before,
-        "RegDRep should be skipped in pre-Conway era"
+        1,
+        "RegDRep should be applied during block application regardless of protocol version"
     );
 }
 
@@ -5898,12 +5900,12 @@ fn test_era_gating_conway_cert_accepted_in_conway() {
 
 #[test]
 fn test_era_gating_vote_delegation_rejected_pre_conway() {
+    // Era-gating removed from block application — apply unconditionally.
     let mut params = ProtocolParameters::mainnet_defaults();
-    params.protocol_version_major = 7; // Babbage
+    params.protocol_version_major = 7;
     let mut state = LedgerState::new(params);
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xBBu8; 28]));
-    let delegations_before = state.governance.vote_delegations.len();
 
     state.process_certificate(&Certificate::VoteDelegation {
         credential: cred,
@@ -5911,13 +5913,14 @@ fn test_era_gating_vote_delegation_rejected_pre_conway() {
     });
     assert_eq!(
         state.governance.vote_delegations.len(),
-        delegations_before,
-        "VoteDelegation should be skipped in pre-Conway era"
+        1,
+        "VoteDelegation applied during block application regardless of protocol version"
     );
 }
 
 #[test]
 fn test_era_gating_committee_hot_auth_rejected_pre_conway() {
+    // Era-gating removed from block application — apply unconditionally.
     let mut params = ProtocolParameters::mainnet_defaults();
     params.protocol_version_major = 8;
     let mut state = LedgerState::new(params);
@@ -5929,9 +5932,10 @@ fn test_era_gating_committee_hot_auth_rejected_pre_conway() {
         cold_credential: cold,
         hot_credential: hot,
     });
-    assert!(
-        state.governance.committee_hot_keys.is_empty(),
-        "CommitteeHotAuth should be skipped in pre-Conway era"
+    assert_eq!(
+        state.governance.committee_hot_keys.len(),
+        1,
+        "CommitteeHotAuth applied during block application regardless of protocol version"
     );
 }
 
@@ -5976,6 +5980,7 @@ fn test_era_gating_governance_proposals_skipped_pre_conway() {
 
 #[test]
 fn test_era_gating_conway_stake_registration_rejected_pre_conway() {
+    // Era-gating removed from block application — apply unconditionally.
     let mut params = ProtocolParameters::mainnet_defaults();
     params.protocol_version_major = 8;
     let mut state = LedgerState::new(params);
@@ -5983,14 +5988,14 @@ fn test_era_gating_conway_stake_registration_rejected_pre_conway() {
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xFFu8; 28]));
     let key = credential_to_hash(&cred);
 
-    // Conway-style registration with deposit should be skipped
+    // Conway-style registration IS applied during block application
     state.process_certificate(&Certificate::ConwayStakeRegistration {
         credential: cred.clone(),
         deposit: Lovelace(2_000_000),
     });
     assert!(
-        !state.reward_accounts.contains_key(&key),
-        "ConwayStakeRegistration should be skipped in pre-Conway era"
+        state.reward_accounts.contains_key(&key),
+        "ConwayStakeRegistration applied during block application regardless of protocol version"
     );
 
     // But regular StakeRegistration should work

@@ -4,7 +4,7 @@ use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::transaction::{Certificate, MIRSource, MIRTarget};
 use torsten_primitives::value::Lovelace;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Returns true if the certificate is Conway-only and requires protocol version >= 9.
 pub(crate) fn is_conway_only_certificate(cert: &Certificate) -> bool {
@@ -27,16 +27,13 @@ pub(crate) fn is_conway_only_certificate(cert: &Certificate) -> bool {
 
 impl LedgerState {
     /// Process a certificate and update the ledger state accordingly.
-    /// Conway-specific certificates are silently skipped if the protocol version is < 9.
+    ///
+    /// Certificates are applied unconditionally during block application.
+    /// Era-gating (e.g., Conway-only certs in pre-Conway era) is a Phase-1
+    /// tx validation rule, not a block application rule. The block producer
+    /// already validated era compatibility. During replay, the in-state
+    /// protocol version may lag behind the block's actual era.
     pub(crate) fn process_certificate(&mut self, cert: &Certificate) {
-        if is_conway_only_certificate(cert) && self.protocol_params.protocol_version_major < 9 {
-            warn!(
-                "Ignoring Conway-only certificate {:?} in pre-Conway era (protocol version {})",
-                std::mem::discriminant(cert),
-                self.protocol_params.protocol_version_major,
-            );
-            return;
-        }
         match cert {
             Certificate::StakeRegistration(credential) => {
                 let key = credential_to_hash(credential);
@@ -55,25 +52,16 @@ impl LedgerState {
             }
             Certificate::StakeDeregistration(credential) => {
                 let key = credential_to_hash(credential);
-                // Per Shelley ledger spec: deregistration is only valid if reward balance is zero.
-                // If the reward account has a non-zero balance, skip deregistration.
-                let balance = self
-                    .reward_accounts
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(Lovelace(0));
-                if balance.0 > 0 {
-                    debug!(
-                        "Stake deregistration rejected: non-zero reward balance (key={}, balance={})",
-                        key.to_hex(), balance.0,
-                    );
-                } else {
-                    self.stake_distribution.stake_map.remove(&key);
-                    Arc::make_mut(&mut self.delegations).remove(&key);
-                    Arc::make_mut(&mut self.reward_accounts).remove(&key);
-                    self.script_stake_credentials.remove(&key);
-                    debug!("Stake key deregistered: {}", key.to_hex());
-                }
+                // Apply deregistration unconditionally during block application.
+                // The zero-balance check is a Phase-1 tx validation rule (DELEG STS),
+                // not a block application rule. The block producer already validated
+                // this — re-checking during replay with accumulated rewards causes
+                // false rejections and stale delegation entries.
+                self.stake_distribution.stake_map.remove(&key);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                self.script_stake_credentials.remove(&key);
+                debug!("Stake key deregistered: {}", key.to_hex());
             }
             Certificate::ConwayStakeRegistration {
                 credential,
