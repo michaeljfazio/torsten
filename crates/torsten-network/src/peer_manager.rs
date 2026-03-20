@@ -190,6 +190,8 @@ const EWMA_ALPHA: f64 = 0.3;
 ///
 /// Exposed as `pub(crate)` so that governor tests can construct peer states
 /// that are explicitly outside the grace window.
+// Grace period for new peers before liveness gate kicks in (reserved for Phase 2).
+#[allow(dead_code)]
 pub(crate) const PROMOTION_NEW_PEER_GRACE: Duration = Duration::from_secs(30);
 
 impl PeerPerformance {
