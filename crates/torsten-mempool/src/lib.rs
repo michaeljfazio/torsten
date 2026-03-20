@@ -840,13 +840,30 @@ impl Mempool {
         self.claimed_inputs.len()
     }
 
-    /// Get transactions for block production ordered by fee density (fee/byte, descending).
-    /// Transactions with higher fee density are prioritized.
+    /// Get transactions ordered by fee density (fee/byte, descending).
     ///
-    /// This is an alias for `get_txs_for_block()` — both use the same fee-density
-    /// sorted index. Retained for backward compatibility.
+    /// Unlike `get_txs_for_block()` (FIFO), this sorts by fee density.
+    /// NOT used for block production (Haskell uses FIFO), but retained for
+    /// eviction policy and diagnostics.
     pub fn get_txs_for_block_by_fee(&self, max_count: usize, max_size: usize) -> Vec<Transaction> {
-        self.get_txs_for_block(max_count, max_size)
+        let fee_index = self.fee_index.read();
+        let mut result = Vec::new();
+        let mut total_size = 0;
+
+        for key in fee_index.iter() {
+            if result.len() >= max_count {
+                break;
+            }
+            if let Some(entry) = self.txs.get(&key.tx_hash) {
+                if total_size + entry.size_bytes > max_size {
+                    continue; // Skip oversized, try smaller txs
+                }
+                result.push(entry.tx.clone());
+                total_size += entry.size_bytes;
+            }
+        }
+
+        result
     }
 
     /// Remove transactions that spend any of the given inputs (already consumed by a new block).
@@ -1486,14 +1503,14 @@ mod tests {
             .unwrap();
 
         // Get txs — should be sorted by fee density: tx2, tx3, tx1
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 3);
         assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest fee density
         assert_eq!(txs[1].body.fee, Lovelace(200_000)); // medium
         assert_eq!(txs[2].body.fee, Lovelace(100_000)); // lowest
 
         // With size limit, only highest-fee txs should be included
-        let txs = mempool.get_txs_for_block(10, 1000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 1000);
         assert_eq!(txs.len(), 2); // only room for 2 x 500 bytes
         assert_eq!(txs[0].body.fee, Lovelace(500_000)); // highest priority first
         assert_eq!(txs[1].body.fee, Lovelace(200_000)); // second highest
@@ -1760,7 +1777,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 3);
         // Order: tx2 (800/byte) > tx3 (600/byte) > tx1 (500/byte)
         assert_eq!(txs[0].body.fee.0, 400_000); // highest density
@@ -1784,14 +1801,14 @@ mod tests {
             .add_tx_with_fee(hash_b, make_tx_with_fee(1000), 500, Lovelace(1000))
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         // hash_b (0x11...) < hash_a (0xAA...) lexicographically, so hash_b comes first
         assert_eq!(txs[0].body.fee.0, 1000);
         assert_eq!(txs[1].body.fee.0, 1000);
 
         // Run again — ordering must be stable/deterministic
-        let txs2 = mempool.get_txs_for_block(10, 100_000);
+        let txs2 = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs2.len(), 2);
     }
 
@@ -1818,7 +1835,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         // Both have equal density, so tiebreak is by hash ascending
         // [1u8; 32] < [2u8; 32], so tx with hash [1...] comes first
@@ -1848,7 +1865,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         assert_eq!(txs[0].body.fee.0, 100); // non-zero fee first
         assert_eq!(txs[1].body.fee.0, 0); // zero fee last
@@ -1877,7 +1894,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         // Zero-size (treated as 1): density = 1000/1 = 1000
         // 500-byte: density = 1000/500 = 2
@@ -1921,7 +1938,7 @@ mod tests {
         assert_eq!(mempool.fee_index.read().len(), 2);
 
         // Now tx3 (200) should be first, tx1 (100) second
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         assert_eq!(txs[0].body.fee.0, 200);
         assert_eq!(txs[1].body.fee.0, 100);
@@ -1959,7 +1976,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs[0].body.fee.0, 500);
         assert_eq!(txs[1].body.fee.0, 300);
         assert_eq!(txs[2].body.fee.0, 100);
@@ -2001,7 +2018,7 @@ mod tests {
             .unwrap();
 
         // Budget: 1000 bytes. tx1 (800) fits first, then tx3 (200) fits, tx2 (300) doesn't
-        let txs = mempool.get_txs_for_block(10, 1000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 1000);
         // tx1 density: 10000/800 = 12.5, tx2: 5000/300 = 16.67, tx3: 1000/200 = 5
         // Order by density: tx2 (16.67), tx1 (12.5), tx3 (5)
         // tx2 = 300, tx1 = 800 -> 300+800=1100 > 1000, skip tx1
@@ -2035,7 +2052,7 @@ mod tests {
         assert_eq!(mempool.len(), 3);
 
         // Remaining: tx5 (500), tx3 (300), tx1 (100)
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 3);
         assert_eq!(txs[0].body.fee.0, 500);
         assert_eq!(txs[1].body.fee.0, 300);
@@ -2069,7 +2086,7 @@ mod tests {
             )
             .unwrap();
 
-        let txs = mempool.get_txs_for_block(10, 100_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 100_000);
         assert_eq!(txs.len(), 2);
         // tx2 (5/2 = 2.5) should come before tx1 (7/3 = 2.333...)
         assert_eq!(txs[0].body.fee.0, 5);
@@ -2923,7 +2940,7 @@ mod tests {
         }
 
         // Get txs for block - should be ordered by fee density descending
-        let txs = mempool.get_txs_for_block(10, 1_000_000);
+        let txs = mempool.get_txs_for_block_by_fee(10, 1_000_000);
         assert_eq!(txs.len(), 3);
         assert_eq!(txs[0].body.fee, Lovelace(300)); // highest
         assert_eq!(txs[1].body.fee, Lovelace(200));
@@ -2944,7 +2961,7 @@ mod tests {
             .unwrap();
 
         // Ordering should still be maintained
-        let txs2 = mempool.get_txs_for_block(10, 1_000_000);
+        let txs2 = mempool.get_txs_for_block_by_fee(10, 1_000_000);
         assert_eq!(txs2.len(), 3);
         assert_eq!(txs2[0].body.fee, Lovelace(500));
         assert_eq!(txs2[1].body.fee, Lovelace(300));
