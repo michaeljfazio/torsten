@@ -145,16 +145,28 @@ impl LedgerState {
 
     /// Calculate rewards using the GO snapshot and a separate fee value.
     ///
-    /// This is the primary reward calculation entry point, matching Haskell's
-    /// `startStep` in PulsingReward.hs. The GO snapshot provides stake/pool/block
-    /// data, and `ss_fee` provides the fee pot (captured by SNAP at the previous
-    /// epoch boundary).
+    /// Legacy entry point that uses GO snapshot for both stake AND block data.
     pub(crate) fn calculate_rewards_with_fee(
         &self,
         go_snapshot: &StakeSnapshot,
         ss_fee: Lovelace,
     ) -> PendingRewardUpdate {
-        self.calculate_rewards_inner(go_snapshot, ss_fee.0)
+        self.calculate_rewards_inner(go_snapshot, go_snapshot, ss_fee.0)
+    }
+
+    /// Calculate rewards matching Haskell's `startStep` exactly.
+    ///
+    /// Uses THREE separate data sources:
+    /// - `go_snapshot`: ssStakeGo — stake distribution, delegations, pool params (2 epochs ago)
+    /// - `bprev_snapshot`: nesBprev equivalent — block production counts (1 epoch ago, from SET)
+    /// - `ss_fee`: ssFee — fee pot from SNAP at previous boundary
+    pub(crate) fn calculate_rewards_full(
+        &self,
+        go_snapshot: &StakeSnapshot,
+        bprev_snapshot: &StakeSnapshot,
+        ss_fee: Lovelace,
+    ) -> PendingRewardUpdate {
+        self.calculate_rewards_inner(go_snapshot, bprev_snapshot, ss_fee.0)
     }
 
     /// Calculate rewards and return a PendingRewardUpdate for deferred application.
@@ -167,15 +179,20 @@ impl LedgerState {
     ///   - Operator reward goes to pool's registered reward account
     ///
     /// Legacy entry point that reads fees from the snapshot itself. New code
-    /// should use `calculate_rewards_with_fee` which takes fees separately.
+    /// should use `calculate_rewards_full` which separates GO/bprev/fees.
     pub(crate) fn calculate_rewards(&self, rupd_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
-        self.calculate_rewards_inner(rupd_snapshot, rupd_snapshot.epoch_fees.0)
+        self.calculate_rewards_inner(rupd_snapshot, rupd_snapshot, rupd_snapshot.epoch_fees.0)
     }
 
-    /// Inner reward calculation that takes fees as a parameter.
+    /// Inner reward calculation.
+    ///
+    /// `stake_snapshot`: provides stake distribution, delegations, pool params (GO)
+    /// `block_snapshot`: provides epoch_block_count, epoch_blocks_by_pool (nesBprev/SET)
+    /// `epoch_fees`: ssFee from SNAP
     fn calculate_rewards_inner(
         &self,
-        rupd_snapshot: &StakeSnapshot,
+        stake_snapshot: &StakeSnapshot,
+        block_snapshot: &StakeSnapshot,
         epoch_fees: u64,
     ) -> PendingRewardUpdate {
         let rho_num = self.protocol_params.rho.numerator as i128;
@@ -214,7 +231,7 @@ impl LedgerState {
         // from the previous epoch, passed to startStep). For the first RUPD,
         // the initial bprev is empty (0 blocks) — this is correct because
         // no snapshot rotation has captured block counts yet.
-        let actual_blocks = rupd_snapshot.epoch_block_count;
+        let actual_blocks = block_snapshot.epoch_block_count;
 
         let rho = Rat::from_i128(rho_num, rho_den);
 
@@ -280,7 +297,7 @@ impl LedgerState {
         }
 
         // Total active stake (for apparent performance denominator only)
-        let total_active_stake: u64 = rupd_snapshot
+        let total_active_stake: u64 = stake_snapshot
             .pool_stake
             .values()
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
@@ -305,7 +322,7 @@ impl LedgerState {
 
         // Build delegators-by-pool index for O(n) reward distribution
         let mut delegators_by_pool: HashMap<Hash28, Vec<Hash32>> = HashMap::new();
-        for (cred_hash, pool_id) in rupd_snapshot.delegations.iter() {
+        for (cred_hash, pool_id) in stake_snapshot.delegations.iter() {
             delegators_by_pool
                 .entry(*pool_id)
                 .or_default()
@@ -314,12 +331,12 @@ impl LedgerState {
 
         // Build owner-delegated-stake per pool for pledge check
         let mut owner_stake_by_pool: HashMap<Hash28, u64> = HashMap::new();
-        for (pool_id, pool_reg) in rupd_snapshot.pool_params.iter() {
+        for (pool_id, pool_reg) in stake_snapshot.pool_params.iter() {
             let mut owner_stake = 0u64;
             for owner in &pool_reg.owners {
                 let owner_key = owner.to_hash32_padded();
-                if rupd_snapshot.delegations.get(&owner_key) == Some(pool_id) {
-                    owner_stake += rupd_snapshot
+                if stake_snapshot.delegations.get(&owner_key) == Some(pool_id) {
+                    owner_stake += stake_snapshot
                         .stake_distribution
                         .get(&owner_key)
                         .map(|l| l.0)
@@ -336,10 +353,10 @@ impl LedgerState {
         // are skipped entirely — they receive no rewards. This is critical when
         // d >= 0.8: all blocks are overlay blocks, BlocksMade is empty, and NO
         // pools receive rewards (even though apparent performance = 1).
-        for (pool_id, pool_active_stake) in &rupd_snapshot.pool_stake {
+        for (pool_id, pool_active_stake) in &stake_snapshot.pool_stake {
             // Only reward pools that produced blocks in the snapshot epoch.
             // Matches Haskell's startStep which iterates over BlocksMade keys.
-            if rupd_snapshot
+            if block_snapshot
                 .epoch_blocks_by_pool
                 .get(pool_id)
                 .copied()
@@ -349,7 +366,7 @@ impl LedgerState {
                 continue;
             }
 
-            let pool_reg = match rupd_snapshot.pool_params.get(pool_id) {
+            let pool_reg = match stake_snapshot.pool_params.get(pool_id) {
                 Some(reg) => reg,
                 None => continue,
             };
@@ -397,11 +414,27 @@ impl LedgerState {
             //     sigma = pool_stake / total_active_stake
             //   When d >= 0.8: perf = 1 (no performance adjustment)
             // Per-pool block count from the snapshot (Haskell's bprev BlocksMade).
-            let blocks_made = rupd_snapshot
+            let blocks_made = block_snapshot
                 .epoch_blocks_by_pool
                 .get(pool_id)
                 .copied()
                 .unwrap_or(0);
+            debug!(
+                pool = ?pool_id.as_bytes()[..4],
+                blocks_made,
+                max_pool,
+                pool_stake = pool_active_stake.0,
+                total_stake,
+                total_active_stake,
+                total_blocks = total_blocks_in_epoch,
+                reward_pot,
+                self_delegated,
+                pledge = pool_reg.pledge.0,
+                n_opt,
+                d,
+                "Per-pool reward input"
+            );
+
             let pool_reward = if pool_active_stake.0 == 0 {
                 0u64
             } else if d >= 0.8 {
@@ -454,7 +487,7 @@ impl LedgerState {
                         continue;
                     }
 
-                    let member_stake = rupd_snapshot
+                    let member_stake = stake_snapshot
                         .stake_distribution
                         .get(cred_hash)
                         .copied()

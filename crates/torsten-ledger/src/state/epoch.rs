@@ -47,14 +47,26 @@ impl LedgerState {
         // ss_fee: captured by SNAP at the previous boundary, contains fees from the
         // epoch before the one that just ended. At genesis, ss_fee = 0.
         {
-            // Use GO snapshot for stake/pool data (matches Haskell's ssStakeGo).
-            // Use ss_fee for the fee component (matches Haskell's ssFee).
+            // Haskell's startStep uses THREE separate data sources:
+            //   1. ssStakeGo: stake/pool/delegation data (2 epochs ago)
+            //   2. nesBprev (BlocksMade): block production from previous epoch
+            //   3. ssFee: fees captured by SNAP at previous boundary
+            //
+            // GO provides stake distribution. SET provides block counts
+            // (SET = old mark = epoch that just ended = nesBprev equivalent).
             let go_snapshot = self
                 .snapshots
                 .go
                 .clone()
                 .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
-            let rupd = self.calculate_rewards_with_fee(&go_snapshot, self.snapshots.ss_fee);
+            // Block counts come from SET (= previous epoch's data = nesBprev)
+            let set_snapshot = self
+                .snapshots
+                .set
+                .clone()
+                .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
+            let rupd =
+                self.calculate_rewards_full(&go_snapshot, &set_snapshot, self.snapshots.ss_fee);
             self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
             self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
             let mut total_applied = 0u64;

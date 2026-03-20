@@ -31,6 +31,10 @@
       <sourceFolder url="file://$MODULE_DIR$/tests/conformance/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests/conformance/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/tests/golden/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/torsten-cli/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/torsten-config/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/torsten-config/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/torsten-monitor/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
