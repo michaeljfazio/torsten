@@ -633,8 +633,7 @@ impl VolatileDB {
         }
 
         // Trim flushed blocks from selected_chain front
-        self.selected_chain
-            .retain(|h| !removed_set.contains(h));
+        self.selected_chain.retain(|h| !removed_set.contains(h));
 
         // Rewrite WAL with remaining entries
         if let Some(ref mut wal) = self.wal {
@@ -669,24 +668,21 @@ impl VolatileDB {
             .position(|h| {
                 if let Some(block) = self.blocks.get(h) {
                     if block.slot == target_slot {
-                        return target_hash.map_or(true, |th| h == th);
+                        return target_hash.is_none_or(|th| h == th);
                     }
                 }
                 false
             })
             .or_else(|| {
                 // Fallback: last block at or before target_slot
-                self.selected_chain.iter().rposition(|h| {
-                    self.blocks
-                        .get(h)
-                        .map_or(false, |b| b.slot <= target_slot)
-                })
+                self.selected_chain
+                    .iter()
+                    .rposition(|h| self.blocks.get(h).is_some_and(|b| b.slot <= target_slot))
             });
 
         let rolled_back = match cut_point {
             Some(idx) => {
-                let suffix: Vec<Hash32> =
-                    self.selected_chain.drain((idx + 1)..).rev().collect();
+                let suffix: Vec<Hash32> = self.selected_chain.drain((idx + 1)..).rev().collect();
                 let now = Instant::now();
                 for h in &suffix {
                     self.gc_schedule.insert(*h, now);
@@ -851,14 +847,10 @@ impl VolatileDB {
     pub fn walk_chain_back(&self, tip_hash: &Hash32) -> Vec<Hash32> {
         let mut chain = Vec::new();
         let mut current = *tip_hash;
-        loop {
-            if let Some(block) = self.blocks.get(&current) {
-                chain.push(current);
-                if self.blocks.contains_key(&block.prev_hash) {
-                    current = block.prev_hash;
-                } else {
-                    break;
-                }
+        while let Some(block) = self.blocks.get(&current) {
+            chain.push(current);
+            if self.blocks.contains_key(&block.prev_hash) {
+                current = block.prev_hash;
             } else {
                 break;
             }
@@ -874,7 +866,7 @@ impl VolatileDB {
             .filter(|(hash, _)| {
                 self.successors
                     .get(*hash)
-                    .map_or(true, |succs| succs.is_empty())
+                    .is_none_or(|succs| succs.is_empty())
             })
             .map(|(hash, block)| (*hash, block.slot, block.block_no))
             .collect()
@@ -896,8 +888,11 @@ impl VolatileDB {
         let (intersection, rollback, apply) = match intersection_idx {
             Some(idx) => {
                 let intersection_hash = self.selected_chain[idx];
-                let rollback: Vec<Hash32> =
-                    self.selected_chain[(idx + 1)..].iter().rev().copied().collect();
+                let rollback: Vec<Hash32> = self.selected_chain[(idx + 1)..]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect();
                 let intersection_pos_in_new =
                     new_chain.iter().position(|h| *h == intersection_hash);
                 let apply: Vec<Hash32> = match intersection_pos_in_new {
@@ -907,8 +902,7 @@ impl VolatileDB {
                 (intersection_hash, rollback, apply)
             }
             None => {
-                let rollback: Vec<Hash32> =
-                    self.selected_chain.iter().rev().copied().collect();
+                let rollback: Vec<Hash32> = self.selected_chain.iter().rev().copied().collect();
                 let anchor = self
                     .blocks
                     .get(&new_chain[0])

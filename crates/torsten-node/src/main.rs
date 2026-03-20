@@ -29,6 +29,8 @@ enum Command {
     Run(Box<RunArgs>),
     /// Import a Mithril snapshot for fast initial sync
     MithrilImport(MithrilImportArgs),
+    /// Dump ledger state at epoch boundaries (for cross-validation with cardano-streamer)
+    DumpSnapshot(DumpSnapshotArgs),
     /// Database inspection and maintenance tools
     Db(DbArgs),
 }
@@ -231,6 +233,30 @@ struct MithrilImportArgs {
     log: LogArgs,
 }
 
+#[derive(clap::Args, Debug)]
+struct DumpSnapshotArgs {
+    /// Path to the node configuration file
+    #[arg(long)]
+    config: PathBuf,
+
+    /// Path to the database directory (must contain immutable/ chunk files)
+    #[arg(long, default_value = "db")]
+    database_path: PathBuf,
+
+    /// Stop replaying at this slot (dump state at the epoch boundary at or before this slot).
+    /// If omitted, replays the entire chain and dumps at every epoch boundary.
+    #[arg(long)]
+    stop_slot: Option<u64>,
+
+    /// Output file path for JSON dumps. Each epoch's state is one JSON object per line.
+    /// Defaults to stdout if not specified.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    #[command(flatten)]
+    log: LogArgs,
+}
+
 fn build_logging_opts(log: &LogArgs) -> Result<logging::LoggingOpts> {
     let outputs: Result<Vec<logging::LogOutput>, _> =
         log.log_outputs.iter().map(|s| s.parse()).collect();
@@ -265,6 +291,7 @@ async fn main() -> Result<()> {
     let log_args = match &cli.command {
         Command::Run(ref args) => Some(&args.log),
         Command::MithrilImport(ref args) => Some(&args.log),
+        Command::DumpSnapshot(ref args) => Some(&args.log),
         Command::Db(_) => None,
     };
     let _log_guard = if let Some(log_args) = log_args {
@@ -276,8 +303,253 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Run(args) => run_node(*args).await,
         Command::MithrilImport(args) => run_mithril_import(args).await,
+        Command::DumpSnapshot(args) => run_dump_snapshot(args).await,
         Command::Db(args) => run_db_command(args).await,
     }
+}
+
+/// Replay blocks from ImmutableDB and dump ledger state at epoch boundaries.
+///
+/// Produces JSON output compatible with cardano-streamer's `dump-snapshot`
+/// format for cross-validation of epoch fees, reserves, treasury, and
+/// stake distribution.
+async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
+    use std::io::Write;
+
+    info!(
+        config = %args.config.display(),
+        database_path = %args.database_path.display(),
+        stop_slot = ?args.stop_slot,
+        "dump-snapshot: starting epoch-by-epoch ledger state dump"
+    );
+
+    // Load node config
+    let node_config = config::NodeConfig::load(&args.config)?;
+    let config_dir = args
+        .config
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    node_config.validate(&config_dir)?;
+
+    // Load genesis files and build protocol parameters (same as Node::new)
+    let mut protocol_params =
+        torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults();
+
+    let mut byron_epoch_length: u64 = 0;
+    if let Some(ref genesis_path) = node_config.byron_genesis_file {
+        let genesis_path = config_dir.join(genesis_path);
+        if let Ok((genesis, _hash)) = genesis::ByronGenesis::load_with_hash(&genesis_path) {
+            let k = genesis.security_param();
+            byron_epoch_length = 10 * k;
+            info!(k, epoch_len = byron_epoch_length, "Byron genesis loaded");
+        }
+    }
+
+    let mut shelley_genesis_opt: Option<genesis::ShelleyGenesis> = None;
+    if let Some(ref genesis_path) = node_config.shelley_genesis_file {
+        let genesis_path = config_dir.join(genesis_path);
+        if let Ok((genesis, _hash)) = genesis::ShelleyGenesis::load_with_hash(&genesis_path) {
+            genesis.apply_to_protocol_params(&mut protocol_params);
+            info!(epoch_len = genesis.epoch_length, "Shelley genesis loaded");
+            shelley_genesis_opt = Some(genesis);
+        }
+    }
+
+    if let Some(ref genesis_path) = node_config.alonzo_genesis_file {
+        let genesis_path = config_dir.join(genesis_path);
+        if let Ok(genesis) = genesis::AlonzoGenesis::load(&genesis_path) {
+            genesis.apply_to_protocol_params(&mut protocol_params);
+            info!("Alonzo genesis loaded");
+        }
+    }
+
+    if let Some(ref genesis_path) = node_config.conway_genesis_file {
+        let genesis_path = config_dir.join(genesis_path);
+        if let Ok(genesis) = genesis::ConwayGenesis::load(&genesis_path) {
+            genesis.apply_to_protocol_params(&mut protocol_params);
+            info!("Conway genesis loaded");
+        }
+    }
+
+    // Initialize fresh ledger state from genesis params
+    let mut ledger = torsten_ledger::LedgerState::new(protocol_params);
+
+    // Apply Shelley genesis configuration (epoch length, slot config, reserves)
+    if let Some(ref sg) = shelley_genesis_opt {
+        ledger.slot_config = sg.slot_config();
+        ledger.epoch_length = sg.epoch_length;
+        ledger.reserves = torsten_primitives::value::Lovelace(sg.max_lovelace_supply);
+    }
+
+    let immutable_dir = args.database_path.join("immutable");
+    if !immutable_dir.is_dir() {
+        anyhow::bail!(
+            "No immutable directory found at {}. Run mithril-import first.",
+            immutable_dir.display()
+        );
+    }
+
+    // Open output (file or stdout)
+    let mut output: Box<dyn Write> = match &args.output {
+        Some(path) => Box::new(std::io::BufWriter::new(std::fs::File::create(path)?)),
+        None => Box::new(std::io::stdout().lock()),
+    };
+
+    let stop_slot = args.stop_slot.unwrap_or(u64::MAX);
+    let mut last_epoch = u64::MAX;
+    let mut epoch_fees: u64 = 0;
+    let mut blocks_applied = 0u64;
+    let start_time = std::time::Instant::now();
+
+    info!("Replaying blocks from ImmutableDB...");
+
+    mithril::replay_from_chunk_files(&immutable_dir, |cbor| {
+        let block = torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
+            cbor,
+            byron_epoch_length,
+        )
+        .map_err(|e| anyhow::anyhow!("Block decode error: {e}"))?;
+
+        let block_slot = block.slot().0;
+        if block_slot > stop_slot {
+            return Err(anyhow::anyhow!("STOP"));
+        }
+
+        let block_fees: u64 = block.transactions.iter().map(|tx| tx.body.fee.0).sum();
+
+        if let Err(e) = ledger.apply_block(&block, torsten_ledger::BlockValidationMode::ApplyOnly) {
+            if !format!("{e}").contains("Block does not connect") {
+                tracing::warn!(slot = block_slot, "Block apply failed: {e}");
+            }
+            return Ok(());
+        }
+
+        epoch_fees += block_fees;
+        blocks_applied += 1;
+
+        let current_epoch = ledger.epoch.0;
+
+        // Dump state at each epoch transition
+        if last_epoch != u64::MAX && current_epoch > last_epoch {
+            let total_stake: u64 = ledger
+                .pool_params
+                .keys()
+                .filter_map(|pool_id| {
+                    ledger
+                        .snapshots
+                        .set
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pool_id))
+                        .map(|s| s.0)
+                })
+                .sum();
+
+            let pool_distribution: Vec<serde_json::Value> = ledger
+                .pool_params
+                .iter()
+                .filter_map(|(pool_id, _)| {
+                    let stake = ledger
+                        .snapshots
+                        .set
+                        .as_ref()
+                        .and_then(|s| s.pool_stake.get(pool_id))
+                        .map(|s| s.0)
+                        .unwrap_or(0);
+                    if stake > 0 {
+                        Some(serde_json::json!({
+                            "poolId": hex::encode(pool_id.as_bytes()),
+                            "stake": stake,
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let era_name = format!("{}", ledger.era);
+            let snapshot = serde_json::json!({
+                "epoch": last_epoch,
+                "epochFees": epoch_fees,
+                "reserves": ledger.reserves.0,
+                "treasury": ledger.treasury.0,
+                "totalStake": total_stake,
+                "totalPools": ledger.pool_params.len(),
+                "poolDistribution": pool_distribution,
+                "snapshotEraName": era_name,
+            });
+
+            serde_json::to_writer(&mut output, &snapshot)
+                .map_err(|e| anyhow::anyhow!("JSON write error: {e}"))?;
+            writeln!(output).map_err(|e| anyhow::anyhow!("Write error: {e}"))?;
+
+            info!(
+                epoch = last_epoch,
+                treasury = ledger.treasury.0,
+                reserves = ledger.reserves.0,
+                pools = ledger.pool_params.len(),
+                fees = epoch_fees,
+                era = %era_name,
+                "Epoch snapshot dumped"
+            );
+
+            epoch_fees = 0;
+        }
+
+        last_epoch = current_epoch;
+        Ok(())
+    })
+    .or_else(|e| {
+        if format!("{e}").contains("STOP") {
+            Ok(0)
+        } else {
+            Err(e)
+        }
+    })?;
+
+    // Dump final epoch
+    if blocks_applied > 0 && last_epoch != u64::MAX {
+        let total_stake: u64 = ledger
+            .pool_params
+            .keys()
+            .filter_map(|pool_id| {
+                ledger
+                    .snapshots
+                    .set
+                    .as_ref()
+                    .and_then(|s| s.pool_stake.get(pool_id))
+                    .map(|s| s.0)
+            })
+            .sum();
+
+        let snapshot = serde_json::json!({
+            "epoch": last_epoch,
+            "epochFees": epoch_fees,
+            "reserves": ledger.reserves.0,
+            "treasury": ledger.treasury.0,
+            "totalStake": total_stake,
+            "totalPools": ledger.pool_params.len(),
+            "poolDistribution": [],
+            "snapshotEraName": format!("{}", ledger.era),
+        });
+
+        serde_json::to_writer(&mut output, &snapshot)?;
+        writeln!(output)?;
+    }
+
+    let elapsed = start_time.elapsed();
+    info!(
+        blocks = blocks_applied,
+        epochs = if last_epoch == u64::MAX {
+            0
+        } else {
+            last_epoch + 1
+        },
+        elapsed_secs = elapsed.as_secs(),
+        "dump-snapshot complete"
+    );
+
+    Ok(())
 }
 
 async fn run_db_command(args: DbArgs) -> Result<()> {
