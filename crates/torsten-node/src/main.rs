@@ -403,6 +403,22 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         );
     }
 
+    // Set the Shelley transition epoch and Byron epoch length.
+    // On preview/preprod (no Byron era), transition = 0 and blocks start
+    // directly in Alonzo. On mainnet, transition = 208 (Byron epochs 0-207).
+    // The default LedgerState uses mainnet values (208/21600) which would
+    // produce incorrect epoch boundaries for other networks.
+    let network_magic = node_config
+        .network_magic
+        .unwrap_or_else(|| node_config.network.magic());
+    let shelley_transition_epoch =
+        crate::node::epoch::shelley_transition_epoch_for_magic(network_magic);
+    ledger.set_shelley_transition(shelley_transition_epoch, byron_epoch_length);
+    info!(
+        network_magic,
+        shelley_transition_epoch, byron_epoch_length, "HFC epoch configuration set"
+    );
+
     let immutable_dir = args.database_path.join("immutable");
     if !immutable_dir.is_dir() {
         anyhow::bail!(
