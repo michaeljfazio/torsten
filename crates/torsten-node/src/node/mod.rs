@@ -2171,8 +2171,7 @@ impl Node {
                 // Wall clock slot is at or behind chain tip — not our slot to forge
                 debug!(
                     wall_clock = wc.0,
-                    tip_slot,
-                    "Forge: wall clock slot <= tip slot, skipping"
+                    tip_slot, "Forge: wall clock slot <= tip slot, skipping"
                 );
                 return;
             }

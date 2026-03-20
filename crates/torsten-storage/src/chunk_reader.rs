@@ -203,6 +203,10 @@ mod backend {
 
     impl ChunkReader for IoUringChunkReader {
         fn read_range(&self, path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
+            // Zero-length read is an empty range — return None to match mmap backend.
+            if len == 0 {
+                return None;
+            }
             let file = fs::File::open(path).ok()?;
             let fd = io_uring::types::Fd(file.as_raw_fd());
             let mut buf = vec![0u8; len];
