@@ -337,12 +337,22 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         torsten_primitives::protocol_params::ProtocolParameters::mainnet_defaults();
 
     let mut byron_epoch_length: u64 = 0;
+    let mut byron_initial_funds: u64 = 0;
     if let Some(ref genesis_path) = node_config.byron_genesis_file {
         let genesis_path = config_dir.join(genesis_path);
         if let Ok((genesis, _hash)) = genesis::ByronGenesis::load_with_hash(&genesis_path) {
             let k = genesis.security_param();
             byron_epoch_length = 10 * k;
-            info!(k, epoch_len = byron_epoch_length, "Byron genesis loaded");
+            // Sum initial fund distribution (nonAvvmBalances + avvmDistr)
+            // These funds are distributed at genesis and must be subtracted
+            // from reserves to match the Haskell reference implementation.
+            byron_initial_funds = genesis.initial_utxos().iter().map(|e| e.lovelace).sum();
+            info!(
+                k,
+                epoch_len = byron_epoch_length,
+                initial_funds = byron_initial_funds,
+                "Byron genesis loaded"
+            );
         }
     }
 
@@ -379,7 +389,18 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     if let Some(ref sg) = shelley_genesis_opt {
         ledger.slot_config = sg.slot_config();
         ledger.epoch_length = sg.epoch_length;
-        ledger.reserves = torsten_primitives::value::Lovelace(sg.max_lovelace_supply);
+        // reserves = maxLovelaceSupply - initial fund distribution (Byron genesis)
+        // The Byron nonAvvmBalances are distributed at genesis and enter
+        // circulation immediately, reducing the reserve pool.
+        ledger.reserves = torsten_primitives::value::Lovelace(
+            sg.max_lovelace_supply.saturating_sub(byron_initial_funds),
+        );
+        info!(
+            max_supply = sg.max_lovelace_supply,
+            initial_funds = byron_initial_funds,
+            reserves = ledger.reserves.0,
+            "Reserves initialized (maxSupply - initialFunds)"
+        );
     }
 
     let immutable_dir = args.database_path.join("immutable");
