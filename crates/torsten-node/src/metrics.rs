@@ -372,6 +372,8 @@ pub struct NodeMetrics {
     pub drep_count: AtomicU64,
     pub proposal_count: AtomicU64,
     pub pool_count: AtomicU64,
+    pub disk_total_bytes: AtomicU64,
+    pub disk_used_bytes: AtomicU64,
     pub disk_available_bytes: AtomicU64,
     // Block production metrics
     pub leader_checks_total: AtomicU64,
@@ -458,6 +460,8 @@ impl NodeMetrics {
             drep_count: AtomicU64::new(0),
             proposal_count: AtomicU64::new(0),
             pool_count: AtomicU64::new(0),
+            disk_total_bytes: AtomicU64::new(0),
+            disk_used_bytes: AtomicU64::new(0),
             disk_available_bytes: AtomicU64::new(0),
             leader_checks_total: AtomicU64::new(0),
             leader_checks_not_elected: AtomicU64::new(0),
@@ -556,6 +560,14 @@ impl NodeMetrics {
 
     pub fn set_disk_available_bytes(&self, bytes: u64) {
         self.disk_available_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn set_disk_total_bytes(&self, bytes: u64) {
+        self.disk_total_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn set_disk_used_bytes(&self, bytes: u64) {
+        self.disk_used_bytes.store(bytes, Ordering::Relaxed);
     }
 
     /// Record that a block was just received (updates timestamp to now).
@@ -867,6 +879,16 @@ impl NodeMetrics {
                 "torsten_pool_count",
                 "Number of registered stake pools",
                 &self.pool_count,
+            ),
+            (
+                "torsten_disk_total_bytes",
+                "Total disk space in bytes on the database volume",
+                &self.disk_total_bytes,
+            ),
+            (
+                "torsten_disk_used_bytes",
+                "Used disk space in bytes on the database volume",
+                &self.disk_used_bytes,
             ),
             (
                 "torsten_disk_available_bytes",

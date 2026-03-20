@@ -3640,6 +3640,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "libc",
  "ratatui",
  "reqwest",
  "tokio",

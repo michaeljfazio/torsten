@@ -34,7 +34,7 @@
 //! ```
 
 use crate::app::{App, NodeStatus};
-use crate::disk;
+
 use crate::layout::{compute_layout, LayoutMode};
 use crate::theme::Theme;
 use crate::widgets::epoch_progress::EpochProgress;
@@ -948,18 +948,17 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         ));
     }
 
-    // ---- Row 4+: Disk space ----
+    // ---- Row 4+: Disk space (from Prometheus metrics) ----
     //
-    // Query the filesystem containing the database directory.  The path is
-    // supplied via `--db-path`; when absent the rows are simply omitted.
-    //
-    // Layout mirrors the Memory row: a compact inline bar + percentage label
-    // when there is enough width, otherwise just the key/value pair.
-    //
-    //   Disk         47.3 GB  [██████░░░░]  61.2%
-    //   Disk free    18.1 GB
-    if let Some(ds) = disk::query(&app.db_path) {
-        let disk_ratio = ds.usage_ratio().clamp(0.0, 1.0);
+    // Read disk stats from the node's metrics endpoint rather than querying
+    // the filesystem directly.  The node populates torsten_disk_total_bytes,
+    // torsten_disk_used_bytes, and torsten_disk_available_bytes.
+    let disk_total = app.metrics.get_u64("torsten_disk_total_bytes");
+    let disk_used = app.metrics.get_u64("torsten_disk_used_bytes");
+    let disk_free = app.metrics.get_u64("torsten_disk_available_bytes");
+
+    if disk_total > 0 {
+        let disk_ratio = (disk_used as f64 / disk_total as f64).clamp(0.0, 1.0);
         let disk_pct = disk_ratio * 100.0;
 
         // Color thresholds: green < 70 %, yellow 70–90 %, red > 90 %.
@@ -971,7 +970,7 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             theme.success
         };
 
-        let disk_used_str = App::format_bytes(ds.used_bytes);
+        let disk_used_str = App::format_bytes(disk_used);
         let disk_pct_label = format!(" {:.1}%", disk_pct);
 
         // Width available for the inline bar (same calculation as Memory row).
@@ -980,7 +979,6 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             .min(16);
 
         if disk_gauge_w >= 4 {
-            // Wide layout: label + used bytes + gap + smooth bar + pct.
             let bar_spans = build_smooth_bar(disk_ratio, disk_gauge_w, disk_color, theme);
             let mut disk_spans = vec![
                 Span::raw(" "),
@@ -1001,15 +999,12 @@ fn render_resources_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             ));
             lines.push(Line::from(disk_spans));
         } else {
-            // Narrow panel: label + used bytes only.
             lines.push(kv_aligned("Disk", disk_used_str, disk_color, theme, col_w));
         }
 
-        // Secondary row: free space — shown in muted color as a quick
-        // "how much room is left" indicator without repeating total bytes.
         lines.push(kv_aligned(
             "Disk free",
-            App::format_bytes(ds.free_bytes),
+            App::format_bytes(disk_free),
             theme.muted,
             theme,
             col_w,

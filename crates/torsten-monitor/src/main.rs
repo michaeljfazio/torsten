@@ -53,7 +53,7 @@ use metrics::fetch_metrics;
 const DEFAULT_METRICS_URL: &str = "http://localhost:12798/metrics";
 
 /// Poll interval for fetching metrics from the Prometheus endpoint.
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// CLI arguments for torsten-monitor.
 #[derive(Parser, Debug)]

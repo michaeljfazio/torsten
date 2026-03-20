@@ -44,6 +44,33 @@ pub fn check_disk_space(path: &Path) -> std::io::Result<u64> {
     available_space(path)
 }
 
+/// Returns (total_bytes, used_bytes) for the filesystem containing `path`.
+/// Returns None if the statvfs call fails or on non-Unix platforms.
+pub fn check_disk_total_used(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let c_path = CString::new(path.to_string_lossy().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if ret != 0 {
+            return None;
+        }
+        #[allow(clippy::unnecessary_cast)]
+        let block_size = stat.f_frsize as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let total = stat.f_blocks as u64 * block_size;
+        #[allow(clippy::unnecessary_cast)]
+        let used = total.saturating_sub(stat.f_bfree as u64 * block_size);
+        Some((total, used))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Classify available bytes into a severity level.
 pub fn classify_disk_space(available_bytes: u64) -> DiskSpaceLevel {
     if available_bytes < FATAL_BYTES {
@@ -92,6 +119,11 @@ pub async fn start_disk_monitor(
         match check_disk_space(&database_path) {
             Ok(available) => {
                 metrics.set_disk_available_bytes(available);
+                // Also update total/used metrics for the monitor dashboard.
+                if let Some((total, used)) = check_disk_total_used(&database_path) {
+                    metrics.set_disk_total_bytes(total);
+                    metrics.set_disk_used_bytes(used);
+                }
                 let level = classify_disk_space(available);
                 // Publish the current disk space level so the sync loop can react
                 let _ = disk_level_tx.send(level);

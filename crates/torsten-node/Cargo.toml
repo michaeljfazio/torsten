@@ -57,9 +57,10 @@ memmap2 = { workspace = true }
 crc32fast = { workspace = true }
 fs2 = { workspace = true }
 rayon = { workspace = true }
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
