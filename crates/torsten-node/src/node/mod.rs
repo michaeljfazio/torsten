@@ -1278,11 +1278,34 @@ impl Node {
                         continue;
                     }
 
-                    // Extract relay addresses from registered pools
-                    let relays: Vec<(String, u16)> = {
+                    // Extract relay addresses from registered pools and
+                    // identify Big Ledger Peers (top 90% of active stake).
+                    let (relays, blp_relays): (Vec<(String, u16)>, Vec<(String, u16)>) = {
                         let ls = ledger.read().await;
+
+                        // Build pool_id -> stake map for BLP classification
+                        let pool_stakes: Vec<_> = ls
+                            .pool_params
+                            .keys()
+                            .map(|pool_id| {
+                                let stake = ls
+                                    .snapshots
+                                    .set
+                                    .as_ref()
+                                    .and_then(|s| s.pool_stake.get(pool_id))
+                                    .map(|s| s.0)
+                                    .unwrap_or(0);
+                                (pool_id.as_bytes().to_vec(), stake)
+                            })
+                            .collect();
+                        let (big_pool_ids, _) = crate::gsm::identify_big_ledger_peers(&pool_stakes);
+                        let big_pool_set: std::collections::HashSet<Vec<u8>> =
+                            big_pool_ids.into_iter().collect();
+
                         let mut relays = Vec::new();
-                        for pool_reg in ls.pool_params.values() {
+                        let mut blp_relays = Vec::new();
+                        for (pool_id, pool_reg) in ls.pool_params.iter() {
+                            let is_blp = big_pool_set.contains(&pool_id.as_bytes().to_vec());
                             for relay in &pool_reg.relays {
                                 match relay {
                                     torsten_primitives::transaction::Relay::SingleHostAddr {
@@ -1295,7 +1318,10 @@ impl Node {
                                                 "{}.{}.{}.{}",
                                                 ipv4[0], ipv4[1], ipv4[2], ipv4[3]
                                             );
-                                            relays.push((addr, *port));
+                                            relays.push((addr.clone(), *port));
+                                            if is_blp {
+                                                blp_relays.push((addr, *port));
+                                            }
                                         }
                                     }
                                     torsten_primitives::transaction::Relay::SingleHostName {
@@ -1304,17 +1330,23 @@ impl Node {
                                     } => {
                                         if let Some(port) = port {
                                             relays.push((dns_name.clone(), *port));
+                                            if is_blp {
+                                                blp_relays.push((dns_name.clone(), *port));
+                                            }
                                         }
                                     }
                                     torsten_primitives::transaction::Relay::MultiHostName {
                                         dns_name,
                                     } => {
                                         relays.push((dns_name.clone(), 3001));
+                                        if is_blp {
+                                            blp_relays.push((dns_name.clone(), 3001));
+                                        }
                                     }
                                 }
                             }
                         }
-                        relays
+                        (relays, blp_relays)
                     };
 
                     if relays.is_empty() {
@@ -1344,14 +1376,33 @@ impl Node {
                             }
                         }
                     }
+                    // Also resolve BLP relay addresses
+                    let blp_set: std::collections::HashSet<String> =
+                        blp_relays.iter().map(|(h, p)| format!("{h}:{p}")).collect();
+                    let mut blp_resolved = std::collections::HashSet::new();
+                    for addr in &resolved_addrs {
+                        // Check if this resolved address came from a BLP relay
+                        // (approximate: check if any BLP relay resolves to this addr)
+                        if blp_set
+                            .iter()
+                            .any(|blp_hp| blp_hp.ends_with(&format!(":{}", addr.port())))
+                        {
+                            blp_resolved.insert(*addr);
+                        }
+                    }
+
                     if !resolved_addrs.is_empty() {
                         let mut pm_w = pm.write().await;
                         for socket_addr in &resolved_addrs {
                             pm_w.add_ledger_peer(*socket_addr);
+                            if blp_resolved.contains(socket_addr) {
+                                pm_w.add_big_ledger_peer(*socket_addr);
+                            }
                         }
                         let added = resolved_addrs.len();
+                        let blp_count = blp_resolved.len();
                         debug!(
-                            "Ledger peer discovery: +{added} peers from {} relays, {}",
+                            "Ledger peer discovery: +{added} peers ({blp_count} BLPs) from {} relays, {}",
                             relays.len(),
                             pm_w.stats()
                         );
@@ -1847,10 +1898,25 @@ impl Node {
                 break;
             }
 
-            // Get peers to connect to from the peer manager
+            // Get peers to connect to from the peer manager.
+            // During PreSyncing/Syncing (Genesis), prefer BLP peers for block download.
             let targets: Vec<std::net::SocketAddr> = {
                 let pm = peer_manager.read().await;
-                pm.peers_to_connect()
+                let gsm_state = self.gsm.read().await.state();
+                let mut peers = pm.peers_to_connect();
+                if gsm_state != crate::gsm::GenesisSyncState::CaughtUp {
+                    // Sort BLPs first for Genesis-mode sync
+                    peers.sort_by_key(|addr| {
+                        if pm.peer_category(addr)
+                            == Some(torsten_network::PeerCategory::BigLedgerPeer)
+                        {
+                            0 // BLPs first
+                        } else {
+                            1
+                        }
+                    });
+                }
+                peers
             };
 
             // If peer manager has no targets, fall back to topology list
