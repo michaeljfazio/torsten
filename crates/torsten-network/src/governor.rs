@@ -143,7 +143,7 @@ impl Default for GovernorConfig {
             soft_limit: 384,
             churn_interval_normal_secs: 3300, // 55 minutes
             churn_interval_sync_secs: 900,    // 15 minutes
-            stall_demotion_cycles: 6,         // 6 × 30 s = 3 minutes
+            stall_demotion_cycles: u32::MAX,  // Disabled: governor connections don't run ChainSync
             error_demotion_threshold: 5,      // 5 accumulated failures
         }
     }
