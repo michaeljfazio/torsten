@@ -105,9 +105,11 @@ const MAX_TX_BODY_REQUEST: usize = 1000;
 /// Maximum reassembled message size for the TxSubmission2 responder/initiator (8 MB).
 const MAX_REASSEMBLY_SIZE: usize = 8 * 1024 * 1024;
 
-/// Timeout for the remote peer's first MsgInit on TxSubmission2.
-/// After this long with no MsgInit the remote is not participating.
-const TXSUB_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Timeout for the TxSubmission2 MsgInit exchange.
+/// The Haskell node's Server sleeps 60 seconds (`threadDelay 60`) before
+/// reading MsgInit, so our Client-side timeout must exceed that.
+/// 90 seconds provides a comfortable margin.
+const TXSUB_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Timeout for subsequent MsgRequestTxIds (blocking requests may hold longer).
 const TXSUB_BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -279,26 +281,30 @@ impl DuplexPeerConnection {
             .parse()
             .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
 
-        // --- TxSubmission2 responder task ----------------------------------------
+        // --- TxSubmission2 CLIENT task (subscribe_client channel) ----------------
         //
-        // Handles incoming TxSubmission2 protocol messages from the remote peer.
-        // When the remote sends MsgRequestTxIds we reply with our current mempool
-        // contents; when they send MsgRequestTxs we reply with the raw CBOR bytes.
-        // The task exits cleanly on MsgDone or channel close.
+        // In TxSubmission2, the **Client** (outbound/initiator) SERVES its own
+        // mempool to the remote Server.  The Client sends MsgInit, then waits
+        // for the remote Server to send MsgRequestTxIds, and replies with
+        // MsgReplyTxIds / MsgReplyTxs from our mempool.
+        //
+        // This matches Haskell's `txSubmissionOutbound`.
         let txsub_responder = tokio::spawn(serve_tx_submission(
-            txsub_server_channel,
+            txsub_client_channel,
             mempool.clone(),
             remote_addr,
         ));
 
-        // --- TxSubmission2 initiator task ----------------------------------------
+        // --- TxSubmission2 SERVER task (subscribe_server channel) ----------------
         //
-        // Sends MsgInit, then periodically sends MsgRequestTxIds to pull
-        // the remote peer's mempool txs into our local mempool.  This is the
-        // symmetric counterpart to the responder above, and implements the
-        // standard full-duplex N2N tx propagation behaviour from cardano-node.
+        // The **Server** (inbound/responder) PULLS the remote Client's mempool
+        // txs into our local mempool.  The Server receives MsgInit from the
+        // remote Client, then sends MsgRequestTxIds and receives MsgReplyTxIds
+        // / MsgReplyTxs.
+        //
+        // This matches Haskell's `txSubmissionInboundV2`.
         let txsub_initiator = tokio::spawn(pull_tx_submission(
-            txsub_client_channel,
+            txsub_server_channel,
             mempool,
             remote_addr,
         ));
@@ -414,30 +420,25 @@ pub async fn serve_tx_submission(
 }
 
 /// Inner function that returns `Result` so we can use `?` throughout.
+///
+/// This is the TxSubmission2 **Client** (outbound/initiator) role.
+/// Per the Haskell spec (`txSubmissionOutbound`), the Client:
+///   1. Sends MsgInit [6]
+///   2. Waits for the Server to send MsgRequestTxIds
+///   3. Replies with MsgReplyTxIds from our mempool
+///   4. Waits for MsgRequestTxs
+///   5. Replies with MsgReplyTxs
+///
+/// The Client DOES NOT expect MsgInit back — only the Client sends it.
 async fn serve_tx_submission_inner(
     mut channel: AgentChannel,
     mempool: Arc<dyn MempoolProvider>,
     peer_addr: SocketAddr,
 ) -> Result<(), DuplexError> {
-    // Wait for MsgInit from the remote peer.  Use a short timeout — if the
-    // peer does not initiate TxSubmission2 within this window they are not
-    // participating in the protocol on this connection.
-    let init_payload = tokio::time::timeout(TXSUB_INIT_TIMEOUT, recv_msg(&mut channel))
-        .await
-        .map_err(|_| DuplexError::Timeout("waiting for TxSubmission2 MsgInit".into()))??;
-
-    let init_tag = decode_first_tag(&init_payload)?;
-    if init_tag != 6 {
-        return Err(DuplexError::TxSubmission(format!(
-            "expected MsgInit (6) from peer, got tag {init_tag}"
-        )));
-    }
-    debug!(%peer_addr, "TxSubmission2 responder: received MsgInit from peer");
-
-    // Reply with our own MsgInit [6].
-    let init_reply = encode_msg_init();
-    send_msg(&mut channel, &init_reply).await?;
-    info!(%peer_addr, "TxSubmission2 responder: init handshake complete");
+    // Step 1: Send MsgInit [6] — only the Client sends this.
+    let init_msg = encode_msg_init();
+    send_msg(&mut channel, &init_msg).await?;
+    info!(%peer_addr, "TxSubmission2 client: sent MsgInit, waiting for server requests");
 
     // Track inflight tx IDs (sent to this peer, not yet acknowledged).
     // This vector is ordered: front = oldest, back = newest.  We drain
@@ -617,30 +618,38 @@ pub async fn pull_tx_submission(
 }
 
 /// Inner function that returns `Result` so we can use `?` throughout.
+///
+/// This is the TxSubmission2 **Server** (inbound/responder) role.
+/// Per the Haskell spec (`txSubmissionInboundV2`), the Server:
+///   1. Receives MsgInit [6] from the remote Client (does NOT send MsgInit)
+///   2. Sends MsgRequestTxIds to pull the remote Client's mempool tx IDs
+///   3. Receives MsgReplyTxIds
+///   4. Sends MsgRequestTxs for unknown tx IDs
+///   5. Receives MsgReplyTxs, adds txs to local mempool
+///
+/// Note: The Haskell Server has a 60-second warmup delay (`threadDelay 60`)
+/// before reading MsgInit. We implement this as a timeout on receiving MsgInit.
 async fn pull_tx_submission_inner(
     mut channel: AgentChannel,
     mempool: Arc<dyn MempoolProvider>,
     peer_addr: SocketAddr,
 ) -> Result<(), DuplexError> {
-    // Step 1: Send MsgInit to the remote peer.
-    let init_msg = encode_msg_init();
-    send_msg(&mut channel, &init_msg).await?;
-    debug!(%peer_addr, "TxSubmission2 initiator: sent MsgInit");
-
-    // Step 2: Wait for the peer's MsgInit reply.
+    // Step 1: Receive MsgInit from the remote Client.
+    // The Server does NOT send MsgInit — only the Client sends it.
+    // Use a generous timeout because the peer may have warmup delays.
     let init_payload = tokio::time::timeout(TXSUB_INIT_TIMEOUT, recv_msg(&mut channel))
         .await
         .map_err(|_| {
-            DuplexError::Timeout("TxSubmission2 initiator: waiting for peer MsgInit".into())
+            DuplexError::Timeout("TxSubmission2 server: waiting for client MsgInit".into())
         })??;
 
     let init_tag = decode_first_tag(&init_payload)?;
     if init_tag != 6 {
         return Err(DuplexError::TxSubmissionInitiator(format!(
-            "expected MsgInit (6) from peer, got tag {init_tag}"
+            "expected MsgInit (6) from client, got tag {init_tag}"
         )));
     }
-    info!(%peer_addr, "TxSubmission2 initiator: init handshake complete — beginning tx polling");
+    info!(%peer_addr, "TxSubmission2 server: received MsgInit — beginning tx polling");
 
     // Track tx IDs received from this peer but not yet acknowledged.
     // pending_ack is sent as ack_count in the next MsgRequestTxIds.
