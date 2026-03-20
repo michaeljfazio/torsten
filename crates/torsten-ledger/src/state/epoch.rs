@@ -158,18 +158,42 @@ impl LedgerState {
             "Epoch snapshot: stake distribution rebuilt from UTxO set"
         );
 
+        // Block production data for the mark snapshot.
+        //
+        // In Haskell, `incrBlocks` only counts non-overlay blocks. When d >= 0.8,
+        // ALL slots are overlay slots, so BlocksMade is empty — pools produced no
+        // "eligible" blocks. We must match this behavior: when d >= 0.8 during the
+        // epoch that just ended, the mark captures ZERO block counts.
+        //
+        // d is read from the CURRENT protocol params (which were in effect during
+        // the epoch that just ended, since param updates are applied at the START
+        // of the epoch boundary before the mark is created).
+        let d_num = self.protocol_params.d.numerator as f64;
+        let d_den = self.protocol_params.d.denominator.max(1) as f64;
+        let d_value = if self.protocol_params.protocol_version_major >= 7 {
+            0.0 // Babbage+ always d=0
+        } else {
+            d_num / d_den
+        };
+        let (mark_block_count, mark_blocks_by_pool) = if d_value >= 0.8 {
+            // All overlay → no non-overlay blocks counted (matches Haskell incrBlocks)
+            (0u64, Arc::new(HashMap::new()))
+        } else {
+            (
+                self.epoch_block_count,
+                Arc::clone(&self.epoch_blocks_by_pool),
+            )
+        };
+
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
             delegations: Arc::clone(&self.delegations),
             pool_stake,
             pool_params: Arc::clone(&self.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
-            // Capture the epoch that just ended's performance data.
-            // After three rotations this reaches "go" and is used by
-            // calculate_rewards() — matching Haskell's RUPD rule.
             epoch_fees: self.epoch_fees,
-            epoch_block_count: self.epoch_block_count,
-            epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
+            epoch_block_count: mark_block_count,
+            epoch_blocks_by_pool: mark_blocks_by_pool,
         });
 
         // Process pending pool retirements for this epoch
@@ -202,13 +226,16 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
-        // Apply pre-Conway protocol parameter update proposals (PPUP rule).
-        // In Shelley-Babbage, genesis delegates submit update proposals targeting epoch E.
-        // At the epoch boundary E -> E+1, proposals targeting E are evaluated:
-        // if enough distinct genesis delegates proposed updates (>= update_quorum),
-        // their proposals are merged and applied to take effect in epoch E+1.
-        // Note: self.epoch still holds the OLD epoch at this point (updated at end).
-        if let Some(proposals) = self.pending_pp_updates.remove(&self.epoch) {
+        // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
+        //
+        // In Haskell, proposals targeting epoch E are evaluated at the (E-1)→E
+        // boundary by the UPEC rule (within NEWEPOCH). The updated params become
+        // `curPParams` for epoch E. Proposals are in `sgsCurProposals` which
+        // were promoted from `sgsFutureProposals` at the previous boundary.
+        //
+        // We use `new_epoch` as the key because proposals targeting epoch N
+        // should take effect when epoch N starts (= at the (N-1)→N boundary).
+        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::with_capacity(proposals.len());
