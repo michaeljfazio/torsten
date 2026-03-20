@@ -1428,6 +1428,14 @@ impl Node {
         //    (5 s) has elapsed, rather than waiting up to 30 s for the next
         //    full evaluation cycle.  This keeps peers visible as Warm in the
         //    TUI for the intended dwell period without adding latency.
+        // Shared set of peer addresses managed by the sync loop.
+        // The governor skips Connect events for these addresses to avoid
+        // creating duplicate TCP connections. Declared here so both the
+        // governor task and sync loop can access it.
+        let sync_managed_peers: Arc<
+            tokio::sync::RwLock<std::collections::HashSet<std::net::SocketAddr>>,
+        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+
         {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
@@ -1460,6 +1468,8 @@ impl Node {
                     ..Default::default()
                 }
             };
+
+            let gov_sync_managed = sync_managed_peers.clone();
 
             // Persistent map of live governor-managed DuplexPeerConnections.
             //
@@ -1582,6 +1592,15 @@ impl Node {
                                     addrs_to_disconnect.push(*addr);
                                 }
                                 GovernorEvent::Connect(addr) => {
+                                    // Skip if sync loop already manages this peer.
+                                    // Prevents duplicate TCP connections per peer.
+                                    if gov_sync_managed.read().await.contains(addr) {
+                                        debug!(
+                                            %addr,
+                                            "Governor: skipping Connect — peer managed by sync loop"
+                                        );
+                                        continue;
+                                    }
                                     // Skip if we already have an in-flight
                                     // connect attempt for this address.
                                     if connecting_peers.contains(addr) {
@@ -1915,6 +1934,9 @@ impl Node {
             let (mut active_client, peer_addr) = match client {
                 Some(c) => {
                     retry_count = 0;
+                    // Register this peer as sync-managed so the governor
+                    // doesn't create a duplicate connection.
+                    sync_managed_peers.write().await.insert(c.1);
                     c
                 }
                 None => {
@@ -2244,9 +2266,13 @@ impl Node {
                     if *shutdown_rx.borrow() {
                         break;
                     }
+                    // Unregister from sync-managed so governor can connect.
+                    sync_managed_peers.write().await.remove(&peer_addr);
                     info!("Peer disconnected, reconnecting...");
                 }
                 Err(e) => {
+                    // Unregister from sync-managed so governor can connect.
+                    sync_managed_peers.write().await.remove(&peer_addr);
                     // Mark as failed (not just disconnected) so PeerManager
                     // deprioritizes this peer on the next connection attempt.
                     // This is important after sleep/hibernate where stale peers
