@@ -230,23 +230,23 @@
 <h2 id="key-dependencies"><a class="header" href="#key-dependencies">Key Dependencies</a></h2>
 <p>Torsten leverages the <a href="https://github.com/txpipe/pallas">pallas</a> family of crates (v1.0.0-alpha.5) for Cardano wire-format compatibility:</p>
 <ul>
-<li><strong>pallas-network</strong> -- Ouroboros multiplexer and handshake</li>
-<li><strong>pallas-codec</strong> -- CBOR encoding/decoding</li>
-<li><strong>pallas-primitives</strong> -- Cardano primitive types</li>
-<li><strong>pallas-traverse</strong> -- Multi-era block traversal</li>
-<li><strong>pallas-crypto</strong> -- Cryptographic primitives</li>
-<li><strong>pallas-addresses</strong> -- Address parsing and construction</li>
+<li><strong>pallas-network</strong> — Ouroboros multiplexer and handshake</li>
+<li><strong>pallas-codec</strong> — CBOR encoding/decoding</li>
+<li><strong>pallas-primitives</strong> — Cardano primitive types</li>
+<li><strong>pallas-traverse</strong> — Multi-era block traversal</li>
+<li><strong>pallas-crypto</strong> — Cryptographic primitives</li>
+<li><strong>pallas-addresses</strong> — Address parsing and construction</li>
 </ul>
 <p>Other key dependencies:</p>
 <ul>
-<li><strong>tokio</strong> -- Async runtime</li>
-<li><strong>cardano-lsm</strong> -- Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)</li>
-<li><strong>minicbor</strong> -- CBOR encoding for custom types</li>
-<li><strong>ed25519-dalek</strong> -- Ed25519 signatures</li>
-<li><strong>blake2b_simd</strong> -- SIMD-accelerated Blake2b hashing</li>
-<li><strong>uplc</strong> -- Plutus CEK machine for script evaluation</li>
-<li><strong>clap</strong> -- CLI argument parsing</li>
-<li><strong>tracing</strong> -- Structured logging</li>
+<li><strong>tokio</strong> — Async runtime</li>
+<li><strong>torsten-lsm</strong> — Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)</li>
+<li><strong>minicbor</strong> — CBOR encoding for custom types</li>
+<li><strong>ed25519-dalek</strong> — Ed25519 signatures</li>
+<li><strong>blake2b_simd</strong> — SIMD-accelerated Blake2b hashing</li>
+<li><strong>uplc</strong> — Plutus CEK machine for script evaluation</li>
+<li><strong>clap</strong> — CLI argument parsing</li>
+<li><strong>tracing</strong> — Structured logging</li>
 </ul>
 <h2 id="design-principles"><a class="header" href="#design-principles">Design Principles</a></h2>
 <h3 id="zero-warning-policy"><a class="header" href="#zero-warning-policy">Zero-Warning Policy</a></h3>

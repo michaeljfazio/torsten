@@ -186,25 +186,25 @@
 <h2 id="why-torsten"><a class="header" href="#why-torsten">Why Torsten?</a></h2>
 <p>The Cardano ecosystem benefits from client diversity. Running multiple independent node implementations strengthens the network by:</p>
 <ul>
-<li><strong>Resilience</strong> -- A bug in one implementation does not bring down the entire network.</li>
-<li><strong>Performance</strong> -- Rust's zero-cost abstractions and memory safety without garbage collection enable high-throughput block processing.</li>
-<li><strong>Verification</strong> -- An independent implementation validates the Cardano specification against the reference Haskell node, catching ambiguities and edge cases.</li>
-<li><strong>Accessibility</strong> -- A Rust codebase broadens the pool of developers who can contribute to Cardano infrastructure.</li>
+<li><strong>Resilience</strong> — A bug in one implementation does not bring down the entire network.</li>
+<li><strong>Performance</strong> — Rust's zero-cost abstractions and memory safety without garbage collection enable high-throughput block processing.</li>
+<li><strong>Verification</strong> — An independent implementation validates the Cardano specification against the reference Haskell node, catching ambiguities and edge cases.</li>
+<li><strong>Accessibility</strong> — A Rust codebase broadens the pool of developers who can contribute to Cardano infrastructure.</li>
 </ul>
 <h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
 <ul>
-<li><strong>Full Ouroboros Praos consensus</strong> -- Slot leader checks, VRF validation, KES period tracking, epoch nonce computation.</li>
-<li><strong>Multi-era support</strong> -- Byron, Shelley, Allegra, Mary, Alonzo, Babbage, and Conway eras.</li>
-<li><strong>Conway governance (CIP-1694)</strong> -- DRep registration, voting, proposals, constitutional committee, treasury withdrawals.</li>
-<li><strong>Pipelined multi-peer sync</strong> -- Header collection from a primary peer with parallel block fetching from multiple peers.</li>
-<li><strong>Plutus script execution</strong> -- Plutus V1/V2/V3 evaluation via the uplc CEK machine.</li>
-<li><strong>Node-to-Node (N2N) protocol</strong> -- Full Ouroboros mini-protocol suite: ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing.</li>
-<li><strong>Node-to-Client (N2C) protocol</strong> -- Unix domain socket server with LocalChainSync, LocalStateQuery, LocalTxSubmission, and LocalTxMonitor.</li>
-<li><strong>cardano-cli compatible CLI</strong> -- Key generation, transaction building, signing, submission, queries, and governance commands.</li>
-<li><strong>Prometheus metrics</strong> -- Real-time node metrics on port 12798.</li>
-<li><strong>P2P networking</strong> -- Peer manager with cold/warm/hot lifecycle, DNS multi-resolution, ledger-based peer discovery, and inbound rate limiting.</li>
-<li><strong>Mithril snapshot import</strong> -- Fast initial sync by importing a Mithril-certified snapshot.</li>
-<li><strong>SIGHUP topology reload</strong> -- Update peer configuration without restarting the node.</li>
+<li><strong>Full Ouroboros Praos consensus</strong> — Slot leader checks, VRF validation, KES period tracking, epoch nonce computation.</li>
+<li><strong>Multi-era support</strong> — Byron, Shelley, Allegra, Mary, Alonzo, Babbage, and Conway eras.</li>
+<li><strong>Conway governance (CIP-1694)</strong> — DRep registration, voting, proposals, constitutional committee, treasury withdrawals.</li>
+<li><strong>Pipelined multi-peer sync</strong> — Header collection from a primary peer with parallel block fetching from multiple peers.</li>
+<li><strong>Plutus script execution</strong> — Plutus V1/V2/V3 evaluation via the uplc CEK machine.</li>
+<li><strong>Node-to-Node (N2N) protocol</strong> — Full Ouroboros mini-protocol suite: ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing.</li>
+<li><strong>Node-to-Client (N2C) protocol</strong> — Unix domain socket server with LocalChainSync, LocalStateQuery, LocalTxSubmission, and LocalTxMonitor.</li>
+<li><strong>cardano-cli compatible CLI</strong> — Key generation, transaction building, signing, submission, queries, and governance commands.</li>
+<li><strong>Prometheus metrics</strong> — Real-time node metrics on port 12798.</li>
+<li><strong>P2P networking</strong> — Peer manager with cold/warm/hot lifecycle, DNS multi-resolution, ledger-based peer discovery, and inbound rate limiting.</li>
+<li><strong>Mithril snapshot import</strong> — Fast initial sync by importing a Mithril-certified snapshot.</li>
+<li><strong>SIGHUP topology reload</strong> — Update peer configuration without restarting the node.</li>
 </ul>
 <h2 id="project-status"><a class="header" href="#project-status">Project Status</a></h2>
 <p>Torsten is under active development. It can sync against both the Cardano mainnet and preview/preprod testnets. The node implements the full N2N and N2C protocol stacks, ledger validation, epoch transitions with stake snapshots and reward distribution, and Conway-era governance.</p>

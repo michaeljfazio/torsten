@@ -184,9 +184,9 @@
 <h2 id="current-state"><a class="header" href="#current-state">Current State</a></h2>
 <p>The GSM implements three states matching the Ouroboros Genesis specification:</p>
 <ul>
-<li><strong>PreSyncing</strong> -- Waiting for enough trusted big ledger peers (BLPs). The Historical Availability Assumption (HAA) requires a minimum number of active BLPs before sync begins.</li>
-<li><strong>Syncing</strong> -- Active block download with density-based peer evaluation. The GSM monitors chain density across peers and can disconnect peers with insufficient chain density (GDD).</li>
-<li><strong>CaughtUp</strong> -- Normal Praos operation. The node is at or near the chain tip and participates in standard consensus.</li>
+<li><strong>PreSyncing</strong> — Waiting for enough trusted big ledger peers (BLPs). The Historical Availability Assumption (HAA) requires a minimum number of active BLPs before sync begins.</li>
+<li><strong>Syncing</strong> — Active block download with density-based peer evaluation. The GSM monitors chain density across peers and can disconnect peers with insufficient chain density (GDD).</li>
+<li><strong>CaughtUp</strong> — Normal Praos operation. The node is at or near the chain tip and participates in standard consensus.</li>
 </ul>
 <h3 id="enabling-genesis-mode"><a class="header" href="#enabling-genesis-mode">Enabling Genesis Mode</a></h3>
 <p>Genesis mode is opt-in via the <code>--consensus-mode genesis</code> CLI flag:</p>

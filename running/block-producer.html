@@ -187,9 +187,9 @@
 <h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
 <p>A block producer is a node that has been registered as a stake pool and is capable of minting new blocks when it is elected as a slot leader. The block production pipeline involves:</p>
 <ol>
-<li><strong>Slot leader check</strong> -- Each slot, the node uses its VRF key and the epoch nonce to determine if it is elected to produce a block.</li>
-<li><strong>Block forging</strong> -- If elected, the node assembles a block from pending mempool transactions, signs it with the KES key, and includes the VRF proof.</li>
-<li><strong>Block announcement</strong> -- The forged block is propagated to connected peers via the N2N protocol.</li>
+<li><strong>Slot leader check</strong> — Each slot, the node uses its VRF key and the epoch nonce to determine if it is elected to produce a block.</li>
+<li><strong>Block forging</strong> — If elected, the node assembles a block from pending mempool transactions, signs it with the KES key, and includes the VRF proof.</li>
+<li><strong>Block announcement</strong> — The forged block is propagated to connected peers via the N2N protocol.</li>
 </ol>
 <h2 id="required-keys"><a class="header" href="#required-keys">Required Keys</a></h2>
 <h3 id="cold-keys-offline"><a class="header" href="#cold-keys-offline">Cold Keys (Offline)</a></h3>
@@ -264,10 +264,10 @@
 </code></pre>
 <p>Key points:</p>
 <ul>
-<li><strong>No bootstrap peers</strong> -- The block producer syncs exclusively through your relays.</li>
-<li><strong>No public roots</strong> -- No connections to unknown peers.</li>
-<li><strong>Ledger peers disabled</strong> -- <code>useLedgerAfterSlot: -1</code> disables ledger-based peer discovery.</li>
-<li><strong>Only local roots</strong> -- All connections are to your own relay nodes.</li>
+<li><strong>No bootstrap peers</strong> — The block producer syncs exclusively through your relays.</li>
+<li><strong>No public roots</strong> — No connections to unknown peers.</li>
+<li><strong>Ledger peers disabled</strong> — <code>useLedgerAfterSlot: -1</code> disables ledger-based peer discovery.</li>
+<li><strong>Only local roots</strong> — All connections are to your own relay nodes.</li>
 </ul>
 <h2 id="leader-schedule"><a class="header" href="#leader-schedule">Leader Schedule</a></h2>
 <p>You can compute your pool's leader schedule for an epoch:</p>
@@ -389,17 +389,17 @@ cp opcert-new.cert opcert.cert
 <li><strong>Snapshot too old:</strong> The "set" snapshot reflects stake from two epoch boundaries ago. A newly registered pool must wait 2 epoch transitions before appearing in the "set" snapshot.</li>
 <li><strong>UTxO store not attached:</strong> If the node started without a UTxO store, stake reconstruction is skipped. Check for the <code>Rebuilding stake distribution from UTxO store</code> log message.</li>
 </ul>
-<h3 id="forge-skipping----epoch-nonce-not-yet-established"><a class="header" href="#forge-skipping----epoch-nonce-not-yet-established">"Forge: skipping -- epoch nonce not yet established"</a></h3>
+<h3 id="forge-skipping--epoch-nonce-not-yet-established"><a class="header" href="#forge-skipping--epoch-nonce-not-yet-established">"Forge: skipping — epoch nonce not yet established"</a></h3>
 <pre><code>Forge: skipping — epoch nonce not yet established
 </code></pre>
 <p>This is expected after loading a ledger snapshot. The node must observe at least one live epoch transition to establish a reliable epoch nonce. On preview testnet, this takes up to 1 day (one epoch). On mainnet, up to 5 days.</p>
-<p><strong>No action required</strong> -- the node will begin forging automatically after the next epoch boundary.</p>
+<p><strong>No action required</strong> — the node will begin forging automatically after the next epoch boundary.</p>
 <h3 id="vrf-leader-eligibility-check-failed"><a class="header" href="#vrf-leader-eligibility-check-failed">"VRF leader eligibility check failed"</a></h3>
 <p>VRF leader check failures during the first few epochs after a full replay are non-fatal and expected. The mark/set/go snapshot rotation means the "set" snapshot needs up to 3 epoch transitions to stabilize with correct stake distributions derived from the replayed state. During this window:</p>
 <ul>
 <li>The node may compute incorrect leader eligibility for some slots.</li>
 <li>Block verification for incoming blocks from peers is relaxed (strict VRF verification is disabled until <code>nonce_established</code> is true).</li>
-<li>Your pool may miss some leader slots -- this is temporary and self-correcting.</li>
+<li>Your pool may miss some leader slots — this is temporary and self-correcting.</li>
 </ul>
 <h3 id="pool-registered-but-no-forge-attempts"><a class="header" href="#pool-registered-but-no-forge-attempts">Pool Registered but No Forge Attempts</a></h3>
 <p>If your pool is registered on-chain but the node never logs any forge attempts:</p>

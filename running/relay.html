@@ -258,10 +258,10 @@
 </code></pre>
 <p>Key topology settings for relays:</p>
 <ul>
-<li><strong><code>bootstrapPeers</code></strong> -- Trusted initial peers for syncing from genesis or after restart.</li>
-<li><strong><code>localRoots</code> with <code>behindFirewall: true</code></strong> -- Your block producer. The relay waits for inbound connections from the BP rather than connecting outbound, which works correctly when the BP is behind a firewall.</li>
-<li><strong><code>useLedgerAfterSlot</code></strong> -- Enables ledger-based peer discovery once synced past this slot, providing decentralized peer resolution from on-chain stake pool registrations.</li>
-<li><strong><code>advertise: false</code></strong> -- Set to <code>true</code> if you want your relay to be discoverable via peer sharing.</li>
+<li><strong><code>bootstrapPeers</code></strong> — Trusted initial peers for syncing from genesis or after restart.</li>
+<li><strong><code>localRoots</code> with <code>behindFirewall: true</code></strong> — Your block producer. The relay waits for inbound connections from the BP rather than connecting outbound, which works correctly when the BP is behind a firewall.</li>
+<li><strong><code>useLedgerAfterSlot</code></strong> — Enables ledger-based peer discovery once synced past this slot, providing decentralized peer resolution from on-chain stake pool registrations.</li>
+<li><strong><code>advertise: false</code></strong> — Set to <code>true</code> if you want your relay to be discoverable via peer sharing.</li>
 </ul>
 <h2 id="multiple-relays"><a class="header" href="#multiple-relays">Multiple Relays</a></h2>
 <p>Running two or more relays provides redundancy. If one relay goes down, the block producer stays connected through the other.</p>
@@ -326,9 +326,9 @@ sudo ufw enable
 <p>See <a href="./monitoring.html">Monitoring</a> for the full list of available metrics and Grafana dashboard setup.</p>
 <h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
 <ul>
-<li><a href="./block-producer.html">Block Producer</a> -- Set up key generation, operational certificates, and block production</li>
-<li><a href="./topology.html">Topology</a> -- Full topology format reference</li>
-<li><a href="./monitoring.html">Monitoring</a> -- Prometheus metrics and alerting</li>
+<li><a href="./block-producer.html">Block Producer</a> — Set up key generation, operational certificates, and block production</li>
+<li><a href="./topology.html">Topology</a> — Full topology format reference</li>
+<li><a href="./monitoring.html">Monitoring</a> — Prometheus metrics and alerting</li>
 </ul>
 
                     </main>

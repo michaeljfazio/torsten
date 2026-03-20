@@ -194,7 +194,7 @@
 
     ROLL[Rollback] --&gt;|remove from volatile| VOL
 
-    LS[LedgerState] --&gt; UTXO[UtxoStore&lt;br/&gt;cardano-lsm LSM tree&lt;br/&gt;On-disk UTxO set]
+    LS[LedgerState] --&gt; UTXO[UtxoStore&lt;br/&gt;torsten-lsm LSM tree&lt;br/&gt;On-disk UTxO set]
     LS --&gt; DIFF[DiffSeq&lt;br/&gt;Last k UTxO diffs&lt;br/&gt;For rollback]
 </code></pre>
 <h2 id="block-storage"><a class="header" href="#block-storage">Block Storage</a></h2>
@@ -236,16 +236,16 @@
 <li>Results from both databases are merged</li>
 </ul>
 <h2 id="utxo-storage-utxo-hd"><a class="header" href="#utxo-storage-utxo-hd">UTxO Storage (UTxO-HD)</a></h2>
-<p>The UTxO set is stored on disk using <a href="https://crates.io/crates/cardano-lsm">cardano-lsm</a>, a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.</p>
+<p>The UTxO set is stored on disk using <code>torsten-lsm</code>, a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.</p>
 <h3 id="utxostore"><a class="header" href="#utxostore">UtxoStore</a></h3>
-<p>The <code>UtxoStore</code> (in <code>torsten-ledger</code>) wraps a cardano-lsm <code>LsmTree</code> and provides:</p>
+<p>The <code>UtxoStore</code> (in <code>torsten-ledger</code>) wraps a torsten-lsm <code>LsmTree</code> and provides:</p>
 <ul>
 <li><strong>Disk-backed UTxO set</strong> — the full UTxO set lives on disk, not in memory</li>
 <li><strong>Efficient point lookups</strong> — bloom filters for fast negative lookups</li>
 <li><strong>Batch writes</strong> — UTxO inserts and deletes are batched per block</li>
 <li><strong>Snapshots</strong> — periodic snapshots for crash recovery</li>
 </ul>
-<p>cardano-lsm is configured via storage profiles that maximize available system memory:</p>
+<p>torsten-lsm is configured via storage profiles that maximize available system memory:</p>
 <div class="table-wrapper"><table><thead><tr><th>Profile</th><th>Target System</th><th>Memtable</th><th>Block Cache</th><th>Expected RSS</th></tr></thead><tbody>
 <tr><td><code>ultra-memory</code></td><td>32GB</td><td>2GB</td><td>24GB</td><td>~27GB</td></tr>
 <tr><td><code>high-memory</code> (default)</td><td>16GB</td><td>1GB</td><td>12GB</td><td>~14GB</td></tr>
@@ -289,7 +289,7 @@
     chunks/           # Block data files
     index/            # Secondary indexes (slot, hash)
     hash_index.dat    # Mmap block index (open-addressing hash table)
-  utxo-store/         # cardano-lsm database (UTxO set)
+  utxo-store/         # torsten-lsm database (UTxO set)
     active/           # Current SSTables
     snapshots/        # Durable snapshots
   ledger/             # Ledger state snapshots
@@ -369,7 +369,7 @@ cargo bench -p torsten-primitives --bench hash_bench
 </tbody></table>
 </div>
 <p>Mmap lookup advantage grows with scale — at mainnet block counts (~10M), the gap widens further.</p>
-<h4 id="utxo-store-scaling-cardano-lsm-lsm-tree"><a class="header" href="#utxo-store-scaling-cardano-lsm-lsm-tree">UTxO Store Scaling (cardano-lsm LSM tree)</a></h4>
+<h4 id="utxo-store-scaling-torsten-lsm-lsm-tree"><a class="header" href="#utxo-store-scaling-torsten-lsm-lsm-tree">UTxO Store Scaling (torsten-lsm LSM tree)</a></h4>
 <div class="table-wrapper"><table><thead><tr><th>Size</th><th>Insert (per-entry)</th><th>Lookup (per-entry)</th><th>Total Lovelace Scan</th></tr></thead><tbody>
 <tr><td>10K</td><td>455ns</td><td>191ns</td><td>2.38ms</td></tr>
 <tr><td>100K</td><td>479ns</td><td>236ns</td><td>29.1ms</td></tr>

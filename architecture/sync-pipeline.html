@@ -211,27 +211,27 @@
 <p>A primary peer is selected for the ChainSync protocol. The node requests block headers sequentially using the N2N ChainSync mini-protocol (V14+). Headers are collected into batches.</p>
 <p>The ChainSync protocol involves:</p>
 <ol>
-<li><strong>MsgFindIntersect</strong> -- Find a common point between the node and the peer</li>
-<li><strong>MsgRequestNext</strong> -- Request the next header</li>
-<li><strong>MsgRollForward</strong> -- Receive a new header</li>
-<li><strong>MsgRollBackward</strong> -- Handle a chain reorganization</li>
+<li><strong>MsgFindIntersect</strong> — Find a common point between the node and the peer</li>
+<li><strong>MsgRequestNext</strong> — Request the next header</li>
+<li><strong>MsgRollForward</strong> — Receive a new header</li>
+<li><strong>MsgRollBackward</strong> — Handle a chain reorganization</li>
 </ol>
 <h3 id="2-block-fetch-pool"><a class="header" href="#2-block-fetch-pool">2. Block Fetch Pool</a></h3>
 <p>Collected headers are distributed across multiple peers for parallel block retrieval. The block fetch pool supports up to 4 concurrent peers, each fetching a range of blocks.</p>
 <p>The BlockFetch protocol involves:</p>
 <ol>
-<li><strong>MsgRequestRange</strong> -- Request a range of blocks by header hash</li>
-<li><strong>MsgBlock</strong> -- Receive a block</li>
-<li><strong>MsgBatchDone</strong> -- Signal the end of a batch</li>
+<li><strong>MsgRequestRange</strong> — Request a range of blocks by header hash</li>
+<li><strong>MsgBlock</strong> — Receive a block</li>
+<li><strong>MsgBatchDone</strong> — Signal the end of a batch</li>
 </ol>
 <p>Blocks are fetched in batches of 500 headers, with sub-batches of 100 headers each. Each sub-batch is decoded on a <code>spawn_blocking</code> task to avoid blocking the async runtime.</p>
 <h3 id="3-block-processing"><a class="header" href="#3-block-processing">3. Block Processing</a></h3>
 <p>Fetched blocks are applied to the ledger state in order:</p>
 <ol>
-<li><strong>Deserialization</strong> -- Raw CBOR bytes are decoded into Torsten's internal <code>Block</code> type using pallas</li>
-<li><strong>Ledger validation</strong> -- Each block is validated against the current ledger state (UTxO checks, fee validation, certificate processing)</li>
-<li><strong>Storage</strong> -- Valid blocks are added to the ChainDB (volatile database first, flushed to immutable when k-deep)</li>
-<li><strong>Epoch transitions</strong> -- At epoch boundaries, stake snapshots are rotated and rewards are calculated</li>
+<li><strong>Deserialization</strong> — Raw CBOR bytes are decoded into Torsten's internal <code>Block</code> type using pallas</li>
+<li><strong>Ledger validation</strong> — Each block is validated against the current ledger state (UTxO checks, fee validation, certificate processing)</li>
+<li><strong>Storage</strong> — Valid blocks are added to the ChainDB (volatile database first, flushed to immutable when k-deep)</li>
+<li><strong>Epoch transitions</strong> — At epoch boundaries, stake snapshots are rotated and rewards are calculated</li>
 </ol>
 <h3 id="batched-lock-acquisition"><a class="header" href="#batched-lock-acquisition">Batched Lock Acquisition</a></h3>
 <p>To minimize lock contention, the sync loop acquires a single lock on both the ChainDB and ledger state for each batch of 500 blocks, rather than locking per-block.</p>

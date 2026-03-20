@@ -184,10 +184,10 @@
 <h2 id="ouroboros-praos-overview"><a class="header" href="#ouroboros-praos-overview">Ouroboros Praos Overview</a></h2>
 <p>Ouroboros Praos divides time into fixed-length slots. Each slot, a slot leader is selected based on their stake proportion. The leader is entitled to produce a block for that slot. Key properties:</p>
 <ul>
-<li><strong>Slot-based</strong> -- Time is divided into slots (1 second each on mainnet)</li>
-<li><strong>Epoch-based</strong> -- Slots are grouped into epochs (432000 slots / 5 days on mainnet)</li>
-<li><strong>Stake-proportional</strong> -- The probability of being elected is proportional to the pool's active stake</li>
-<li><strong>Private leader selection</strong> -- Only the pool operator knows if they are elected (until they publish the block)</li>
+<li><strong>Slot-based</strong> — Time is divided into slots (1 second each on mainnet)</li>
+<li><strong>Epoch-based</strong> — Slots are grouped into epochs (432000 slots / 5 days on mainnet)</li>
+<li><strong>Stake-proportional</strong> — The probability of being elected is proportional to the pool's active stake</li>
+<li><strong>Private leader selection</strong> — Only the pool operator knows if they are elected (until they publish the block)</li>
 </ul>
 <h2 id="slot-leader-election"><a class="header" href="#slot-leader-election">Slot Leader Election</a></h2>
 <h3 id="vrf-based-selection"><a class="header" href="#vrf-based-selection">VRF-Based Selection</a></h3>
@@ -199,8 +199,8 @@
 </ul>
 <p>The VRF produces:</p>
 <ol>
-<li>A <strong>VRF output</strong> -- A deterministic pseudo-random value</li>
-<li>A <strong>VRF proof</strong> -- A proof that the output was correctly computed</li>
+<li>A <strong>VRF output</strong> — A deterministic pseudo-random value</li>
+<li>A <strong>VRF proof</strong> — A proof that the output was correctly computed</li>
 </ol>
 <h3 id="leader-threshold"><a class="header" href="#leader-threshold">Leader Threshold</a></h3>
 <p>The VRF output is compared against a threshold derived from:</p>
@@ -213,18 +213,18 @@
 </code></pre>
 <p>A slot leader is elected if <code>VRF_output &lt; phi(sigma)</code>.</p>
 <h3 id="vrf-exact-rational-arithmetic"><a class="header" href="#vrf-exact-rational-arithmetic">VRF Exact Rational Arithmetic</a></h3>
-<p>The leader check is a critical consensus operation -- any deviation from the Haskell reference implementation would cause a node to disagree on which blocks are valid. Torsten uses <strong>exact 34-digit fixed-point arithmetic</strong> via <code>dashu-int</code> <code>IBig</code>, matching Haskell's <code>FixedPoint E34</code> type exactly. No floating-point operations are used anywhere in the VRF computation path.</p>
+<p>The leader check is a critical consensus operation — any deviation from the Haskell reference implementation would cause a node to disagree on which blocks are valid. Torsten uses <strong>exact 34-digit fixed-point arithmetic</strong> via <code>dashu-int</code> <code>IBig</code>, matching Haskell's <code>FixedPoint E34</code> type exactly. No floating-point operations are used anywhere in the VRF computation path.</p>
 <p><strong>Era-dependent VRF modes:</strong></p>
 <div class="table-wrapper"><table><thead><tr><th>Era</th><th>Protocol Version</th><th>VRF Output Derivation</th><th>certNatMax</th></tr></thead><tbody>
-<tr><td>Shelley -- Alonzo (TPraos)</td><td>proto &lt; 7</td><td>Raw 64-byte VRF output</td><td>2^512</td></tr>
-<tr><td>Babbage -- Conway (Praos)</td><td>proto &gt;= 7</td><td>Blake2b-256("L" || output)</td><td>2^256</td></tr>
+<tr><td>Shelley — Alonzo (TPraos)</td><td>proto &lt; 7</td><td>Raw 64-byte VRF output</td><td>2^512</td></tr>
+<tr><td>Babbage — Conway (Praos)</td><td>proto &gt;= 7</td><td>Blake2b-256("L" || output)</td><td>2^256</td></tr>
 </tbody></table>
 </div>
 <p>In TPraos mode (Shelley through Alonzo), the raw 64-byte VRF output is used directly for the leader check, with a certNatMax of 2^512 defining the output space. In Praos mode (Babbage onward), the VRF output is hashed with <code>Blake2b-256("L" || output)</code> to produce a 32-byte value, reducing certNatMax to 2^256. The <code>"L"</code> prefix distinguishes the leader VRF output from the nonce VRF output (which uses <code>"N"</code>).</p>
 <p><strong>Mathematical primitives:</strong></p>
 <ul>
-<li><strong><code>ln(1 + x)</code></strong> -- Uses the Euler continued fraction expansion, matching Haskell's <code>lncf</code> function. This converges for all <code>x &gt;= 0</code>, unlike Taylor series which has a limited radius of convergence.</li>
-<li><strong><code>taylorExpCmp</code></strong> -- Computes <code>exp()</code> via Taylor series with rigorous error bounds, enabling early termination when the comparison result can be determined without computing the full expansion. This avoids unnecessary precision in the common case where the VRF output is far from the threshold.</li>
+<li><strong><code>ln(1 + x)</code></strong> — Uses the Euler continued fraction expansion, matching Haskell's <code>lncf</code> function. This converges for all <code>x &gt;= 0</code>, unlike Taylor series which has a limited radius of convergence.</li>
+<li><strong><code>taylorExpCmp</code></strong> — Computes <code>exp()</code> via Taylor series with rigorous error bounds, enabling early termination when the comparison result can be determined without computing the full expansion. This avoids unnecessary precision in the common case where the VRF output is far from the threshold.</li>
 </ul>
 <h3 id="epoch-nonce"><a class="header" href="#epoch-nonce">Epoch Nonce</a></h3>
 <p>The epoch nonce is computed at each epoch boundary:</p>
@@ -239,9 +239,9 @@
 <h3 id="nonce-establishment"><a class="header" href="#nonce-establishment">Nonce Establishment</a></h3>
 <p>The nonce lifecycle follows a precise sequence across epoch boundaries:</p>
 <ol>
-<li><strong>Evolving nonce</strong> -- Accumulates VRF nonce contributions from every block: <code>evolving_nonce = hash(prev_evolving_nonce || hash(vrf_nonce_output))</code></li>
-<li><strong>Candidate nonce</strong> -- The evolving nonce is frozen (snapshotted) at the stability window boundary within each epoch. After this point, new VRF contributions only affect the evolving nonce, not the candidate.</li>
-<li><strong>Epoch nonce</strong> -- At the epoch boundary, the new epoch nonce is computed as <code>hash(candidate_nonce_from_prev_epoch || lab_nonce)</code>.</li>
+<li><strong>Evolving nonce</strong> — Accumulates VRF nonce contributions from every block: <code>evolving_nonce = hash(prev_evolving_nonce || hash(vrf_nonce_output))</code></li>
+<li><strong>Candidate nonce</strong> — The evolving nonce is frozen (snapshotted) at the stability window boundary within each epoch. After this point, new VRF contributions only affect the evolving nonce, not the candidate.</li>
+<li><strong>Epoch nonce</strong> — At the epoch boundary, the new epoch nonce is computed as <code>hash(candidate_nonce_from_prev_epoch || lab_nonce)</code>.</li>
 </ol>
 <pre><code class="language-mermaid">flowchart LR
     A["Block VRF&lt;br/&gt;contributions"] --&gt;|"accumulated&lt;br/&gt;every block"| B["Evolving&lt;br/&gt;Nonce"]
@@ -256,7 +256,7 @@
 <h3 id="era-dependent-nonce-stabilisation-window"><a class="header" href="#era-dependent-nonce-stabilisation-window">Era-Dependent Nonce Stabilisation Window</a></h3>
 <p>The stability window determines how early in an epoch the candidate nonce is frozen. This varies by era:</p>
 <div class="table-wrapper"><table><thead><tr><th>Era</th><th>Protocol Version</th><th>Stability Window</th></tr></thead><tbody>
-<tr><td>Shelley -- Babbage</td><td>proto &lt; 10</td><td>3k/f slots</td></tr>
+<tr><td>Shelley — Babbage</td><td>proto &lt; 10</td><td>3k/f slots</td></tr>
 <tr><td>Conway</td><td>proto &gt;= 10</td><td>4k/f slots</td></tr>
 </tbody></table>
 </div>
@@ -264,18 +264,18 @@
 <h2 id="chain-selection"><a class="header" href="#chain-selection">Chain Selection</a></h2>
 <p>When multiple valid chains exist, Ouroboros Praos selects the chain with the most blocks (longest chain rule). Torsten implements:</p>
 <ol>
-<li><strong>Chain comparison</strong> -- Compare the block height of competing chains</li>
-<li><strong>Rollback support</strong> -- Roll back up to k=2160 blocks to switch to a longer chain</li>
-<li><strong>Immutability</strong> -- Blocks deeper than k are considered final</li>
+<li><strong>Chain comparison</strong> — Compare the block height of competing chains</li>
+<li><strong>Rollback support</strong> — Roll back up to k=2160 blocks to switch to a longer chain</li>
+<li><strong>Immutability</strong> — Blocks deeper than k are considered final</li>
 </ol>
 <h2 id="epoch-transitions"><a class="header" href="#epoch-transitions">Epoch Transitions</a></h2>
 <p>At each epoch boundary, Torsten performs:</p>
 <h3 id="stake-snapshot-rotation"><a class="header" href="#stake-snapshot-rotation">Stake Snapshot Rotation</a></h3>
 <p>Torsten uses the mark/set/go snapshot model:</p>
 <ul>
-<li><strong>Mark</strong> -- The current epoch boundary snapshot (will be used for leader election two epochs from now)</li>
-<li><strong>Set</strong> -- The previous epoch's mark (used for leader election in the current epoch)</li>
-<li><strong>Go</strong> -- Two epochs ago (used for reward distribution in the current epoch)</li>
+<li><strong>Mark</strong> — The current epoch boundary snapshot (will be used for leader election two epochs from now)</li>
+<li><strong>Set</strong> — The previous epoch's mark (used for leader election in the current epoch)</li>
+<li><strong>Go</strong> — Two epochs ago (used for reward distribution in the current epoch)</li>
 </ul>
 <p>At each epoch boundary:</p>
 <ol>
@@ -304,11 +304,11 @@
 <h3 id="reward-calculation-and-distribution"><a class="header" href="#reward-calculation-and-distribution">Reward Calculation and Distribution</a></h3>
 <p>At each epoch boundary, rewards are calculated and distributed:</p>
 <ol>
-<li><strong>Monetary expansion</strong> -- New ADA is created from the reserves based on the monetary expansion rate</li>
-<li><strong>Fee collection</strong> -- Transaction fees from the epoch are collected</li>
-<li><strong>Treasury cut</strong> -- A fraction (tau) of rewards goes to the treasury</li>
-<li><strong>Pool rewards</strong> -- Remaining rewards are distributed to pools based on their performance</li>
-<li><strong>Member distribution</strong> -- Pool rewards are split between the operator and delegators based on pool parameters (cost, margin, pledge)</li>
+<li><strong>Monetary expansion</strong> — New ADA is created from the reserves based on the monetary expansion rate</li>
+<li><strong>Fee collection</strong> — Transaction fees from the epoch are collected</li>
+<li><strong>Treasury cut</strong> — A fraction (tau) of rewards goes to the treasury</li>
+<li><strong>Pool rewards</strong> — Remaining rewards are distributed to pools based on their performance</li>
+<li><strong>Member distribution</strong> — Pool rewards are split between the operator and delegators based on pool parameters (cost, margin, pledge)</li>
 </ol>
 <h2 id="validation-checks"><a class="header" href="#validation-checks">Validation Checks</a></h2>
 <p>Torsten validates the following consensus-level properties:</p>
@@ -319,9 +319,9 @@
 <h3 id="vrf-verification"><a class="header" href="#vrf-verification">VRF Verification</a></h3>
 <p>Full VRF verification includes:</p>
 <ol>
-<li><strong>VRF key binding</strong> -- <code>blake2b_256(header.vrf_vkey)</code> must match the pool's registered <code>vrf_keyhash</code></li>
-<li><strong>VRF proof verification</strong> -- The VRF proof is cryptographically verified against the VRF public key</li>
-<li><strong>Leader eligibility</strong> -- The VRF leader value is checked against the Praos threshold for the pool's relative stake using the phi function</li>
+<li><strong>VRF key binding</strong> — <code>blake2b_256(header.vrf_vkey)</code> must match the pool's registered <code>vrf_keyhash</code></li>
+<li><strong>VRF proof verification</strong> — The VRF proof is cryptographically verified against the VRF public key</li>
+<li><strong>Leader eligibility</strong> — The VRF leader value is checked against the Praos threshold for the pool's relative stake using the phi function</li>
 </ol>
 <h3 id="operational-certificate-verification"><a class="header" href="#operational-certificate-verification">Operational Certificate Verification</a></h3>
 <p>The operational certificate's Ed25519 signature is verified against the raw bytes signable format (matching Haskell's <code>OCertSignable</code>):</p>
