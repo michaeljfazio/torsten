@@ -143,6 +143,20 @@ impl LedgerState {
         }
     }
 
+    /// Calculate rewards using the GO snapshot and a separate fee value.
+    ///
+    /// This is the primary reward calculation entry point, matching Haskell's
+    /// `startStep` in PulsingReward.hs. The GO snapshot provides stake/pool/block
+    /// data, and `ss_fee` provides the fee pot (captured by SNAP at the previous
+    /// epoch boundary).
+    pub(crate) fn calculate_rewards_with_fee(
+        &self,
+        go_snapshot: &StakeSnapshot,
+        ss_fee: Lovelace,
+    ) -> PendingRewardUpdate {
+        self.calculate_rewards_inner(go_snapshot, ss_fee.0)
+    }
+
     /// Calculate rewards and return a PendingRewardUpdate for deferred application.
     ///
     /// Implements the formula from cardano-ledger-shelley:
@@ -152,15 +166,18 @@ impl LedgerState {
     ///   - Operator reward includes self-delegation share (margin + proportional)
     ///   - Operator reward goes to pool's registered reward account
     ///
-    /// The `rupd_snapshot` argument is the SET snapshot after rotation (= old mark =
-    /// epoch-just-ended data).  The caller (`process_epoch_transition`) passes
-    /// `self.snapshots.set` immediately after rotating the mark→set→go chain.
-    ///
-    /// Historical note: the parameter was previously named `go_snapshot` when
-    /// the code incorrectly used the GO position (= epoch-2-ago data), which
-    /// caused the first two epoch RUPDs to be skipped entirely and produced 2.16×
-    /// treasury inflation relative to the canonical Koios on-chain values.
+    /// Legacy entry point that reads fees from the snapshot itself. New code
+    /// should use `calculate_rewards_with_fee` which takes fees separately.
     pub(crate) fn calculate_rewards(&self, rupd_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
+        self.calculate_rewards_inner(rupd_snapshot, rupd_snapshot.epoch_fees.0)
+    }
+
+    /// Inner reward calculation that takes fees as a parameter.
+    fn calculate_rewards_inner(
+        &self,
+        rupd_snapshot: &StakeSnapshot,
+        epoch_fees: u64,
+    ) -> PendingRewardUpdate {
         let rho_num = self.protocol_params.rho.numerator as i128;
         let rho_den = self.protocol_params.rho.denominator.max(1) as i128;
         let tau_num = self.protocol_params.tau.numerator as i128;
@@ -220,18 +237,9 @@ impl LedgerState {
                 ))
                 .floor_u64()
         };
-        // Fees come from the snapshot's ssFee, matching Haskell's
-        // `rPot = ssFee(snapshots) + deltaR1` in PulsingReward.hs.
-        //
-        // The ssFee is set by the SNAP rule at the epoch boundary and
-        // reflects fees accumulated during the epoch whose data is in
-        // the snapshot. For the first RUPD (epoch 0), ssFee = 0 because
-        // no SNAP has run yet — the initial snapshots have ssFee = Coin 0.
-        //
-        // Previously we fell back to `self.epoch_fees` when the snapshot
-        // fees were 0, which incorrectly included epoch 0's fees in the
-        // first RUPD (adding 87,558 extra lovelace to treasury).
-        let epoch_fees = rupd_snapshot.epoch_fees.0;
+        // epoch_fees is passed as a parameter:
+        // - calculate_rewards_with_fee: from EpochSnapshots.ss_fee (Haskell's ssFee)
+        // - calculate_rewards: from the snapshot's embedded epoch_fees (legacy)
         let total_rewards_available = expansion + epoch_fees;
 
         if total_rewards_available == 0 {
@@ -253,10 +261,10 @@ impl LedgerState {
         // apparent performance).
         let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
         if total_stake == 0 {
+            // No circulation → no rewards. Fee offset still applies.
+            let net = treasury_cut.saturating_sub(epoch_fees);
             return PendingRewardUpdate {
-                // Only treasury_cut actually leaves reserves (goes to treasury).
-                // The rest of the expansion is not distributed and stays in reserves.
-                delta_reserves: treasury_cut,
+                delta_reserves: net,
                 delta_treasury: treasury_cut,
                 rewards: HashMap::new(),
             };
@@ -268,8 +276,10 @@ impl LedgerState {
             .values()
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
         if total_active_stake == 0 {
+            // No delegated stake → no pool rewards, only treasury. Fee offset still applies.
+            let net = treasury_cut.saturating_sub(epoch_fees);
             return PendingRewardUpdate {
-                delta_reserves: treasury_cut,
+                delta_reserves: net,
                 delta_treasury: treasury_cut,
                 rewards: HashMap::new(),
             };
@@ -470,16 +480,31 @@ impl LedgerState {
             epoch_fees
         );
 
-        // delta_reserves = treasury_cut + total_distributed (what actually leaves reserves)
-        // Undistributed rewards stay in reserves — they are NOT sent to treasury.
-        // In Haskell: deltaR = deltaR1 - sum(rewards) - deltaT
-        // where deltaR1 is the expansion, deltaT is the treasury cut.
-        // The undistributed portion reduces the net reserve depletion.
-        let actually_leaving_reserves = treasury_cut + total_distributed;
+        // Reserve accounting per Haskell's RewardUpdate:
+        //
+        //   deltaR1 = expansion (from reserves → reward pot)
+        //   rPot    = ssFee + deltaR1 (fees from circulation + expansion from reserves)
+        //   deltaT  = floor(tau * rPot) (treasury cut)
+        //   rewards = sum of all pool/member rewards distributed
+        //   deltaR2 = rPot - deltaT - rewards (undistributed remainder → back to reserves)
+        //   deltaR  = -(deltaR1) + deltaR2 = ssFee - deltaT - rewards
+        //
+        // Net reserve decrease = deltaT + rewards - ssFee
+        //
+        // The ssFee (epoch_fees) offsets the reserve decrease because fees come from
+        // circulation (transaction senders), not from reserves. When fees are part of
+        // rPot, they fund part of the treasury cut and rewards without touching reserves.
+        let gross = treasury_cut + total_distributed;
+        let net_reserve_decrease = gross.saturating_sub(epoch_fees);
+        if epoch_fees > 0 {
+            debug!(
+                "Fee offset: gross={gross}, epoch_fees={epoch_fees}, net={net_reserve_decrease}"
+            );
+        }
         PendingRewardUpdate {
             rewards: reward_map,
             delta_treasury: treasury_cut,
-            delta_reserves: actually_leaving_reserves,
+            delta_reserves: net_reserve_decrease,
         }
     }
 

@@ -337,7 +337,12 @@ pub struct StakeDistributionState {
 /// - "mark" is the snapshot taken at the current epoch boundary
 /// - "set" is the snapshot from the previous epoch (used for leader election)
 /// - "go" is the snapshot from two epochs ago (used for reward calculation)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Matches Haskell's `SnapShots` data type. All snapshots start as empty
+/// (not None) — Haskell uses `emptySnapShots` at genesis. The `ss_fee`
+/// field is separate from individual snapshots, matching Haskell's `ssFee`
+/// which is set by the SNAP rule at each epoch boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochSnapshots {
     /// Snapshot from the most recent epoch boundary ("mark")
     pub mark: Option<StakeSnapshot>,
@@ -345,6 +350,24 @@ pub struct EpochSnapshots {
     pub set: Option<StakeSnapshot>,
     /// Snapshot from two epochs ago ("go") — used for reward distribution
     pub go: Option<StakeSnapshot>,
+    /// Fee pot for the next RUPD (Haskell's `ssFee`).
+    ///
+    /// Captured by SNAP at each epoch boundary from the accumulated epoch fees.
+    /// The RUPD uses this as part of `rPot = ssFee + deltaR1`.
+    /// At genesis this is 0 (no SNAP has run yet).
+    #[serde(default = "default_lovelace_zero")]
+    pub ss_fee: Lovelace,
+}
+
+impl Default for EpochSnapshots {
+    fn default() -> Self {
+        EpochSnapshots {
+            mark: None,
+            set: None,
+            go: None,
+            ss_fee: Lovelace(0),
+        }
+    }
 }
 
 /// Serde default helper for `Lovelace(0)` in snapshot fields.

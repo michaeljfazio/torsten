@@ -490,7 +490,7 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
 
             let era_name = format!("{}", ledger.era);
             let snapshot = serde_json::json!({
-                "epoch": last_epoch,
+                "epoch": current_epoch,
                 "epochFees": epoch_fees,
                 "reserves": ledger.reserves.0,
                 "treasury": ledger.treasury.0,
@@ -505,7 +505,7 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             writeln!(output).map_err(|e| anyhow::anyhow!("Write error: {e}"))?;
 
             info!(
-                epoch = last_epoch,
+                epoch = current_epoch,
                 treasury = ledger.treasury.0,
                 reserves = ledger.reserves.0,
                 pools = ledger.pool_params.len(),
