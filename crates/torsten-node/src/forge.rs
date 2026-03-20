@@ -331,7 +331,9 @@ pub fn forge_block(
 
     // Validate KES period offset is within bounds (Sum6Kes supports 62 evolutions)
     const MAX_KES_EVOLUTIONS: u64 = 62;
-    if kes_period_offset > MAX_KES_EVOLUTIONS {
+    // Sum6Kes supports periods 0..=61 (62 evolutions). Period 62 is expired.
+    // Using >= to match consensus validation at praos.rs which also uses >=.
+    if kes_period_offset >= MAX_KES_EVOLUTIONS {
         anyhow::bail!(
             "KES key expired: current period {} - opcert period {} = offset {} > max {}. \
              Rotate your KES key and issue a new operational certificate.",
@@ -389,18 +391,55 @@ pub fn forge_block(
 }
 
 /// Compute approximate body size from transactions
+/// Compute the block body size matching Haskell's `bbodySz` field.
+///
+/// The body size is the total byte count of the 4 segregated components:
+///   CBOR_array(tx_bodies) + CBOR_array(witness_sets) + CBOR_map(aux_data) + CBOR_array(invalid_indices)
+///
+/// This must match the structure used by `compute_block_body_hash` and `encode_block`.
 fn compute_body_size(transactions: &[Transaction]) -> u64 {
-    let mut size: u64 = 0;
+    use torsten_serialization::cbor::{encode_array_header, encode_map_header, encode_uint};
+    use torsten_serialization::encode::{
+        encode_auxiliary_data, encode_transaction_body, encode_witness_set,
+    };
+
+    // 1. tx_bodies array
+    let mut bodies_len = encode_array_header(transactions.len()).len();
     for tx in transactions {
-        if let Some(ref cbor) = tx.raw_cbor {
-            size += cbor.len() as u64;
-        } else {
-            // Estimate from encoding
-            let encoded = torsten_serialization::encode_transaction(tx);
-            size += encoded.len() as u64;
-        }
+        bodies_len += encode_transaction_body(&tx.body).len();
     }
-    size
+
+    // 2. witness_sets array
+    let mut wits_len = encode_array_header(transactions.len()).len();
+    for tx in transactions {
+        wits_len += encode_witness_set(&tx.witness_set).len();
+    }
+
+    // 3. aux_data map
+    let aux_entries: Vec<_> = transactions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, tx)| tx.auxiliary_data.as_ref().map(|aux| (i, aux)))
+        .collect();
+    let mut aux_len = encode_map_header(aux_entries.len()).len();
+    for (idx, aux) in &aux_entries {
+        aux_len += encode_uint(*idx as u64).len();
+        aux_len += encode_auxiliary_data(aux).len();
+    }
+
+    // 4. invalid_tx_indices array
+    let invalid_indices: Vec<_> = transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, tx)| !tx.is_valid)
+        .map(|(i, _)| i)
+        .collect();
+    let mut invalid_len = encode_array_header(invalid_indices.len()).len();
+    for idx in &invalid_indices {
+        invalid_len += encode_uint(*idx as u64).len();
+    }
+
+    (bodies_len + wits_len + aux_len + invalid_len) as u64
 }
 
 /// Check if we are the slot leader for a given slot.

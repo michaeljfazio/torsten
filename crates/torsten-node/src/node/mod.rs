@@ -2463,7 +2463,11 @@ impl Node {
                 return;
             }
         };
-        let epoch_nonce = ls.epoch_nonce;
+        // Use epoch_nonce_for_slot to handle first slot of new epoch correctly.
+        // At epoch boundaries, the TICKN transition hasn't been applied yet, so
+        // ls.epoch_nonce still holds the previous epoch's nonce. epoch_nonce_for_slot
+        // pre-computes the correct nonce, matching the sync path.
+        let epoch_nonce = ls.epoch_nonce_for_slot(next_slot.0);
         let block_number = torsten_primitives::time::BlockNo(ls.current_block_number().0 + 1);
         let prev_hash = ls
             .tip
