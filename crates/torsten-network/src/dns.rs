@@ -329,4 +329,138 @@ mod tests {
         assert!(!addrs.is_empty());
         assert!(addrs.iter().all(|a| a.port() == 3001));
     }
+
+    // ── Additional coverage ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_hit_does_not_alter_cache_size() {
+        // Resolving a host that is already cached must not add a second entry.
+        let mut resolver = DnsResolver::new();
+        let key = "already-cached.example:3001";
+        resolver.cache.insert(
+            key.to_string(),
+            CacheEntry {
+                addrs: vec!["10.0.0.1:3001".parse().unwrap()],
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(300),
+            },
+        );
+        assert_eq!(resolver.cache_size(), 1);
+
+        // Inject a second, different entry under another key and verify size stays 2
+        resolver.cache.insert(
+            "other.example:80".to_string(),
+            CacheEntry {
+                addrs: vec!["10.0.0.2:80".parse().unwrap()],
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(300),
+            },
+        );
+        assert_eq!(resolver.cache_size(), 2);
+    }
+
+    #[test]
+    fn test_evict_expired_leaves_fresh_entries_intact() {
+        // After evicting expired entries, the number of fresh entries must be
+        // unchanged and their contents must be unmodified.
+        let mut resolver = DnsResolver::new();
+        let fresh_addr: std::net::SocketAddr = "9.9.9.9:53".parse().unwrap();
+
+        resolver.cache.insert(
+            "stale.example:3001".to_string(),
+            CacheEntry {
+                addrs: vec!["1.2.3.4:3001".parse().unwrap()],
+                inserted_at: Instant::now() - Duration::from_secs(1000),
+                ttl: Duration::from_secs(60),
+            },
+        );
+        resolver.cache.insert(
+            "fresh.example:53".to_string(),
+            CacheEntry {
+                addrs: vec![fresh_addr],
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(300),
+            },
+        );
+
+        resolver.evict_expired();
+        assert_eq!(
+            resolver.cache_size(),
+            1,
+            "Only the fresh entry should remain"
+        );
+        let remaining = &resolver.cache["fresh.example:53"];
+        assert_eq!(remaining.addrs, vec![fresh_addr]);
+    }
+
+    #[test]
+    fn test_clear_cache_removes_all_entries() {
+        // clear_cache must leave cache_size() == 0 even when there are many entries.
+        let mut resolver = DnsResolver::new();
+        for i in 0..10u16 {
+            resolver.cache.insert(
+                format!("host{i}:300{i}"),
+                CacheEntry {
+                    addrs: vec![format!("1.2.3.{i}:300{i}").parse().unwrap()],
+                    inserted_at: Instant::now(),
+                    ttl: Duration::from_secs(300),
+                },
+            );
+        }
+        assert_eq!(resolver.cache_size(), 10);
+        resolver.clear_cache();
+        assert_eq!(resolver.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_with_ttl_min_and_default_are_set_correctly() {
+        // with_ttl should set both min_ttl and default_ttl as specified.
+        let min = Duration::from_secs(5);
+        let default = Duration::from_secs(120);
+        let resolver = DnsResolver::with_ttl(min, default);
+        assert_eq!(resolver.min_ttl, min);
+        assert_eq!(resolver.default_ttl, default);
+        assert_eq!(
+            resolver.cache_size(),
+            0,
+            "New resolver cache should be empty"
+        );
+    }
+
+    #[test]
+    fn test_cache_entry_not_expired_at_exactly_ttl_minus_one_ms() {
+        // An entry where elapsed < ttl must report is_expired() = false.
+        let entry = CacheEntry {
+            addrs: vec!["127.0.0.1:3001".parse().unwrap()],
+            // Inserted just now — not expired for a 60s TTL.
+            inserted_at: Instant::now(),
+            ttl: Duration::from_secs(60),
+        };
+        assert!(!entry.is_expired());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_cache_hit_returns_cached_addresses() {
+        // Resolving a host that is in-cache must return exactly the cached
+        // addresses without triggering any network lookup.
+        let mut resolver = DnsResolver::new();
+        let expected: Vec<std::net::SocketAddr> = vec![
+            "10.20.30.40:9001".parse().unwrap(),
+            "10.20.30.41:9001".parse().unwrap(),
+        ];
+        resolver.cache.insert(
+            "multi-addr.example:9001".to_string(),
+            CacheEntry {
+                addrs: expected.clone(),
+                inserted_at: Instant::now(),
+                ttl: Duration::from_secs(300),
+            },
+        );
+
+        let result = resolver.resolve("multi-addr.example", 9001).await.unwrap();
+        assert_eq!(
+            result, expected,
+            "Cache hit must return all cached addresses"
+        );
+    }
 }

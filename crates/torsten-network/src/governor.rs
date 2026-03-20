@@ -2013,4 +2013,193 @@ mod tests {
             "Shuffle of 20 elements should not be the identity permutation"
         );
     }
+
+    // ── Connection limit boundary conditions ──────────────────────────────────
+
+    #[test]
+    fn test_connection_check_at_soft_limit_delays() {
+        // A count exactly equal to soft_limit should produce Delay, not Accept.
+        let gov = Governor::new(GovernorConfig::default());
+        let decision = gov.connection_check(gov.config().soft_limit);
+        assert!(
+            matches!(decision, ConnectionDecision::Delay(_)),
+            "Exactly at soft_limit must Delay; got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn test_connection_check_just_below_soft_limit_accepts() {
+        // One below soft_limit must still Accept.
+        let gov = Governor::new(GovernorConfig::default());
+        assert_eq!(
+            gov.connection_check(gov.config().soft_limit - 1),
+            ConnectionDecision::Accept
+        );
+    }
+
+    #[test]
+    fn test_connection_check_at_hard_limit_rejects() {
+        // Exactly at the hard limit must Reject.
+        let gov = Governor::new(GovernorConfig::default());
+        assert_eq!(
+            gov.connection_check(gov.config().hard_limit),
+            ConnectionDecision::Reject
+        );
+    }
+
+    #[test]
+    fn test_connection_check_above_hard_limit_rejects() {
+        // Above the hard limit must also Reject.
+        let gov = Governor::new(GovernorConfig::default());
+        assert_eq!(
+            gov.connection_check(gov.config().hard_limit + 100),
+            ConnectionDecision::Reject
+        );
+    }
+
+    // ── SyncState::PreSyncing uses sync targets ───────────────────────────────
+
+    #[test]
+    fn test_presyncing_uses_sync_targets() {
+        // PreSyncing should use the same (lower) sync targets as Syncing.
+        let mut gov = Governor::new(GovernorConfig::default());
+        gov.set_sync_state(SyncState::PreSyncing);
+        assert_eq!(
+            gov.active_targets().active_peers,
+            GovernorConfig::default().sync_targets.active_peers,
+            "PreSyncing must use sync targets"
+        );
+    }
+
+    #[test]
+    fn test_set_sync_state_no_op_when_same() {
+        // Setting the same state should not change any field (and not panic).
+        let mut gov = Governor::new(GovernorConfig::default());
+        gov.set_sync_state(SyncState::CaughtUp);
+        let active_before = gov.active_targets().active_peers;
+        gov.set_sync_state(SyncState::CaughtUp); // same state
+        assert_eq!(gov.active_targets().active_peers, active_before);
+    }
+
+    // ── PeerTargets::syncing() lower than default ─────────────────────────────
+
+    #[test]
+    fn test_sync_targets_lower_than_normal() {
+        // sync targets should have smaller active and established counts
+        // to speed up convergence during initial block download.
+        let normal = PeerTargets::default();
+        let sync = PeerTargets::syncing();
+
+        assert!(
+            sync.active_peers <= normal.active_peers,
+            "Sync active_peers ({}) must be <= normal ({})",
+            sync.active_peers,
+            normal.active_peers
+        );
+        assert!(
+            sync.established_peers <= normal.established_peers,
+            "Sync established_peers ({}) must be <= normal ({})",
+            sync.established_peers,
+            normal.established_peers
+        );
+    }
+
+    // ── Shuffle of empty and single-element slices ────────────────────────────
+
+    #[test]
+    fn test_shuffle_empty_slice_is_noop() {
+        let mut gov = Governor::new(GovernorConfig::default());
+        let mut v: Vec<u32> = vec![];
+        gov.shuffle(&mut v); // must not panic
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_shuffle_single_element_is_noop() {
+        let mut gov = Governor::new(GovernorConfig::default());
+        let mut v = vec![42u32];
+        gov.shuffle(&mut v);
+        assert_eq!(v, vec![42u32]);
+    }
+
+    // ── Deduplication of Connect/Promote across phases ────────────────────────
+
+    #[test]
+    fn test_evaluate_deduplicates_connect_events() {
+        // When multiple governor phases could emit Connect for the same peer
+        // (e.g., BLP phase + general established phase), only one Connect must
+        // appear in the output.
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 20,
+            target_warm_peers: 20,
+            target_known_peers: 200,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        // Single cold BLP — eligible for both BLP phase and general connect phase.
+        let blp = test_addr(4001);
+        pm.add_big_ledger_peer(blp);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_blp: 1,
+                established_blp: 1,
+                active_peers: 1,
+                established_peers: 1,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let connects_for_blp = events
+            .iter()
+            .filter(|e| matches!(e, GovernorEvent::Connect(a) if *a == blp))
+            .count();
+
+        assert_eq!(
+            connects_for_blp, 1,
+            "Connect must be deduplicated: got {connects_for_blp} for {blp}"
+        );
+    }
+
+    // ── GovernorConfig defaults ───────────────────────────────────────────────
+
+    #[test]
+    fn test_governor_config_defaults() {
+        let config = GovernorConfig::default();
+        // Hard limit must be > soft limit
+        assert!(
+            config.hard_limit > config.soft_limit,
+            "hard_limit must be > soft_limit"
+        );
+        // Normal churn interval must be longer than sync churn interval
+        assert!(
+            config.churn_interval_normal_secs > config.churn_interval_sync_secs,
+            "Normal churn should be less frequent than sync churn"
+        );
+    }
+
+    // ── maybe_churn: no-op before interval ───────────────────────────────────
+
+    #[test]
+    fn test_maybe_churn_no_op_before_interval() {
+        // maybe_churn should return an empty vec when the churn interval has
+        // not yet elapsed.
+        let pm = setup_pm_with_peers(10, 5, 20);
+        let mut gov = Governor::new(GovernorConfig {
+            churn_interval_normal_secs: 3600, // 1 hour — definitely not elapsed
+            ..GovernorConfig::default()
+        });
+        // last_churn defaults to Instant::now() in Governor::new,
+        // so the interval has not elapsed.
+        let events = gov.maybe_churn(&pm);
+        assert!(
+            events.is_empty(),
+            "maybe_churn must be a no-op before interval expires; got {events:?}"
+        );
+        assert!(!gov.churn_active, "churn must not be active");
+    }
 }

@@ -226,4 +226,69 @@ mod tests {
             limiter.available()
         );
     }
+
+    // ── Additional coverage ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_try_consume_zero_bytes_always_succeeds() {
+        // Consuming zero bytes should always succeed even on an empty bucket.
+        let mut limiter = TokenBucketRateLimiter::with_burst(100, 100);
+        // Drain the bucket
+        assert!(limiter.try_consume(100));
+        // Zero-byte consume must not fail
+        assert!(
+            limiter.try_consume(0),
+            "Consuming 0 bytes must always succeed"
+        );
+    }
+
+    #[test]
+    fn test_burst_size_is_two_times_rate_for_default_constructor() {
+        // The default constructor sets burst = 2× rate.
+        let rate: u64 = 500_000;
+        let limiter = TokenBucketRateLimiter::new(rate);
+        assert!(
+            (limiter.burst_size() - 2.0 * rate as f64).abs() < 1.0,
+            "burst_size should be 2× rate; got {}",
+            limiter.burst_size()
+        );
+    }
+
+    #[test]
+    fn test_sequential_consumes_deplete_bucket() {
+        // Multiple sequential try_consume calls should reduce available tokens.
+        let mut limiter = TokenBucketRateLimiter::with_burst(1000, 300);
+        assert!(limiter.try_consume(100)); // 200 remaining
+        assert!(limiter.try_consume(100)); // 100 remaining
+        assert!(limiter.try_consume(100)); // 0 remaining (approx)
+                                           // Next consume beyond ~0 should fail
+        assert!(
+            !limiter.try_consume(100),
+            "Bucket should be exhausted after three 100-byte consumes from 300-byte bucket"
+        );
+    }
+
+    #[test]
+    fn test_rate_accessor_returns_configured_rate() {
+        let rate: u64 = 123_456;
+        let limiter = TokenBucketRateLimiter::new(rate);
+        assert!(
+            (limiter.rate() - rate as f64).abs() < 1.0,
+            "rate() should return the configured rate"
+        );
+    }
+
+    #[test]
+    fn test_with_burst_custom_sizes() {
+        // with_burst should use exactly the provided burst, not 2× rate.
+        let limiter = TokenBucketRateLimiter::with_burst(1000, 250);
+        assert!(
+            (limiter.burst_size() - 250.0).abs() < 1.0,
+            "burst_size should be exactly 250"
+        );
+        assert!(
+            (limiter.available() - 250.0).abs() < 1.0,
+            "Initial available tokens should equal burst_size"
+        );
+    }
 }

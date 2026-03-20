@@ -2292,4 +2292,636 @@ mod tests {
             "is_circuit_open must not transition state"
         );
     }
+
+    // ── update_tip ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_tip_stores_slot() {
+        // update_tip should record the peer's remote chain tip slot.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+
+        pm.update_tip(&addr, 12345);
+        assert_eq!(pm.peers[&addr].remote_tip_slot, Some(12345));
+
+        // Overwrite with a newer tip
+        pm.update_tip(&addr, 99999);
+        assert_eq!(pm.peers[&addr].remote_tip_slot, Some(99999));
+    }
+
+    #[test]
+    fn test_update_tip_unknown_peer_is_noop() {
+        // update_tip on an address not in the peer table must not panic.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        pm.update_tip(&test_addr(9999), 1);
+        assert_eq!(pm.peers.len(), 0);
+    }
+
+    // ── duplex / mark_peer_duplex ────────────────────────────────────────────
+
+    #[test]
+    fn test_mark_peer_duplex_sets_flag() {
+        // mark_peer_duplex should set the `duplex` flag on the peer entry.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+
+        assert!(!pm.peers[&addr].duplex);
+        pm.mark_peer_duplex(&addr);
+        assert!(pm.peers[&addr].duplex);
+    }
+
+    #[test]
+    fn test_duplex_peer_count_reflects_flag() {
+        // duplex_peer_count should count only peers with duplex=true.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let a1 = test_addr(3001);
+        let a2 = test_addr(3002);
+        pm.add_config_peer(a1, false, false);
+        pm.add_config_peer(a2, false, false);
+        pm.peer_connected(&a1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&a2, 14, ConnectionDirection::Outbound);
+
+        assert_eq!(pm.duplex_peer_count(), 0);
+        pm.mark_peer_duplex(&a1);
+        assert_eq!(pm.duplex_peer_count(), 1);
+        pm.mark_peer_duplex(&a2);
+        assert_eq!(pm.duplex_peer_count(), 2);
+    }
+
+    #[test]
+    fn test_peer_disconnected_clears_duplex_flag() {
+        // Disconnecting a peer must clear the duplex flag so it is not counted
+        // while the peer is cold.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.mark_peer_duplex(&addr);
+        assert_eq!(pm.duplex_peer_count(), 1);
+
+        pm.peer_disconnected(&addr);
+        assert_eq!(
+            pm.duplex_peer_count(),
+            0,
+            "duplex flag must be cleared on disconnect"
+        );
+    }
+
+    #[test]
+    fn test_peer_failed_clears_duplex_flag() {
+        // A failure should also clear the duplex flag.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.mark_peer_duplex(&addr);
+
+        pm.peer_failed(&addr);
+        assert_eq!(
+            pm.duplex_peer_count(),
+            0,
+            "duplex flag must be cleared on failure"
+        );
+    }
+
+    // ── register_inbound_peer / deregister_inbound_peer ─────────────────────
+
+    #[test]
+    fn test_register_inbound_peer_creates_warm_entry() {
+        // register_inbound_peer should create a warm inbound entry for a
+        // previously unknown address.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = routable_addr(5, 5, 5, 5, 4001);
+
+        pm.register_inbound_peer(addr);
+
+        assert!(pm.peers.contains_key(&addr));
+        assert!(pm.warm_peers.contains(&addr));
+        assert_eq!(pm.peers[&addr].temperature, PeerTemperature::Warm);
+        assert_eq!(
+            pm.peers[&addr].direction,
+            Some(ConnectionDirection::Inbound)
+        );
+    }
+
+    #[test]
+    fn test_register_inbound_peer_upgrades_known_cold_peer() {
+        // If the address is already known (e.g., from ledger discovery) but
+        // cold, register_inbound_peer should move it to warm and set direction.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(4001);
+        pm.add_ledger_peer(addr); // cold ledger peer
+        assert!(pm.cold_peers.contains(&addr));
+
+        pm.register_inbound_peer(addr);
+
+        assert!(
+            pm.warm_peers.contains(&addr),
+            "should be warm after inbound registration"
+        );
+        assert!(!pm.cold_peers.contains(&addr));
+        assert_eq!(
+            pm.peers[&addr].direction,
+            Some(ConnectionDirection::Inbound)
+        );
+        // Source should remain Ledger (not overwritten)
+        assert_eq!(pm.peers[&addr].source, PeerSource::Ledger);
+    }
+
+    #[test]
+    fn test_deregister_inbound_peer_returns_to_cold() {
+        // deregister_inbound_peer should move the peer back to cold when the
+        // inbound connection drops.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = routable_addr(5, 5, 5, 5, 4002);
+        pm.register_inbound_peer(addr);
+        assert!(pm.warm_peers.contains(&addr));
+
+        pm.deregister_inbound_peer(&addr);
+
+        assert!(
+            pm.cold_peers.contains(&addr),
+            "deregistered peer should be cold"
+        );
+        assert!(!pm.warm_peers.contains(&addr));
+        assert_eq!(pm.peers[&addr].direction, None);
+        assert_eq!(pm.peers[&addr].temperature, PeerTemperature::Cold);
+    }
+
+    #[test]
+    fn test_deregister_inbound_peer_no_effect_on_outbound() {
+        // deregister_inbound_peer must only act on peers with direction=Inbound.
+        // An outbound peer should be unaffected.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        assert!(pm.warm_peers.contains(&addr));
+
+        pm.deregister_inbound_peer(&addr);
+
+        // Outbound peer must remain warm
+        assert!(
+            pm.warm_peers.contains(&addr),
+            "outbound peer must not be affected by deregister_inbound_peer"
+        );
+    }
+
+    // ── outbound_peer_count / inbound_peer_count ─────────────────────────────
+
+    #[test]
+    fn test_outbound_and_inbound_peer_counts() {
+        // outbound/inbound counts should track connection direction accurately.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let out1 = test_addr(3001);
+        let out2 = test_addr(3002);
+        let in1 = test_addr(3003);
+        pm.add_config_peer(out1, false, false);
+        pm.add_config_peer(out2, false, false);
+        pm.add_config_peer(in1, false, false);
+
+        pm.peer_connected(&out1, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&out2, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&in1, 14, ConnectionDirection::Inbound);
+
+        assert_eq!(pm.outbound_peer_count(), 2);
+        assert_eq!(pm.inbound_peer_count(), 1);
+    }
+
+    #[test]
+    fn test_inbound_count_decremented_on_disconnect() {
+        // When an inbound peer disconnects, inbound_count should decrement.
+        let config = PeerManagerConfig {
+            max_inbound_peers: 5,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(config);
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Inbound);
+        assert!(!pm.should_accept_inbound() || pm.inbound_count == 1);
+
+        pm.peer_disconnected(&addr);
+        // After disconnect inbound_count should be 0 again
+        assert_eq!(pm.inbound_count, 0);
+    }
+
+    // ── cold_peers_for_eviction ordering ────────────────────────────────────
+
+    #[test]
+    fn test_cold_peers_for_eviction_excludes_config_peers() {
+        // Config-sourced peers should never appear in the eviction candidates.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let config_peer = test_addr(3001);
+        let ledger_peer = test_addr(3002);
+
+        pm.add_config_peer(config_peer, false, false);
+        pm.add_ledger_peer(ledger_peer);
+
+        let candidates = pm.cold_peers_for_eviction();
+        assert!(
+            !candidates.contains(&config_peer),
+            "Config peer must never appear in eviction candidates"
+        );
+        assert!(candidates.contains(&ledger_peer));
+    }
+
+    #[test]
+    fn test_cold_peers_for_eviction_oldest_first() {
+        // Never-connected peers (age = infinity) should sort before recently
+        // connected peers.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let old_peer = test_addr(3001);
+        let new_peer = test_addr(3002);
+
+        pm.add_ledger_peer(old_peer);
+        pm.add_ledger_peer(new_peer);
+
+        // Simulate new_peer having been connected recently (ages it as "younger")
+        if let Some(info) = pm.peers.get_mut(&new_peer) {
+            info.last_connected = Some(Instant::now());
+        }
+        // old_peer.last_connected remains None — treated as maximally old
+
+        let candidates = pm.cold_peers_for_eviction();
+        // Both should appear; old_peer (None last_connected) must be first
+        assert_eq!(
+            candidates[0], old_peer,
+            "Peer that was never connected should evict first"
+        );
+    }
+
+    // ── warm_hot_peer_addrs_for_sharing outbound-only filter ─────────────────
+
+    #[test]
+    fn test_warm_hot_peer_addrs_for_sharing_outbound_only() {
+        // warm_hot_peer_addrs_for_sharing must only return outbound-connected peers.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let outbound = routable_addr(8, 8, 8, 8, 3001);
+        let inbound = routable_addr(1, 1, 1, 1, 3002);
+
+        pm.add_config_peer(outbound, false, false);
+        pm.add_config_peer(inbound, false, false);
+
+        pm.peer_connected(&outbound, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&inbound, 14, ConnectionDirection::Inbound);
+
+        let candidates = pm.warm_hot_peer_addrs_for_sharing();
+        assert!(
+            candidates.contains(&outbound),
+            "Outbound peer should be a sharing candidate"
+        );
+        assert!(
+            !candidates.contains(&inbound),
+            "Inbound peer must not be a sharing candidate"
+        );
+    }
+
+    // ── add_big_ledger_peer upgrade ──────────────────────────────────────────
+
+    #[test]
+    fn test_add_big_ledger_peer_upgrades_existing_category() {
+        // If a peer is already known, add_big_ledger_peer should upgrade its
+        // category to BigLedgerPeer without creating a duplicate entry.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_ledger_peer(addr);
+        assert_eq!(pm.peers[&addr].category, PeerCategory::LedgerPeer);
+
+        pm.add_big_ledger_peer(addr);
+        assert_eq!(pm.peers.len(), 1, "Should not create duplicate entry");
+        assert_eq!(pm.peers[&addr].category, PeerCategory::BigLedgerPeer);
+    }
+
+    #[test]
+    fn test_add_big_ledger_peer_new_entry() {
+        // add_big_ledger_peer for an unknown address should create a new cold
+        // BLP entry.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_big_ledger_peer(addr);
+
+        assert_eq!(pm.big_ledger_peer_count(), 1);
+        assert!(pm.cold_peers.contains(&addr));
+        assert_eq!(pm.peers[&addr].category, PeerCategory::BigLedgerPeer);
+    }
+
+    #[test]
+    fn test_active_big_ledger_peer_count() {
+        // Only hot BLPs should be counted by active_big_ledger_peer_count.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let blp = test_addr(3001);
+        let regular = test_addr(3002);
+
+        pm.add_big_ledger_peer(blp);
+        pm.add_config_peer(regular, false, false);
+
+        // Connect and promote both
+        pm.peer_connected(&blp, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&regular, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&blp);
+        pm.promote_to_hot(&regular);
+
+        assert_eq!(
+            pm.active_big_ledger_peer_count(),
+            1,
+            "Only the BLP should count"
+        );
+    }
+
+    // ── local_root_group with no resolvable members ──────────────────────────
+
+    #[test]
+    fn test_add_local_root_group_empty_members_skipped() {
+        // A local root group where none of the member addresses are registered
+        // as peers should be silently skipped (not panic, not register empty group).
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+
+        // These addresses are NOT added as peers — the group has no known members.
+        let unknown1 = test_addr(9001);
+        let unknown2 = test_addr(9002);
+
+        pm.add_local_root_group(vec![unknown1, unknown2], 1, 2);
+
+        // The group must be skipped — no groups registered.
+        assert!(pm.local_root_groups().is_empty());
+    }
+
+    #[test]
+    fn test_add_local_root_group_filters_unknown_members() {
+        // When only some members are registered, the group is created with only
+        // the known members.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let known = test_addr(3001);
+        let unknown = test_addr(9999);
+
+        pm.add_config_peer(known, true, false);
+        pm.add_local_root_group(vec![known, unknown], 1, 1);
+
+        let groups = pm.local_root_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].members, vec![known]);
+        assert!(!groups[0].members.contains(&unknown));
+    }
+
+    // ── peer_category accessor ───────────────────────────────────────────────
+
+    #[test]
+    fn test_peer_category_returns_none_for_unknown() {
+        let pm = PeerManager::new(PeerManagerConfig::default());
+        assert!(pm.peer_category(&test_addr(9999)).is_none());
+    }
+
+    #[test]
+    fn test_peer_category_returns_correct_category() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let local_root = test_addr(3001);
+        let ledger = test_addr(3002);
+
+        pm.add_config_peer(local_root, true, false); // trustable → LocalRoot
+        pm.add_ledger_peer(ledger);
+
+        assert_eq!(pm.peer_category(&local_root), Some(PeerCategory::LocalRoot));
+        assert_eq!(pm.peer_category(&ledger), Some(PeerCategory::LedgerPeer));
+    }
+
+    // ── is_local_root accessor ────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_local_root_only_for_local_root_category() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let local_root = test_addr(3001);
+        let regular = test_addr(3002);
+
+        pm.add_config_peer(local_root, true, false);
+        pm.add_config_peer(regular, false, false);
+
+        assert!(pm.is_local_root(&local_root));
+        assert!(!pm.is_local_root(&regular));
+        assert!(!pm.is_local_root(&test_addr(9999))); // unknown address
+    }
+
+    // ── PeerInfo::should_retry backoff schedule ───────────────────────────────
+
+    #[test]
+    fn test_should_retry_true_before_first_failure() {
+        // A peer that has never failed should always be eligible for retry.
+        let info = PeerInfo::new(test_addr(3001), PeerSource::Config);
+        assert!(
+            info.should_retry(),
+            "Never-failed peer must be eligible for retry"
+        );
+    }
+
+    #[test]
+    fn test_should_retry_false_immediately_after_failure() {
+        // Just after a failure, should_retry should return false due to backoff.
+        let mut info = PeerInfo::new(test_addr(3001), PeerSource::Ledger);
+        info.failure_count = 1;
+        info.last_failed = Some(Instant::now());
+        assert!(
+            !info.should_retry(),
+            "Just-failed peer must not be eligible yet"
+        );
+    }
+
+    #[test]
+    fn test_should_retry_true_after_backoff_expires() {
+        // After the backoff window passes, should_retry should return true.
+        // Backoff formula: 5 * 2^(failure_count.min(4))
+        // failure_count=1 → 5 * 2^1 = 10s. Set last_failed to 12s ago.
+        let mut info = PeerInfo::new(test_addr(3001), PeerSource::Ledger);
+        info.failure_count = 1;
+        info.last_failed = Some(Instant::now() - Duration::from_secs(12));
+        assert!(
+            info.should_retry(),
+            "Peer should be retryable once backoff expires"
+        );
+    }
+
+    // ── PeerInfo::selection_score source bonuses ────────────────────────────
+
+    #[test]
+    fn test_selection_score_source_ordering() {
+        // Config peers should score higher than PeerSharing peers (all else equal).
+        let config_info = PeerInfo::new(test_addr(3001), PeerSource::Config);
+        let shared_info = PeerInfo::new(test_addr(3002), PeerSource::PeerSharing);
+        let ledger_info = PeerInfo::new(test_addr(3003), PeerSource::Ledger);
+        let inbound_info = PeerInfo::new(test_addr(3004), PeerSource::Inbound);
+
+        // Config 0.1 bonus > Ledger 0.05 bonus > Inbound 0.02 bonus > Shared 0
+        assert!(config_info.selection_score() > ledger_info.selection_score());
+        assert!(ledger_info.selection_score() > inbound_info.selection_score());
+        assert!(inbound_info.selection_score() > shared_info.selection_score());
+    }
+
+    #[test]
+    fn test_selection_score_failure_penalty() {
+        // Failures should linearly penalise the selection score.
+        let mut no_failures = PeerInfo::new(test_addr(3001), PeerSource::Config);
+        let mut with_failures = PeerInfo::new(test_addr(3002), PeerSource::Config);
+        with_failures.failure_count = 3;
+
+        assert!(
+            no_failures.selection_score() > with_failures.selection_score(),
+            "Peer with failures must score lower: {} vs {}",
+            no_failures.selection_score(),
+            with_failures.selection_score()
+        );
+        // Adding a known tip should boost score
+        no_failures.remote_tip_slot = Some(12345);
+        let with_tip = no_failures.selection_score();
+        let without_tip = PeerInfo::new(test_addr(3001), PeerSource::Config).selection_score();
+        assert!(
+            with_tip > without_tip,
+            "Known remote tip should boost score"
+        );
+    }
+
+    // ── PeerPerformance: zero block count ────────────────────────────────────
+
+    #[test]
+    fn test_record_block_fetch_zero_blocks_uses_fetch_ms() {
+        // When block_count=0, per-block time falls back to the raw fetch_ms value.
+        let mut perf = PeerPerformance::default();
+        perf.record_block_fetch(200.0, 0, 0);
+        // With zero blocks the code divides by block_count which is 0, so it
+        // falls back to fetch_ms directly.
+        assert_eq!(perf.avg_block_fetch_ms, Some(200.0));
+    }
+
+    // ── PeerPerformance: compute_reputation boundary ─────────────────────────
+
+    #[test]
+    fn test_compute_reputation_always_in_range() {
+        // Regardless of input, reputation must stay in [0.0, 1.0].
+        let mut perf_perfect = PeerPerformance::default();
+        perf_perfect.record_handshake_rtt(1.0); // near-zero RTT
+        perf_perfect.record_block_fetch(1.0, 10000, 100_000_000);
+        let score_perfect = perf_perfect.compute_reputation(0);
+        assert!(
+            (0.0..=1.0).contains(&score_perfect),
+            "Reputation must be in [0,1]: {score_perfect}"
+        );
+
+        let mut perf_terrible = PeerPerformance::default();
+        perf_terrible.record_handshake_rtt(100_000.0); // extremely high RTT
+        perf_terrible.record_block_fetch(100_000.0, 1, 1);
+        let score_terrible = perf_terrible.compute_reputation(100);
+        assert!(
+            (0.0..=1.0).contains(&score_terrible),
+            "Reputation must be in [0,1]: {score_terrible}"
+        );
+    }
+
+    // ── connected_peer_addrs includes both warm and hot ──────────────────────
+
+    #[test]
+    fn test_connected_peer_addrs_includes_warm_and_hot() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let warm_peer = test_addr(3001);
+        let hot_peer = test_addr(3002);
+        let cold_peer = test_addr(3003);
+
+        pm.add_config_peer(warm_peer, false, false);
+        pm.add_config_peer(hot_peer, false, false);
+        pm.add_config_peer(cold_peer, false, false);
+
+        pm.peer_connected(&warm_peer, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&hot_peer, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&hot_peer);
+
+        let connected = pm.connected_peer_addrs();
+        assert!(
+            connected.contains(&warm_peer),
+            "warm peer must be in connected list"
+        );
+        assert!(
+            connected.contains(&hot_peer),
+            "hot peer must be in connected list"
+        );
+        assert!(
+            !connected.contains(&cold_peer),
+            "cold peer must not be in connected list"
+        );
+    }
+
+    // ── hot_peer_addrs ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hot_peer_addrs_only_returns_hot() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let hot = test_addr(3001);
+        let warm = test_addr(3002);
+
+        pm.add_config_peer(hot, false, false);
+        pm.add_config_peer(warm, false, false);
+        pm.peer_connected(&hot, 14, ConnectionDirection::Outbound);
+        pm.peer_connected(&warm, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&hot);
+
+        let hot_addrs = pm.hot_peer_addrs();
+        assert_eq!(hot_addrs.len(), 1);
+        assert_eq!(hot_addrs[0], hot);
+    }
+
+    // ── stats.inbound_count ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_inbound_count_tracks_inbound_peers() {
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let in1 = test_addr(3001);
+        let out1 = test_addr(3002);
+
+        pm.add_config_peer(in1, false, false);
+        pm.add_config_peer(out1, false, false);
+
+        pm.peer_connected(&in1, 14, ConnectionDirection::Inbound);
+        pm.peer_connected(&out1, 14, ConnectionDirection::Outbound);
+
+        let stats = pm.stats();
+        assert_eq!(stats.inbound_count, 1);
+    }
+
+    // ── promote_to_hot is idempotent when already hot ────────────────────────
+
+    #[test]
+    fn test_promote_to_hot_is_idempotent() {
+        // Calling promote_to_hot on an already-hot peer should be a no-op.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+        assert_eq!(pm.hot_peer_count(), 1);
+
+        pm.promote_to_hot(&addr); // second call — should not duplicate
+        assert_eq!(
+            pm.hot_peer_count(),
+            1,
+            "Double-promote must not create duplicate"
+        );
+    }
+
+    // ── demote_to_warm is idempotent when already warm ───────────────────────
+
+    #[test]
+    fn test_demote_to_warm_is_idempotent() {
+        // Calling demote_to_warm on an already-warm peer should be a no-op.
+        let mut pm = PeerManager::new(PeerManagerConfig::default());
+        let addr = test_addr(3001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        // Peer is warm from peer_connected; demote immediately should do nothing.
+        pm.demote_to_warm(&addr);
+        assert_eq!(pm.warm_peer_count(), 1);
+        assert_eq!(
+            pm.hot_peer_count(),
+            0,
+            "Should remain warm after no-op demote"
+        );
+    }
 }
