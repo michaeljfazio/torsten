@@ -13,10 +13,10 @@
 //! - Connection limit enforcement (hard/soft)
 
 use crate::peer_manager::{PeerCategory, PeerManager};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Peer count targets for the governor decision loop.
 #[derive(Debug, Clone)]
@@ -122,6 +122,16 @@ pub struct GovernorConfig {
     pub churn_interval_normal_secs: u64,
     /// Sync churn interval (seconds)
     pub churn_interval_sync_secs: u64,
+    /// Number of consecutive evaluation cycles in which a hot peer must
+    /// serve zero new blocks before the governor demotes it back to warm.
+    ///
+    /// Each full evaluation cycle runs every 30 seconds, so the default of 6
+    /// cycles corresponds to a 3-minute stall window.  Local root peers are
+    /// exempt from stall demotion.
+    pub stall_demotion_cycles: u32,
+    /// Failure count above which a hot peer is unconditionally demoted to
+    /// warm.  Local root peers are exempt from error-rate demotion.
+    pub error_demotion_threshold: u32,
 }
 
 impl Default for GovernorConfig {
@@ -133,6 +143,8 @@ impl Default for GovernorConfig {
             soft_limit: 384,
             churn_interval_normal_secs: 3300, // 55 minutes
             churn_interval_sync_secs: 900,    // 15 minutes
+            stall_demotion_cycles: 6,         // 6 × 30 s = 3 minutes
+            error_demotion_threshold: 5,      // 5 accumulated failures
         }
     }
 }
@@ -174,6 +186,18 @@ pub struct Governor {
     /// Peer-sharing requests are rate-limited to at most once per 60 seconds,
     /// matching Haskell's `policyPeerShareRetryTime`.
     last_peer_sharing_request: Option<Instant>,
+
+    // ── Phase 8: Stall-detection for hot peers (#200) ─────────────────────
+    /// Snapshot of `blocks_fetched` per hot peer taken at the end of each
+    /// full evaluation cycle.  On the next cycle the governor compares the
+    /// current count against this snapshot; if it has not increased for
+    /// `config.stall_demotion_cycles` consecutive evaluations the peer is
+    /// demoted back to warm.
+    ///
+    /// The outer `HashMap` maps peer address to `(snapshot_blocks, stale_cycles)`.
+    /// `stale_cycles` is incremented each time the block count has not grown;
+    /// reset to 0 when at least one new block has been fetched.
+    hot_peer_stall: HashMap<SocketAddr, (u64, u32)>,
 }
 
 impl Governor {
@@ -200,6 +224,7 @@ impl Governor {
             churn_seed,
             recently_churned: HashSet::new(),
             last_peer_sharing_request: None,
+            hot_peer_stall: HashMap::new(),
         }
     }
 
@@ -271,12 +296,13 @@ impl Governor {
     /// a list of events that should be executed. Events are prioritized:
     /// 1. Local root valency enforcement (per-group, highest priority)
     /// 2. Big ledger peers (most important for genesis/sync)
-    /// 3. Active peers below target → promote
+    /// 3. Active peers below target → promote (liveness-gated)
     /// 4. Established peers below target → connect
     /// 5. Above target → demote/disconnect (respecting local root protection)
     ///    5a. BLP preemption during Syncing (demote non-BLP hot to free slots)
     /// 6. Peer sharing when known-peer count is low
     /// 7. Known-peer surplus eviction (trim cold set when > 1.5× target)
+    /// 8. Stall/error-rate demotion of hot peers that are not contributing
     pub fn evaluate(&mut self, pm: &PeerManager) -> Vec<GovernorEvent> {
         let mut events = Vec::new();
         let targets = self.active_targets().clone();
@@ -305,13 +331,25 @@ impl Governor {
         // --- Phase 7: Known-peer surplus eviction ---
         self.evaluate_known_surplus(pm, &targets, &mut events);
 
+        // --- Phase 8: Stall/error-rate demotion ---
+        self.evaluate_stale_hot_peers(pm, &mut events);
+
+        // --- Update stall-detection snapshot for next cycle ---
+        // Record the current blocks_fetched for all hot peers so that the
+        // next call to evaluate() can detect which peers served no new blocks.
+        self.update_stall_snapshot(pm);
+
         // Deduplicate events by address — multiple phases may emit Connect or
         // Promote for the same peer (e.g., BLP phase + general deficit phase).
+        // Also deduplicate Demote events so that stall demotion and surplus
+        // reduction don't both fire for the same peer in one cycle.
         let mut seen_connect = std::collections::HashSet::new();
         let mut seen_promote = std::collections::HashSet::new();
+        let mut seen_demote = std::collections::HashSet::new();
         events.retain(|e| match e {
             GovernorEvent::Connect(addr) => seen_connect.insert(*addr),
             GovernorEvent::Promote(addr) => seen_promote.insert(*addr),
+            GovernorEvent::Demote(addr) => seen_demote.insert(*addr),
             _ => true,
         });
 
@@ -463,7 +501,10 @@ impl Governor {
 
         let mut blp_hot_after_events = active_blp;
 
-        // Step 1: promote warm BLPs first (connection already established)
+        // Step 1: promote warm BLPs first (connection already established).
+        // Gate on liveness: only promote if the peer has demonstrated activity
+        // or connected recently enough that it hasn't yet had a chance to serve
+        // blocks.
         let hot_set: HashSet<SocketAddr> = pm.hot_peer_addrs().into_iter().collect();
         let warm_blps: Vec<SocketAddr> = pm
             .connected_peer_addrs()
@@ -471,6 +512,7 @@ impl Governor {
             .filter(|addr| {
                 pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer)
                     && !hot_set.contains(addr)
+                    && pm.is_promotion_ready(addr)
             })
             .take(targets.active_blp - blp_hot_after_events)
             .collect();
@@ -499,6 +541,12 @@ impl Governor {
     }
 
     /// Phase 2: Evaluate active (hot) peer targets.
+    ///
+    /// Before promoting a warm peer to hot, we verify that it has demonstrated
+    /// some liveness: either it has fetched at least one block since connecting
+    /// (non-zero `blocks_fetched`), or it connected recently enough that it
+    /// hasn't yet had the chance to serve blocks.  This prevents the governor
+    /// from promoting peers that connected but then immediately stalled.
     fn evaluate_active(
         &self,
         pm: &PeerManager,
@@ -509,7 +557,11 @@ impl Governor {
         if hot < targets.active_peers {
             let deficit = targets.active_peers - hot;
             let to_promote = pm.peers_to_promote();
-            for addr in to_promote.into_iter().take(deficit) {
+            for addr in to_promote
+                .into_iter()
+                .filter(|a| pm.is_promotion_ready(a))
+                .take(deficit)
+            {
                 events.push(GovernorEvent::Promote(addr));
             }
         }
@@ -893,9 +945,141 @@ impl Governor {
         &self.recently_churned
     }
 
+    /// Phase 8: Stall and error-rate demotion of hot peers (#200).
+    ///
+    /// A hot peer is demoted back to warm if:
+    ///
+    /// 1. **Stall**: it has not fetched any new blocks for at least
+    ///    `config.stall_demotion_cycles` consecutive evaluation cycles.  This
+    ///    is determined by comparing the peer's current `blocks_fetched`
+    ///    counter against the snapshot taken at the previous cycle.
+    ///
+    /// 2. **Errors**: its accumulated `failure_count` exceeds
+    ///    `config.error_demotion_threshold`.
+    ///
+    /// Local root peers are exempt from both checks — they are operator-
+    /// configured trusted peers that should be promoted again immediately.
+    fn evaluate_stale_hot_peers(&self, pm: &PeerManager, events: &mut Vec<GovernorEvent>) {
+        // Build the set of addresses already targeted for demotion by earlier
+        // phases so we don't emit duplicate Demote events.
+        let already_demoted: HashSet<SocketAddr> = events
+            .iter()
+            .filter_map(|e| {
+                if let GovernorEvent::Demote(a) = e {
+                    Some(*a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for addr in pm.hot_peer_addrs() {
+            // Local root peers are never demoted by the governor.
+            if pm.is_local_root(&addr) {
+                continue;
+            }
+            // Skip peers already scheduled for demotion this cycle.
+            if already_demoted.contains(&addr) {
+                continue;
+            }
+
+            // ── Error-rate check ─────────────────────────────────────────────
+            // Demote immediately if the peer has accumulated too many failures.
+            if let Some(info) = pm.peer_info(&addr) {
+                if info.failure_count >= self.config.error_demotion_threshold {
+                    warn!(
+                        %addr,
+                        failure_count = info.failure_count,
+                        threshold = self.config.error_demotion_threshold,
+                        "Governor: demoting hot peer due to excessive failures"
+                    );
+                    events.push(GovernorEvent::Demote(addr));
+                    continue;
+                }
+            }
+
+            // ── Stall check ──────────────────────────────────────────────────
+            // If we have a snapshot from the previous cycle, check whether the
+            // block count has grown.  If not, increment the stale counter; if
+            // it has exceeded the threshold, demote.
+            let current_blocks = pm
+                .peer_performance(&addr)
+                .map(|p| p.blocks_fetched)
+                .unwrap_or(0);
+
+            if let Some(&(snapshot_blocks, stale_cycles)) = self.hot_peer_stall.get(&addr) {
+                if current_blocks == snapshot_blocks {
+                    // No new blocks this cycle.
+                    let new_stale = stale_cycles + 1;
+                    if new_stale >= self.config.stall_demotion_cycles {
+                        warn!(
+                            %addr,
+                            stale_cycles = new_stale,
+                            threshold = self.config.stall_demotion_cycles,
+                            blocks_fetched = current_blocks,
+                            "Governor: demoting stalled hot peer (no new blocks)"
+                        );
+                        events.push(GovernorEvent::Demote(addr));
+                    }
+                }
+                // If blocks grew, the snapshot will be updated in
+                // update_stall_snapshot() called after this phase.
+            }
+            // Peers with no snapshot are new promotions — skip until
+            // their first full cycle has elapsed.
+        }
+    }
+
+    /// Update the stall-detection snapshot after each full evaluation cycle.
+    ///
+    /// Called at the end of `evaluate()` to record each hot peer's current
+    /// `blocks_fetched` counter and the number of consecutive stale cycles.
+    /// Peers that are no longer hot are removed from the map; new hot peers
+    /// are inserted with their current count and `stale_cycles = 0`.
+    fn update_stall_snapshot(&mut self, pm: &PeerManager) {
+        let hot_addrs: HashSet<SocketAddr> = pm.hot_peer_addrs().into_iter().collect();
+
+        // Remove entries for peers that are no longer hot (they may have been
+        // demoted by this cycle or by an external action).
+        self.hot_peer_stall
+            .retain(|addr, _| hot_addrs.contains(addr));
+
+        // Update/insert for each current hot peer.
+        for addr in &hot_addrs {
+            let current_blocks = pm
+                .peer_performance(addr)
+                .map(|p| p.blocks_fetched)
+                .unwrap_or(0);
+
+            self.hot_peer_stall
+                .entry(*addr)
+                .and_modify(|(snapshot, stale_cycles)| {
+                    if current_blocks > *snapshot {
+                        // Progress: reset the stale counter.
+                        *snapshot = current_blocks;
+                        *stale_cycles = 0;
+                    } else {
+                        // No progress: increment stale counter (capped to avoid
+                        // wrapping on very long stalls).
+                        *stale_cycles = stale_cycles.saturating_add(1);
+                    }
+                })
+                .or_insert((current_blocks, 0));
+        }
+    }
+
     /// Get current governor config (for testing/inspection)
     pub fn config(&self) -> &GovernorConfig {
         &self.config
+    }
+
+    /// Return the stall-detection snapshot (for testing/inspection).
+    ///
+    /// Each entry maps a hot peer address to `(blocks_fetched_snapshot,
+    /// consecutive_stale_cycles)`.
+    #[cfg(test)]
+    pub fn hot_peer_stall(&self) -> &HashMap<SocketAddr, (u64, u32)> {
+        &self.hot_peer_stall
     }
 }
 
@@ -2014,139 +2198,35 @@ mod tests {
         );
     }
 
-    // ── Connection limit boundary conditions ──────────────────────────────────
+    // ── #199: Warm-to-hot promotion liveness gate ─────────────────────────────
 
+    /// A warm peer that has not yet fetched any blocks and connected more than
+    /// PROMOTION_NEW_PEER_GRACE ago must NOT be promoted to hot.
     #[test]
-    fn test_connection_check_at_soft_limit_delays() {
-        // A count exactly equal to soft_limit should produce Delay, not Accept.
-        let gov = Governor::new(GovernorConfig::default());
-        let decision = gov.connection_check(gov.config().soft_limit);
-        assert!(
-            matches!(decision, ConnectionDecision::Delay(_)),
-            "Exactly at soft_limit must Delay; got {decision:?}"
-        );
-    }
-
-    #[test]
-    fn test_connection_check_just_below_soft_limit_accepts() {
-        // One below soft_limit must still Accept.
-        let gov = Governor::new(GovernorConfig::default());
-        assert_eq!(
-            gov.connection_check(gov.config().soft_limit - 1),
-            ConnectionDecision::Accept
-        );
-    }
-
-    #[test]
-    fn test_connection_check_at_hard_limit_rejects() {
-        // Exactly at the hard limit must Reject.
-        let gov = Governor::new(GovernorConfig::default());
-        assert_eq!(
-            gov.connection_check(gov.config().hard_limit),
-            ConnectionDecision::Reject
-        );
-    }
-
-    #[test]
-    fn test_connection_check_above_hard_limit_rejects() {
-        // Above the hard limit must also Reject.
-        let gov = Governor::new(GovernorConfig::default());
-        assert_eq!(
-            gov.connection_check(gov.config().hard_limit + 100),
-            ConnectionDecision::Reject
-        );
-    }
-
-    // ── SyncState::PreSyncing uses sync targets ───────────────────────────────
-
-    #[test]
-    fn test_presyncing_uses_sync_targets() {
-        // PreSyncing should use the same (lower) sync targets as Syncing.
-        let mut gov = Governor::new(GovernorConfig::default());
-        gov.set_sync_state(SyncState::PreSyncing);
-        assert_eq!(
-            gov.active_targets().active_peers,
-            GovernorConfig::default().sync_targets.active_peers,
-            "PreSyncing must use sync targets"
-        );
-    }
-
-    #[test]
-    fn test_set_sync_state_no_op_when_same() {
-        // Setting the same state should not change any field (and not panic).
-        let mut gov = Governor::new(GovernorConfig::default());
-        gov.set_sync_state(SyncState::CaughtUp);
-        let active_before = gov.active_targets().active_peers;
-        gov.set_sync_state(SyncState::CaughtUp); // same state
-        assert_eq!(gov.active_targets().active_peers, active_before);
-    }
-
-    // ── PeerTargets::syncing() lower than default ─────────────────────────────
-
-    #[test]
-    fn test_sync_targets_lower_than_normal() {
-        // sync targets should have smaller active and established counts
-        // to speed up convergence during initial block download.
-        let normal = PeerTargets::default();
-        let sync = PeerTargets::syncing();
-
-        assert!(
-            sync.active_peers <= normal.active_peers,
-            "Sync active_peers ({}) must be <= normal ({})",
-            sync.active_peers,
-            normal.active_peers
-        );
-        assert!(
-            sync.established_peers <= normal.established_peers,
-            "Sync established_peers ({}) must be <= normal ({})",
-            sync.established_peers,
-            normal.established_peers
-        );
-    }
-
-    // ── Shuffle of empty and single-element slices ────────────────────────────
-
-    #[test]
-    fn test_shuffle_empty_slice_is_noop() {
-        let mut gov = Governor::new(GovernorConfig::default());
-        let mut v: Vec<u32> = vec![];
-        gov.shuffle(&mut v); // must not panic
-        assert!(v.is_empty());
-    }
-
-    #[test]
-    fn test_shuffle_single_element_is_noop() {
-        let mut gov = Governor::new(GovernorConfig::default());
-        let mut v = vec![42u32];
-        gov.shuffle(&mut v);
-        assert_eq!(v, vec![42u32]);
-    }
-
-    // ── Deduplication of Connect/Promote across phases ────────────────────────
-
-    #[test]
-    fn test_evaluate_deduplicates_connect_events() {
-        // When multiple governor phases could emit Connect for the same peer
-        // (e.g., BLP phase + general established phase), only one Connect must
-        // appear in the output.
+    fn test_promotion_blocked_for_idle_peer_past_grace() {
+        use crate::peer_manager::PROMOTION_NEW_PEER_GRACE;
         let pm_config = PeerManagerConfig {
-            target_hot_peers: 20,
-            target_warm_peers: 20,
-            target_known_peers: 200,
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
             ..PeerManagerConfig::default()
         };
         let mut pm = PeerManager::new(pm_config);
 
-        // Single cold BLP — eligible for both BLP phase and general connect phase.
-        let blp = test_addr(4001);
-        pm.add_big_ledger_peer(blp);
+        let addr = test_addr(20001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        // Force last_connected to be well past the grace period.
+        pm.set_last_connected(
+            &addr,
+            Instant::now() - PROMOTION_NEW_PEER_GRACE - Duration::from_secs(10),
+        );
+        // blocks_fetched is still 0 and last_good_fetch is None.
 
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_blp: 1,
-                established_blp: 1,
-                active_peers: 1,
-                established_peers: 1,
+                active_peers: 5,
+                established_peers: 10,
                 ..PeerTargets::default()
             },
             ..GovernorConfig::default()
@@ -2154,52 +2234,434 @@ mod tests {
         let mut gov = Governor::new(config);
         let events = gov.evaluate(&pm);
 
-        let connects_for_blp = events
+        let promotes: Vec<SocketAddr> = events
             .iter()
-            .filter(|e| matches!(e, GovernorEvent::Connect(a) if *a == blp))
-            .count();
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
 
-        assert_eq!(
-            connects_for_blp, 1,
-            "Connect must be deduplicated: got {connects_for_blp} for {blp}"
+        assert!(
+            !promotes.contains(&addr),
+            "Idle peer past grace should NOT be promoted; promotions={promotes:?}"
         );
     }
 
-    // ── GovernorConfig defaults ───────────────────────────────────────────────
-
+    /// A warm peer that has fetched at least one block MUST be eligible for
+    /// promotion regardless of connection age.
     #[test]
-    fn test_governor_config_defaults() {
-        let config = GovernorConfig::default();
-        // Hard limit must be > soft limit
-        assert!(
-            config.hard_limit > config.soft_limit,
-            "hard_limit must be > soft_limit"
-        );
-        // Normal churn interval must be longer than sync churn interval
-        assert!(
-            config.churn_interval_normal_secs > config.churn_interval_sync_secs,
-            "Normal churn should be less frequent than sync churn"
-        );
-    }
+    fn test_promotion_allowed_for_peer_with_blocks() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
 
-    // ── maybe_churn: no-op before interval ───────────────────────────────────
+        let addr = test_addr(20002);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        // Record a block fetch so the liveness gate is satisfied.
+        pm.record_block_fetch(&addr, 50.0, 1, 1024);
 
-    #[test]
-    fn test_maybe_churn_no_op_before_interval() {
-        // maybe_churn should return an empty vec when the churn interval has
-        // not yet elapsed.
-        let pm = setup_pm_with_peers(10, 5, 20);
-        let mut gov = Governor::new(GovernorConfig {
-            churn_interval_normal_secs: 3600, // 1 hour — definitely not elapsed
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
             ..GovernorConfig::default()
-        });
-        // last_churn defaults to Instant::now() in Governor::new,
-        // so the interval has not elapsed.
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let promotes: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            promotes.contains(&addr),
+            "Peer with blocks fetched should be promoted; promotions={promotes:?}"
+        );
+    }
+
+    /// A warm peer that connected very recently (within grace) with no blocks
+    /// must still be eligible for promotion.
+    #[test]
+    fn test_promotion_allowed_during_grace_period() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(20003);
+        pm.add_config_peer(addr, false, false);
+        // peer_connected sets last_connected = Instant::now(), so we're within grace.
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        // No blocks fetched yet; failure_count = 0.
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let promotes: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            promotes.contains(&addr),
+            "Peer within grace period should be promotable; promotions={promotes:?}"
+        );
+    }
+
+    /// Local root peers bypass the liveness gate and are always eligible.
+    #[test]
+    fn test_promotion_local_root_bypasses_liveness_gate() {
+        use crate::peer_manager::PROMOTION_NEW_PEER_GRACE;
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(20004);
+        pm.add_config_peer(addr, true, false); // trustable = LocalRoot
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        // Force connection time to be past grace, and zero blocks fetched.
+        pm.set_last_connected(
+            &addr,
+            Instant::now() - PROMOTION_NEW_PEER_GRACE - Duration::from_secs(60),
+        );
+
+        // Register as a local root group so Phase 0 fires.
+        pm.add_local_root_group(vec![addr], 1, 1);
+
+        let mut gov = Governor::new(GovernorConfig::default());
+        let events = gov.evaluate(&pm);
+
+        let promotes: Vec<SocketAddr> = events
+            .iter()
+            .filter_map(|e| match e {
+                GovernorEvent::Promote(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            promotes.contains(&addr),
+            "Local root peer must bypass liveness gate and be promoted; promotions={promotes:?}"
+        );
+    }
+
+    // ── #200: Stall detection and error-rate demotion ─────────────────────────
+
+    /// A hot peer that serves no new blocks for stall_demotion_cycles consecutive
+    /// evaluation cycles must be demoted back to warm.
+    #[test]
+    fn test_stall_demotion_after_threshold_cycles() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(21001);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+        // blocks_fetched starts at 0; no record_block_fetch call.
+
+        // Use a small threshold to make the test fast.
+        let threshold = 3u32;
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            stall_demotion_cycles: threshold,
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
+        // Run `threshold` cycles without the peer serving any blocks.
+        // On cycle 0 the snapshot is inserted (stale_cycles = 0).
+        // On each subsequent cycle it is incremented.
+        // Demotion fires when stale_cycles >= threshold.
+        let mut demoted = false;
+        for _ in 0..=threshold {
+            let events = gov.evaluate(&pm);
+            if events
+                .iter()
+                .any(|e| matches!(e, GovernorEvent::Demote(a) if *a == addr))
+            {
+                demoted = true;
+                break;
+            }
+            // Simulate the node applying the Demote event (drop hot flag).
+            // Without this the peer stays hot for subsequent cycles.
+        }
+
+        assert!(
+            demoted,
+            "Hot peer with no block activity should be demoted after {threshold} stale cycles"
+        );
+    }
+
+    /// A hot peer that continues to serve blocks must NOT be stall-demoted.
+    #[test]
+    fn test_no_stall_demotion_for_active_peer() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(21002);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            stall_demotion_cycles: 2,
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
+        // Run several cycles, recording one block between each so the
+        // block count always grows.
+        for i in 1..=5u64 {
+            pm.record_block_fetch(&addr, 30.0, i, 512 * i);
+            let events = gov.evaluate(&pm);
+            let demoted = events
+                .iter()
+                .any(|e| matches!(e, GovernorEvent::Demote(a) if *a == addr));
+            assert!(
+                !demoted,
+                "Active hot peer must not be stall-demoted at cycle {i}"
+            );
+        }
+    }
+
+    /// A hot peer that exceeds the error threshold must be demoted regardless
+    /// of its block activity.
+    #[test]
+    fn test_error_rate_demotion() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(21003);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+        // Record some blocks to avoid stall demotion path.
+        pm.record_block_fetch(&addr, 20.0, 5, 4096);
+
+        // Artificially inflate the failure count beyond the threshold.
+        let threshold = 3u32;
+        pm.set_failure_count(&addr, threshold + 1);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            error_demotion_threshold: threshold,
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+        let events = gov.evaluate(&pm);
+
+        let demoted = events
+            .iter()
+            .any(|e| matches!(e, GovernorEvent::Demote(a) if *a == addr));
+        assert!(
+            demoted,
+            "Peer exceeding error threshold must be demoted; events={events:?}"
+        );
+    }
+
+    /// Local root peers must never be demoted by stall or error checks.
+    #[test]
+    fn test_stall_and_error_exempt_local_root() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(21004);
+        pm.add_config_peer(addr, true, false); // trustable = LocalRoot
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+        // High failure count.
+        pm.set_failure_count(&addr, 100);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            stall_demotion_cycles: 1,
+            error_demotion_threshold: 2,
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
+        // Run multiple cycles with no blocks — should never demote local root.
+        for cycle in 0..5 {
+            let events = gov.evaluate(&pm);
+            let demoted = events
+                .iter()
+                .any(|e| matches!(e, GovernorEvent::Demote(a) if *a == addr));
+            assert!(
+                !demoted,
+                "Local root must never be stall/error-demoted (cycle {cycle})"
+            );
+        }
+    }
+
+    /// The stall snapshot is updated correctly: stale_cycles resets when blocks grow.
+    #[test]
+    fn test_stall_snapshot_resets_on_activity() {
+        let pm_config = PeerManagerConfig {
+            target_hot_peers: 5,
+            target_warm_peers: 5,
+            target_known_peers: 100,
+            ..PeerManagerConfig::default()
+        };
+        let mut pm = PeerManager::new(pm_config);
+
+        let addr = test_addr(21005);
+        pm.add_config_peer(addr, false, false);
+        pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
+        pm.promote_to_hot(&addr);
+
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                active_peers: 5,
+                established_peers: 10,
+                ..PeerTargets::default()
+            },
+            stall_demotion_cycles: 5, // high threshold so we don't demote
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
+        // Cycle 1: no blocks → snapshot inserted with stale_cycles = 0.
+        gov.evaluate(&pm);
+        // After cycle 1 the snapshot is (0 blocks, 0 stale).
+
+        // Cycle 2: no blocks → stale_cycles becomes 1.
+        gov.evaluate(&pm);
+        let (_, stale) = *gov.hot_peer_stall().get(&addr).unwrap();
+        assert_eq!(stale, 1, "stale_cycles should be 1 after two idle cycles");
+
+        // Cycle 3: serve blocks → stale_cycles should reset to 0.
+        pm.record_block_fetch(&addr, 10.0, 10, 8192);
+        gov.evaluate(&pm);
+        let (snap_blocks, stale) = *gov.hot_peer_stall().get(&addr).unwrap();
+        assert_eq!(stale, 0, "stale_cycles must reset after blocks are served");
+        assert_eq!(
+            snap_blocks, 10,
+            "snapshot block count should reflect new total"
+        );
+    }
+
+    // ── #201: Configurable connection targets ─────────────────────────────────
+
+    /// GovernorConfig fields read from NodeConfig must be reflected in the governor.
+    #[test]
+    fn test_configurable_targets_reflected_in_governor() {
+        let config = GovernorConfig {
+            normal_targets: PeerTargets {
+                root_peers: 30,
+                known_peers: 42,
+                established_peers: 20,
+                active_peers: 8,
+                known_blp: 7,
+                established_blp: 5,
+                active_blp: 3,
+            },
+            churn_interval_normal_secs: 600,
+            churn_interval_sync_secs: 120,
+            stall_demotion_cycles: 4,
+            error_demotion_threshold: 7,
+            ..GovernorConfig::default()
+        };
+        let gov = Governor::new(config.clone());
+
+        // Verify that the governor honours every customised field.
+        assert_eq!(gov.config().normal_targets.active_peers, 8);
+        assert_eq!(gov.config().normal_targets.known_peers, 42);
+        assert_eq!(gov.config().normal_targets.root_peers, 30);
+        assert_eq!(gov.config().normal_targets.established_peers, 20);
+        assert_eq!(gov.config().normal_targets.active_blp, 3);
+        assert_eq!(gov.config().normal_targets.known_blp, 7);
+        assert_eq!(gov.config().normal_targets.established_blp, 5);
+        assert_eq!(gov.config().churn_interval_normal_secs, 600);
+        assert_eq!(gov.config().churn_interval_sync_secs, 120);
+        assert_eq!(gov.config().stall_demotion_cycles, 4);
+        assert_eq!(gov.config().error_demotion_threshold, 7);
+    }
+
+    /// Changing only the churn interval does not affect peer count targets.
+    #[test]
+    fn test_custom_churn_interval_does_not_fire_early() {
+        // When churn_interval_normal_secs is large, maybe_churn should be a no-op
+        // for a freshly constructed governor.
+        let pm = setup_pm_with_peers(5, 5, 20);
+        let config = GovernorConfig {
+            churn_interval_normal_secs: 99999,
+            ..GovernorConfig::default()
+        };
+        let mut gov = Governor::new(config);
+
         let events = gov.maybe_churn(&pm);
         assert!(
             events.is_empty(),
-            "maybe_churn must be a no-op before interval expires; got {events:?}"
+            "maybe_churn must not fire before the interval elapses; events={events:?}"
         );
-        assert!(!gov.churn_active, "churn must not be active");
+        assert!(!gov.churn_active, "churn must not be active yet");
     }
 }

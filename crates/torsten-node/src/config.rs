@@ -109,6 +109,35 @@ pub struct NodeConfig {
     /// Storage configuration (optional overrides for storage profiles)
     #[serde(default)]
     pub storage: Option<StorageConfigJson>,
+
+    /// Governor churn interval during normal (caught-up) operation, in seconds.
+    ///
+    /// Controls how often the governor rotates a random subset of peers to
+    /// ensure the node does not become permanently attached to the same set.
+    /// Matches cardano-node default of 3300 s (55 minutes).
+    #[serde(default = "default_churn_interval_normal_secs")]
+    pub churn_interval_normal_secs: u64,
+
+    /// Governor churn interval during syncing, in seconds.
+    ///
+    /// Faster rotation while syncing so that the node can quickly shed
+    /// unresponsive peers.  Matches cardano-node default of 900 s (15 minutes).
+    #[serde(default = "default_churn_interval_sync_secs")]
+    pub churn_interval_sync_secs: u64,
+
+    /// Number of consecutive governor evaluation cycles in which a hot peer
+    /// must serve zero new blocks before it is demoted back to warm (stall
+    /// detection).  A cycle runs every 30 seconds, so the default of 6 cycles
+    /// corresponds to a 3-minute stall window.
+    #[serde(default = "default_stall_demotion_cycles")]
+    pub stall_demotion_cycles: u32,
+
+    /// Failure count threshold above which a hot peer is unconditionally
+    /// demoted to warm during each governor evaluation cycle.  Local root
+    /// peers are exempt from this check and will never be demoted by the
+    /// governor.  Default: 5 failures.
+    #[serde(default = "default_error_demotion_threshold")]
+    pub error_demotion_threshold: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -171,6 +200,22 @@ fn default_established_big_ledger_peers() -> usize {
 
 fn default_known_big_ledger_peers() -> usize {
     15
+}
+
+fn default_churn_interval_normal_secs() -> u64 {
+    3300 // 55 minutes, matching cardano-node
+}
+
+fn default_churn_interval_sync_secs() -> u64 {
+    900 // 15 minutes, matching cardano-node
+}
+
+fn default_stall_demotion_cycles() -> u32 {
+    6 // 6 × 30 s = 3 minutes of inactivity triggers demotion
+}
+
+fn default_error_demotion_threshold() -> u32 {
+    5 // 5 accumulated failures triggers demotion
 }
 
 fn default_min_severity() -> String {
@@ -309,6 +354,10 @@ impl Default for NodeConfig {
             min_severity: "Info".to_string(),
             metrics_port: None,
             storage: None,
+            churn_interval_normal_secs: default_churn_interval_normal_secs(),
+            churn_interval_sync_secs: default_churn_interval_sync_secs(),
+            stall_demotion_cycles: default_stall_demotion_cycles(),
+            error_demotion_threshold: default_error_demotion_threshold(),
         }
     }
 }
