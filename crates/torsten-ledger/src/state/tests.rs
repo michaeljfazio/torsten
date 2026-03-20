@@ -3736,6 +3736,9 @@ fn test_pool_retirement_within_emax() {
 
 #[test]
 fn test_pool_retirement_exceeds_emax() {
+    // The e_max check is a Phase-1 transaction validation rule, not a block
+    // application rule. During block application (including replay), retirements
+    // are applied unconditionally — the block was already validated on-chain.
     let mut params = ProtocolParameters::mainnet_defaults();
     params.e_max = 18;
     let mut state = LedgerState::new(params);
@@ -3745,11 +3748,11 @@ fn test_pool_retirement_exceeds_emax() {
     let pool_hash = Hash28::from_bytes([0xBB; 28]);
     let cert = Certificate::PoolRetirement {
         pool_hash,
-        epoch: 29, // 10 + 18 + 1 = exceeds e_max
+        epoch: 29, // Would exceed e_max if validated, but block application applies unconditionally
     };
     state.process_certificate(&cert);
-    // Should NOT have been added
-    assert!(!state.pending_retirements.contains_key(&EpochNo(29)));
+    // Retirement IS applied during block application (no e_max re-check)
+    assert!(state.pending_retirements.contains_key(&EpochNo(29)));
 }
 
 #[test]

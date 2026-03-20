@@ -146,27 +146,21 @@ impl LedgerState {
                 Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
-                // Validate: retirement epoch must be <= current_epoch + e_max
-                let max_retirement_epoch = self.epoch.0.saturating_add(self.protocol_params.e_max);
-                if *epoch > max_retirement_epoch {
-                    warn!(
-                        pool = %pool_hash.to_hex(),
-                        retirement_epoch = epoch,
-                        current_epoch = self.epoch.0,
-                        e_max = self.protocol_params.e_max,
-                        "Pool retirement epoch exceeds e_max bound, ignoring"
-                    );
-                } else {
-                    debug!(
-                        "Pool retirement scheduled at epoch {}: {}",
-                        epoch,
-                        pool_hash.to_hex()
-                    );
-                    self.pending_retirements
-                        .entry(torsten_primitives::time::EpochNo(*epoch))
-                        .or_default()
-                        .push(*pool_hash);
-                }
+                // Apply the retirement unconditionally. The e_max check
+                // (retirement_epoch <= current_epoch + e_max) is a Phase-1
+                // transaction validation rule, NOT a block application rule.
+                // Blocks already on-chain have passed validation — re-checking
+                // during replay with the wrong "current epoch" causes false
+                // rejections and ledger state divergence.
+                debug!(
+                    "Pool retirement scheduled at epoch {}: {}",
+                    epoch,
+                    pool_hash.to_hex()
+                );
+                self.pending_retirements
+                    .entry(torsten_primitives::time::EpochNo(*epoch))
+                    .or_default()
+                    .push(*pool_hash);
             }
             Certificate::RegStakeDeleg {
                 credential,
