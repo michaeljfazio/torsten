@@ -971,20 +971,28 @@ impl LedgerState {
         //    - Shelley/Allegra/Mary/Alonzo (TPraos): blake2b_256(nonce_vrf_cert.0)
         //    - Babbage/Conway (Praos): blake2b_256("N" || vrf_result.0)
         // 3. candidate_nonce tracks evolving_nonce UNLESS the block is within the
-        //    last randomness_stabilisation_window (4k/f) slots of the epoch,
-        //    in which case the candidate freezes so the epoch nonce is stable.
+        //    last stability window slots of the epoch, in which case the candidate
+        //    freezes so the epoch nonce is stable.
+        //
+        //    Per Haskell erratum 17.3: Babbage uses ceiling(3k/f) (stability_window_3kf),
+        //    while Conway+ uses ceiling(4k/f) (randomness_stabilisation_window).
         if !block.header.nonce_vrf_output.is_empty() {
             // Update evolving nonce unconditionally with the pre-computed eta
             self.update_evolving_nonce(&block.header.nonce_vrf_output);
 
-            // Candidate nonce tracks evolving nonce OUTSIDE the stability window (4k/f).
+            // Select the correct stability window based on era.
+            // Babbage (proto major 7-8): use 3k/f for backward-compatibility.
+            // Conway+ (proto major 9+): use 4k/f.
+            let window = if self.protocol_params.protocol_version_major >= 9 {
+                self.randomness_stabilisation_window
+            } else {
+                // Pre-Conway (including Babbage): ceiling(3k/f)
+                self.stability_window_3kf
+            };
+
+            // Candidate nonce tracks evolving nonce OUTSIDE the stability window.
             let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
-            if block
-                .slot()
-                .0
-                .saturating_add(self.randomness_stabilisation_window)
-                < first_slot_of_next_epoch
-            {
+            if block.slot().0.saturating_add(window) < first_slot_of_next_epoch {
                 self.candidate_nonce = self.evolving_nonce;
             }
         } else if block.era.is_shelley_based() {
