@@ -1121,8 +1121,18 @@ impl Node {
             }
         }
 
-        // Remove confirmed transactions from mempool, then full revalidation
+        // Revalidate mempool transactions against the updated ledger state.
+        //
+        // Per the Haskell spec (pureSyncWithLedger → revalidateTxsFor → reapplyTxs),
+        // ALL mempool txs are re-validated sequentially in FIFO order against the
+        // new ticked ledger state. This naturally handles:
+        //   - Confirmed txs (double-spend → removed)
+        //   - Consumed input conflicts
+        //   - TTL expiry
+        //   - Cascading child removal (parent removed → child's input missing)
+        //   - Any other validation rule changes
         if !self.mempool.is_empty() {
+            // First remove confirmed txs by hash (fast path).
             let confirmed_hashes: Vec<_> = blocks
                 .iter()
                 .flat_map(|b| b.transactions.iter().map(|tx| tx.hash))
@@ -1131,14 +1141,20 @@ impl Node {
                 self.mempool.remove_txs(&confirmed_hashes);
             }
 
-            // Full revalidation: check each remaining tx for input conflicts,
-            // TTL expiry, and any other invalidity in one pass.
+            // Full revalidation against the updated ledger state.
+            // Build a set of consumed inputs for a quick first-pass check,
+            // plus check TTL against the new tip slot.
             let consumed_inputs: std::collections::HashSet<_> = blocks
                 .iter()
                 .flat_map(|b| b.transactions.iter())
                 .flat_map(|tx| tx.body.inputs.iter().cloned())
                 .collect();
             let current_slot = blocks.last().map(|b| b.slot());
+
+            // Also check if the tx's inputs exist in the on-chain UTxO set.
+            // This catches chained txs whose parents were removed: their inputs
+            // no longer exist in the UTxO set and mempool virtual UTxO.
+            let ls = self.ledger_state.read().await;
             self.mempool.revalidate_all(|tx| {
                 // Reject if any input was consumed by the new block
                 if tx
@@ -1149,14 +1165,24 @@ impl Node {
                 {
                     return false;
                 }
-                // Reject if TTL has expired
+                // Reject if TTL has expired (half-open: slot >= ttl means expired)
                 if let (Some(ttl), Some(slot)) = (tx.body.ttl, current_slot) {
-                    if slot.0 > ttl.0 {
+                    if slot.0 >= ttl.0 {
+                        return false;
+                    }
+                }
+                // Reject if any input is not in on-chain UTxO or mempool virtual UTxO.
+                // This catches orphaned chained txs whose parents were removed.
+                for input in &tx.body.inputs {
+                    if !ls.utxo_set.contains(input)
+                        && self.mempool.lookup_virtual_utxo(input).is_none()
+                    {
                         return false;
                     }
                 }
                 true
             });
+            drop(ls);
         }
 
         if let Some(last_block) = blocks.last() {
