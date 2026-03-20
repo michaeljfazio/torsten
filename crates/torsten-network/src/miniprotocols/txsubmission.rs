@@ -126,13 +126,19 @@ impl TxSubmissionClient {
     ) -> Result<TxSubmissionStats, TxSubmissionError> {
         let mut stats = TxSubmissionStats::default();
 
-        // Step 1: Send our MsgInit [6]
-        info!("TxSubmission2: sending MsgInit");
+        // Step 1: Send our MsgInit [6].
+        //
+        // In Ouroboros TxSubmission2, the Client (tx advertiser — us) sends
+        // MsgInit once.  The Server (tx consumer — our peer) does NOT send
+        // MsgInit back; it goes directly to sending MsgRequestTxIds after its
+        // own warmup.  We do NOT call recv_init() here.
+        //
+        // The Haskell Server has a `threadDelay 60` warmup before it reads
+        // MsgInit.  Our first MsgRequestTxIds reply will arrive after that
+        // delay, handled by the BLOCKING_RESPONSE_TIMEOUT.
+        info!("TxSubmission2: sending MsgInit (Client role — no MsgInit reply expected)");
         self.send_init().await?;
-
-        // Step 2: Wait for peer's MsgInit [6]
-        self.recv_init().await?;
-        info!("TxSubmission2: init handshake complete — beginning tx polling");
+        info!("TxSubmission2: MsgInit sent, waiting for server's first MsgRequestTxIds");
 
         // Main loop: request tx IDs, filter, request bodies, validate, add to mempool.
         //
@@ -335,21 +341,6 @@ impl TxSubmissionClient {
         self.send_raw(&buf).await
     }
 
-    /// Receive MsgInit [6] from peer.
-    async fn recv_init(&mut self) -> Result<(), TxSubmissionError> {
-        let payload = self.recv_raw(RESPONSE_TIMEOUT).await?;
-        let mut decoder = minicbor::Decoder::new(&payload);
-        let _arr = decoder.array().map_err(cbor_err)?;
-        let tag = decoder.u32().map_err(cbor_err)?;
-        if tag != 6 {
-            return Err(TxSubmissionError::Protocol(format!(
-                "expected MsgInit (6), got tag {tag}"
-            )));
-        }
-        debug!("TxSubmission2: received MsgInit from peer");
-        Ok(())
-    }
-
     /// Send MsgRequestTxIds and receive MsgReplyTxIds or MsgDone.
     ///
     /// # Arguments
@@ -391,26 +382,68 @@ impl TxSubmissionClient {
 
         match tag {
             // MsgReplyTxIds: [1, [[tx_id, size], ...]]
+            //
+            // The Haskell pallas encoder uses indefinite-length arrays for the inner
+            // list (begin_array/end), so `array()` may return None.  We handle both
+            // definite-length and indefinite-length arrays here.
             1 => {
-                let items_len = decoder.array().map_err(cbor_err)?.unwrap_or(0);
-                let mut result = Vec::with_capacity(items_len as usize);
-                for _ in 0..items_len {
-                    let _inner = decoder.array().map_err(cbor_err)?;
-                    let tx_hash_bytes = decoder.bytes().map_err(cbor_err)?;
-                    let size = decoder.u32().map_err(cbor_err)?;
+                let count_opt = decoder.array().map_err(cbor_err)?;
+                let mut result = Vec::new();
 
-                    if tx_hash_bytes.len() == 32 {
-                        // Safety: length is checked to be exactly 32 by the enclosing `if`
-                        let hash_arr: [u8; 32] = tx_hash_bytes.try_into().expect("32-byte slice");
-                        let tx_hash = Hash32::from_bytes(hash_arr);
-                        result.push((tx_hash, size));
-                    } else {
-                        warn!(
-                            len = tx_hash_bytes.len(),
-                            "TxSubmission2: ignoring tx ID with unexpected length"
-                        );
+                match count_opt {
+                    Some(n) => {
+                        // Definite-length array.
+                        result.reserve(n as usize);
+                        for _ in 0..n {
+                            let _inner = decoder.array().map_err(cbor_err)?;
+                            let tx_hash_bytes = decoder.bytes().map_err(cbor_err)?;
+                            let size = decoder.u32().map_err(cbor_err)?;
+                            if tx_hash_bytes.len() == 32 {
+                                let hash_arr: [u8; 32] =
+                                    tx_hash_bytes.try_into().expect("32-byte slice");
+                                result.push((Hash32::from_bytes(hash_arr), size));
+                            } else {
+                                warn!(
+                                    len = tx_hash_bytes.len(),
+                                    "TxSubmission2: ignoring tx ID with unexpected length"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        // Indefinite-length array (Haskell wire format).
+                        loop {
+                            use minicbor::data::Type;
+                            match decoder.datatype() {
+                                Ok(Type::Break) => {
+                                    let _ = decoder.skip();
+                                    break;
+                                }
+                                Ok(_) => {
+                                    let _inner = decoder.array().map_err(cbor_err)?;
+                                    let tx_hash_bytes = decoder.bytes().map_err(cbor_err)?;
+                                    let size = decoder.u32().map_err(cbor_err)?;
+                                    if tx_hash_bytes.len() == 32 {
+                                        let hash_arr: [u8; 32] =
+                                            tx_hash_bytes.try_into().expect("32-byte slice");
+                                        result.push((Hash32::from_bytes(hash_arr), size));
+                                    } else {
+                                        warn!(
+                                            len = tx_hash_bytes.len(),
+                                            "TxSubmission2: ignoring tx ID with unexpected length"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    return Err(TxSubmissionError::Cbor(format!(
+                                        "MsgReplyTxIds: error reading indefinite array: {e}"
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
+
                 debug!(
                     count = result.len(),
                     "TxSubmission2: received MsgReplyTxIds"
@@ -463,11 +496,39 @@ impl TxSubmissionClient {
             )));
         }
 
-        let items_len = decoder.array().map_err(cbor_err)?.unwrap_or(0);
-        let mut result = Vec::with_capacity(items_len as usize);
-        for _ in 0..items_len {
-            let tx_cbor = decoder.bytes().map_err(cbor_err)?;
-            result.push(tx_cbor.to_vec());
+        // The Haskell pallas encoder uses indefinite-length arrays for MsgReplyTxs
+        // inner list, so `array()` may return None.  Handle both cases.
+        let count_opt = decoder.array().map_err(cbor_err)?;
+        let mut result = Vec::new();
+        match count_opt {
+            Some(n) => {
+                result.reserve(n as usize);
+                for _ in 0..n {
+                    let tx_cbor = decoder.bytes().map_err(cbor_err)?;
+                    result.push(tx_cbor.to_vec());
+                }
+            }
+            None => {
+                // Indefinite-length array (Haskell wire format).
+                loop {
+                    use minicbor::data::Type;
+                    match decoder.datatype() {
+                        Ok(Type::Break) => {
+                            let _ = decoder.skip();
+                            break;
+                        }
+                        Ok(_) => {
+                            let tx_cbor = decoder.bytes().map_err(cbor_err)?;
+                            result.push(tx_cbor.to_vec());
+                        }
+                        Err(e) => {
+                            return Err(TxSubmissionError::Cbor(format!(
+                                "MsgReplyTxs: error reading indefinite array: {e}"
+                            )));
+                        }
+                    }
+                }
+            }
         }
 
         info!(count = result.len(), "TxSubmission2: received MsgReplyTxs");
@@ -803,21 +864,18 @@ mod tests {
     // Full protocol exchange simulation
     // -----------------------------------------------------------------------
 
-    /// Simulates the TxSubmission2 handshake exchange at the CBOR message level.
+    /// Simulates the TxSubmission2 exchange at the CBOR message level.
     ///
-    /// This test verifies that our CBOR encoding matches the wire format expected
-    /// by a Cardano peer at each step of the protocol:
-    ///
-    ///   1. MsgInit [6] — initiator → responder
-    ///   2. MsgInit [6] — responder → initiator
-    ///   3. MsgRequestTxIds [0, false, 0, 100] — initiator → responder
-    ///   4. MsgReplyTxIds [1, [[hash, size]]] — responder → initiator
-    ///   5. MsgRequestTxs [2, [hash]] — initiator → responder
-    ///   6. MsgReplyTxs [3, [tx_cbor]] — responder → initiator
-    ///   7. MsgRequestTxIds [0, false, 1, 100] — with ack=1
-    ///   8. MsgReplyTxIds [1, []] — empty, trigger blocking
-    ///   9. MsgRequestTxIds [0, true, 0, 100] — blocking request
-    ///  10. MsgDone [4] — responder ends session
+    /// Correct Ouroboros TxSubmission2 flow:
+    ///   1. MsgInit [6]             — Client → Server  (ONLY the Client sends MsgInit)
+    ///   2. MsgRequestTxIds [0,...] — Server → Client  (Server has agency in StIdle)
+    ///   3. MsgReplyTxIds [1, [...]] — Client → Server
+    ///   4. MsgRequestTxs [2, [...]] — Server → Client
+    ///   5. MsgReplyTxs [3, [...]]  — Client → Server
+    ///   6. MsgRequestTxIds [0,..., ack=1] — Server acknowledges prev batch
+    ///   7. MsgReplyTxIds [1, []]   — Client empty (trigger blocking)
+    ///   8. MsgRequestTxIds [0, true, 0, 100] — Server blocking request
+    ///   9. MsgDone [4]             — Server closes session
     #[test]
     fn test_protocol_message_sequence_encoding() {
         // Step 1: Verify MsgInit encoding
@@ -941,6 +999,140 @@ mod tests {
                 "MsgDone MUST be tag 4 per Ouroboros CDDL spec (was incorrectly 5)"
             );
         }
+    }
+
+    /// Verify that MsgReplyTxIds with indefinite-length inner array (Haskell pallas
+    /// wire format) is correctly decoded by our request_tx_ids handler.
+    #[test]
+    fn test_reply_tx_ids_indefinite_array_decoded() {
+        let hash_a = [0x11u8; 32];
+        let hash_b = [0x22u8; 32];
+
+        // Build with indefinite-length inner array (matching Haskell pallas encoder).
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap(); // outer array(2)
+        enc.u32(1).unwrap(); // tag = MsgReplyTxIds
+        enc.begin_array().unwrap(); // indefinite-length inner array
+        enc.array(2).unwrap(); // [hash_a, 512]
+        enc.bytes(&hash_a).unwrap();
+        enc.u32(512u32).unwrap();
+        enc.array(2).unwrap(); // [hash_b, 1024]
+        enc.bytes(&hash_b).unwrap();
+        enc.u32(1024u32).unwrap();
+        enc.end().unwrap(); // break
+
+        // Simulate the decoding logic used in request_tx_ids.
+        let mut decoder = minicbor::Decoder::new(&buf);
+        let _arr = decoder.array().unwrap();
+        let tag = decoder.u32().unwrap();
+        assert_eq!(tag, 1, "tag must be 1 (MsgReplyTxIds)");
+
+        let count_opt = decoder.array().unwrap(); // returns None for indefinite
+        assert!(
+            count_opt.is_none(),
+            "indefinite array must return None from array()"
+        );
+
+        let mut result = Vec::new();
+        loop {
+            use minicbor::data::Type;
+            match decoder.datatype().unwrap() {
+                Type::Break => {
+                    let _ = decoder.skip();
+                    break;
+                }
+                _ => {
+                    let _inner = decoder.array().unwrap();
+                    let bytes: [u8; 32] = decoder.bytes().unwrap().try_into().unwrap();
+                    let size = decoder.u32().unwrap();
+                    result.push((bytes, size));
+                }
+            }
+        }
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, hash_a);
+        assert_eq!(result[0].1, 512u32);
+        assert_eq!(result[1].0, hash_b);
+        assert_eq!(result[1].1, 1024u32);
+    }
+
+    /// Verify that MsgReplyTxs with indefinite-length inner array (Haskell pallas
+    /// wire format) is correctly decoded by our request_txs handler.
+    #[test]
+    fn test_reply_txs_indefinite_array_decoded() {
+        let tx1 = vec![0x82u8, 0x00, 0x01];
+        let tx2 = vec![0xFF, 0xFE];
+
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(3).unwrap(); // MsgReplyTxs tag
+        enc.begin_array().unwrap(); // indefinite
+        enc.bytes(&tx1).unwrap();
+        enc.bytes(&tx2).unwrap();
+        enc.end().unwrap();
+
+        let mut decoder = minicbor::Decoder::new(&buf);
+        let _arr = decoder.array().unwrap();
+        let tag = decoder.u32().unwrap();
+        assert_eq!(tag, 3);
+
+        let count_opt = decoder.array().unwrap();
+        assert!(count_opt.is_none(), "indefinite array returns None");
+
+        let mut bodies = Vec::new();
+        loop {
+            use minicbor::data::Type;
+            match decoder.datatype().unwrap() {
+                Type::Break => {
+                    let _ = decoder.skip();
+                    break;
+                }
+                _ => {
+                    let b = decoder.bytes().unwrap().to_vec();
+                    bodies.push(b);
+                }
+            }
+        }
+
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], tx1);
+        assert_eq!(bodies[1], tx2);
+    }
+
+    /// Protocol flow: Client sends MsgInit ONCE; there is no bidirectional MsgInit.
+    /// The Server goes directly to MsgRequestTxIds after MsgInit.
+    #[test]
+    fn test_no_bidirectional_msginit() {
+        // Verify MsgInit hex: 81 06 (array(1) containing integer 6).
+        let init = encode_msg_init();
+        assert_eq!(
+            init,
+            vec![0x81, 0x06],
+            "MsgInit must be [81 06] = array(1) containing integer 6"
+        );
+
+        // The first message AFTER MsgInit from the Server must be MsgRequestTxIds (tag 0),
+        // not another MsgInit (tag 6).
+        let req_ids = {
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(4).unwrap();
+            enc.u32(0).unwrap(); // tag = 0, NOT 6
+            enc.bool(false).unwrap();
+            enc.u16(0u16).unwrap();
+            enc.u16(100u16).unwrap();
+            buf
+        };
+        let mut dec = minicbor::Decoder::new(&req_ids);
+        dec.array().unwrap();
+        let tag = dec.u32().unwrap();
+        assert_eq!(
+            tag, 0,
+            "first Server message must be MsgRequestTxIds (tag 0), not MsgInit (tag 6)"
+        );
     }
 
     /// Verify that MsgRequestTxIds wire format is compatible with what Haskell

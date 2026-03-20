@@ -1,4 +1,4 @@
-//! Full-duplex N2N peer connection (Phase 1 + Phase 2 + Phase 3).
+//! Full-duplex N2N peer connection (Phase 1 + Phase 2).
 //!
 //! Fixes GitHub issue #187: outbound N2N connections using `PeerClient` are
 //! initiator-only — the remote peer cannot request our mempool transactions
@@ -7,44 +7,57 @@
 //! connection, using the pallas `Plexer`'s ability to `subscribe_client` and
 //! `subscribe_server` simultaneously before `spawn()`.
 //!
-//! Fixes GitHub issue #193: on duplex connections we now also act as the
-//! TxSubmission2 **initiator** (client), so we pull the remote peer's mempool
-//! transactions into our local mempool.  The initiator and responder tasks run
-//! concurrently on the same connection — this is the standard full-duplex N2N
-//! behaviour in cardano-node.
-//!
 //! # Protocol assignment
 //!
-//! In a full-duplex (InitiatorAndResponder) N2N connection:
+//! In a full-duplex (InitiatorAndResponder) N2N connection we open outbound,
+//! we are the TCP *initiator*.  For TxSubmission2 the Ouroboros roles are
+//! INDEPENDENT of the TCP connection direction:
 //!
-//! | Mini-protocol    | We are…             | Why                                               |
-//! |------------------|---------------------|---------------------------------------------------|
-//! | Handshake (0)    | Client              | We open the connection and propose versions        |
-//! | ChainSync (2)    | Client              | We sync headers *from* the peer                   |
-//! | BlockFetch (3)   | Client              | We fetch full blocks *from* the peer               |
-//! | TxSubmission2(4) | **Client+Server**   | We pull peer txs AND serve our own mempool txs     |
-//! | KeepAlive (8)    | Client              | We send pings; remote echoes back                  |
-//! | PeerSharing (10) | Client              | We request peers (also tolerate responder messages)|
+//! | Mini-protocol    | Mux channel      | Ouroboros role  | What we do                              |
+//! |------------------|------------------|-----------------|-----------------------------------------|
+//! | Handshake (0)    | subscribe_client | Initiator       | Propose versions                        |
+//! | ChainSync (2)    | subscribe_client | Initiator       | Pull headers from peer                  |
+//! | BlockFetch (3)   | subscribe_client | Initiator       | Fetch full blocks from peer             |
+//! | TxSubmission2(4) | subscribe_client | **Client**      | Serve our mempool to the remote Server  |
+//! | TxSubmission2(4) | subscribe_server | **Server**      | Pull remote Client's mempool into ours  |
+//! | KeepAlive (8)    | subscribe_client | Initiator       | Ping the peer                           |
+//! | PeerSharing (10) | subscribe_client | Initiator       | Request peers                           |
 //!
-//! The TxSubmission2 responder task handles MsgInit, MsgRequestTxIds,
-//! MsgRequestTxs, and MsgDone from the remote peer, serving our mempool contents
-//! in response.
+//! Both `subscribe_client` and `subscribe_server` for TxSubmission2 are
+//! registered before the plexer spawns.  This gives two independent
+//! bidirectional channels — one for each direction of mempool propagation.
 //!
-//! The TxSubmission2 initiator task sends MsgInit, then periodically sends
-//! MsgRequestTxIds to pull the remote peer's mempool txs into our local mempool.
+//! # TxSubmission2 Ouroboros roles (per pallas / Haskell oracle)
+//!
+//! **Client** (the tx *advertiser*, `txSubmissionOutbound` in Haskell):
+//!   - Sends `MsgInit [6]`
+//!   - Then waits in `StIdle` for the Server to send requests
+//!   - Replies to `MsgRequestTxIds` with `MsgReplyTxIds`
+//!   - Replies to `MsgRequestTxs` with `MsgReplyTxs`
+//!   - The Client NEVER sends `MsgInit` a second time
+//!
+//! **Server** (the tx *consumer*, `txSubmissionInboundV2` in Haskell):
+//!   - Waits for `MsgInit [6]` from Client (does NOT send MsgInit itself)
+//!   - Then has agency in `StIdle` and sends `MsgRequestTxIds`
+//!   - Receives `MsgReplyTxIds`, decides which tx bodies to fetch
+//!   - Sends `MsgRequestTxs`, receives `MsgReplyTxs`
+//!   - Haskell Server has a 60-second warmup `threadDelay 60` before
+//!     reading MsgInit; our `TXSUB_INIT_TIMEOUT` must exceed 60 s.
 //!
 //! # Multiplexer direction conventions (pallas)
 //!
 //! `subscribe_client(P)` → sends on protocol P (bit-15 = 0), receives on P|0x8000
 //! `subscribe_server(P)` → sends on P|0x8000, receives on protocol P (bit-15 = 0)
 //!
-//! This matches the Ouroboros wire format: initiator messages have bit-15 = 0,
-//! responder messages have bit-15 = 1.
-//!
-//! Both roles can coexist on the same protocol ID because the multiplexer
-//! routes by (protocol_id, direction) — client traffic for protocol 4 is
-//! routed to the `subscribe_client(4)` channel, server traffic to the
-//! `subscribe_server(4)` channel.
+//! We are the TCP initiator (bit-15=0 outbound).  For TxSubmission2:
+//!  - `subscribe_client(4)`: we send on 4 (bit-15=0), receive on 0x8004.
+//!    Peer (TCP responder) uses their `subscribe_server(4)` which sends
+//!    on 0x8004 and receives on 4.  So: we → MsgInit/ReplyTxIds/ReplyTxs;
+//!    peer → MsgRequestTxIds/MsgRequestTxs.  This is our **Client** channel.
+//!  - `subscribe_server(4)`: we send on 0x8004, receive on 4.
+//!    Peer (TCP responder) uses their `subscribe_client(4)` which sends
+//!    on 4 and receives on 0x8004.  So: peer → MsgInit/ReplyTxIds/ReplyTxs;
+//!    we → MsgRequestTxIds/MsgRequestTxs.  This is our **Server** channel.
 
 use pallas_network::miniprotocols::handshake;
 use pallas_network::miniprotocols::{
@@ -52,12 +65,10 @@ use pallas_network::miniprotocols::{
     PROTOCOL_N2N_KEEP_ALIVE, PROTOCOL_N2N_PEER_SHARING, PROTOCOL_N2N_TX_SUBMISSION,
 };
 use pallas_network::multiplexer::{AgentChannel, Bearer, Plexer, RunningPlexer};
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::ToSocketAddrs;
-use torsten_primitives::hash::Hash32;
-use torsten_primitives::mempool::{MempoolAddResult, MempoolProvider};
+use torsten_primitives::mempool::MempoolProvider;
 use tracing::{debug, info, warn};
 
 use crate::client::ClientError;
@@ -72,9 +83,9 @@ pub enum DuplexError {
     Connection(String),
     #[error("handshake failed: {0}")]
     Handshake(String),
-    #[error("TxSubmission2 responder error: {0}")]
+    #[error("TxSubmission2 client error: {0}")]
     TxSubmission(String),
-    #[error("TxSubmission2 initiator error: {0}")]
+    #[error("TxSubmission2 server error: {0}")]
     TxSubmissionInitiator(String),
     #[error("CBOR error: {0}")]
     Cbor(String),
@@ -106,49 +117,32 @@ const MAX_TX_BODY_REQUEST: usize = 1000;
 const MAX_REASSEMBLY_SIZE: usize = 8 * 1024 * 1024;
 
 /// Timeout for the TxSubmission2 MsgInit exchange.
-/// The Haskell node's Server sleeps 60 seconds (`threadDelay 60`) before
-/// reading MsgInit, so our Client-side timeout must exceed that.
-/// 90 seconds provides a comfortable margin.
+///
+/// The Haskell node's Server has a `threadDelay 60` warmup delay before
+/// reading MsgInit from the Client.  Our Client-side send succeeds
+/// immediately, but we then wait up to TXSUB_INIT_TIMEOUT for the Server
+/// to send the first MsgRequestTxIds.
+///
+/// The Haskell Server side also waits up to this timeout for the remote
+/// Client to send MsgInit.  90 seconds provides a comfortable margin above
+/// the 60-second Haskell warmup.
 const TXSUB_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Timeout for subsequent MsgRequestTxIds (blocking requests may hold longer).
 const TXSUB_BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-// ─── Initiator constants ─────────────────────────────────────────────────────
-
-/// How many tx IDs to request per MsgRequestTxIds from a peer.
-const INITIATOR_REQ_COUNT: u16 = 100;
-
-/// Maximum tx IDs we track in the per-peer known-set before eviction.
-/// Prevents unbounded memory growth over long-lived sessions.
-const INITIATOR_MAX_KNOWN: usize = 10_000;
-
-/// Timeout for receiving a non-blocking MsgReplyTxIds from the peer.
-const INITIATOR_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Timeout for receiving a blocking MsgReplyTxIds from the peer.
-/// A blocking request holds until the peer has at least one new tx.
-const INITIATOR_BLOCKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
 // ─── DuplexPeerConnection ───────────────────────────────────────────────────
 
 /// A full-duplex outbound N2N connection that simultaneously runs:
-///  - ChainSync client       (we pull headers from the remote)
-///  - BlockFetch client      (we pull blocks from the remote)
-///  - KeepAlive client       (we ping the remote)
-///  - TxSubmission2 server   (remote pulls our mempool txs)
-///  - TxSubmission2 client   (we pull remote peer's mempool txs)
+///  - ChainSync client      (we pull headers from the remote)
+///  - BlockFetch client     (we pull blocks from the remote)
+///  - KeepAlive client      (we ping the remote)
+///  - TxSubmission2 client  (we serve our mempool to the remote Server)
+///  - TxSubmission2 server  (we pull the remote Client's mempool into ours)
 ///
 /// Compared to `PipelinedPeerClient`, this connection advertises
 /// `initiator_only_diffusion_mode = false` (InitiatorAndResponder) in the
-/// handshake, and starts two background tasks:
-///
-///  1. **Responder** — serves our mempool to the remote peer.
-///  2. **Initiator** — pulls the remote peer's mempool txs into our local mempool.
-///
-/// Both TxSubmission2 tasks run concurrently on the same connection; the
-/// multiplexer routes client-direction and server-direction traffic to the
-/// corresponding `subscribe_client` / `subscribe_server` channels.
+/// handshake, and starts two background tasks for bidirectional TxSubmission2.
 pub struct DuplexPeerConnection {
     /// ChainSync raw buffer (bypasses pallas state machine for pipelining).
     pub cs_buf: pallas_network::multiplexer::ChannelBuffer,
@@ -167,13 +161,12 @@ pub struct DuplexPeerConnection {
     pub in_flight: usize,
     /// Byron epoch length for correct slot computation on non-mainnet networks.
     pub byron_epoch_length: u64,
-    /// Background TxSubmission2 responder task handle.
+    /// Background TxSubmission2 CLIENT task (serves our mempool to remote Server).
     /// Dropping this aborts the task, which is intentional on disconnect.
-    _txsub_responder: tokio::task::JoinHandle<()>,
-    /// Background TxSubmission2 initiator task handle.
-    /// Pulls the remote peer's mempool txs into our local mempool.
+    _txsub_client: tokio::task::JoinHandle<()>,
+    /// Background TxSubmission2 SERVER task (pulls remote Client's mempool into ours).
     /// Dropping this aborts the task, which is intentional on disconnect.
-    _txsub_initiator: tokio::task::JoinHandle<()>,
+    _txsub_server: tokio::task::JoinHandle<()>,
 }
 
 impl DuplexPeerConnection {
@@ -182,9 +175,9 @@ impl DuplexPeerConnection {
     /// # Arguments
     /// - `addr`           — target peer address
     /// - `network_magic`  — Cardano network magic (e.g. 2 for preview)
-    /// - `mempool`        — local mempool; served via TxSubmission2 to the peer
-    ///   and also receives transactions pulled from the peer
-    /// - `block_provider` — chain storage (for future ChainSync/BlockFetch server tasks)
+    /// - `mempool`        — local mempool; served to the remote Server (Client task),
+    ///   and also receives incoming txs from the remote Client (Server task)
+    /// - `block_provider` — chain storage (reserved for future ChainSync/BlockFetch server tasks)
     pub async fn connect(
         addr: impl ToSocketAddrs + std::fmt::Display + Copy,
         network_magic: u64,
@@ -208,12 +201,6 @@ impl DuplexPeerConnection {
         // spawn the plexer so its demuxer/muxer tasks are running.  Any protocol
         // we do not subscribe will have its incoming segments silently dropped by
         // the demuxer, which is fine.
-        //
-        // For TxSubmission2 (protocol 4) we subscribe BOTH directions:
-        //   subscribe_client(4) → we are the initiator; we pull the peer's txs
-        //   subscribe_server(4) → we are the responder; the peer pulls our txs
-        // The multiplexer routes traffic by (protocol_id, direction bit-15), so
-        // both channels coexist without interference.
         let mut plexer = Plexer::new(bearer);
 
         // Handshake: always initiator-side (we propose versions).
@@ -225,12 +212,16 @@ impl DuplexPeerConnection {
         // BlockFetch: initiator (we request blocks).
         let bf_channel = plexer.subscribe_client(PROTOCOL_N2N_BLOCK_FETCH);
 
-        // TxSubmission2: **client** (we request the peer's mempool txs).
-        //   subscribe_client(P) → sends on P (bit-15 = 0), receives on P|0x8000
+        // TxSubmission2 CLIENT channel (subscribe_client):
+        //   We send on bit-15=0: MsgInit, MsgReplyTxIds, MsgReplyTxs, MsgDone
+        //   We receive on bit-15=1: MsgRequestTxIds, MsgRequestTxs
+        //   → serve_tx_submission: we are the tx-advertiser Client serving our mempool
         let txsub_client_channel = plexer.subscribe_client(PROTOCOL_N2N_TX_SUBMISSION);
 
-        // TxSubmission2: **server** (remote peer requests our txs).
-        //   subscribe_server(P) → sends on P|0x8000, receives on P (bit-15 = 0)
+        // TxSubmission2 SERVER channel (subscribe_server):
+        //   We send on bit-15=1: MsgRequestTxIds, MsgRequestTxs
+        //   We receive on bit-15=0: MsgInit, MsgReplyTxIds, MsgReplyTxs, MsgDone
+        //   → pull_tx_submission: we are the tx-consumer Server pulling from remote Client
         let txsub_server_channel = plexer.subscribe_server(PROTOCOL_N2N_TX_SUBMISSION);
 
         // KeepAlive: initiator (we ping; remote echoes).
@@ -275,7 +266,6 @@ impl DuplexPeerConnection {
         // --- BlockFetch client ---------------------------------------------------
         let bf_client = pallas_network::miniprotocols::blockfetch::Client::new(bf_channel);
 
-        // --- Resolve remote address for logging ----------------------------------
         let remote_addr_str = format!("{addr}");
         let remote_addr: SocketAddr = remote_addr_str
             .parse()
@@ -289,7 +279,7 @@ impl DuplexPeerConnection {
         // MsgReplyTxIds / MsgReplyTxs from our mempool.
         //
         // This matches Haskell's `txSubmissionOutbound`.
-        let txsub_responder = tokio::spawn(serve_tx_submission(
+        let txsub_client = tokio::spawn(serve_tx_submission(
             txsub_client_channel,
             mempool.clone(),
             remote_addr,
@@ -303,13 +293,13 @@ impl DuplexPeerConnection {
         // / MsgReplyTxs.
         //
         // This matches Haskell's `txSubmissionInboundV2`.
-        let txsub_initiator = tokio::spawn(pull_tx_submission(
+        let txsub_server = tokio::spawn(pull_tx_submission(
             txsub_server_channel,
             mempool,
             remote_addr,
         ));
 
-        info!("duplex: connected to {remote_addr} (InitiatorAndResponder, TxSub client+server)");
+        info!("duplex: connected to {remote_addr} (InitiatorAndResponder)");
 
         Ok(DuplexPeerConnection {
             cs_buf,
@@ -320,8 +310,8 @@ impl DuplexPeerConnection {
             remote_addr,
             in_flight: 0,
             byron_epoch_length: 0,
-            _txsub_responder: txsub_responder,
-            _txsub_initiator: txsub_initiator,
+            _txsub_client: txsub_client,
+            _txsub_server: txsub_server,
         })
     }
 
@@ -340,10 +330,10 @@ impl DuplexPeerConnection {
         &mut self.bf_client
     }
 
-    /// Abort the connection (kills the plexer, responder task, and initiator task).
+    /// Abort the connection (kills the plexer and responder tasks).
     pub async fn abort(self) {
-        self._txsub_responder.abort();
-        self._txsub_initiator.abort();
+        self._txsub_client.abort();
+        self._txsub_server.abort();
         self._plexer.abort().await;
     }
 
@@ -355,13 +345,9 @@ impl DuplexPeerConnection {
     /// method moves those channels into the pipelined client so the sync loop
     /// can drive them without needing a second TCP connection.
     ///
-    /// Both TxSubmission2 task handles are returned to the caller:
-    ///  - `responder_handle` — serves our mempool to the remote peer
-    ///  - `initiator_handle` — pulls the remote peer's mempool txs into ours
-    ///
-    /// The caller MUST keep both handles alive for as long as the sync session
-    /// is active.  Dropping a handle aborts the corresponding task, which is
-    /// the correct behavior when the peer disconnects.
+    /// The two TxSubmission2 tasks are returned as a combined `JoinHandle` — the
+    /// caller MUST keep them alive for as long as the sync session is active.
+    /// Dropping them aborts both tasks, which is the correct cleanup behavior.
     ///
     /// Byron epoch length is preserved from the duplex connection; the
     /// await-reply timeout is initialised to the default and can be overridden
@@ -383,39 +369,35 @@ impl DuplexPeerConnection {
             self.in_flight,
             self.byron_epoch_length,
         );
-        (client, self._txsub_responder, self._txsub_initiator)
+        (client, self._txsub_client, self._txsub_server)
     }
 }
 
-// ─── Phase 2: TxSubmission2 server ─────────────────────────────────────────
+// ─── TxSubmission2 Client task (serves our mempool to remote Server) ─────────
 
-/// Serve TxSubmission2 requests from a remote peer on behalf of our local mempool.
+/// Serve our mempool to a remote TxSubmission2 Server via the CLIENT role.
 ///
-/// This is the **responder** side of the N2N TxSubmission2 protocol.  In the
-/// Ouroboros model, when a peer opens a full-duplex connection to us, we are
-/// the TxSubmission2 **server** — they ask for our mempool tx IDs, then ask
-/// for the corresponding CBOR bodies.
+/// This function wraps the inner implementation and logs errors as warnings —
+/// TxSubmission2 failures are non-fatal to the parent ChainSync connection.
 ///
-/// Protocol flow (remote peer is initiator/client; we are responder/server):
-/// 1. Remote sends MsgInit [6]
-/// 2. We respond with MsgInit [6]
-/// 3. Remote sends MsgRequestTxIds [0, blocking, ack, req_count]
+/// Protocol flow (we are the **Client**, the tx advertiser):
+/// 1. We send MsgInit [6]
+/// 2. Remote Server sends MsgRequestTxIds [0, blocking, ack, req]
 ///    → We reply MsgReplyTxIds [1, [[tx_id, size], ...]]
-/// 4. Remote sends MsgRequestTxs [2, [tx_id, ...]]
+/// 3. Remote Server sends MsgRequestTxs [2, [tx_id, ...]]
 ///    → We reply MsgReplyTxs [3, [tx_cbor, ...]]
-/// 5. Remote sends MsgDone [4] → we exit
+/// 4. Remote Server sends MsgDone [4] → we exit
 ///
-/// The function runs until the remote peer closes the protocol or the channel
-/// is dropped.  All errors are logged as warnings (non-fatal for the parent
-/// connection).
+/// The Client NEVER sends MsgInit a second time and does NOT wait for a
+/// MsgInit reply — only the Client sends MsgInit, and only once.
 pub async fn serve_tx_submission(
     channel: AgentChannel,
     mempool: Arc<dyn MempoolProvider>,
     peer_addr: SocketAddr,
 ) {
     match serve_tx_submission_inner(channel, mempool, peer_addr).await {
-        Ok(()) => debug!(%peer_addr, "TxSubmission2 responder: session complete"),
-        Err(e) => warn!(%peer_addr, "TxSubmission2 responder: {e}"),
+        Ok(()) => debug!(%peer_addr, "TxSubmission2 client: session complete"),
+        Err(e) => warn!(%peer_addr, "TxSubmission2 client: {e}"),
     }
 }
 
@@ -424,19 +406,25 @@ pub async fn serve_tx_submission(
 /// This is the TxSubmission2 **Client** (outbound/initiator) role.
 /// Per the Haskell spec (`txSubmissionOutbound`), the Client:
 ///   1. Sends MsgInit [6]
-///   2. Waits for the Server to send MsgRequestTxIds
+///   2. Waits for the Server to send MsgRequestTxIds  (Server has agency in StIdle)
 ///   3. Replies with MsgReplyTxIds from our mempool
 ///   4. Waits for MsgRequestTxs
 ///   5. Replies with MsgReplyTxs
 ///
 /// The Client DOES NOT expect MsgInit back — only the Client sends it.
+/// The Haskell Server has a 60 s `threadDelay` warmup delay before it reads
+/// MsgInit, so TXSUB_BLOCKING_TIMEOUT covers that wait.
 async fn serve_tx_submission_inner(
     mut channel: AgentChannel,
     mempool: Arc<dyn MempoolProvider>,
     peer_addr: SocketAddr,
 ) -> Result<(), DuplexError> {
-    // Step 1: Send MsgInit [6] — only the Client sends this.
+    // Step 1: Send MsgInit [6].
+    // Only the Client sends MsgInit.  We do NOT wait for a MsgInit reply —
+    // the Server goes directly to MsgRequestTxIds after its warmup delay.
     let init_msg = encode_msg_init();
+    info!(%peer_addr, "TxSubmission2 client: sending MsgInit [{}]",
+        hex_prefix(&init_msg));
     send_msg(&mut channel, &init_msg).await?;
     info!(%peer_addr, "TxSubmission2 client: sent MsgInit, waiting for server requests");
 
@@ -448,11 +436,17 @@ async fn serve_tx_submission_inner(
     loop {
         // Use a generous timeout for the blocking MsgRequestTxIds case:
         // the peer may hold us for up to 5 minutes while waiting for new txs.
+        // The initial request also goes through this path — the Haskell Server
+        // waits 60 s before sending the first MsgRequestTxIds.
         let payload = tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(&mut channel))
             .await
-            .map_err(|_| DuplexError::Timeout("TxSubmission2 MsgRequestTxIds timeout".into()))??;
+            .map_err(|_| {
+                DuplexError::Timeout("TxSubmission2 client: MsgRequestTxIds timeout".into())
+            })??;
 
         let tag = decode_first_tag(&payload)?;
+        info!(%peer_addr, tag, "TxSubmission2 client: received message [{}]",
+            hex_prefix(&payload));
 
         match tag {
             // MsgRequestTxIds: [0, blocking, ack_count, req_count]
@@ -464,7 +458,7 @@ async fn serve_tx_submission_inner(
                     blocking,
                     ack_count,
                     req_count,
-                    "TxSubmission2 responder: MsgRequestTxIds"
+                    "TxSubmission2 client: MsgRequestTxIds"
                 );
 
                 // Acknowledge previously sent tx IDs.
@@ -479,7 +473,7 @@ async fn serve_tx_submission_inner(
                     warn!(
                         %peer_addr,
                         inflight = inflight.len(),
-                        "TxSubmission2 responder: inflight cap reached, sending empty reply"
+                        "TxSubmission2 client: inflight cap reached, sending empty reply"
                     );
                     encode_reply_tx_ids(&[])
                 } else {
@@ -517,13 +511,15 @@ async fn serve_tx_submission_inner(
                             %peer_addr,
                             count = new_ids.len(),
                             inflight = inflight.len(),
-                            "TxSubmission2 responder: sending MsgReplyTxIds"
+                            "TxSubmission2 client: sending MsgReplyTxIds"
                         );
                     }
 
                     encode_reply_tx_ids(&new_ids)
                 };
 
+                info!(%peer_addr, "TxSubmission2 client: sending MsgReplyTxIds [{}]",
+                    hex_prefix(&reply));
                 send_msg(&mut channel, &reply).await?;
             }
 
@@ -533,7 +529,7 @@ async fn serve_tx_submission_inner(
                 debug!(
                     %peer_addr,
                     count = requested_hashes.len(),
-                    "TxSubmission2 responder: MsgRequestTxs"
+                    "TxSubmission2 client: MsgRequestTxs"
                 );
 
                 // Fetch CBOR bodies from mempool for each requested hash.
@@ -555,29 +551,27 @@ async fn serve_tx_submission_inner(
                     %peer_addr,
                     count = bodies.len(),
                     requested = requested_hashes.len(),
-                    "TxSubmission2 responder: sending MsgReplyTxs"
+                    "TxSubmission2 client: sending MsgReplyTxs"
                 );
 
                 let reply = encode_reply_txs(&bodies);
+                info!(%peer_addr, "TxSubmission2 client: sending MsgReplyTxs [{}]",
+                    hex_prefix(&reply));
                 send_msg(&mut channel, &reply).await?;
             }
 
             // MsgDone: [4]
             4 => {
-                info!(%peer_addr, "TxSubmission2 responder: peer sent MsgDone, closing");
+                info!(%peer_addr, "TxSubmission2 client: peer sent MsgDone, closing");
                 break;
             }
 
-            // MsgInit again (shouldn't happen after handshake, be tolerant)
-            6 => {
-                debug!(%peer_addr, "TxSubmission2 responder: duplicate MsgInit, ignoring");
-            }
-
+            // Unexpected tag
             other => {
                 warn!(
                     %peer_addr,
                     tag = other,
-                    "TxSubmission2 responder: unexpected message tag, closing"
+                    "TxSubmission2 client: unexpected message tag, closing"
                 );
                 break;
             }
@@ -587,33 +581,27 @@ async fn serve_tx_submission_inner(
     Ok(())
 }
 
-// ─── Phase 3: TxSubmission2 initiator ───────────────────────────────────────
+// ─── TxSubmission2 Server task (pulls remote Client's mempool into ours) ─────
 
-/// Pull TxSubmission2 transactions from a remote peer into our local mempool.
+/// Pull transactions from a remote TxSubmission2 Client via the SERVER role.
 ///
-/// This is the **initiator** side of the N2N TxSubmission2 protocol.  We
-/// connect as the client and periodically request transaction IDs from the peer,
-/// then fetch the bodies for any txs we do not already have in our local mempool.
+/// This function wraps the inner implementation and logs errors as warnings.
 ///
-/// Protocol flow (we are initiator/client; remote peer is responder/server):
-/// 1. We send MsgInit [6]
-/// 2. Remote responds with MsgInit [6]
-/// 3. We send MsgRequestTxIds [0, blocking, ack_count, req_count]
-///    → Remote replies MsgReplyTxIds [1, [[tx_id, size], ...]]
-/// 4. We send MsgRequestTxs [2, [tx_id, ...]] for IDs not already in our mempool
-///    → Remote replies MsgReplyTxs [3, [tx_cbor, ...]]
-/// 5. Loop from step 3
-///
-/// The function runs until the remote peer closes the protocol (sends MsgDone)
-/// or the channel is dropped.  All errors are logged as warnings (non-fatal).
+/// Protocol flow (we are the **Server**, the tx consumer):
+/// 1. Remote Client sends MsgInit [6] → we receive it (do NOT send MsgInit back)
+/// 2. We send MsgRequestTxIds [0, blocking, ack, req]
+///    → Remote Client replies MsgReplyTxIds [1, [[tx_id, size], ...]]
+/// 3. We send MsgRequestTxs [2, [tx_id, ...]]
+///    → Remote Client replies MsgReplyTxs [3, [tx_cbor, ...]]
+/// 4. We send MsgDone [4] to close (or exit when the channel closes)
 pub async fn pull_tx_submission(
     channel: AgentChannel,
     mempool: Arc<dyn MempoolProvider>,
     peer_addr: SocketAddr,
 ) {
     match pull_tx_submission_inner(channel, mempool, peer_addr).await {
-        Ok(()) => debug!(%peer_addr, "TxSubmission2 initiator: session complete"),
-        Err(e) => warn!(%peer_addr, "TxSubmission2 initiator: {e}"),
+        Ok(()) => debug!(%peer_addr, "TxSubmission2 server: session complete"),
+        Err(e) => warn!(%peer_addr, "TxSubmission2 server: {e}"),
     }
 }
 
@@ -644,6 +632,8 @@ async fn pull_tx_submission_inner(
         })??;
 
     let init_tag = decode_first_tag(&init_payload)?;
+    info!(%peer_addr, tag = init_tag, "TxSubmission2 server: received initial message [{}]",
+        hex_prefix(&init_payload));
     if init_tag != 6 {
         return Err(DuplexError::TxSubmissionInitiator(format!(
             "expected MsgInit (6) from client, got tag {init_tag}"
@@ -654,121 +644,119 @@ async fn pull_tx_submission_inner(
     // Track tx IDs received from this peer but not yet acknowledged.
     // pending_ack is sent as ack_count in the next MsgRequestTxIds.
     let mut pending_ack: u16 = 0;
-
-    // Known-set: tx IDs we have already seen from this peer (dedup filter).
-    // When the set exceeds INITIATOR_MAX_KNOWN we clear it to prevent
-    // unbounded memory growth over long-lived sessions.
-    let mut known_tx_ids: HashSet<[u8; 32]> = HashSet::new();
+    // Set of tx IDs already seen from this peer (dedup filter).
+    let mut known_tx_ids: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     loop {
-        // Send MsgRequestTxIds.
-        //
-        // First request is non-blocking so we immediately drain any queued txs.
-        // If the peer returns empty, we switch to blocking to wait for new txs.
-        let tx_ids = initiator_request_tx_ids(
-            &mut channel,
-            false,
-            pending_ack,
-            INITIATOR_REQ_COUNT,
-            &peer_addr,
-        )
-        .await?;
+        // Step 2: Send MsgRequestTxIds.
+        // Start non-blocking to drain any queued txs; fall back to blocking
+        // to wait for new ones.
+        let ack = pending_ack;
+        let req_msg = encode_request_tx_ids(false, ack, MAX_TX_IDS_PER_REPLY as u16);
+        info!(%peer_addr, ack, "TxSubmission2 server: sending MsgRequestTxIds [{}]",
+            hex_prefix(&req_msg));
+        send_msg(&mut channel, &req_msg).await?;
         pending_ack = 0;
 
-        let tx_ids = match tx_ids {
-            InitiatorTxIdsReply::Done => {
-                info!(%peer_addr, "TxSubmission2 initiator: peer sent MsgDone, closing");
-                break;
-            }
-            InitiatorTxIdsReply::Ids(ids) if ids.is_empty() => {
-                // Non-blocking reply was empty — peer has no queued txs right now.
-                // Send a blocking request to wait until new txs become available.
-                debug!(%peer_addr, "TxSubmission2 initiator: no txs queued, sending blocking request");
-                match initiator_request_tx_ids(
+        // Step 3: Receive MsgReplyTxIds or MsgDone.
+        let reply = tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(&mut channel))
+            .await
+            .map_err(|_| {
+                DuplexError::Timeout("TxSubmission2 server: MsgReplyTxIds timeout".into())
+            })??;
+
+        let reply_tag = decode_first_tag(&reply)?;
+        info!(%peer_addr, tag = reply_tag, "TxSubmission2 server: received reply [{}]",
+            hex_prefix(&reply));
+
+        match reply_tag {
+            // MsgReplyTxIds: [1, [[tx_id, size], ...]]
+            1 => {
+                let ids = decode_reply_tx_ids(&reply)?;
+
+                if ids.is_empty() {
+                    // Non-blocking returned empty — switch to blocking.
+                    debug!(%peer_addr, "TxSubmission2 server: no txs available, sending blocking request");
+                    let blocking_req = encode_request_tx_ids(true, 0, MAX_TX_IDS_PER_REPLY as u16);
+                    info!(%peer_addr, "TxSubmission2 server: sending blocking MsgRequestTxIds [{}]",
+                        hex_prefix(&blocking_req));
+                    send_msg(&mut channel, &blocking_req).await?;
+
+                    // Receive the blocking reply.
+                    let blocking_reply =
+                        tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(&mut channel))
+                            .await
+                            .map_err(|_| {
+                                DuplexError::Timeout(
+                                    "TxSubmission2 server: blocking MsgReplyTxIds timeout".into(),
+                                )
+                            })??;
+
+                    let blocking_tag = decode_first_tag(&blocking_reply)?;
+                    info!(%peer_addr, tag = blocking_tag,
+                        "TxSubmission2 server: received blocking reply [{}]",
+                        hex_prefix(&blocking_reply));
+
+                    match blocking_tag {
+                        1 => {
+                            let blocking_ids = decode_reply_tx_ids(&blocking_reply)?;
+                            if blocking_ids.is_empty() {
+                                // Empty blocking reply = peer is ending the session.
+                                info!(%peer_addr,
+                                    "TxSubmission2 server: empty blocking reply, closing");
+                                break;
+                            }
+                            if let Err(e) = process_tx_ids_server(
+                                &mut channel,
+                                &blocking_ids,
+                                &mempool,
+                                &mut pending_ack,
+                                &mut known_tx_ids,
+                                peer_addr,
+                            )
+                            .await
+                            {
+                                warn!(%peer_addr, "TxSubmission2 server: process_tx_ids: {e}");
+                            }
+                        }
+                        4 => {
+                            info!(%peer_addr,
+                                "TxSubmission2 server: peer sent MsgDone during blocking wait");
+                            break;
+                        }
+                        other => {
+                            warn!(%peer_addr, tag = other,
+                                "TxSubmission2 server: unexpected tag in blocking reply");
+                            break;
+                        }
+                    }
+                } else if let Err(e) = process_tx_ids_server(
                     &mut channel,
-                    true,
-                    0,
-                    INITIATOR_REQ_COUNT,
-                    &peer_addr,
+                    &ids,
+                    &mempool,
+                    &mut pending_ack,
+                    &mut known_tx_ids,
+                    peer_addr,
                 )
-                .await?
+                .await
                 {
-                    InitiatorTxIdsReply::Done => {
-                        info!(%peer_addr, "TxSubmission2 initiator: peer sent MsgDone during blocking wait");
-                        break;
-                    }
-                    InitiatorTxIdsReply::Ids(ids) if ids.is_empty() => {
-                        // Empty reply to a blocking request signals the peer is
-                        // ending the session (transitioning to Done state).
-                        info!(%peer_addr, "TxSubmission2 initiator: empty blocking reply, closing");
-                        break;
-                    }
-                    InitiatorTxIdsReply::Ids(ids) => ids,
+                    warn!(%peer_addr, "TxSubmission2 server: process_tx_ids: {e}");
                 }
             }
-            InitiatorTxIdsReply::Ids(ids) => ids,
-        };
 
-        // Accumulate acks: every batch we receive must be acknowledged in the
-        // next MsgRequestTxIds.  Saturating add prevents overflow on huge batches.
-        pending_ack = pending_ack.saturating_add(tx_ids.len() as u16);
+            // MsgDone: [4]
+            4 => {
+                info!(%peer_addr, "TxSubmission2 server: peer sent MsgDone, closing");
+                break;
+            }
 
-        // Evict the known-set if it would exceed the cap to bound memory use.
-        if known_tx_ids.len() + tx_ids.len() > INITIATOR_MAX_KNOWN {
-            known_tx_ids.clear();
-        }
-
-        // Filter: only request bodies for tx IDs not already in our mempool
-        // or already seen from this peer in this session.
-        let new_ids: Vec<[u8; 32]> = tx_ids
-            .iter()
-            .filter(|(hash, _)| {
-                let h = Hash32::from_bytes(*hash);
-                !mempool.contains(&h) && !known_tx_ids.contains(hash)
-            })
-            .map(|(hash, _)| *hash)
-            .collect();
-
-        // Record all IDs as seen (whether we fetch them or not).
-        for (hash, _) in &tx_ids {
-            known_tx_ids.insert(*hash);
-        }
-
-        if new_ids.is_empty() {
-            debug!(
-                %peer_addr,
-                total = tx_ids.len(),
-                "TxSubmission2 initiator: all tx IDs already known, skipping body request"
-            );
-            continue;
-        }
-
-        debug!(
-            %peer_addr,
-            new = new_ids.len(),
-            total = tx_ids.len(),
-            "TxSubmission2 initiator: requesting transaction bodies"
-        );
-
-        // Request full transaction bodies for the new IDs.
-        let bodies = initiator_request_txs(&mut channel, &new_ids, &peer_addr).await?;
-
-        // Decode and add each transaction to the local mempool.
-        for (i, tx_cbor) in bodies.iter().enumerate() {
-            let tx_hash = if i < new_ids.len() {
-                Hash32::from_bytes(new_ids[i])
-            } else {
-                continue;
-            };
-
-            // Try decoding across eras (Conway=6 first, then backwards).
-            let added = try_add_tx_to_mempool(tx_hash, tx_cbor, &*mempool, &peer_addr);
-            if !added {
+            other => {
                 warn!(
                     %peer_addr,
-                    hash = %tx_hash,
-                    "TxSubmission2 initiator: failed to decode tx in any era"
+                    tag = other,
+                    "TxSubmission2 server: unexpected reply tag, closing"
                 );
+                break;
             }
         }
     }
@@ -776,163 +764,133 @@ async fn pull_tx_submission_inner(
     Ok(())
 }
 
-/// Result of a MsgRequestTxIds exchange on the initiator side.
-enum InitiatorTxIdsReply {
-    /// Peer replied with a list of (tx_hash_bytes, size) pairs.
-    Ids(Vec<([u8; 32], u32)>),
-    /// Peer sent MsgDone [4] — session is ending.
-    Done,
-}
-
-/// Send MsgRequestTxIds and receive MsgReplyTxIds or MsgDone.
+/// Process a batch of tx IDs from a MsgReplyTxIds: fetch bodies via MsgRequestTxs,
+/// then add new transactions to the local mempool.
 ///
-/// # Arguments
-/// - `blocking`   — if true the responder holds its reply until it has txs
-/// - `ack_count`  — number of tx IDs from the previous batch that we are acknowledging
-/// - `req_count`  — how many new tx IDs we want
-async fn initiator_request_tx_ids(
+/// Updates `pending_ack` with the number of IDs just received (to be sent in
+/// the next MsgRequestTxIds).  Deduplicates via `known_tx_ids`.
+async fn process_tx_ids_server(
     channel: &mut AgentChannel,
-    blocking: bool,
-    ack_count: u16,
-    req_count: u16,
-    peer_addr: &SocketAddr,
-) -> Result<InitiatorTxIdsReply, DuplexError> {
-    // Encode MsgRequestTxIds: [0, blocking, ack_count, req_count]
-    let request = encode_request_tx_ids(blocking, ack_count, req_count);
-    send_msg(channel, &request).await?;
+    ids: &[([u8; 32], u32)],
+    mempool: &Arc<dyn MempoolProvider>,
+    pending_ack: &mut u16,
+    known_tx_ids: &mut std::collections::HashSet<[u8; 32]>,
+    peer_addr: SocketAddr,
+) -> Result<(), DuplexError> {
+    // Accumulate pending acks for this batch.
+    *pending_ack = pending_ack.saturating_add(ids.len() as u16);
+
+    // Filter out already-known tx IDs.
+    let new_ids: Vec<[u8; 32]> = ids
+        .iter()
+        .filter_map(|(hash, _)| {
+            if known_tx_ids.contains(hash) {
+                None
+            } else {
+                let h = torsten_primitives::hash::Hash32::from_bytes(*hash);
+                if mempool.contains(&h) {
+                    None
+                } else {
+                    Some(*hash)
+                }
+            }
+        })
+        .collect();
+
+    // Track all IDs from this batch as seen (evict on overflow).
+    const MAX_KNOWN: usize = 10_000;
+    if known_tx_ids.len() + ids.len() > MAX_KNOWN {
+        known_tx_ids.clear();
+    }
+    for (hash, _) in ids {
+        known_tx_ids.insert(*hash);
+    }
+
+    if new_ids.is_empty() {
+        return Ok(());
+    }
 
     debug!(
         %peer_addr,
-        blocking,
-        ack_count,
-        req_count,
-        "TxSubmission2 initiator: sent MsgRequestTxIds"
+        new = new_ids.len(),
+        total = ids.len(),
+        "TxSubmission2 server: requesting tx bodies"
     );
 
-    // Use a longer timeout for blocking requests.
-    let wait = if blocking {
-        INITIATOR_BLOCKING_TIMEOUT
-    } else {
-        INITIATOR_RESPONSE_TIMEOUT
-    };
+    // Send MsgRequestTxs for the new (unknown) tx IDs.
+    let req_txs_msg = encode_request_txs(&new_ids);
+    info!(%peer_addr, count = new_ids.len(),
+        "TxSubmission2 server: sending MsgRequestTxs [{}]",
+        hex_prefix(&req_txs_msg));
+    send_msg(channel, &req_txs_msg).await?;
 
-    let payload = tokio::time::timeout(wait, recv_msg(channel))
+    // Receive MsgReplyTxs.
+    let reply = tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(channel))
         .await
-        .map_err(|_| {
-            DuplexError::Timeout(format!(
-                "TxSubmission2 initiator: waiting for MsgReplyTxIds from {peer_addr}"
-            ))
-        })??;
+        .map_err(|_| DuplexError::Timeout("TxSubmission2 server: MsgReplyTxs timeout".into()))??;
 
-    let tag = decode_first_tag(&payload)?;
+    let reply_tag = decode_first_tag(&reply)?;
+    info!(%peer_addr, tag = reply_tag,
+        "TxSubmission2 server: received MsgReplyTxs [{}]",
+        hex_prefix(&reply));
 
-    match tag {
-        // MsgReplyTxIds: [1, [[tx_id, size], ...]]
-        1 => {
-            let ids = decode_reply_tx_ids(&payload)?;
-            debug!(%peer_addr, count = ids.len(), "TxSubmission2 initiator: received MsgReplyTxIds");
-            Ok(InitiatorTxIdsReply::Ids(ids))
-        }
-        // MsgDone: [4]
-        4 => {
-            debug!(%peer_addr, "TxSubmission2 initiator: received MsgDone");
-            Ok(InitiatorTxIdsReply::Done)
-        }
-        other => Err(DuplexError::TxSubmissionInitiator(format!(
-            "expected MsgReplyTxIds (1) or MsgDone (4), got tag {other}"
-        ))),
-    }
-}
-
-/// Send MsgRequestTxs and receive MsgReplyTxs.
-async fn initiator_request_txs(
-    channel: &mut AgentChannel,
-    tx_ids: &[[u8; 32]],
-    peer_addr: &SocketAddr,
-) -> Result<Vec<Vec<u8>>, DuplexError> {
-    if tx_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Encode MsgRequestTxs: [2, [tx_id, ...]]
-    let request = encode_initiator_request_txs(tx_ids);
-    send_msg(channel, &request).await?;
-
-    debug!(%peer_addr, count = tx_ids.len(), "TxSubmission2 initiator: sent MsgRequestTxs");
-
-    let payload = tokio::time::timeout(INITIATOR_RESPONSE_TIMEOUT, recv_msg(channel))
-        .await
-        .map_err(|_| {
-            DuplexError::Timeout(format!(
-                "TxSubmission2 initiator: waiting for MsgReplyTxs from {peer_addr}"
-            ))
-        })??;
-
-    let tag = decode_first_tag(&payload)?;
-    if tag != 3 {
+    if reply_tag != 3 {
         return Err(DuplexError::TxSubmissionInitiator(format!(
-            "expected MsgReplyTxs (3), got tag {tag}"
+            "expected MsgReplyTxs (3), got {reply_tag}"
         )));
     }
 
-    let bodies = decode_reply_txs(&payload)?;
+    let bodies = decode_reply_txs(&reply)?;
     info!(
         %peer_addr,
         count = bodies.len(),
-        requested = tx_ids.len(),
-        "TxSubmission2 initiator: received MsgReplyTxs"
+        "TxSubmission2 server: received tx bodies"
     );
-    Ok(bodies)
-}
 
-/// Try to decode a transaction CBOR payload across eras and add it to the mempool.
-///
-/// Attempts Conway (era 6) first, then walks backwards through earlier eras.
-/// Returns `true` if the transaction was successfully decoded (even if the
-/// mempool rejected it — rejection counts as "decoded"), `false` only if
-/// decoding failed in every era.
-fn try_add_tx_to_mempool(
-    tx_hash: Hash32,
-    tx_cbor: &[u8],
-    mempool: &dyn MempoolProvider,
-    peer_addr: &SocketAddr,
-) -> bool {
-    for era in [6u16, 5, 4, 3, 2] {
-        match torsten_serialization::decode_transaction(era, tx_cbor) {
-            Ok(tx) => {
-                let tx_size = tx_cbor.len();
-                let fee = tx.body.fee;
-                match mempool.add_tx_with_fee(tx_hash, tx, tx_size, fee) {
-                    Ok(MempoolAddResult::Added) => {
-                        info!(
-                            %peer_addr,
-                            hash = %tx_hash,
-                            size = tx_size,
-                            era,
-                            "TxSubmission2 initiator: tx added to mempool"
-                        );
+    for (i, tx_cbor) in bodies.iter().enumerate() {
+        let tx_hash_bytes = if i < new_ids.len() {
+            new_ids[i]
+        } else {
+            continue;
+        };
+        let tx_hash = torsten_primitives::hash::Hash32::from_bytes(tx_hash_bytes);
+
+        // Try decoding across eras (Conway=6 first, then backwards).
+        let mut decoded = false;
+        for era in [6u16, 5, 4, 3, 2] {
+            match torsten_serialization::decode_transaction(era, tx_cbor) {
+                Ok(tx) => {
+                    let tx_size = tx_cbor.len();
+                    let fee = tx.body.fee;
+                    match mempool.add_tx_with_fee(tx_hash, tx, tx_size, fee) {
+                        Ok(torsten_primitives::mempool::MempoolAddResult::Added) => {
+                            info!(
+                                hash = %tx_hash,
+                                size = tx_size,
+                                "TxSubmission2 server: tx added to mempool"
+                            );
+                        }
+                        Ok(torsten_primitives::mempool::MempoolAddResult::AlreadyExists) => {
+                            debug!(hash = %tx_hash, "TxSubmission2 server: tx already in mempool");
+                        }
+                        Err(e) => {
+                            debug!(hash = %tx_hash,
+                                "TxSubmission2 server: mempool rejected tx: {e}");
+                        }
                     }
-                    Ok(MempoolAddResult::AlreadyExists) => {
-                        debug!(
-                            %peer_addr,
-                            hash = %tx_hash,
-                            "TxSubmission2 initiator: tx already in mempool"
-                        );
-                    }
-                    Err(e) => {
-                        debug!(
-                            %peer_addr,
-                            hash = %tx_hash,
-                            "TxSubmission2 initiator: mempool rejected tx: {e}"
-                        );
-                    }
+                    decoded = true;
+                    break;
                 }
-                return true;
+                Err(_) => continue,
             }
-            Err(_) => continue,
+        }
+
+        if !decoded {
+            warn!(hash = %tx_hash, "TxSubmission2 server: failed to decode tx in any era");
         }
     }
-    false
+
+    Ok(())
 }
 
 // ─── Channel I/O helpers ────────────────────────────────────────────────────
@@ -979,6 +937,19 @@ async fn recv_msg(channel: &mut AgentChannel) -> Result<Vec<u8>, DuplexError> {
     }
 }
 
+/// Return the first 16 bytes of a payload as a hex string (for debug logging).
+fn hex_prefix(payload: &[u8]) -> String {
+    let n = payload.len().min(16);
+    let mut s = String::with_capacity(n * 2 + 3);
+    for b in &payload[..n] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    if payload.len() > 16 {
+        s.push_str("..");
+    }
+    s
+}
+
 // ─── CBOR decode helpers ────────────────────────────────────────────────────
 
 /// Decode the first array element (the message tag) from a CBOR payload.
@@ -1012,7 +983,83 @@ fn decode_request_tx_ids(payload: &[u8]) -> Result<(bool, usize, usize), DuplexE
     Ok((blocking, ack_count, req_count))
 }
 
+/// Decode `MsgReplyTxIds = [1, [[tx_id, size], ...]]`.
+///
+/// The inner list may be either definite-length or indefinite-length CBOR.
+/// The pallas Haskell encoder uses indefinite-length (`begin_array`/`end`).
+fn decode_reply_tx_ids(payload: &[u8]) -> Result<Vec<([u8; 32], u32)>, DuplexError> {
+    let mut dec = minicbor::Decoder::new(payload);
+    dec.array()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected outer array: {e}")))?;
+    let _tag = dec
+        .u32()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected tag: {e}")))?;
+
+    // The inner list may be definite (Some(n)) or indefinite (None from `array()`).
+    let count_opt = dec
+        .array()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected id array: {e}")))?;
+
+    let mut ids = Vec::new();
+    match count_opt {
+        Some(n) => {
+            // Definite-length array.
+            for _ in 0..n {
+                let (hash, size) = decode_tx_id_and_size(&mut dec)?;
+                ids.push((hash, size));
+            }
+        }
+        None => {
+            // Indefinite-length array — read until `break` (DataType::Break).
+            loop {
+                // Peek at the next data type; break code = 0xFF.
+                use minicbor::data::Type;
+                match dec.datatype() {
+                    Ok(Type::Break) => {
+                        // consume the break
+                        let _ = dec.skip();
+                        break;
+                    }
+                    Ok(_) => {
+                        let (hash, size) = decode_tx_id_and_size(&mut dec)?;
+                        ids.push((hash, size));
+                    }
+                    Err(e) => {
+                        return Err(DuplexError::Cbor(format!(
+                            "MsgReplyTxIds: error reading indefinite array: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Decode a single `[tx_hash_bytes, size_u32]` pair from the inner array.
+fn decode_tx_id_and_size(dec: &mut minicbor::Decoder<'_>) -> Result<([u8; 32], u32), DuplexError> {
+    dec.array()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected pair array: {e}")))?;
+    let bytes = dec
+        .bytes()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected tx hash: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(DuplexError::Cbor(format!(
+            "MsgReplyTxIds: tx hash length {} != 32",
+            bytes.len()
+        )));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(bytes);
+    let size = dec
+        .u32()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected size u32: {e}")))?;
+    Ok((hash, size))
+}
+
 /// Decode `MsgRequestTxs = [2, [tx_id, ...]]` and return the list of tx hashes.
+///
+/// The inner list may be either definite-length or indefinite-length CBOR.
 fn decode_request_txs(payload: &[u8]) -> Result<Vec<[u8; 32]>, DuplexError> {
     let mut dec = minicbor::Decoder::new(payload);
     dec.array()
@@ -1021,29 +1068,119 @@ fn decode_request_txs(payload: &[u8]) -> Result<Vec<[u8; 32]>, DuplexError> {
         .u32()
         .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: expected tag: {e}")))?;
 
-    let count = dec
+    let count_opt = dec
         .array()
-        .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: expected id array: {e}")))?
-        .unwrap_or(0);
+        .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: expected id array: {e}")))?;
 
-    let cap = (count as usize).min(MAX_TX_BODY_REQUEST);
-    let mut hashes = Vec::with_capacity(cap);
-    for _ in 0..cap {
-        let bytes = dec.bytes().map_err(|e| {
-            DuplexError::Cbor(format!("MsgRequestTxs: expected tx hash bytes: {e}"))
-        })?;
-        if bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            hashes.push(arr);
-        } else {
-            warn!(
-                len = bytes.len(),
-                "TxSubmission2 responder: ignoring tx hash with unexpected length"
-            );
+    let mut hashes = Vec::new();
+    match count_opt {
+        Some(n) => {
+            let cap = (n as usize).min(MAX_TX_BODY_REQUEST);
+            for _ in 0..cap {
+                let bytes = dec.bytes().map_err(|e| {
+                    DuplexError::Cbor(format!("MsgRequestTxs: expected tx hash bytes: {e}"))
+                })?;
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes);
+                    hashes.push(arr);
+                } else {
+                    warn!(
+                        len = bytes.len(),
+                        "TxSubmission2: ignoring tx hash with unexpected length"
+                    );
+                }
+            }
+        }
+        None => {
+            // Indefinite-length.
+            use minicbor::data::Type;
+            loop {
+                match dec.datatype() {
+                    Ok(Type::Break) => {
+                        let _ = dec.skip();
+                        break;
+                    }
+                    Ok(_) => {
+                        let bytes = dec.bytes().map_err(|e| {
+                            DuplexError::Cbor(format!("MsgRequestTxs: expected tx hash bytes: {e}"))
+                        })?;
+                        if bytes.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(bytes);
+                            hashes.push(arr);
+                        } else {
+                            warn!(
+                                len = bytes.len(),
+                                "TxSubmission2: ignoring tx hash with unexpected length"
+                            );
+                        }
+                        if hashes.len() >= MAX_TX_BODY_REQUEST {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DuplexError::Cbor(format!(
+                            "MsgRequestTxs: error reading indefinite array: {e}"
+                        )));
+                    }
+                }
+            }
         }
     }
     Ok(hashes)
+}
+
+/// Decode `MsgReplyTxs = [3, [tx_cbor, ...]]`.
+///
+/// The inner list may be either definite-length or indefinite-length CBOR.
+/// The pallas Haskell encoder uses indefinite-length (`begin_array`/`end`).
+fn decode_reply_txs(payload: &[u8]) -> Result<Vec<Vec<u8>>, DuplexError> {
+    let mut dec = minicbor::Decoder::new(payload);
+    dec.array()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected outer array: {e}")))?;
+    let _tag = dec
+        .u32()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected tag: {e}")))?;
+
+    let count_opt = dec
+        .array()
+        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected body array: {e}")))?;
+
+    let mut bodies = Vec::new();
+    match count_opt {
+        Some(n) => {
+            for _ in 0..n {
+                let tx_cbor = dec.bytes().map_err(|e| {
+                    DuplexError::Cbor(format!("MsgReplyTxs: expected tx cbor: {e}"))
+                })?;
+                bodies.push(tx_cbor.to_vec());
+            }
+        }
+        None => {
+            use minicbor::data::Type;
+            loop {
+                match dec.datatype() {
+                    Ok(Type::Break) => {
+                        let _ = dec.skip();
+                        break;
+                    }
+                    Ok(_) => {
+                        let tx_cbor = dec.bytes().map_err(|e| {
+                            DuplexError::Cbor(format!("MsgReplyTxs: expected tx cbor: {e}"))
+                        })?;
+                        bodies.push(tx_cbor.to_vec());
+                    }
+                    Err(e) => {
+                        return Err(DuplexError::Cbor(format!(
+                            "MsgReplyTxs: error reading indefinite array: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(bodies)
 }
 
 // ─── CBOR encode helpers ────────────────────────────────────────────────────
@@ -1057,39 +1194,6 @@ fn encode_msg_init() -> Vec<u8> {
     buf
 }
 
-/// Encode `MsgReplyTxIds = [1, [[tx_id, size_bytes], ...]]`.
-///
-/// Each element is `[bytes(tx_hash), uint(size)]`.  An empty slice produces
-/// `[1, []]`, which is the correct non-blocking empty reply.
-fn encode_reply_tx_ids(ids: &[([u8; 32], u32)]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut enc = minicbor::Encoder::new(&mut buf);
-    enc.array(2).expect("encode outer array");
-    enc.u32(1).expect("encode tag");
-    enc.array(ids.len() as u64).expect("encode id array");
-    for (hash, size) in ids {
-        enc.array(2).expect("encode pair");
-        enc.bytes(hash.as_slice()).expect("encode hash");
-        enc.u32(*size).expect("encode size");
-    }
-    buf
-}
-
-/// Encode `MsgReplyTxs = [3, [tx_cbor, ...]]`.
-fn encode_reply_txs(bodies: &[Vec<u8>]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut enc = minicbor::Encoder::new(&mut buf);
-    enc.array(2).expect("encode outer array");
-    enc.u32(3).expect("encode tag");
-    enc.array(bodies.len() as u64).expect("encode body array");
-    for body in bodies {
-        enc.bytes(body).expect("encode tx cbor");
-    }
-    buf
-}
-
-// ─── Initiator CBOR encode helpers ──────────────────────────────────────────
-
 /// Encode `MsgRequestTxIds = [0, blocking, ack_count, req_count]`.
 fn encode_request_tx_ids(blocking: bool, ack_count: u16, req_count: u16) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -1102,86 +1206,60 @@ fn encode_request_tx_ids(blocking: bool, ack_count: u16, req_count: u16) -> Vec<
     buf
 }
 
+/// Encode `MsgReplyTxIds = [1, [[tx_id, size_bytes], ...]]`.
+///
+/// The inner list uses **indefinite-length** encoding to match the pallas /
+/// Haskell wire format.  Definite-length would also be parseable by a
+/// conformant CBOR decoder, but we match Haskell for maximum compatibility.
+///
+/// Each element is `[bytes(tx_hash), uint(size)]`.  An empty slice produces
+/// `[1, _ []]`, which is the correct non-blocking empty reply.
+fn encode_reply_tx_ids(ids: &[([u8; 32], u32)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+    enc.array(2).expect("encode outer array");
+    enc.u32(1).expect("encode tag");
+    // Use indefinite-length array to match Haskell pallas wire format.
+    enc.begin_array().expect("begin indefinite array");
+    for (hash, size) in ids {
+        enc.array(2).expect("encode pair");
+        enc.bytes(hash.as_slice()).expect("encode hash");
+        enc.u32(*size).expect("encode size");
+    }
+    enc.end().expect("end indefinite array");
+    buf
+}
+
 /// Encode `MsgRequestTxs = [2, [tx_id, ...]]`.
-fn encode_initiator_request_txs(tx_ids: &[[u8; 32]]) -> Vec<u8> {
+///
+/// Uses **indefinite-length** encoding for the inner list to match Haskell.
+fn encode_request_txs(hashes: &[[u8; 32]]) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).expect("encode outer array");
     enc.u32(2).expect("encode tag");
-    enc.array(tx_ids.len() as u64).expect("encode id array");
-    for id in tx_ids {
-        enc.bytes(id.as_slice()).expect("encode tx id");
+    enc.begin_array().expect("begin indefinite array");
+    for hash in hashes {
+        enc.bytes(hash.as_slice()).expect("encode hash");
     }
+    enc.end().expect("end indefinite array");
     buf
 }
 
-// ─── Initiator CBOR decode helpers ──────────────────────────────────────────
-
-/// Decode `MsgReplyTxIds = [1, [[tx_id, size], ...]]`.
+/// Encode `MsgReplyTxs = [3, [tx_cbor, ...]]`.
 ///
-/// Returns a list of `(hash_bytes, size)` pairs.  Entries with non-32-byte
-/// hash fields are silently dropped (malformed peer data).
-fn decode_reply_tx_ids(payload: &[u8]) -> Result<Vec<([u8; 32], u32)>, DuplexError> {
-    let mut dec = minicbor::Decoder::new(payload);
-    dec.array()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected outer array: {e}")))?;
-    let _tag = dec
-        .u32()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected tag: {e}")))?;
-
-    let count = dec
-        .array()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected id array: {e}")))?
-        .unwrap_or(0);
-
-    let mut result = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        dec.array()
-            .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected pair: {e}")))?;
-        let hash_bytes = dec
-            .bytes()
-            .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected hash bytes: {e}")))?;
-        let size = dec
-            .u32()
-            .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected size u32: {e}")))?;
-
-        if hash_bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(hash_bytes);
-            result.push((arr, size));
-        } else {
-            warn!(
-                len = hash_bytes.len(),
-                "TxSubmission2 initiator: ignoring tx ID with unexpected hash length"
-            );
-        }
+/// Uses **indefinite-length** encoding for the inner list to match Haskell.
+fn encode_reply_txs(bodies: &[Vec<u8>]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+    enc.array(2).expect("encode outer array");
+    enc.u32(3).expect("encode tag");
+    enc.begin_array().expect("begin indefinite array");
+    for body in bodies {
+        enc.bytes(body).expect("encode tx cbor");
     }
-    Ok(result)
-}
-
-/// Decode `MsgReplyTxs = [3, [tx_cbor, ...]]`.
-fn decode_reply_txs(payload: &[u8]) -> Result<Vec<Vec<u8>>, DuplexError> {
-    let mut dec = minicbor::Decoder::new(payload);
-    dec.array()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected outer array: {e}")))?;
-    let _tag = dec
-        .u32()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected tag: {e}")))?;
-
-    let count = dec
-        .array()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected body array: {e}")))?
-        .unwrap_or(0);
-
-    let cap = (count as usize).min(MAX_TX_BODY_REQUEST);
-    let mut result = Vec::with_capacity(cap);
-    for _ in 0..cap {
-        let body = dec
-            .bytes()
-            .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: expected tx body bytes: {e}")))?;
-        result.push(body.to_vec());
-    }
-    Ok(result)
+    enc.end().expect("end indefinite array");
+    buf
 }
 
 // ─── Handshake version table ─────────────────────────────────────────────────
@@ -1243,17 +1321,32 @@ mod tests {
         assert_eq!(decode_first_tag(&bytes).unwrap(), 6);
     }
 
-    /// MsgReplyTxIds empty (non-blocking empty reply).
+    /// MsgInit hex: must be exactly 82 06 (array(1), u32(6)).
     #[test]
-    fn test_encode_reply_tx_ids_empty() {
-        let bytes = encode_reply_tx_ids(&[]);
-        let mut dec = minicbor::Decoder::new(&bytes);
-        assert_eq!(dec.array().unwrap().unwrap_or(0), 2); // outer array(2)
-        assert_eq!(dec.u32().unwrap(), 1); // tag = 1
-        assert_eq!(dec.array().unwrap().unwrap_or(99), 0); // inner array(0)
+    fn test_encode_msg_init_hex() {
+        let bytes = encode_msg_init();
+        assert_eq!(
+            bytes,
+            vec![0x81, 0x06],
+            "MsgInit must encode as 81 06 (array(1) containing integer 6)"
+        );
     }
 
-    /// MsgReplyTxIds with two entries round-trips correctly.
+    /// MsgReplyTxIds empty — uses indefinite-length inner array.
+    #[test]
+    fn test_encode_reply_tx_ids_empty_indefinite() {
+        let bytes = encode_reply_tx_ids(&[]);
+        // Outer array(2): 0x82
+        // Tag 1: 0x01
+        // begin_array (indefinite): 0x9F
+        // end (break): 0xFF
+        assert_eq!(bytes[0], 0x82, "outer array(2)");
+        assert_eq!(bytes[1], 0x01, "tag = 1");
+        assert_eq!(bytes[2], 0x9F, "indefinite array start (0x9F)");
+        assert_eq!(*bytes.last().unwrap(), 0xFF, "break code (0xFF)");
+    }
+
+    /// MsgReplyTxIds with two entries round-trips correctly (indefinite inner array).
     #[test]
     fn test_encode_reply_tx_ids_two_entries() {
         let hash_a = [0x11u8; 32];
@@ -1261,35 +1354,119 @@ mod tests {
         let ids = vec![(hash_a, 512u32), (hash_b, 1024u32)];
         let bytes = encode_reply_tx_ids(&ids);
 
-        let mut dec = minicbor::Decoder::new(&bytes);
-        assert_eq!(dec.array().unwrap().unwrap_or(0), 2);
-        assert_eq!(dec.u32().unwrap(), 1); // MsgReplyTxIds tag
-
-        let n = dec.array().unwrap().unwrap_or(0);
-        assert_eq!(n, 2);
-        for (expected_hash, expected_size) in &ids {
-            dec.array().unwrap(); // inner pair
-            let hash = dec.bytes().unwrap();
-            assert_eq!(hash, expected_hash.as_slice());
-            assert_eq!(dec.u32().unwrap(), *expected_size);
-        }
+        // Decode with our own decoder — must handle indefinite inner array.
+        let decoded = decode_reply_tx_ids(&bytes).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].0, hash_a);
+        assert_eq!(decoded[0].1, 512u32);
+        assert_eq!(decoded[1].0, hash_b);
+        assert_eq!(decoded[1].1, 1024u32);
     }
 
-    /// MsgReplyTxs with two bodies round-trips correctly.
+    /// decode_reply_tx_ids handles definite-length inner array (from older/other encoders).
     #[test]
-    fn test_encode_reply_txs() {
+    fn test_decode_reply_tx_ids_definite() {
+        let hash_a = [0xAAu8; 32];
+        // Build with definite array (minicbor standard encoder).
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap(); // outer array(2)
+        enc.u32(1).unwrap(); // tag = 1
+        enc.array(1u64).unwrap(); // definite inner array(1)
+        enc.array(2).unwrap(); // pair array(2)
+        enc.bytes(&hash_a).unwrap();
+        enc.u32(256u32).unwrap();
+
+        let decoded = decode_reply_tx_ids(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, hash_a);
+        assert_eq!(decoded[0].1, 256u32);
+    }
+
+    /// MsgReplyTxs uses indefinite-length inner array.
+    #[test]
+    fn test_encode_reply_txs_indefinite() {
         let bodies = vec![vec![0x01, 0x02, 0x03], vec![0xFF, 0xFE]];
         let bytes = encode_reply_txs(&bodies);
 
-        let mut dec = minicbor::Decoder::new(&bytes);
-        assert_eq!(dec.array().unwrap().unwrap_or(0), 2);
-        assert_eq!(dec.u32().unwrap(), 3); // MsgReplyTxs tag
+        assert_eq!(bytes[0], 0x82, "outer array(2)");
+        assert_eq!(bytes[1], 0x03, "tag = 3");
+        assert_eq!(bytes[2], 0x9F, "indefinite array start");
+        assert_eq!(*bytes.last().unwrap(), 0xFF, "break code");
 
-        let n = dec.array().unwrap().unwrap_or(0);
-        assert_eq!(n as usize, bodies.len());
-        for expected in &bodies {
-            assert_eq!(dec.bytes().unwrap(), expected.as_slice());
-        }
+        // Round-trip via decode_reply_txs.
+        let decoded = decode_reply_txs(&bytes).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0], vec![0x01, 0x02, 0x03]);
+        assert_eq!(decoded[1], vec![0xFF, 0xFE]);
+    }
+
+    /// decode_reply_txs handles definite-length inner array.
+    #[test]
+    fn test_decode_reply_txs_definite() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(3).unwrap();
+        enc.array(1u64).unwrap(); // definite
+        enc.bytes(&[0xDE, 0xAD]).unwrap();
+
+        let decoded = decode_reply_txs(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], vec![0xDE, 0xAD]);
+    }
+
+    /// MsgRequestTxs uses indefinite-length inner array.
+    #[test]
+    fn test_encode_request_txs_indefinite() {
+        let hashes = vec![[0x11u8; 32], [0x22u8; 32]];
+        let bytes = encode_request_txs(&hashes);
+
+        assert_eq!(bytes[0], 0x82, "outer array(2)");
+        assert_eq!(bytes[1], 0x02, "tag = 2");
+        assert_eq!(bytes[2], 0x9F, "indefinite array start");
+        assert_eq!(*bytes.last().unwrap(), 0xFF, "break code");
+
+        // Decode round-trip.
+        let decoded = decode_request_txs(&bytes).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0], [0x11u8; 32]);
+        assert_eq!(decoded[1], [0x22u8; 32]);
+    }
+
+    /// decode_request_txs handles definite-length inner array.
+    #[test]
+    fn test_decode_request_txs_definite() {
+        let hash_a = [0xAAu8; 32];
+        let hash_b = [0xBBu8; 32];
+
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(2).unwrap();
+        enc.array(2u64).unwrap(); // definite
+        enc.bytes(&hash_a).unwrap();
+        enc.bytes(&hash_b).unwrap();
+
+        let hashes = decode_request_txs(&buf).unwrap();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0], hash_a);
+        assert_eq!(hashes[1], hash_b);
+    }
+
+    /// decode_request_txs ignores hashes that are not exactly 32 bytes.
+    #[test]
+    fn test_decode_request_txs_bad_hash_len() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(2).unwrap();
+        enc.array(1u64).unwrap();
+        enc.bytes(&[0xCC; 16]).unwrap(); // 16 bytes — wrong length
+
+        // Should succeed but return an empty list (bad-length hash dropped).
+        let hashes = decode_request_txs(&buf).unwrap();
+        assert_eq!(hashes.len(), 0);
     }
 
     /// decode_request_tx_ids extracts (blocking, ack_count, req_count).
@@ -1324,41 +1501,6 @@ mod tests {
         assert!(blocking);
         assert_eq!(ack, 0);
         assert_eq!(req, 50);
-    }
-
-    /// decode_request_txs extracts hash list correctly.
-    #[test]
-    fn test_decode_request_txs() {
-        let hash_a = [0xAAu8; 32];
-        let hash_b = [0xBBu8; 32];
-
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).unwrap();
-        enc.u32(2).unwrap(); // MsgRequestTxs tag
-        enc.array(2u64).unwrap();
-        enc.bytes(&hash_a).unwrap();
-        enc.bytes(&hash_b).unwrap();
-
-        let hashes = decode_request_txs(&buf).unwrap();
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes[0], hash_a);
-        assert_eq!(hashes[1], hash_b);
-    }
-
-    /// decode_request_txs ignores hashes that are not exactly 32 bytes.
-    #[test]
-    fn test_decode_request_txs_bad_hash_len() {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).unwrap();
-        enc.u32(2).unwrap();
-        enc.array(1u64).unwrap();
-        enc.bytes(&[0xCC; 16]).unwrap(); // 16 bytes — wrong length
-
-        // Should succeed but return an empty list (bad-length hash dropped).
-        let hashes = decode_request_txs(&buf).unwrap();
-        assert_eq!(hashes.len(), 0);
     }
 
     /// The blocking CBOR field must be a CBOR bool (0xF5/0xF4), not an integer.
@@ -1416,7 +1558,6 @@ mod tests {
     /// Inflight cap logic: once inflight reaches MAX_TX_INFLIGHT we must send empty.
     #[test]
     fn test_inflight_cap_sends_empty() {
-        // Simulate the cap check logic extracted from serve_tx_submission_inner.
         let mut inflight: Vec<[u8; 32]> = Vec::new();
         for i in 0..MAX_TX_INFLIGHT {
             let mut h = [0u8; 32];
@@ -1428,7 +1569,6 @@ mod tests {
         }
         assert_eq!(inflight.len(), MAX_TX_INFLIGHT);
 
-        // When inflight is at cap, no new IDs should be sent.
         let remaining_cap = MAX_TX_INFLIGHT.saturating_sub(inflight.len());
         assert_eq!(remaining_cap, 0, "remaining cap must be 0 at the limit");
     }
@@ -1453,406 +1593,72 @@ mod tests {
         assert_eq!(inflight.len(), 0, "inflight must be empty after over-ack");
     }
 
-    // -----------------------------------------------------------------------
-    // Initiator CBOR encode / decode tests
-    // -----------------------------------------------------------------------
-
-    /// encode_request_tx_ids must produce [0, blocking, ack_count, req_count].
+    /// encode_request_tx_ids produces the correct CBOR wire format.
     #[test]
-    fn test_encode_request_tx_ids_blocking_true() {
+    fn test_encode_request_tx_ids() {
         let bytes = encode_request_tx_ids(true, 5, 100);
         let mut dec = minicbor::Decoder::new(&bytes);
+        assert_eq!(dec.array().unwrap().unwrap_or(0), 4);
+        assert_eq!(dec.u32().unwrap(), 0); // tag
+        assert!(dec.bool().unwrap()); // blocking = true
+        assert_eq!(dec.u16().unwrap(), 5); // ack_count
+        assert_eq!(dec.u16().unwrap(), 100); // req_count
+    }
+
+    /// hex_prefix returns the correct hex string for short payloads.
+    #[test]
+    fn test_hex_prefix_short() {
+        let data = vec![0x81u8, 0x06];
+        let s = hex_prefix(&data);
+        assert_eq!(s, "8106");
+    }
+
+    /// hex_prefix appends ".." for payloads longer than 16 bytes.
+    #[test]
+    fn test_hex_prefix_long() {
+        let data = vec![0xAAu8; 20];
+        let s = hex_prefix(&data);
+        assert!(s.ends_with(".."), "must end with .. for long payloads");
         assert_eq!(
-            dec.array().unwrap().unwrap_or(0),
-            4,
-            "outer array length must be 4"
-        );
-        assert_eq!(dec.u32().unwrap(), 0, "tag must be 0 (MsgRequestTxIds)");
-        assert!(dec.bool().unwrap(), "blocking must be true");
-        assert_eq!(dec.u16().unwrap(), 5, "ack_count must be 5");
-        assert_eq!(dec.u16().unwrap(), 100, "req_count must be 100");
-    }
-
-    /// encode_request_tx_ids with blocking=false.
-    #[test]
-    fn test_encode_request_tx_ids_blocking_false() {
-        let bytes = encode_request_tx_ids(false, 0, 50);
-        let mut dec = minicbor::Decoder::new(&bytes);
-        dec.array().unwrap();
-        assert_eq!(dec.u32().unwrap(), 0);
-        assert!(!dec.bool().unwrap(), "blocking must be false");
-        assert_eq!(dec.u16().unwrap(), 0);
-        assert_eq!(dec.u16().unwrap(), 50);
-    }
-
-    /// encode_request_tx_ids: blocking field must encode as CBOR bool (0xF5/0xF4),
-    /// not as integer 1/0.
-    #[test]
-    fn test_encode_request_tx_ids_blocking_is_cbor_bool() {
-        let blocking_bytes = encode_request_tx_ids(true, 0, 100);
-        let non_blocking_bytes = encode_request_tx_ids(false, 0, 100);
-        assert!(
-            blocking_bytes.contains(&0xF5),
-            "blocking=true must encode as CBOR true (0xF5)"
-        );
-        assert!(
-            non_blocking_bytes.contains(&0xF4),
-            "blocking=false must encode as CBOR false (0xF4)"
+            &s[..32],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"[..32].to_string()
         );
     }
 
-    /// encode_initiator_request_txs must produce [2, [hash, ...]].
+    /// The protocol flow: Client sends MsgInit, then receives MsgRequestTxIds.
+    /// Verify there is no second MsgInit sent or expected from the Client side.
     #[test]
-    fn test_encode_initiator_request_txs_two_hashes() {
-        let hash_a = [0xAAu8; 32];
-        let hash_b = [0xBBu8; 32];
-        let ids = [hash_a, hash_b];
-        let bytes = encode_initiator_request_txs(&ids);
-
-        let mut dec = minicbor::Decoder::new(&bytes);
-        assert_eq!(dec.array().unwrap().unwrap_or(0), 2, "outer array(2)");
-        assert_eq!(dec.u32().unwrap(), 2, "tag must be 2 (MsgRequestTxs)");
-        let n = dec.array().unwrap().unwrap_or(0);
-        assert_eq!(n, 2, "inner array length must be 2");
-        assert_eq!(dec.bytes().unwrap(), hash_a.as_slice());
-        assert_eq!(dec.bytes().unwrap(), hash_b.as_slice());
-    }
-
-    /// encode_initiator_request_txs with empty slice must produce [2, []].
-    #[test]
-    fn test_encode_initiator_request_txs_empty() {
-        let bytes = encode_initiator_request_txs(&[]);
-        let mut dec = minicbor::Decoder::new(&bytes);
-        dec.array().unwrap();
-        assert_eq!(dec.u32().unwrap(), 2);
-        assert_eq!(
-            dec.array().unwrap().unwrap_or(99),
-            0,
-            "inner array must be empty"
-        );
-    }
-
-    /// decode_reply_tx_ids must parse [1, [[hash, size], ...]] correctly.
-    #[test]
-    fn test_decode_reply_tx_ids_two_entries() {
-        let hash_a = [0x11u8; 32];
-        let hash_b = [0x22u8; 32];
-
-        // Encode a well-formed MsgReplyTxIds from the responder side.
-        let encoded = encode_reply_tx_ids(&[(hash_a, 512), (hash_b, 1024)]);
-        let decoded = decode_reply_tx_ids(&encoded).unwrap();
-
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].0, hash_a);
-        assert_eq!(decoded[0].1, 512);
-        assert_eq!(decoded[1].0, hash_b);
-        assert_eq!(decoded[1].1, 1024);
-    }
-
-    /// decode_reply_tx_ids with empty list must succeed and return [].
-    #[test]
-    fn test_decode_reply_tx_ids_empty() {
-        let encoded = encode_reply_tx_ids(&[]);
-        let decoded = decode_reply_tx_ids(&encoded).unwrap();
-        assert!(
-            decoded.is_empty(),
-            "empty MsgReplyTxIds must decode to empty vec"
-        );
-    }
-
-    /// decode_reply_tx_ids drops entries whose hash is not exactly 32 bytes.
-    #[test]
-    fn test_decode_reply_tx_ids_bad_hash_length_dropped() {
-        // Craft a MsgReplyTxIds with one 16-byte hash (malformed).
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).unwrap(); // outer [tag, ids]
-        enc.u32(1).unwrap(); // MsgReplyTxIds tag
-        enc.array(1u64).unwrap(); // one entry
-        enc.array(2).unwrap(); // inner [hash, size]
-        enc.bytes(&[0xAAu8; 16]).unwrap(); // 16-byte hash — malformed
-        enc.u32(256).unwrap();
-
-        let decoded = decode_reply_tx_ids(&buf).unwrap();
-        assert_eq!(
-            decoded.len(),
-            0,
-            "malformed hash (16 bytes) must be silently dropped"
-        );
-    }
-
-    /// decode_reply_txs must parse [3, [cbor, ...]] correctly.
-    #[test]
-    fn test_decode_reply_txs_two_bodies() {
-        let body_a = vec![0x01, 0x02, 0x03];
-        let body_b = vec![0xFF, 0xFE, 0xFD];
-        let encoded = encode_reply_txs(&[body_a.clone(), body_b.clone()]);
-        let decoded = decode_reply_txs(&encoded).unwrap();
-
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0], body_a);
-        assert_eq!(decoded[1], body_b);
-    }
-
-    /// decode_reply_txs with empty list must succeed and return [].
-    #[test]
-    fn test_decode_reply_txs_empty() {
-        let encoded = encode_reply_txs(&[]);
-        let decoded = decode_reply_txs(&encoded).unwrap();
-        assert!(decoded.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Initiator state machine logic tests (no I/O)
-    // -----------------------------------------------------------------------
-
-    /// The pending_ack accumulation must use saturating_add.
-    #[test]
-    fn test_initiator_pending_ack_saturating_add() {
-        let mut pending_ack: u16 = u16::MAX - 2;
-        let batch_len = 5u16;
-        pending_ack = pending_ack.saturating_add(batch_len);
-        assert_eq!(
-            pending_ack,
-            u16::MAX,
-            "saturating_add must clamp at u16::MAX"
-        );
-    }
-
-    /// Known-set eviction: when len + incoming > cap, the set is cleared first.
-    #[test]
-    fn test_initiator_known_set_eviction() {
-        let mut known: HashSet<[u8; 32]> = HashSet::new();
-
-        // Fill to just below the cap.
-        for i in 0..INITIATOR_MAX_KNOWN {
-            let mut h = [0u8; 32];
-            h[0] = (i >> 24) as u8;
-            h[1] = (i >> 16) as u8;
-            h[2] = (i >> 8) as u8;
-            h[3] = i as u8;
-            known.insert(h);
-        }
-        assert_eq!(known.len(), INITIATOR_MAX_KNOWN);
-
-        // One more entry triggers eviction.
-        let new_hash = [0xFFu8; 32];
-        let incoming: Vec<([u8; 32], u32)> = vec![(new_hash, 100)];
-        if known.len() + incoming.len() > INITIATOR_MAX_KNOWN {
-            known.clear();
-        }
-        for (h, _) in &incoming {
-            known.insert(*h);
-        }
-        assert_eq!(
-            known.len(),
-            1,
-            "after eviction only the new hash should remain"
-        );
-        assert!(known.contains(&new_hash));
-    }
-
-    /// Known-set dedup: tx IDs already in the set are filtered from new_ids.
-    #[test]
-    fn test_initiator_dedup_filter() {
-        let mut known: HashSet<[u8; 32]> = HashSet::new();
-        let hash_a = [0x11u8; 32];
-        let hash_b = [0x22u8; 32];
-        let hash_c = [0x33u8; 32];
-
-        // First batch: both are new, neither is in the known set.
-        let batch1 = vec![(hash_a, 100u32), (hash_b, 200u32)];
-        let new1: Vec<[u8; 32]> = batch1
-            .iter()
-            .filter(|(h, _)| !known.contains(h))
-            .map(|(h, _)| *h)
-            .collect();
-        assert_eq!(new1.len(), 2, "first batch: both hashes must be new");
-        for (h, _) in &batch1 {
-            known.insert(*h);
-        }
-
-        // Second batch: same hashes — both filtered.
-        let batch2 = [(hash_a, 100u32), (hash_b, 200u32)];
-        let new2: Vec<[u8; 32]> = batch2
-            .iter()
-            .filter(|(h, _)| !known.contains(h))
-            .map(|(h, _)| *h)
-            .collect();
-        assert_eq!(new2.len(), 0, "second batch: all hashes already known");
-
-        // Third batch: one old, one new.
-        let batch3 = [(hash_a, 100u32), (hash_c, 300u32)];
-        let new3: Vec<[u8; 32]> = batch3
-            .iter()
-            .filter(|(h, _)| !known.contains(h))
-            .map(|(h, _)| *h)
-            .collect();
-        assert_eq!(new3.len(), 1, "third batch: only hash_c must be new");
-        assert_eq!(new3[0], hash_c);
-    }
-
-    /// encode_request_tx_ids / decode_request_tx_ids round-trip.
-    ///
-    /// The initiator encodes MsgRequestTxIds; the responder decodes it.
-    /// This validates that the two sides interoperate correctly.
-    #[test]
-    fn test_initiator_request_tx_ids_roundtrip_with_responder_decode() {
-        let encoded = encode_request_tx_ids(true, 7, 100);
-        // The responder uses decode_request_tx_ids to parse this.
-        let (blocking, ack, req) = decode_request_tx_ids(&encoded).unwrap();
-        assert!(blocking, "blocking must survive round-trip");
-        assert_eq!(ack, 7, "ack_count must survive round-trip");
-        assert_eq!(req, 100, "req_count must survive round-trip");
-    }
-
-    /// encode_initiator_request_txs / decode_request_txs round-trip.
-    ///
-    /// The initiator encodes MsgRequestTxs; the responder decodes it.
-    #[test]
-    fn test_initiator_request_txs_roundtrip_with_responder_decode() {
-        let hash_a = [0xAAu8; 32];
-        let hash_b = [0xBBu8; 32];
-        let encoded = encode_initiator_request_txs(&[hash_a, hash_b]);
-        let hashes = decode_request_txs(&encoded).unwrap();
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes[0], hash_a);
-        assert_eq!(hashes[1], hash_b);
-    }
-
-    /// decode_reply_tx_ids / encode_reply_tx_ids round-trip.
-    ///
-    /// The responder encodes MsgReplyTxIds; the initiator decodes it.
-    #[test]
-    fn test_responder_reply_tx_ids_roundtrip_with_initiator_decode() {
-        let hash_a = [0xCCu8; 32];
-        let hash_b = [0xDDu8; 32];
-        let encoded = encode_reply_tx_ids(&[(hash_a, 512), (hash_b, 1024)]);
-        let ids = decode_reply_tx_ids(&encoded).unwrap();
-        assert_eq!(ids.len(), 2);
-        assert_eq!(ids[0], (hash_a, 512));
-        assert_eq!(ids[1], (hash_b, 1024));
-    }
-
-    /// decode_reply_txs / encode_reply_txs round-trip.
-    ///
-    /// The responder encodes MsgReplyTxs; the initiator decodes it.
-    #[test]
-    fn test_responder_reply_txs_roundtrip_with_initiator_decode() {
-        let tx1 = vec![0x82, 0x00, 0x01];
-        let tx2 = vec![0x83, 0x01, 0x02, 0x03];
-        let encoded = encode_reply_txs(&[tx1.clone(), tx2.clone()]);
-        let bodies = decode_reply_txs(&encoded).unwrap();
-        assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[0], tx1);
-        assert_eq!(bodies[1], tx2);
-    }
-
-    // -----------------------------------------------------------------------
-    // Full initiator protocol sequence tests
-    // -----------------------------------------------------------------------
-
-    /// Verifies the complete TxSubmission2 initiator protocol message sequence
-    /// at the CBOR wire level — no I/O required.
-    ///
-    /// Simulates the message flow:
-    ///   1. Initiator → Responder: MsgInit [6]
-    ///   2. Responder → Initiator: MsgInit [6]
-    ///   3. Initiator → Responder: MsgRequestTxIds [0, false, 0, 100]
-    ///   4. Responder → Initiator: MsgReplyTxIds [1, [[hash, size]]]
-    ///   5. Initiator → Responder: MsgRequestTxs [2, [hash]]
-    ///   6. Responder → Initiator: MsgReplyTxs [3, [tx_cbor]]
-    ///   7. Initiator → Responder: MsgRequestTxIds [0, false, 1, 100] (ack=1)
-    ///   8. Responder → Initiator: MsgReplyTxIds [1, []] (empty → trigger blocking)
-    ///   9. Initiator → Responder: MsgRequestTxIds [0, true, 0, 100] (blocking)
-    ///  10. Responder → Initiator: MsgDone [4]
-    #[test]
-    fn test_initiator_protocol_message_sequence() {
-        // Step 1: Initiator sends MsgInit
-        let init = encode_msg_init();
-        assert_eq!(decode_first_tag(&init).unwrap(), 6, "MsgInit tag must be 6");
-
-        // Step 2: Responder sends MsgInit — same encoding
-        let init_reply = encode_msg_init();
-        assert_eq!(decode_first_tag(&init_reply).unwrap(), 6);
-
-        // Step 3: Initiator sends MsgRequestTxIds (non-blocking, ack=0, req=100)
-        let req_ids = encode_request_tx_ids(false, 0, 100);
-        let (blocking, ack, req) = decode_request_tx_ids(&req_ids).unwrap();
+    fn test_client_protocol_flow_no_bidirectional_init() {
+        // The serve_tx_submission_inner function should:
+        //   1. send_init  (one-way)
+        //   2. enter loop waiting for MsgRequestTxIds
+        // This is verified structurally by confirming our encode/decode
+        // helpers do NOT include a "recv_init" step.
+        //
+        // We encode what a Server would send as its first message after MsgInit:
+        let msg_request_tx_ids = encode_request_tx_ids(false, 0, 100);
+        let (blocking, ack, req) = decode_request_tx_ids(&msg_request_tx_ids).unwrap();
         assert!(!blocking);
         assert_eq!(ack, 0);
         assert_eq!(req, 100);
-
-        // Step 4: Responder replies with one tx ID
-        let tx_hash = [0xDEu8; 32];
-        let reply_ids = encode_reply_tx_ids(&[(tx_hash, 256)]);
-        let ids = decode_reply_tx_ids(&reply_ids).unwrap();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0].0, tx_hash);
-        assert_eq!(ids[0].1, 256);
-
-        // Step 5: Initiator sends MsgRequestTxs for that hash
-        let req_txs = encode_initiator_request_txs(&[tx_hash]);
-        let hashes = decode_request_txs(&req_txs).unwrap();
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0], tx_hash);
-
-        // Step 6: Responder replies with the tx body
-        let fake_tx = vec![0x82u8, 0x01, 0x02];
-        let reply_txs = encode_reply_txs(std::slice::from_ref(&fake_tx));
-        let bodies = decode_reply_txs(&reply_txs).unwrap();
-        assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0], fake_tx);
-
-        // Step 7: Initiator sends MsgRequestTxIds with ack=1 (acknowledging step 4)
-        let req_with_ack = encode_request_tx_ids(false, 1, 100);
-        let (blocking, ack, _) = decode_request_tx_ids(&req_with_ack).unwrap();
-        assert!(!blocking);
-        assert_eq!(ack, 1, "ack_count must be 1 after processing one tx batch");
-
-        // Step 8: Responder replies empty (no new txs)
-        let empty_reply = encode_reply_tx_ids(&[]);
-        let empty_ids = decode_reply_tx_ids(&empty_reply).unwrap();
-        assert!(
-            empty_ids.is_empty(),
-            "empty reply triggers blocking request"
-        );
-
-        // Step 9: Initiator sends blocking MsgRequestTxIds
-        let blocking_req = encode_request_tx_ids(true, 0, 100);
-        let (blocking, _, _) = decode_request_tx_ids(&blocking_req).unwrap();
-        assert!(blocking, "blocking flag must be true for blocking request");
-
-        // Step 10: Responder sends MsgDone [4]
-        let mut done_buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut done_buf);
-        enc.array(1).unwrap();
-        enc.u32(4).unwrap();
-        assert_eq!(
-            decode_first_tag(&done_buf).unwrap(),
-            4,
-            "MsgDone must be tag 4 per Ouroboros CDDL"
-        );
+        // No MsgInit decode step in this flow — Client doesn't wait for it back.
     }
 
-    /// Verify that the initiator's MsgRequestTxIds can be decoded by the
-    /// responder using its existing decode_request_tx_ids function, and
-    /// vice-versa for MsgReplyTxIds — ensuring bidirectional wire compatibility.
+    /// The server protocol flow: Server receives MsgInit, then sends MsgRequestTxIds.
+    /// Verify the Server does NOT send MsgInit.
     #[test]
-    fn test_initiator_responder_bidirectional_compatibility() {
-        // Initiator encodes; responder decodes
-        let initiator_req = encode_request_tx_ids(false, 3, 50);
-        let (blocking, ack, req) = decode_request_tx_ids(&initiator_req).unwrap();
-        assert!(!blocking);
-        assert_eq!(ack, 3);
-        assert_eq!(req, 50);
+    fn test_server_protocol_flow_receives_init_then_requests() {
+        // Server receives MsgInit [6] from client.
+        let init_bytes = encode_msg_init();
+        let tag = decode_first_tag(&init_bytes).unwrap();
+        assert_eq!(tag, 6, "server must receive tag 6 (MsgInit)");
 
-        // Responder encodes; initiator decodes
-        let hash = [0x55u8; 32];
-        let responder_reply = encode_reply_tx_ids(&[(hash, 100)]);
-        let ids = decode_reply_tx_ids(&responder_reply).unwrap();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0].0, hash);
-        assert_eq!(ids[0].1, 100);
+        // Server then sends MsgRequestTxIds (not another MsgInit).
+        let req_bytes = encode_request_tx_ids(false, 0, 100);
+        let req_tag = decode_first_tag(&req_bytes).unwrap();
+        assert_eq!(
+            req_tag, 0,
+            "server first message must be MsgRequestTxIds (tag 0)"
+        );
     }
 }
