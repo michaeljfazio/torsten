@@ -184,15 +184,11 @@ impl LedgerState {
         let d_den = self.protocol_params.d.denominator.max(1) as f64;
         let d = d_num / d_den;
 
-        // Use the snapshot's epoch data — Haskell's RUPD computes eta and
-        // fees from the epoch that just ended, not the live (new) epoch counters.
-        // Fall back to self.* for backward compatibility with legacy snapshots where
-        // these fields default to zero.
-        let actual_blocks = if rupd_snapshot.epoch_block_count > 0 {
-            rupd_snapshot.epoch_block_count
-        } else {
-            self.epoch_block_count
-        };
+        // Block count comes from the snapshot (Haskell's bprev = BlocksMade
+        // from the previous epoch, passed to startStep). For the first RUPD,
+        // the initial bprev is empty (0 blocks) — this is correct because
+        // no snapshot rotation has captured block counts yet.
+        let actual_blocks = rupd_snapshot.epoch_block_count;
 
         let rho = Rat::from_i128(rho_num, rho_den);
 
@@ -224,11 +220,18 @@ impl LedgerState {
                 ))
                 .floor_u64()
         };
-        let epoch_fees = if rupd_snapshot.epoch_fees.0 > 0 {
-            rupd_snapshot.epoch_fees.0
-        } else {
-            self.epoch_fees.0
-        };
+        // Fees come from the snapshot's ssFee, matching Haskell's
+        // `rPot = ssFee(snapshots) + deltaR1` in PulsingReward.hs.
+        //
+        // The ssFee is set by the SNAP rule at the epoch boundary and
+        // reflects fees accumulated during the epoch whose data is in
+        // the snapshot. For the first RUPD (epoch 0), ssFee = 0 because
+        // no SNAP has run yet — the initial snapshots have ssFee = Coin 0.
+        //
+        // Previously we fell back to `self.epoch_fees` when the snapshot
+        // fees were 0, which incorrectly included epoch 0's fees in the
+        // first RUPD (adding 87,558 extra lovelace to treasury).
+        let epoch_fees = rupd_snapshot.epoch_fees.0;
         let total_rewards_available = expansion + epoch_fees;
 
         if total_rewards_available == 0 {
@@ -356,15 +359,12 @@ impl LedgerState {
             //     beta  = blocks_made / total_blocks
             //     sigma = pool_stake / total_active_stake
             //   When d >= 0.8: perf = 1 (no performance adjustment)
-            let blocks_made = if !rupd_snapshot.epoch_blocks_by_pool.is_empty() {
-                rupd_snapshot
-                    .epoch_blocks_by_pool
-                    .get(pool_id)
-                    .copied()
-                    .unwrap_or(0)
-            } else {
-                self.epoch_blocks_by_pool.get(pool_id).copied().unwrap_or(0)
-            };
+            // Per-pool block count from the snapshot (Haskell's bprev BlocksMade).
+            let blocks_made = rupd_snapshot
+                .epoch_blocks_by_pool
+                .get(pool_id)
+                .copied()
+                .unwrap_or(0);
             let pool_reward = if pool_active_stake.0 == 0 {
                 0u64
             } else if d >= 0.8 {
