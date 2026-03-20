@@ -35,13 +35,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bench-
 
+      # Separate stable cache for Criterion baselines so that benchmark
+      # comparison reports ("change: +2.3%") persist across CI runs even
+      # when Cargo.lock changes.
+      - name: Cache Criterion baselines
+        uses: actions/cache@v5
+        with:
+          path: target/criterion
+          key: ${{ runner.os }}-criterion-baselines
+          restore-keys: |
+            ${{ runner.os }}-criterion-baselines
+
       - name: Run storage benchmarks
         run: |
-          cargo bench -p torsten-storage --bench storage_bench -- --output-format bencher 2>/dev/null | tee storage_bench.txt || true
+          # Run in default mode first (generates HTML reports with comparison)
+          cargo bench -p torsten-storage --bench storage_bench 2>&1 | tee storage_bench.txt || true
+          # Save baselines for next run
+          cargo bench -p torsten-storage --bench storage_bench -- --save-baseline nightly 2>/dev/null || true
 
       - name: Run UTxO benchmarks
         run: |
-          cargo bench -p torsten-ledger --bench utxo_bench -- --output-format bencher 2>/dev/null | tee utxo_bench.txt || true
+          cargo bench -p torsten-ledger --bench utxo_bench 2>&1 | tee utxo_bench.txt || true
+          cargo bench -p torsten-ledger --bench utxo_bench -- --save-baseline nightly 2>/dev/null || true
 
       - name: Run LSM large-scale stress tests
         run: |
