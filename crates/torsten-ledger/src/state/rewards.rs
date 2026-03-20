@@ -197,9 +197,17 @@ impl LedgerState {
         // The d >= 0.8 guard prevents division by near-zero expectedBlocks and
         // ensures full monetary expansion during the federated era (Shelley/Allegra/Mary).
         // On preview testnet d starts at 1.0 from genesis, so this guard is critical.
-        let d_num = self.protocol_params.d.numerator as f64;
-        let d_den = self.protocol_params.d.denominator.max(1) as f64;
-        let d = d_num / d_den;
+        //
+        // In Conway (protocol version >= 9), d is hardcoded to 0.
+        // In earlier eras, d comes from protocol params (set in genesis,
+        // modified by parameter updates).
+        let d = if self.protocol_params.protocol_version_major >= 9 {
+            0.0 // Conway deprecated d
+        } else {
+            let d_num = self.protocol_params.d.numerator as f64;
+            let d_den = self.protocol_params.d.denominator.max(1) as f64;
+            d_num / d_den
+        };
 
         // Block count comes from the snapshot (Haskell's bprev = BlocksMade
         // from the previous epoch, passed to startStep). For the first RUPD,
