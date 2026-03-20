@@ -232,7 +232,7 @@ fn test_kes_keygen_produces_valid_key_pair() {
 #[test]
 fn test_vrf_keygen_produces_valid_pair() {
     let kp = torsten_crypto::vrf::generate_vrf_keypair();
-    assert_eq!(kp.secret_key.len(), 32);
+    assert_eq!(kp.secret_key().len(), 32);
     assert_eq!(kp.public_key.len(), 32);
 }
 
@@ -240,7 +240,7 @@ fn test_vrf_keygen_produces_valid_pair() {
 fn test_vrf_keygen_different_each_time() {
     let kp1 = torsten_crypto::vrf::generate_vrf_keypair();
     let kp2 = torsten_crypto::vrf::generate_vrf_keypair();
-    assert_ne!(kp1.secret_key, kp2.secret_key);
+    assert_ne!(kp1.secret_key(), kp2.secret_key());
 }
 
 // ─── Helper: simple CBOR byte-string wrapper ─────────────────────────────────

@@ -408,20 +408,17 @@ impl ChainDB {
         // No-op: VolatileDB handles rollback without snapshots
     }
 
-    /// Rollback the chain to a given point.
-    ///
-    /// Only affects the VolatileDB (immutable blocks can't be rolled back).
-    /// Returns the hashes of the removed blocks.
+    /// Non-destructive rollback: truncate the selected chain to a given point.
+    /// Blocks from the old chain remain in volatile for delayed GC.
     pub fn rollback_to_point(
         &mut self,
         point: &Point,
     ) -> Result<Vec<BlockHeaderHash>, ChainDBError> {
-        warn!(point = ?point, "ChainDB: rollback requested");
+        warn!(point = ?point, "ChainDB: rollback (non-destructive)");
 
         let target_slot = point.slot().map(|s| s.0).unwrap_or(0);
         let target_hash = point.hash().copied();
 
-        // Check if rollback is a no-op
         if let Some((_, tip_hash, _)) = self.volatile.get_tip() {
             if let Some(th) = target_hash {
                 if tip_hash == th {
@@ -434,9 +431,26 @@ impl ChainDB {
             .volatile
             .rollback_to_point(target_slot, target_hash.as_ref());
 
-        debug!(blocks_removed = removed.len(), "ChainDB: rollback complete");
+        debug!(
+            blocks_removed = removed.len(),
+            total_volatile = self.volatile.len(),
+            "ChainDB: rollback complete (fork blocks retained)"
+        );
 
         Ok(removed)
+    }
+
+    /// Switch the selected chain to a new tip.
+    pub fn switch_to_fork(
+        &mut self,
+        new_tip_hash: &BlockHeaderHash,
+    ) -> Option<crate::volatile_db::SwitchPlan> {
+        self.volatile.switch_chain(new_tip_hash)
+    }
+
+    /// GC orphaned fork blocks from volatile. Returns count removed.
+    pub fn gc_volatile(&mut self) -> usize {
+        self.volatile.gc_orphaned_blocks()
     }
 
     // -- Flush / Lifecycle --------------------------------------------------
@@ -748,14 +762,17 @@ mod tests {
         assert!(removed.contains(&make_hash(4)));
         assert!(removed.contains(&make_hash(5)));
 
-        // Blocks 4 and 5 should be gone
-        assert!(!db.has_block(&make_hash(4)));
-        assert!(!db.has_block(&make_hash(5)));
+        // Non-destructive: blocks 4 and 5 still in store
+        assert!(db.has_block(&make_hash(4)));
+        assert!(db.has_block(&make_hash(5)));
 
         // Blocks 1-3 should still exist
         assert!(db.has_block(&make_hash(1)));
         assert!(db.has_block(&make_hash(2)));
         assert!(db.has_block(&make_hash(3)));
+
+        // Tip should be block 3
+        assert_eq!(db.get_tip().block_number, BlockNo(3));
     }
 
     #[test]
@@ -1389,10 +1406,10 @@ mod tests {
         build_chain(&mut db, 5);
         assert_eq!(db.volatile_block_count(), 5);
 
-        // Remove 2 via rollback
+        // Non-destructive rollback: blocks remain in store
         db.rollback_to_point(&Point::Specific(SlotNo(3), make_hash(3)))
             .unwrap();
-        assert_eq!(db.volatile_block_count(), 3);
+        assert_eq!(db.volatile_block_count(), 5);
     }
 
     #[test]
@@ -1425,9 +1442,9 @@ mod tests {
 
         assert_eq!(db.volatile_block_count(), 5);
 
-        // Rollback all volatile blocks
+        // Non-destructive rollback: blocks remain in volatile
         db.rollback_to_point(&Point::Origin).unwrap();
-        assert_eq!(db.volatile_block_count(), 0);
+        assert_eq!(db.volatile_block_count(), 5);
 
         // Immutable blocks should still be there
         for i in 1..=5u64 {

@@ -11,4 +11,4 @@ pub use config::{
     UtxoConfig,
 };
 pub use immutable_db::ImmutableDB;
-pub use volatile_db::VolatileDB;
+pub use volatile_db::{SwitchPlan, VolatileDB};

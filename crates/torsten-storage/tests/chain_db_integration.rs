@@ -84,11 +84,11 @@ fn test_rollback_after_flush() {
         .unwrap();
     assert_eq!(removed.len(), 50);
 
-    // Rolled-back blocks should be gone from volatile
+    // Non-destructive: blocks still in store after rollback
     for i in (rollback_to + 1)..=total {
         assert!(
-            !db.has_block(&make_hash(i)),
-            "Block {i} should be removed after rollback"
+            db.has_block(&make_hash(i)),
+            "Block {i} should still exist after non-destructive rollback"
         );
     }
 

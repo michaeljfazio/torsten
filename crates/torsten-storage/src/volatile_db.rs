@@ -34,12 +34,13 @@
 //! that position, we treat the file as legacy. A one-time warning is logged
 //! and `prev_hash` is set to `Hash32::ZERO` for all legacy entries.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use torsten_primitives::hash::Hash32;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// WAL entry magic bytes: "TWAL"
 const WAL_MAGIC: [u8; 4] = *b"TWAL";
@@ -355,18 +356,49 @@ pub struct VolatileBlock {
     pub cbor: Vec<u8>,
 }
 
+/// The default delay before orphaned fork blocks are garbage-collected.
+/// Matches Haskell cardano-node's 60-second GC delay for VolatileDB.
+const GC_DELAY: Duration = Duration::from_secs(60);
+
+/// Plan for switching from one chain to another in the VolatileDB.
+///
+/// Computed by `switch_chain()` — describes which blocks to roll back and
+/// which to apply when atomically swapping the selected chain.
+#[derive(Debug, Clone)]
+pub struct SwitchPlan {
+    /// The common ancestor of the old and new chains.
+    pub intersection: Hash32,
+    /// Blocks to roll back from the old chain (most-recent first).
+    pub rollback: Vec<Hash32>,
+    /// Blocks to apply from the new chain (oldest first).
+    pub apply: Vec<Hash32>,
+}
+
 /// In-memory store for recent (volatile) blocks.
 ///
-/// These blocks are within k of the tip and not yet finalized to
-/// the ImmutableDB. With WAL enabled (`open()`), blocks survive crashes.
-/// Without WAL (`new()`), they are re-fetched from peers on crash.
+/// Stores blocks from all forks — blocks are never deleted on rollback.
+/// The `selected_chain` tracks which chain is currently active. Fork
+/// switching updates `selected_chain` without removing the old chain's
+/// blocks. Orphaned blocks are garbage-collected after a delay.
+///
+/// This matches Haskell cardano-node's VolatileDB architecture where
+/// blocks from all forks coexist and chain selection is tracked separately.
 pub struct VolatileDB {
+    /// All blocks from all forks, indexed by hash.
     blocks: HashMap<Hash32, VolatileBlock>,
+    /// Slot-based index for all blocks (all forks).
     slot_index: BTreeMap<u64, Vec<Hash32>>,
+    /// Block-number index for the SELECTED chain only.
     block_no_index: BTreeMap<u64, Hash32>,
+    /// Successor relationships for all blocks (all forks).
     successors: HashMap<Hash32, Vec<Hash32>>,
-    tip: Option<(u64, Hash32, u64)>, // (slot, hash, block_no)
+    /// Tip of the selected chain: (slot, hash, block_no).
+    tip: Option<(u64, Hash32, u64)>,
     wal: Option<WalWriter>,
+    /// Currently-selected chain fragment, ordered oldest to newest.
+    selected_chain: Vec<Hash32>,
+    /// Blocks scheduled for garbage collection (orphaned fork blocks).
+    gc_schedule: HashMap<Hash32, Instant>,
 }
 
 impl VolatileDB {
@@ -379,6 +411,8 @@ impl VolatileDB {
             successors: HashMap::new(),
             tip: None,
             wal: None,
+            selected_chain: Vec::new(),
+            gc_schedule: HashMap::new(),
         }
     }
 
@@ -404,6 +438,8 @@ impl VolatileDB {
             successors: HashMap::new(),
             tip: None,
             wal: None,
+            selected_chain: Vec::new(),
+            gc_schedule: HashMap::new(),
         };
 
         // Rebuild in-memory state from WAL, using the recovered prev_hash.
@@ -421,12 +457,21 @@ impl VolatileDB {
             );
         }
 
+        // Rebuild selected chain from replayed blocks
+        if !db.blocks.is_empty() {
+            db.rebuild_selected_chain();
+        }
+
         // Open WAL writer for new entries
         let wal = WalWriter::open(&wal_path)?;
         db.wal = Some(wal);
 
         if replayed > 0 {
-            debug!(replayed, "VolatileDB: replayed WAL entries");
+            debug!(
+                replayed,
+                selected_chain_len = db.selected_chain.len(),
+                "VolatileDB: replayed WAL entries, rebuilt selected chain"
+            );
         }
 
         Ok(db)
@@ -458,6 +503,10 @@ impl VolatileDB {
     }
 
     /// Internal block insertion (no WAL write).
+    ///
+    /// Stores the block in all indexes. If it extends the selected chain
+    /// (prev_hash matches selected chain tip), also updates `selected_chain`,
+    /// `block_no_index`, and `tip`. Otherwise stored as a fork block.
     fn insert_block_internal(
         &mut self,
         hash: Hash32,
@@ -466,12 +515,10 @@ impl VolatileDB {
         prev_hash: Hash32,
         cbor: Vec<u8>,
     ) {
-        // Track successor relationship: prev_hash -> hash
+        // Track successor relationship (all forks)
         self.successors.entry(prev_hash).or_default().push(hash);
-
-        // Update indexes
+        // Slot index (all forks)
         self.slot_index.entry(slot).or_default().push(hash);
-        self.block_no_index.insert(block_no, hash);
 
         // Store the block
         self.blocks.insert(
@@ -484,12 +531,14 @@ impl VolatileDB {
             },
         );
 
-        // Update tip if this is the highest slot
-        let is_new_tip = match self.tip {
-            Some((tip_slot, _, _)) => slot > tip_slot,
+        // Extend selected chain if this block connects to it
+        let extends = match self.selected_chain.last() {
+            Some(tip_hash) => prev_hash == *tip_hash,
             None => true,
         };
-        if is_new_tip {
+        if extends {
+            self.selected_chain.push(hash);
+            self.block_no_index.insert(block_no, hash);
             self.tip = Some((slot, hash, block_no));
         }
     }
@@ -528,25 +577,26 @@ impl VolatileDB {
         Some((block.slot, *hash, &block.cbor))
     }
 
-    /// Remove a specific block.
+    /// Remove a specific block from all indexes.
     pub fn remove_block(&mut self, hash: &Hash32) {
         if let Some(block) = self.blocks.remove(hash) {
-            // Remove from slot index
             if let Some(hashes) = self.slot_index.get_mut(&block.slot) {
                 hashes.retain(|h| h != hash);
                 if hashes.is_empty() {
                     self.slot_index.remove(&block.slot);
                 }
             }
-            // Remove from block_no index
-            self.block_no_index.remove(&block.block_no);
-            // Remove from successors
+            if self.block_no_index.get(&block.block_no) == Some(hash) {
+                self.block_no_index.remove(&block.block_no);
+            }
             if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
                 succs.retain(|h| h != hash);
                 if succs.is_empty() {
                     self.successors.remove(&block.prev_hash);
                 }
             }
+            self.selected_chain.retain(|h| h != hash);
+            self.gc_schedule.remove(hash);
         }
     }
 
@@ -559,12 +609,15 @@ impl VolatileDB {
     pub fn remove_blocks_up_to_slot(&mut self, slot: u64) -> Vec<Hash32> {
         let slots_to_remove: Vec<u64> = self.slot_index.range(..=slot).map(|(&s, _)| s).collect();
 
+        let mut removed_set = HashSet::new();
         let mut removed = Vec::new();
         for s in slots_to_remove {
             if let Some(hashes) = self.slot_index.remove(&s) {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
-                        self.block_no_index.remove(&block.block_no);
+                        if self.block_no_index.get(&block.block_no) == Some(&hash) {
+                            self.block_no_index.remove(&block.block_no);
+                        }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
                             succs.retain(|h| *h != hash);
                             if succs.is_empty() {
@@ -572,12 +625,18 @@ impl VolatileDB {
                             }
                         }
                     }
+                    self.gc_schedule.remove(&hash);
+                    removed_set.insert(hash);
                     removed.push(hash);
                 }
             }
         }
 
-        // Rewrite WAL with remaining entries in new 88-byte format
+        // Trim flushed blocks from selected_chain front
+        self.selected_chain
+            .retain(|h| !removed_set.contains(h));
+
+        // Rewrite WAL with remaining entries
         if let Some(ref mut wal) = self.wal {
             let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
                 .blocks
@@ -592,23 +651,101 @@ impl VolatileDB {
         removed
     }
 
-    /// Rollback: remove all blocks after a given point (slot, hash).
-    /// Returns the removed block hashes (most recent first).
+    /// Non-destructive rollback: truncate the selected chain to a given point.
+    ///
+    /// Blocks from the old chain suffix remain in VolatileDB and are scheduled
+    /// for delayed GC. This matches Haskell cardano-node behavior.
+    ///
+    /// Returns hashes removed from the selected chain (most recent first).
     pub fn rollback_to_point(
         &mut self,
         target_slot: u64,
         target_hash: Option<&Hash32>,
     ) -> Vec<Hash32> {
-        let mut removed = Vec::new();
+        // Find the cut point in selected_chain
+        let cut_point = self
+            .selected_chain
+            .iter()
+            .position(|h| {
+                if let Some(block) = self.blocks.get(h) {
+                    if block.slot == target_slot {
+                        return target_hash.map_or(true, |th| h == th);
+                    }
+                }
+                false
+            })
+            .or_else(|| {
+                // Fallback: last block at or before target_slot
+                self.selected_chain.iter().rposition(|h| {
+                    self.blocks
+                        .get(h)
+                        .map_or(false, |b| b.slot <= target_slot)
+                })
+            });
 
-        // Collect all blocks with slot > target_slot
+        let rolled_back = match cut_point {
+            Some(idx) => {
+                let suffix: Vec<Hash32> =
+                    self.selected_chain.drain((idx + 1)..).rev().collect();
+                let now = Instant::now();
+                for h in &suffix {
+                    self.gc_schedule.insert(*h, now);
+                    if let Some(block) = self.blocks.get(h) {
+                        if self.block_no_index.get(&block.block_no) == Some(h) {
+                            self.block_no_index.remove(&block.block_no);
+                        }
+                    }
+                }
+                if let Some(tip_hash) = self.selected_chain.last() {
+                    if let Some(block) = self.blocks.get(tip_hash) {
+                        self.tip = Some((block.slot, *tip_hash, block.block_no));
+                    }
+                } else {
+                    self.tip = None;
+                }
+                suffix
+            }
+            None => {
+                let all: Vec<Hash32> = self.selected_chain.drain(..).rev().collect();
+                let now = Instant::now();
+                for h in &all {
+                    self.gc_schedule.insert(*h, now);
+                    if let Some(block) = self.blocks.get(h) {
+                        if self.block_no_index.get(&block.block_no) == Some(h) {
+                            self.block_no_index.remove(&block.block_no);
+                        }
+                    }
+                }
+                self.tip = None;
+                all
+            }
+        };
+
+        if !rolled_back.is_empty() {
+            debug!(
+                rolled_back = rolled_back.len(),
+                remaining = self.selected_chain.len(),
+                total_blocks = self.blocks.len(),
+                "VolatileDB: non-destructive rollback (fork blocks retained)"
+            );
+        }
+
+        rolled_back
+    }
+
+    /// Destructive rollback: remove all blocks after a given point entirely.
+    /// Used only for catastrophic scenarios (all peers Origin, deep divergence).
+    pub fn rollback_and_prune(
+        &mut self,
+        target_slot: u64,
+        target_hash: Option<&Hash32>,
+    ) -> Vec<Hash32> {
+        let mut removed = Vec::new();
         let slots_to_remove: Vec<u64> = self
             .slot_index
             .range((target_slot + 1)..)
             .map(|(&s, _)| s)
             .collect();
-
-        // Also check blocks at target_slot that don't match the target hash
         let mut at_target: Vec<Hash32> = Vec::new();
         if let Some(target_h) = target_hash {
             if let Some(hashes) = self.slot_index.get(&target_slot) {
@@ -619,32 +756,27 @@ impl VolatileDB {
                 }
             }
         }
-
-        // Remove blocks after target
         for s in slots_to_remove.into_iter().rev() {
             if let Some(hashes) = self.slot_index.remove(&s) {
                 for hash in hashes {
                     if let Some(block) = self.blocks.remove(&hash) {
-                        self.block_no_index.remove(&block.block_no);
+                        if self.block_no_index.get(&block.block_no) == Some(&hash) {
+                            self.block_no_index.remove(&block.block_no);
+                        }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
                             succs.retain(|h| *h != hash);
                         }
                     }
+                    self.gc_schedule.remove(&hash);
                     removed.push(hash);
                 }
             }
         }
-
-        // Remove non-matching blocks at target slot
         for hash in at_target {
             self.remove_block(&hash);
             removed.push(hash);
         }
-
-        // Recompute tip
-        self.recompute_tip();
-
-        // Rewrite WAL with remaining entries in new 88-byte format
+        self.rebuild_selected_chain();
         if let Some(ref mut wal) = self.wal {
             let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
                 .blocks
@@ -652,10 +784,9 @@ impl VolatileDB {
                 .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
                 .collect();
             if let Err(e) = wal.rewrite(&remaining) {
-                warn!(error = %e, "WAL: failed to rewrite after rollback");
+                warn!(error = %e, "WAL: failed to rewrite after destructive rollback");
             }
         }
-
         removed
     }
 
@@ -667,6 +798,8 @@ impl VolatileDB {
         self.slot_index.clear();
         self.block_no_index.clear();
         self.successors.clear();
+        self.selected_chain.clear();
+        self.gc_schedule.clear();
         self.tip = None;
 
         if let Some(ref mut wal) = self.wal {
@@ -705,13 +838,202 @@ impl VolatileDB {
         result
     }
 
-    /// Recompute tip from the current blocks.
+    /// Recompute tip from the selected chain.
     fn recompute_tip(&mut self) {
-        self.tip = self.slot_index.iter().next_back().and_then(|(_, hashes)| {
-            hashes
-                .first()
-                .and_then(|h| self.blocks.get(h).map(|b| (b.slot, *h, b.block_no)))
-        });
+        self.tip = self
+            .selected_chain
+            .last()
+            .and_then(|h| self.blocks.get(h).map(|b| (b.slot, *h, b.block_no)));
+    }
+
+    /// Walk backwards from `tip_hash` through `prev_hash` links.
+    /// Returns oldest-to-newest order.
+    pub fn walk_chain_back(&self, tip_hash: &Hash32) -> Vec<Hash32> {
+        let mut chain = Vec::new();
+        let mut current = *tip_hash;
+        loop {
+            if let Some(block) = self.blocks.get(&current) {
+                chain.push(current);
+                if self.blocks.contains_key(&block.prev_hash) {
+                    current = block.prev_hash;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Find all leaf tips: blocks with no successors.
+    pub fn get_leaf_tips(&self) -> Vec<(Hash32, u64, u64)> {
+        self.blocks
+            .iter()
+            .filter(|(hash, _)| {
+                self.successors
+                    .get(*hash)
+                    .map_or(true, |succs| succs.is_empty())
+            })
+            .map(|(hash, block)| (*hash, block.slot, block.block_no))
+            .collect()
+    }
+
+    /// Switch the selected chain to end at `new_tip_hash`.
+    /// Returns a `SwitchPlan` with blocks to rollback/apply.
+    pub fn switch_chain(&mut self, new_tip_hash: &Hash32) -> Option<SwitchPlan> {
+        let new_chain = self.walk_chain_back(new_tip_hash);
+        if new_chain.is_empty() {
+            return None;
+        }
+        let new_chain_set: HashSet<&Hash32> = new_chain.iter().collect();
+        let intersection_idx = self
+            .selected_chain
+            .iter()
+            .rposition(|h| new_chain_set.contains(h));
+
+        let (intersection, rollback, apply) = match intersection_idx {
+            Some(idx) => {
+                let intersection_hash = self.selected_chain[idx];
+                let rollback: Vec<Hash32> =
+                    self.selected_chain[(idx + 1)..].iter().rev().copied().collect();
+                let intersection_pos_in_new =
+                    new_chain.iter().position(|h| *h == intersection_hash);
+                let apply: Vec<Hash32> = match intersection_pos_in_new {
+                    Some(pos) => new_chain[(pos + 1)..].to_vec(),
+                    None => new_chain.clone(),
+                };
+                (intersection_hash, rollback, apply)
+            }
+            None => {
+                let rollback: Vec<Hash32> =
+                    self.selected_chain.iter().rev().copied().collect();
+                let anchor = self
+                    .blocks
+                    .get(&new_chain[0])
+                    .map(|b| b.prev_hash)
+                    .unwrap_or(new_chain[0]);
+                (anchor, rollback, new_chain.clone())
+            }
+        };
+
+        let now = Instant::now();
+        for h in &rollback {
+            self.gc_schedule.insert(*h, now);
+        }
+        for h in &apply {
+            self.gc_schedule.remove(h);
+        }
+
+        if let Some(idx) = intersection_idx {
+            self.selected_chain.truncate(idx + 1);
+        } else {
+            self.selected_chain.clear();
+        }
+        self.selected_chain.extend_from_slice(&apply);
+
+        self.block_no_index.clear();
+        for h in &self.selected_chain {
+            if let Some(block) = self.blocks.get(h) {
+                self.block_no_index.insert(block.block_no, *h);
+            }
+        }
+        self.recompute_tip();
+
+        info!(
+            rollback_count = rollback.len(),
+            apply_count = apply.len(),
+            selected_len = self.selected_chain.len(),
+            "VolatileDB: chain switch"
+        );
+
+        Some(SwitchPlan {
+            intersection,
+            rollback,
+            apply,
+        })
+    }
+
+    /// Rebuild selected chain by finding the longest chain from all tips.
+    fn rebuild_selected_chain(&mut self) {
+        let tips = self.get_leaf_tips();
+        let mut best_chain: Vec<Hash32> = Vec::new();
+        let mut best_block_no: u64 = 0;
+        for (tip_hash, _, tip_block_no) in &tips {
+            if *tip_block_no >= best_block_no {
+                let chain = self.walk_chain_back(tip_hash);
+                if chain.len() > best_chain.len()
+                    || (chain.len() == best_chain.len() && *tip_block_no > best_block_no)
+                {
+                    best_chain = chain;
+                    best_block_no = *tip_block_no;
+                }
+            }
+        }
+        self.selected_chain = best_chain;
+        self.block_no_index.clear();
+        for h in &self.selected_chain {
+            if let Some(block) = self.blocks.get(h) {
+                self.block_no_index.insert(block.block_no, *h);
+            }
+        }
+        self.recompute_tip();
+    }
+
+    /// GC orphaned fork blocks whose delay has expired. Returns count removed.
+    pub fn gc_orphaned_blocks(&mut self) -> usize {
+        let now = Instant::now();
+        let expired: Vec<Hash32> = self
+            .gc_schedule
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) >= GC_DELAY)
+            .map(|(hash, _)| *hash)
+            .collect();
+        let count = expired.len();
+        for hash in &expired {
+            self.gc_schedule.remove(hash);
+            if !self.selected_chain.contains(hash) {
+                if let Some(block) = self.blocks.remove(hash) {
+                    if let Some(hashes) = self.slot_index.get_mut(&block.slot) {
+                        hashes.retain(|h| h != hash);
+                        if hashes.is_empty() {
+                            self.slot_index.remove(&block.slot);
+                        }
+                    }
+                    if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
+                        succs.retain(|h| h != hash);
+                        if succs.is_empty() {
+                            self.successors.remove(&block.prev_hash);
+                        }
+                    }
+                }
+            }
+        }
+        if count > 0 {
+            debug!(gc_removed = count, "VolatileDB: GC orphaned blocks");
+            if let Some(ref mut wal) = self.wal {
+                let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
+                    .blocks
+                    .iter()
+                    .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
+                    .collect();
+                if let Err(e) = wal.rewrite(&remaining) {
+                    warn!(error = %e, "WAL: failed to rewrite after GC");
+                }
+            }
+        }
+        count
+    }
+
+    /// Get the selected chain length.
+    pub fn selected_chain_len(&self) -> usize {
+        self.selected_chain.len()
+    }
+
+    /// Get the number of orphaned blocks pending GC.
+    pub fn gc_pending_count(&self) -> usize {
+        self.gc_schedule.len()
     }
 }
 
@@ -746,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rollback_removes_suffix() {
+    fn test_rollback_truncates_selected_chain() {
         let mut db = VolatileDB::new();
         db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
         db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
@@ -755,8 +1077,9 @@ mod tests {
         let removed = db.rollback_to_point(100, Some(&h(1)));
         assert_eq!(removed.len(), 2);
         assert!(db.has_block(&h(1)));
-        assert!(!db.has_block(&h(2)));
-        assert!(!db.has_block(&h(3)));
+        assert!(db.has_block(&h(2))); // Non-destructive: still in store
+        assert!(db.has_block(&h(3))); // Non-destructive: still in store
+        assert_eq!(db.selected_chain_len(), 1);
         assert_eq!(db.get_tip(), Some((100, h(1), 10)));
     }
 
@@ -1125,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_rollback_rewrites() {
+    fn test_wal_rollback_preserves_all_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let wal_dir = dir.path().join("volatile");
 
@@ -1135,19 +1458,38 @@ mod tests {
             db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
             db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
 
-            // Rollback to block 1
+            // Non-destructive rollback
             db.rollback_to_point(100, Some(&h(1)));
-            assert_eq!(db.len(), 1);
+            assert_eq!(db.len(), 3); // All blocks retained
+            assert_eq!(db.selected_chain_len(), 1);
         }
 
-        // Re-open: only block 1 should be recovered
+        // Re-open: ALL blocks recovered, longest chain selected
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 3);
+        assert!(db.has_block(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert!(db.has_block(&h(3)));
+        assert_eq!(db.selected_chain_len(), 3);
+        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
+    }
+
+    #[test]
+    fn test_wal_destructive_rollback_prunes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+            db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+            db.rollback_and_prune(100, Some(&h(1)));
+            assert_eq!(db.len(), 1);
+        }
         let db = VolatileDB::open(&wal_dir).unwrap();
         assert_eq!(db.len(), 1);
         assert!(db.has_block(&h(1)));
         assert!(!db.has_block(&h(2)));
-        assert!(!db.has_block(&h(3)));
-        // prev_hash must survive the rollback rewrite
-        assert_eq!(db.get_block(&h(1)).unwrap().prev_hash, h(0));
     }
 
     #[test]
@@ -1474,5 +1816,130 @@ mod tests {
         assert!(db.is_empty());
         assert_eq!(db.len(), 0);
         assert_eq!(db.get_tip(), None);
+    }
+
+    // -- Multi-fork chain management tests ------------------------------------
+
+    #[test]
+    fn test_selected_chain_grows_sequentially() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        assert_eq!(db.selected_chain_len(), 3);
+        assert_eq!(db.get_tip(), Some((300, h(3), 30)));
+    }
+
+    #[test]
+    fn test_fork_block_not_on_selected_chain() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 100, 10, h(0), b"b3_fork".to_vec());
+        assert!(db.has_block(&h(3)));
+        assert_eq!(db.selected_chain_len(), 2);
+        assert_eq!(db.get_tip(), Some((200, h(2), 20)));
+    }
+
+    #[test]
+    fn test_rollback_then_extend_new_chain() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+
+        db.rollback_to_point(100, Some(&h(1)));
+        db.add_block(h(4), 200, 20, h(1), b"b4_new".to_vec());
+        db.add_block(h(5), 300, 30, h(4), b"b5_new".to_vec());
+
+        assert_eq!(db.selected_chain_len(), 3);
+        assert_eq!(db.get_tip(), Some((300, h(5), 30)));
+        assert_eq!(db.len(), 5);
+        let (_, hash, _) = db.get_block_by_number(20).unwrap();
+        assert_eq!(hash, h(4));
+    }
+
+    #[test]
+    fn test_walk_chain_back() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        assert_eq!(db.walk_chain_back(&h(3)), vec![h(1), h(2), h(3)]);
+        assert_eq!(db.walk_chain_back(&h(2)), vec![h(1), h(2)]);
+    }
+
+    #[test]
+    fn test_get_leaf_tips() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        assert_eq!(db.get_leaf_tips().len(), 1);
+        db.add_block(h(3), 200, 20, h(1), b"b3_fork".to_vec());
+        assert_eq!(db.get_leaf_tips().len(), 2);
+    }
+
+    #[test]
+    fn test_switch_chain() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        db.add_block(h(4), 200, 20, h(1), b"b4".to_vec());
+        db.add_block(h(5), 300, 30, h(4), b"b5".to_vec());
+        db.add_block(h(6), 400, 40, h(5), b"b6".to_vec());
+
+        assert_eq!(db.get_tip(), Some((300, h(3), 30)));
+        let plan = db.switch_chain(&h(6)).unwrap();
+        assert_eq!(plan.intersection, h(1));
+        assert_eq!(plan.rollback, vec![h(3), h(2)]);
+        assert_eq!(plan.apply, vec![h(4), h(5), h(6)]);
+        assert_eq!(db.get_tip(), Some((400, h(6), 40)));
+        assert_eq!(db.len(), 6);
+    }
+
+    #[test]
+    fn test_slot_battle_scenario() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 90, 9, h(0), b"parent".to_vec());
+        db.add_block(h(2), 100, 10, h(1), b"our_forged".to_vec());
+        db.add_block(h(3), 100, 10, h(1), b"network_better".to_vec());
+
+        db.rollback_to_point(90, Some(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert!(db.has_block(&h(3)));
+
+        let plan = db.switch_chain(&h(3)).unwrap();
+        assert_eq!(plan.apply, vec![h(3)]);
+        assert_eq!(db.get_tip(), Some((100, h(3), 10)));
+        assert_eq!(db.len(), 3);
+    }
+
+    #[test]
+    fn test_flush_trims_selected_chain() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        assert_eq!(db.selected_chain_len(), 3);
+        db.remove_blocks_up_to_slot(200);
+        assert_eq!(db.len(), 1);
+        assert_eq!(db.selected_chain_len(), 1);
+    }
+
+    #[test]
+    fn test_rebuild_selected_chain_picks_longest() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 200, 20, h(1), b"b3".to_vec());
+        db.add_block(h(4), 300, 30, h(3), b"b4".to_vec());
+        db.add_block(h(5), 400, 40, h(4), b"b5".to_vec());
+        // Currently on A: h(1)→h(2)
+        assert_eq!(db.get_tip(), Some((200, h(2), 20)));
+        db.rebuild_selected_chain();
+        // B is longer: h(1)→h(3)→h(4)→h(5)
+        assert_eq!(db.selected_chain_len(), 4);
+        assert_eq!(db.get_tip(), Some((400, h(5), 40)));
     }
 }

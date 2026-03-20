@@ -171,7 +171,7 @@ impl NodeCmd {
                 let sk_env = serde_json::json!({
                     "type": "VrfSigningKey_PraosVRF",
                     "description": "VRF Signing Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&kp.secret_key))
+                    "cborHex": hex::encode(simple_cbor_wrap(kp.secret_key()))
                 });
                 let vk_env = serde_json::json!({
                     "type": "VrfVerificationKey_PraosVRF",

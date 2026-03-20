@@ -1013,19 +1013,15 @@ impl Node {
                         debug!("Bridged {bridged} blocks from ChainDB storage");
                     }
                     if bridge_failed {
-                        // ChainDB has blocks from a different fork that don't connect
-                        // to the ledger. Clear volatile blocks and let the network
-                        // re-sync from the ledger tip.
+                        // ChainDB has blocks from a different fork that don't
+                        // connect to the ledger. Fork blocks are retained in
+                        // volatile (non-destructive) and will be GC'd after 60s.
+                        // The caller reconnects and ChainSync delivers the
+                        // correct chain blocks.
                         warn!(
                             "Gap bridge failed due to fork divergence. \
-                             Clearing stale volatile blocks and re-syncing from ledger tip."
+                             Fork blocks retained in volatile for GC. Re-syncing."
                         );
-                        {
-                            let mut db = self.chain_db.write().await;
-                            db.clear_volatile();
-                        }
-                        // Return 0 to signal that no blocks were applied from this batch.
-                        // The caller will reconnect with a fresh intersection.
                         return 0;
                     }
                 }
@@ -1217,6 +1213,8 @@ impl Node {
             if let Err(e) = flush_result {
                 warn!(error = %e, "Failed to flush blocks to immutable storage");
             }
+            // GC orphaned fork blocks whose 60-second delay has expired.
+            db.gc_volatile();
         }
 
         let tx_count: u64 = blocks.iter().map(|b| b.transactions.len() as u64).sum();
@@ -1741,22 +1739,18 @@ impl Node {
             );
 
             // If the divergence is shallow (within k blocks), try a
-            // lightweight rollback via handle_rollback. This avoids the
-            // expensive full chain replay.
+            // lightweight rollback via handle_rollback. Non-destructive:
+            // fork blocks remain in VolatileDB and are GC'd after 60s
+            // (matching Haskell cardano-node behavior).
             if depth <= self.consensus.security_param * 2 {
                 let rollback_point = intersect.clone().unwrap_or(Point::Origin);
                 info!(
                     "Fork recovery: lightweight rollback to {rollback_point} \
-                     (depth={depth} slots, within 2k)"
+                     (depth={depth} slots, within 2k). Fork blocks retained for GC."
                 );
                 self.handle_rollback(&rollback_point).await;
-                // Clear volatile DB of contaminated blocks
-                {
-                    let mut db = self.chain_db.write().await;
-                    db.clear_volatile();
-                }
+                // Non-destructive: fork blocks stay in volatile for GC.
                 self.mempool.clear();
-                // Continue with the sync from the intersection — no replay needed.
                 return Err(anyhow::anyhow!(
                     "fork recovery: rolled back {depth} slots, reconnecting to continue sync"
                 ));
