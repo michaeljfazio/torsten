@@ -65,6 +65,9 @@
 ## Mempool Tx Ordering & Chained Tx Deep-Dive
 - See [mempool-tx-ordering.md](mempool-tx-ordering.md) — FIFO ordering (TicketNo), virtual ledger state for chained txs, TxSubmission2 serving order, block production prefix, revalidation logic, policy constants, Torsten divergences
 
+## Monetary Expansion & RUPD
+- See [monetary-expansion-rupd.md](monetary-expansion-rupd.md) — deltaR1, eta, expectedBlocks, block counting (incrBlocks/isOverlaySlot), snapshot system, TICK→RUPD data flow, Conway d=0 simplification, first-epoch behavior
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
