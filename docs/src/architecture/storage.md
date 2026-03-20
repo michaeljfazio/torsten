@@ -17,7 +17,7 @@ flowchart TD
 
     ROLL[Rollback] -->|remove from volatile| VOL
 
-    LS[LedgerState] --> UTXO[UtxoStore<br/>cardano-lsm LSM tree<br/>On-disk UTxO set]
+    LS[LedgerState] --> UTXO[UtxoStore<br/>torsten-lsm LSM tree<br/>On-disk UTxO set]
     LS --> DIFF[DiffSeq<br/>Last k UTxO diffs<br/>For rollback]
 ```
 
@@ -65,18 +65,18 @@ ChainDB supports querying blocks by slot range:
 
 ## UTxO Storage (UTxO-HD)
 
-The UTxO set is stored on disk using [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.
+The UTxO set is stored on disk using `torsten-lsm`, a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.
 
 ### UtxoStore
 
-The `UtxoStore` (in `torsten-ledger`) wraps a cardano-lsm `LsmTree` and provides:
+The `UtxoStore` (in `torsten-ledger`) wraps a torsten-lsm `LsmTree` and provides:
 
 - **Disk-backed UTxO set** — the full UTxO set lives on disk, not in memory
 - **Efficient point lookups** — bloom filters for fast negative lookups
 - **Batch writes** — UTxO inserts and deletes are batched per block
 - **Snapshots** — periodic snapshots for crash recovery
 
-cardano-lsm is configured via storage profiles that maximize available system memory:
+torsten-lsm is configured via storage profiles that maximize available system memory:
 
 | Profile | Target System | Memtable | Block Cache | Expected RSS |
 |---------|--------------|----------|-------------|-------------|
@@ -132,7 +132,7 @@ database-path/
     chunks/           # Block data files
     index/            # Secondary indexes (slot, hash)
     hash_index.dat    # Mmap block index (open-addressing hash table)
-  utxo-store/         # cardano-lsm database (UTxO set)
+  utxo-store/         # torsten-lsm database (UTxO set)
     active/           # Current SSTables
     snapshots/        # Durable snapshots
   ledger/             # Ledger state snapshots
@@ -234,7 +234,7 @@ Results are saved to `target/criterion/` with HTML reports. Baseline results are
 
 Mmap lookup advantage grows with scale — at mainnet block counts (~10M), the gap widens further.
 
-#### UTxO Store Scaling (cardano-lsm LSM tree)
+#### UTxO Store Scaling (torsten-lsm LSM tree)
 
 | Size | Insert (per-entry) | Lookup (per-entry) | Total Lovelace Scan |
 |------|-------------------|-------------------|-------------------|

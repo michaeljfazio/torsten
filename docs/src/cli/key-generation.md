@@ -13,8 +13,8 @@ torsten-cli key generate-payment-key \
 ```
 
 Output files:
-- `payment.skey` -- Payment signing key (keep secret)
-- `payment.vkey` -- Payment verification key (safe to share)
+- `payment.skey` — Payment signing key (keep secret)
+- `payment.vkey` — Payment verification key (safe to share)
 
 ## Stake Keys
 
@@ -27,8 +27,8 @@ torsten-cli key generate-stake-key \
 ```
 
 Output files:
-- `stake.skey` -- Stake signing key
-- `stake.vkey` -- Stake verification key
+- `stake.skey` — Stake signing key
+- `stake.vkey` — Stake verification key
 
 ## Verification Key Hash
 

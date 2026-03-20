@@ -56,23 +56,23 @@ graph TD
 
 Torsten leverages the [pallas](https://github.com/txpipe/pallas) family of crates (v1.0.0-alpha.5) for Cardano wire-format compatibility:
 
-- **pallas-network** -- Ouroboros multiplexer and handshake
-- **pallas-codec** -- CBOR encoding/decoding
-- **pallas-primitives** -- Cardano primitive types
-- **pallas-traverse** -- Multi-era block traversal
-- **pallas-crypto** -- Cryptographic primitives
-- **pallas-addresses** -- Address parsing and construction
+- **pallas-network** — Ouroboros multiplexer and handshake
+- **pallas-codec** — CBOR encoding/decoding
+- **pallas-primitives** — Cardano primitive types
+- **pallas-traverse** — Multi-era block traversal
+- **pallas-crypto** — Cryptographic primitives
+- **pallas-addresses** — Address parsing and construction
 
 Other key dependencies:
 
-- **tokio** -- Async runtime
-- **cardano-lsm** -- Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)
-- **minicbor** -- CBOR encoding for custom types
-- **ed25519-dalek** -- Ed25519 signatures
-- **blake2b_simd** -- SIMD-accelerated Blake2b hashing
-- **uplc** -- Plutus CEK machine for script evaluation
-- **clap** -- CLI argument parsing
-- **tracing** -- Structured logging
+- **tokio** — Async runtime
+- **torsten-lsm** — Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)
+- **minicbor** — CBOR encoding for custom types
+- **ed25519-dalek** — Ed25519 signatures
+- **blake2b_simd** — SIMD-accelerated Blake2b hashing
+- **uplc** — Plutus CEK machine for script evaluation
+- **clap** — CLI argument parsing
+- **tracing** — Structured logging
 
 ## Design Principles
 

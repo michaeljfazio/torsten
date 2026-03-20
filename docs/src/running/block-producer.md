@@ -12,9 +12,9 @@ See the [Complete Deployment](#complete-deployment) section at the bottom of thi
 
 A block producer is a node that has been registered as a stake pool and is capable of minting new blocks when it is elected as a slot leader. The block production pipeline involves:
 
-1. **Slot leader check** -- Each slot, the node uses its VRF key and the epoch nonce to determine if it is elected to produce a block.
-2. **Block forging** -- If elected, the node assembles a block from pending mempool transactions, signs it with the KES key, and includes the VRF proof.
-3. **Block announcement** -- The forged block is propagated to connected peers via the N2N protocol.
+1. **Slot leader check** — Each slot, the node uses its VRF key and the epoch nonce to determine if it is elected to produce a block.
+2. **Block forging** — If elected, the node assembles a block from pending mempool transactions, signs it with the KES key, and includes the VRF proof.
+3. **Block announcement** — The forged block is propagated to connected peers via the N2N protocol.
 
 ## Required Keys
 
@@ -122,10 +122,10 @@ A block producer should not be directly exposed to the public internet. Instead,
 ```
 
 Key points:
-- **No bootstrap peers** -- The block producer syncs exclusively through your relays.
-- **No public roots** -- No connections to unknown peers.
-- **Ledger peers disabled** -- `useLedgerAfterSlot: -1` disables ledger-based peer discovery.
-- **Only local roots** -- All connections are to your own relay nodes.
+- **No bootstrap peers** — The block producer syncs exclusively through your relays.
+- **No public roots** — No connections to unknown peers.
+- **Ledger peers disabled** — `useLedgerAfterSlot: -1` disables ledger-based peer discovery.
+- **Only local roots** — All connections are to your own relay nodes.
 
 ## Leader Schedule
 
@@ -275,7 +275,7 @@ This warning appears at startup when the "set" snapshot contains no stake for yo
 - **Snapshot too old:** The "set" snapshot reflects stake from two epoch boundaries ago. A newly registered pool must wait 2 epoch transitions before appearing in the "set" snapshot.
 - **UTxO store not attached:** If the node started without a UTxO store, stake reconstruction is skipped. Check for the `Rebuilding stake distribution from UTxO store` log message.
 
-### "Forge: skipping -- epoch nonce not yet established"
+### "Forge: skipping — epoch nonce not yet established"
 
 ```
 Forge: skipping — epoch nonce not yet established
@@ -283,7 +283,7 @@ Forge: skipping — epoch nonce not yet established
 
 This is expected after loading a ledger snapshot. The node must observe at least one live epoch transition to establish a reliable epoch nonce. On preview testnet, this takes up to 1 day (one epoch). On mainnet, up to 5 days.
 
-**No action required** -- the node will begin forging automatically after the next epoch boundary.
+**No action required** — the node will begin forging automatically after the next epoch boundary.
 
 ### "VRF leader eligibility check failed"
 
@@ -291,7 +291,7 @@ VRF leader check failures during the first few epochs after a full replay are no
 
 - The node may compute incorrect leader eligibility for some slots.
 - Block verification for incoming blocks from peers is relaxed (strict VRF verification is disabled until `nonce_established` is true).
-- Your pool may miss some leader slots -- this is temporary and self-correcting.
+- Your pool may miss some leader slots — this is temporary and self-correcting.
 
 ### Pool Registered but No Forge Attempts
 

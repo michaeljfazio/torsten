@@ -73,7 +73,7 @@ Torsten requires **Rust 1.75 or later** (edition 2021).
 
 #### System Dependencies
 
-Torsten's storage layer is pure Rust with **no system dependencies** beyond the Rust toolchain. Block storage uses append-only chunk files, and the UTxO set uses [cardano-lsm](https://crates.io/crates/cardano-lsm), a pure Rust LSM tree. On all platforms, `cargo build` works out of the box.
+Torsten's storage layer is pure Rust with **no system dependencies** beyond the Rust toolchain. Block storage uses append-only chunk files, and the UTxO set uses `torsten-lsm`, a pure Rust LSM tree. On all platforms, `cargo build` works out of the box.
 
 ### Build
 

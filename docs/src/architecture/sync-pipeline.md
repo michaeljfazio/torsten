@@ -37,19 +37,19 @@ flowchart LR
 A primary peer is selected for the ChainSync protocol. The node requests block headers sequentially using the N2N ChainSync mini-protocol (V14+). Headers are collected into batches.
 
 The ChainSync protocol involves:
-1. **MsgFindIntersect** -- Find a common point between the node and the peer
-2. **MsgRequestNext** -- Request the next header
-3. **MsgRollForward** -- Receive a new header
-4. **MsgRollBackward** -- Handle a chain reorganization
+1. **MsgFindIntersect** — Find a common point between the node and the peer
+2. **MsgRequestNext** — Request the next header
+3. **MsgRollForward** — Receive a new header
+4. **MsgRollBackward** — Handle a chain reorganization
 
 ### 2. Block Fetch Pool
 
 Collected headers are distributed across multiple peers for parallel block retrieval. The block fetch pool supports up to 4 concurrent peers, each fetching a range of blocks.
 
 The BlockFetch protocol involves:
-1. **MsgRequestRange** -- Request a range of blocks by header hash
-2. **MsgBlock** -- Receive a block
-3. **MsgBatchDone** -- Signal the end of a batch
+1. **MsgRequestRange** — Request a range of blocks by header hash
+2. **MsgBlock** — Receive a block
+3. **MsgBatchDone** — Signal the end of a batch
 
 Blocks are fetched in batches of 500 headers, with sub-batches of 100 headers each. Each sub-batch is decoded on a `spawn_blocking` task to avoid blocking the async runtime.
 
@@ -57,10 +57,10 @@ Blocks are fetched in batches of 500 headers, with sub-batches of 100 headers ea
 
 Fetched blocks are applied to the ledger state in order:
 
-1. **Deserialization** -- Raw CBOR bytes are decoded into Torsten's internal `Block` type using pallas
-2. **Ledger validation** -- Each block is validated against the current ledger state (UTxO checks, fee validation, certificate processing)
-3. **Storage** -- Valid blocks are added to the ChainDB (volatile database first, flushed to immutable when k-deep)
-4. **Epoch transitions** -- At epoch boundaries, stake snapshots are rotated and rewards are calculated
+1. **Deserialization** — Raw CBOR bytes are decoded into Torsten's internal `Block` type using pallas
+2. **Ledger validation** — Each block is validated against the current ledger state (UTxO checks, fee validation, certificate processing)
+3. **Storage** — Valid blocks are added to the ChainDB (volatile database first, flushed to immutable when k-deep)
+4. **Epoch transitions** — At epoch boundaries, stake snapshots are rotated and rewards are calculated
 
 ### Batched Lock Acquisition
 

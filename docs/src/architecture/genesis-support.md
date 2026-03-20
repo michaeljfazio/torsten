@@ -6,9 +6,9 @@ Torsten includes a basic Genesis State Machine (GSM) that tracks the node's sync
 
 The GSM implements three states matching the Ouroboros Genesis specification:
 
-- **PreSyncing** -- Waiting for enough trusted big ledger peers (BLPs). The Historical Availability Assumption (HAA) requires a minimum number of active BLPs before sync begins.
-- **Syncing** -- Active block download with density-based peer evaluation. The GSM monitors chain density across peers and can disconnect peers with insufficient chain density (GDD).
-- **CaughtUp** -- Normal Praos operation. The node is at or near the chain tip and participates in standard consensus.
+- **PreSyncing** — Waiting for enough trusted big ledger peers (BLPs). The Historical Availability Assumption (HAA) requires a minimum number of active BLPs before sync begins.
+- **Syncing** — Active block download with density-based peer evaluation. The GSM monitors chain density across peers and can disconnect peers with insufficient chain density (GDD).
+- **CaughtUp** — Normal Praos operation. The node is at or near the chain tip and participates in standard consensus.
 
 ### Enabling Genesis Mode
 

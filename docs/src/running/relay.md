@@ -93,10 +93,10 @@ A relay topology combines public peer discovery with a local root pointing to yo
 
 Key topology settings for relays:
 
-- **`bootstrapPeers`** -- Trusted initial peers for syncing from genesis or after restart.
-- **`localRoots` with `behindFirewall: true`** -- Your block producer. The relay waits for inbound connections from the BP rather than connecting outbound, which works correctly when the BP is behind a firewall.
-- **`useLedgerAfterSlot`** -- Enables ledger-based peer discovery once synced past this slot, providing decentralized peer resolution from on-chain stake pool registrations.
-- **`advertise: false`** -- Set to `true` if you want your relay to be discoverable via peer sharing.
+- **`bootstrapPeers`** — Trusted initial peers for syncing from genesis or after restart.
+- **`localRoots` with `behindFirewall: true`** — Your block producer. The relay waits for inbound connections from the BP rather than connecting outbound, which works correctly when the BP is behind a firewall.
+- **`useLedgerAfterSlot`** — Enables ledger-based peer discovery once synced past this slot, providing decentralized peer resolution from on-chain stake pool registrations.
+- **`advertise: false`** — Set to `true` if you want your relay to be discoverable via peer sharing.
 
 ## Multiple Relays
 
@@ -180,6 +180,6 @@ See [Monitoring](./monitoring.md) for the full list of available metrics and Gra
 
 ## Next Steps
 
-- [Block Producer](./block-producer.md) -- Set up key generation, operational certificates, and block production
-- [Topology](./topology.md) -- Full topology format reference
-- [Monitoring](./monitoring.md) -- Prometheus metrics and alerting
+- [Block Producer](./block-producer.md) — Set up key generation, operational certificates, and block production
+- [Topology](./topology.md) — Full topology format reference
+- [Monitoring](./monitoring.md) — Prometheus metrics and alerting

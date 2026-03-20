@@ -84,11 +84,11 @@ The ChainSync mini-protocol synchronizes block headers between peers:
 - **Server mode:** Serves headers to connected peers, with per-peer cursor tracking
 
 Key messages:
-- `MsgFindIntersect` -- Find a common chain point
-- `MsgRequestNext` -- Request the next header
-- `MsgRollForward` -- Header delivered
-- `MsgRollBackward` -- Chain reorganization
-- `MsgAwaitReply` -- Peer has no new headers (at tip)
+- `MsgFindIntersect` — Find a common chain point
+- `MsgRequestNext` — Request the next header
+- `MsgRollForward` — Header delivered
+- `MsgRollBackward` — Chain reorganization
+- `MsgAwaitReply` — Peer has no new headers (at tip)
 
 ### BlockFetch
 
@@ -98,10 +98,10 @@ The BlockFetch mini-protocol retrieves block bodies by hash:
 - **Server mode:** Serves blocks to peers, validates block existence before serving
 
 Key messages:
-- `MsgRequestRange` -- Request blocks in a slot range
-- `MsgBlock` -- Block delivered
-- `MsgNoBlocks` -- Requested blocks not available
-- `MsgBatchDone` -- End of batch
+- `MsgRequestRange` — Request blocks in a slot range
+- `MsgBlock` — Block delivered
+- `MsgNoBlocks` — Requested blocks not available
+- `MsgBatchDone` — End of batch
 
 ### TxSubmission2
 
@@ -128,9 +128,9 @@ N2C connections use Unix domain sockets and serve local clients (wallets, CLI to
 
 Supports all 39 Shelley BlockQuery tags (0-38) plus cross-era queries, providing full compatibility with cardano-node. The query protocol uses an acquire/query/release pattern:
 
-1. `MsgAcquire` -- Lock the ledger state at the current tip
-2. `MsgQuery` -- Execute queries against the locked state
-3. `MsgRelease` -- Release the lock
+1. `MsgAcquire` — Lock the ledger state at the current tip
+2. `MsgQuery` — Execute queries against the locked state
+3. `MsgRelease` — Release the lock
 
 All BlockQuery messages are wrapped in the Hard Fork Combinator (HFC) envelope. Results from era-specific `BlockQuery` tags are returned inside an `array(1)` success wrapper, while `QueryAnytime` and `QueryHardFork` results are returned unwrapped.
 
@@ -223,9 +223,9 @@ Monitors the transaction mempool:
 
 The peer manager classifies peers into three categories following the cardano-node model:
 
-- **Cold** -- Known but not connected
-- **Warm** -- Connected but not actively syncing
-- **Hot** -- Actively syncing (ChainSync + BlockFetch)
+- **Cold** — Known but not connected
+- **Warm** — Connected but not actively syncing
+- **Hot** — Actively syncing (ChainSync + BlockFetch)
 
 ### Peer Lifecycle
 
@@ -251,9 +251,9 @@ Warm --> Cold (Disconnection)
 ### Peer Discovery
 
 Peers are discovered through multiple channels:
-1. **Topology file** -- Bootstrap peers, local roots, and public roots
-2. **PeerSharing protocol** -- Gossip-based discovery from connected peers
-3. **Ledger-based discovery** -- SPO relay addresses extracted from pool registration certificates
+1. **Topology file** — Bootstrap peers, local roots, and public roots
+2. **PeerSharing protocol** — Gossip-based discovery from connected peers
+3. **Ledger-based discovery** — SPO relay addresses extracted from pool registration certificates
 
 #### Ledger-Based Peer Discovery
 
@@ -261,14 +261,14 @@ Once the node has synced past the slot threshold configured by `useLedgerAfterSl
 
 The discovery process runs on a periodic 5-minute interval and works as follows:
 
-1. **Slot check** -- The current ledger tip slot is compared against `useLedgerAfterSlot`. If the topology sets this value to a negative number or omits it entirely, ledger peer discovery remains disabled.
-2. **Relay extraction** -- All registered pool parameters are iterated, extracting relay entries of three types:
-   - `SingleHostAddr` -- IPv4 address and port
-   - `SingleHostName` -- DNS hostname and port
-   - `MultiHostName` -- DNS hostname with default port 3001
-3. **Sampling** -- A deterministic subset (up to 20 relays) is sampled from the full relay set to avoid resolving thousands of addresses at once. The sample offset rotates based on the current slot for coverage diversity.
-4. **DNS resolution** -- Hostnames are resolved to socket addresses via async DNS lookup.
-5. **Peer manager integration** -- Resolved addresses are added as cold peers with `PeerSource::Ledger` classification, alongside existing bootstrap and public root peers.
+1. **Slot check** — The current ledger tip slot is compared against `useLedgerAfterSlot`. If the topology sets this value to a negative number or omits it entirely, ledger peer discovery remains disabled.
+2. **Relay extraction** — All registered pool parameters are iterated, extracting relay entries of three types:
+   - `SingleHostAddr` — IPv4 address and port
+   - `SingleHostName` — DNS hostname and port
+   - `MultiHostName` — DNS hostname with default port 3001
+3. **Sampling** — A deterministic subset (up to 20 relays) is sampled from the full relay set to avoid resolving thousands of addresses at once. The sample offset rotates based on the current slot for coverage diversity.
+4. **DNS resolution** — Hostnames are resolved to socket addresses via async DNS lookup.
+5. **Peer manager integration** — Resolved addresses are added as cold peers with `PeerSource::Ledger` classification, alongside existing bootstrap and public root peers.
 
 As pool registrations change over time (new pools register, existing pools update relay addresses, pools retire), the ledger peer set evolves dynamically. This provides a protocol-native discovery mechanism that does not depend on any centralized directory.
 
@@ -280,16 +280,16 @@ Torsten implements full relay node behavior, propagating blocks received from up
 
 Block propagation uses a `tokio::sync::broadcast` channel with a capacity of 64 announcements. The architecture has three components:
 
-1. **Sender** -- The node core holds a `broadcast::Sender<BlockAnnouncement>` obtained from the N2N server at startup. When the sync pipeline processes new blocks or the forge module produces a new block, it sends an announcement containing the slot, block hash, and block number.
-2. **Receivers** -- Each N2N server connection spawns with its own `broadcast::Receiver` subscription. The connection handler uses `tokio::select!` to concurrently service mini-protocol messages and listen for block announcements.
-3. **Delivery** -- When a downstream peer is waiting at the tip (having received `MsgAwaitReply` from ChainSync), an incoming block announcement triggers a `MsgRollForward` message to that peer, along with the block header. The peer can then fetch the full block body via BlockFetch.
+1. **Sender** — The node core holds a `broadcast::Sender<BlockAnnouncement>` obtained from the N2N server at startup. When the sync pipeline processes new blocks or the forge module produces a new block, it sends an announcement containing the slot, block hash, and block number.
+2. **Receivers** — Each N2N server connection spawns with its own `broadcast::Receiver` subscription. The connection handler uses `tokio::select!` to concurrently service mini-protocol messages and listen for block announcements.
+3. **Delivery** — When a downstream peer is waiting at the tip (having received `MsgAwaitReply` from ChainSync), an incoming block announcement triggers a `MsgRollForward` message to that peer, along with the block header. The peer can then fetch the full block body via BlockFetch.
 
 ### Relay vs. Forger Announcements
 
 Both synced and forged blocks flow through the same broadcast channel:
 
-- **Synced blocks** -- When the pipelined ChainSync client receives blocks from an upstream peer and the node is following the tip (strict mode), each batch's final block is announced to all downstream connections. This enables relay behavior where blocks received from one upstream peer propagate to all other connected peers.
-- **Forged blocks** -- When the block producer creates a new block, it is announced through the same channel after being written to ChainDB and applied to the ledger.
+- **Synced blocks** — When the pipelined ChainSync client receives blocks from an upstream peer and the node is following the tip (strict mode), each batch's final block is announced to all downstream connections. This enables relay behavior where blocks received from one upstream peer propagate to all other connected peers.
+- **Forged blocks** — When the block producer creates a new block, it is announced through the same channel after being written to ChainDB and applied to the ledger.
 
 A parallel `broadcast::Sender<RollbackAnnouncement>` handles chain rollbacks, sending `MsgRollBackward` to downstream peers when the node's chain selection switches to a different fork.
 

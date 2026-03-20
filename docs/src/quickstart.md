@@ -118,11 +118,11 @@ curl -s http://localhost:12798/metrics | grep sync_progress
 
 ## Next Steps
 
-- [Configuration](./running/configuration.md) -- Detailed configuration options
-- [Networks](./running/networks.md) -- Connecting to mainnet, preview, or preprod
-- [Mithril Import](./running/mithril.md) -- Fast initial sync details
-- [Monitoring](./running/monitoring.md) -- Prometheus metrics endpoint
-- [Kubernetes Deployment](./running/kubernetes.md) -- Helm chart for production deployments
-- [Relay Node](./running/relay.md) -- Running relay nodes for a stake pool
-- [Block Producer](./running/block-producer.md) -- Running a stake pool
-- [CLI Reference](./cli/overview.md) -- Full CLI command reference
+- [Configuration](./running/configuration.md) — Detailed configuration options
+- [Networks](./running/networks.md) — Connecting to mainnet, preview, or preprod
+- [Mithril Import](./running/mithril.md) — Fast initial sync details
+- [Monitoring](./running/monitoring.md) — Prometheus metrics endpoint
+- [Kubernetes Deployment](./running/kubernetes.md) — Helm chart for production deployments
+- [Relay Node](./running/relay.md) — Running relay nodes for a stake pool
+- [Block Producer](./running/block-producer.md) — Running a stake pool
+- [CLI Reference](./cli/overview.md) — Full CLI command reference

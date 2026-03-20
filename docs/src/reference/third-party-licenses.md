@@ -49,7 +49,6 @@ These are the primary libraries that Torsten directly depends on:
 | [pallas-traverse](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Utilities to traverse over multi-era block data |
 | [pallas-addresses](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Ergonomic library to work with different Cardano addresses |
 | [pallas-network](https://github.com/txpipe/pallas) | 1.0.0-alpha.5 | Apache-2.0 | Ouroboros networking stack using async IO |
-| [cardano-lsm](https://github.com/nixedge/cardano-lsm-rust) | 1.0.1 | Apache-2.0 | Pure Rust port of Cardano's LSM tree for blockchain indexing |
 | [uplc](https://github.com/aiken-lang/aiken) | 1.1.21 | Apache-2.0 | Utilities for working with Untyped Plutus Core |
 | [tokio](https://github.com/tokio-rs/tokio) | 1.50.0 | MIT | An event-driven, non-blocking I/O platform for writing asynchronous I/O
 backe... |
@@ -128,7 +127,6 @@ Complete list of all third-party crates used by Torsten, sorted alphabetically.
 | [bumpalo](https://github.com/fitzgen/bumpalo) | 3.20.2 | MIT OR Apache-2.0 |
 | [byteorder](https://github.com/BurntSushi/byteorder) | 1.5.0 | Unlicense OR MIT |
 | [bytes](https://github.com/tokio-rs/bytes) | 1.11.1 | MIT |
-| [cardano-lsm](https://github.com/nixedge/cardano-lsm-rust) | 1.0.1 | Apache-2.0 |
 | [cast](https://github.com/japaric/cast.rs) | 0.3.0 | MIT OR Apache-2.0 |
 | [cc](https://github.com/rust-lang/cc-rs) | 1.2.56 | MIT OR Apache-2.0 |
 | [cfg-if](https://github.com/rust-lang/cfg-if) | 1.0.4 | MIT OR Apache-2.0 |
