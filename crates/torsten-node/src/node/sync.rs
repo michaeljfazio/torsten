@@ -130,7 +130,11 @@ impl Node {
         // baked into the snapshot) — the nonce may be stale.  Only mark it as
         // established once at least 1 epoch transition has been observed (replay
         // or live), which ensures nonce was built from VRF contributions.
-        self.consensus.nonce_established = self.epoch_transitions_observed >= 1;
+        // Only trust the nonce for strict VRF verification after observing a LIVE
+        // epoch transition (not just from snapshot priming). The snapshot nonce may
+        // be stale if it diverged from the canonical chain. For forging, the nonce
+        // is used best-effort (try_forge_block no longer gates on nonce_established).
+        self.consensus.nonce_established = self.live_epoch_transitions >= 1;
         // Stake snapshots need 3 LIVE (post-replay) epoch transitions to fully
         // rotate with correct rebuilt stake distributions.  Replay-built snapshots
         // may have slightly different stake values than the canonical chain (due
