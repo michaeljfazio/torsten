@@ -250,3 +250,90 @@ impl Node {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shelley_transition_mainnet() {
+        assert_eq!(shelley_transition_epoch_for_magic(764824073), 208);
+    }
+
+    #[test]
+    fn test_shelley_transition_preprod() {
+        assert_eq!(shelley_transition_epoch_for_magic(1), 4);
+    }
+
+    #[test]
+    fn test_shelley_transition_preview_no_byron() {
+        assert_eq!(shelley_transition_epoch_for_magic(2), 0);
+    }
+
+    #[test]
+    fn test_shelley_transition_sanchonet_no_byron() {
+        assert_eq!(shelley_transition_epoch_for_magic(4), 0);
+    }
+
+    #[test]
+    fn test_shelley_transition_unknown_defaults_to_zero() {
+        assert_eq!(shelley_transition_epoch_for_magic(999999), 0);
+    }
+
+    #[test]
+    fn test_snapshot_policy_defaults() {
+        let policy = SnapshotPolicy::new(2160);
+        assert_eq!(policy.normal_interval, std::time::Duration::from_secs(4320));
+        assert_eq!(policy.bulk_min_blocks, 50_000);
+        assert_eq!(policy.max_snapshots, 2);
+        assert_eq!(policy.blocks_since_snapshot, 0);
+    }
+
+    #[test]
+    fn test_snapshot_policy_custom_params() {
+        let policy = SnapshotPolicy::with_params(432, 5, 10_000, 120);
+        assert_eq!(policy.normal_interval, std::time::Duration::from_secs(864));
+        assert_eq!(policy.bulk_min_blocks, 10_000);
+        assert_eq!(policy.max_snapshots, 5);
+        assert_eq!(
+            policy.bulk_min_interval,
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn test_snapshot_policy_record_blocks() {
+        let mut policy = SnapshotPolicy::new(432);
+        assert_eq!(policy.blocks_since_snapshot, 0);
+        policy.record_blocks(100);
+        assert_eq!(policy.blocks_since_snapshot, 100);
+        policy.record_blocks(50);
+        assert_eq!(policy.blocks_since_snapshot, 150);
+    }
+
+    #[test]
+    fn test_snapshot_policy_bulk_not_ready_below_threshold() {
+        let mut policy = SnapshotPolicy::new(432);
+        policy.record_blocks(49_999);
+        // Even though enough time may have passed, not enough blocks
+        assert!(
+            !policy.should_snapshot_bulk() || policy.blocks_since_snapshot < policy.bulk_min_blocks
+        );
+    }
+
+    #[test]
+    fn test_snapshot_taken_resets_counters() {
+        let mut policy = SnapshotPolicy::new(432);
+        policy.record_blocks(100_000);
+        assert_eq!(policy.blocks_since_snapshot, 100_000);
+        policy.snapshot_taken();
+        assert_eq!(policy.blocks_since_snapshot, 0);
+    }
+
+    #[test]
+    fn test_snapshot_normal_not_ready_immediately() {
+        let policy = SnapshotPolicy::new(2160);
+        // Just created — normal interval (4320s) hasn't elapsed
+        assert!(!policy.should_snapshot_normal());
+    }
+}
