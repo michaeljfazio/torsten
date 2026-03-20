@@ -704,6 +704,7 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
 
     let mut lines = vec![
         kv_aligned("P2P", p2p_label, p2p_color, theme, col_w),
+        cwh_line, // Cold/Warm/Hot — shown prominently after P2P status
         kv_aligned(
             "Inbound",
             App::format_number(inbound),
@@ -740,7 +741,6 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
             theme,
             col_w,
         ),
-        cwh_line,
     ];
 
     // Trim to fit available height.
