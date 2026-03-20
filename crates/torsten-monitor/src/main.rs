@@ -27,6 +27,7 @@
 //! | h / ?    | Toggle help overlay             |
 
 mod app;
+mod disk;
 mod layout;
 mod metrics;
 mod theme;
@@ -75,6 +76,16 @@ struct Args {
     /// `torsten_network_magic` Prometheus metric.
     #[arg(long)]
     network_magic: Option<u64>,
+
+    /// Path to the node's database directory.
+    ///
+    /// When supplied the Resources panel shows disk space usage for the
+    /// filesystem that contains this directory (total, used, free, and a
+    /// usage percentage bar).  When omitted the disk row is hidden.
+    ///
+    /// Example: `--db-path ./db-preview`
+    #[arg(long, default_value = "")]
+    db_path: String,
 }
 
 #[tokio::main]
@@ -86,6 +97,9 @@ async fn main() -> Result<()> {
     if let Some(magic) = args.network_magic {
         app.epoch_length_override = app::Network::from_magic(magic).epoch_length();
     }
+
+    // Store the database path so the Resources panel can query disk space.
+    app.db_path = args.db_path.clone();
 
     // Setup terminal in raw alternate-screen mode.
     enable_raw_mode()?;

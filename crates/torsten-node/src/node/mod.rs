@@ -1499,6 +1499,19 @@ impl Node {
                 // Set of addresses for which a connect task is currently running.
                 let mut connecting_peers: std::collections::HashSet<std::net::SocketAddr> =
                     std::collections::HashSet::new();
+
+                // Track in-flight peer-sharing requests so that we never send
+                // more than one PeerSharing request to the same peer concurrently.
+                // Mirrors the connect_done_tx/connecting_peers pattern above.
+                let (peer_sharing_done_tx, mut peer_sharing_done_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<std::net::SocketAddr>();
+                // Set of peers for which a PeerSharing request is in flight.
+                let mut peer_sharing_in_flight: std::collections::HashSet<std::net::SocketAddr> =
+                    std::collections::HashSet::new();
+                // Maximum concurrent PeerSharing requests.  Peer sharing is
+                // low-priority background work; a small cap keeps resource
+                // usage bounded without starving higher-priority connects.
+                const MAX_CONCURRENT_PEER_SHARING: usize = 4;
                 // Maximum concurrent governor-initiated outbound connections.
                 // This prevents a burst of `Connect` events from opening dozens
                 // of TCP connections simultaneously.
@@ -1531,6 +1544,10 @@ impl Node {
                     while let Ok(addr) = connect_done_rx.try_recv() {
                         connecting_peers.remove(&addr);
                     }
+                    // Drain completed peer-sharing tasks before processing new events.
+                    while let Ok(addr) = peer_sharing_done_rx.try_recv() {
+                        peer_sharing_in_flight.remove(&addr);
+                    }
 
                     // Apply events to the peer manager.
                     if !events.is_empty() {
@@ -1540,6 +1557,8 @@ impl Node {
                         // lock and then release it before doing async I/O.
                         let mut addrs_to_connect: Vec<std::net::SocketAddr> = Vec::new();
                         let mut addrs_to_disconnect: Vec<std::net::SocketAddr> = Vec::new();
+                        // Collect peer-sharing requests that need spawning.
+                        let mut addrs_to_share: Vec<(std::net::SocketAddr, u8)> = Vec::new();
 
                         let mut pm = governor_pm.write().await;
                         for event in &events {
@@ -1591,14 +1610,23 @@ impl Node {
                                     addrs_to_connect.push(*addr);
                                 }
                                 GovernorEvent::RequestPeerSharing(addr, count) => {
-                                    // Phase 4+: full peer-sharing client integration.
-                                    // For now emit a debug trace so the event is
-                                    // visible in logs without any protocol I/O.
-                                    debug!(
-                                        %addr,
-                                        count,
-                                        "Governor: RequestPeerSharing (deferred — Phase 4)"
-                                    );
+                                    // Skip if a PeerSharing request is already in flight
+                                    // to this peer (avoid duplicate concurrent requests).
+                                    if peer_sharing_in_flight.contains(addr) {
+                                        continue;
+                                    }
+                                    // Enforce concurrency cap so that a large batch of
+                                    // sharing events doesn't open many connections at once.
+                                    if peer_sharing_in_flight.len() >= MAX_CONCURRENT_PEER_SHARING {
+                                        debug!(
+                                            %addr,
+                                            in_flight = peer_sharing_in_flight.len(),
+                                            "Governor: PeerSharing skipped — concurrent limit reached"
+                                        );
+                                        continue;
+                                    }
+                                    peer_sharing_in_flight.insert(*addr);
+                                    addrs_to_share.push((*addr, *count));
                                 }
                             }
                         }
@@ -1686,6 +1714,73 @@ impl Node {
                                     Err(e) => {
                                         task_pm.write().await.peer_failed(&addr);
                                         debug!(%addr, "Governor: failed to connect — {e}");
+                                    }
+                                }
+                                // Always notify the outer loop that this slot is free.
+                                let _ = task_done_tx.send(addr);
+                            });
+                        }
+
+                        // Spawn one fire-and-forget peer-sharing task per address.
+                        //
+                        // Each task:
+                        //   1. Opens a fresh N2N connection to the target peer.
+                        //   2. Performs Ouroboros handshake.
+                        //   3. Sends MsgShareRequest(count) on the PeerSharing channel.
+                        //   4. Reads MsgSharePeers and adds each returned address as a
+                        //      cold peer via PeerManager::add_shared_peer (non-routable
+                        //      addresses are silently rejected inside that method).
+                        //   5. Sends MsgDone and disconnects.
+                        //   6. Always notifies the outer loop so the slot is freed.
+                        //
+                        // The connection opened here is solely for peer discovery;
+                        // it does not interact with ChainSync or BlockFetch state.
+                        for (addr, count) in addrs_to_share {
+                            let task_pm = governor_pm.clone();
+                            let task_magic = gov_network_magic;
+                            let task_done_tx = peer_sharing_done_tx.clone();
+                            tokio::spawn(async move {
+                                debug!(
+                                    %addr,
+                                    count,
+                                    "Governor: initiating PeerSharing request"
+                                );
+                                // 60 s total timeout for the entire PeerSharing exchange
+                                // (connect + handshake + request/response round trip).
+                                const PEER_SHARING_TIMEOUT_SECS: u64 = 60;
+                                let result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(PEER_SHARING_TIMEOUT_SECS),
+                                    torsten_network::request_peers_from(addr, task_magic, count),
+                                )
+                                .await;
+
+                                match result {
+                                    Ok(Ok(peers)) if !peers.is_empty() => {
+                                        let discovered = peers.len();
+                                        let mut pm = task_pm.write().await;
+                                        for peer_addr in peers {
+                                            pm.add_shared_peer(peer_addr);
+                                        }
+                                        drop(pm);
+                                        info!(
+                                            %addr,
+                                            discovered,
+                                            "PeerSharing: added peers from share response"
+                                        );
+                                    }
+                                    Ok(Ok(_)) => {
+                                        // Empty response — peer returned no addresses.
+                                        debug!(%addr, "PeerSharing: peer returned no addresses");
+                                    }
+                                    Ok(Err(e)) => {
+                                        debug!(%addr, "PeerSharing: request failed — {e}");
+                                    }
+                                    Err(_) => {
+                                        debug!(
+                                            %addr,
+                                            timeout_secs = PEER_SHARING_TIMEOUT_SECS,
+                                            "PeerSharing: request timed out"
+                                        );
                                     }
                                 }
                                 // Always notify the outer loop that this slot is free.

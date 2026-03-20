@@ -379,6 +379,11 @@ pub struct App {
     pub should_quit: bool,
     /// Whether the help overlay is visible.
     pub show_help: bool,
+    /// Path to the node's database directory, used to query disk space.
+    ///
+    /// Set from the `--db-path` CLI argument.  Empty string means "not
+    /// configured" and suppresses the disk row in the Resources panel.
+    pub db_path: String,
 }
 
 impl App {
@@ -407,6 +412,7 @@ impl App {
             theme_idx: monokai_idx,
             should_quit: false,
             show_help: false,
+            db_path: String::new(),
         }
     }
 

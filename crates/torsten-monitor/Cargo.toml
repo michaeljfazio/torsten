@@ -17,3 +17,4 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
