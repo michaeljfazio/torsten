@@ -1347,6 +1347,10 @@ fn convert_pallas_ppup_alonzo(
             numerator: r.numerator,
             denominator: r.denominator,
         }),
+        d: ppu.decentralization_constant.as_ref().map(|r| Rational {
+            numerator: r.numerator,
+            denominator: r.denominator,
+        }),
         protocol_version_major: ppu.protocol_version.as_ref().map(|v| v.0),
         protocol_version_minor: ppu.protocol_version.as_ref().map(|v| v.1),
         min_pool_cost: ppu.min_pool_cost.map(Lovelace),
@@ -1562,6 +1566,7 @@ fn convert_pallas_protocol_param_update(
         a0: update.pool_pledge_influence.as_ref().map(convert_rational),
         rho: update.expansion_rate.as_ref().map(convert_rational),
         tau: update.treasury_growth_rate.as_ref().map(convert_rational),
+        d: None, // d is deprecated in Conway
         min_pool_cost: update.min_pool_cost.map(Lovelace),
         ada_per_utxo_byte: update.ada_per_utxo_byte.map(Lovelace),
         cost_models: update

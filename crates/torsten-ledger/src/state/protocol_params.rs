@@ -64,6 +64,9 @@ impl LedgerState {
         if let Some(ref v) = update.tau {
             self.protocol_params.tau = v.clone();
         }
+        if let Some(ref v) = update.d {
+            self.protocol_params.d = v.clone();
+        }
         if let Some(v) = update.min_pool_cost {
             self.protocol_params.min_pool_cost = v;
         }

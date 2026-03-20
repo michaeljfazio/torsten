@@ -67,6 +67,7 @@
 
 ## Monetary Expansion & RUPD
 - See [monetary-expansion-rupd.md](monetary-expansion-rupd.md) — deltaR1, eta, expectedBlocks, block counting (incrBlocks/isOverlaySlot), snapshot system, TICK→RUPD data flow, Conway d=0 simplification, first-epoch behavior
+- See [rupd-timing-data-flow.md](rupd-timing-data-flow.md) — COMPLETE trace: timing windows (sr=4k/f not 3*(1/f-1)), TICK/RUPD env extraction, NEWEPOCH ordering (applyRUpd BEFORE SNAP), fee lifecycle (deltaF=-ssFee), epoch 0 behavior, Torsten snapshot divergence
 
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic

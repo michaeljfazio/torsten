@@ -474,6 +474,8 @@ pub struct ProtocolParamUpdate {
     pub collateral_percentage: Option<u64>,
     pub max_collateral_inputs: Option<u64>,
     pub min_fee_ref_script_cost_per_byte: Option<u64>,
+    /// Decentralisation parameter (d). Deprecated since Babbage.
+    pub d: Option<Rational>,
     // Protocol version (used in pre-Conway hard fork proposals)
     pub protocol_version_major: Option<u64>,
     pub protocol_version_minor: Option<u64>,

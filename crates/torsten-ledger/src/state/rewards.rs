@@ -198,11 +198,12 @@ impl LedgerState {
         // ensures full monetary expansion during the federated era (Shelley/Allegra/Mary).
         // On preview testnet d starts at 1.0 from genesis, so this guard is critical.
         //
-        // In Conway (protocol version >= 9), d is hardcoded to 0.
-        // In earlier eras, d comes from protocol params (set in genesis,
-        // modified by parameter updates).
-        let d = if self.protocol_params.protocol_version_major >= 9 {
-            0.0 // Conway deprecated d
+        // In Babbage+ (protocol version >= 7), d is always 0.
+        // The Shelley spec defines d for Shelley/Allegra/Mary (proto 2-4).
+        // Alonzo (proto 5-6) still has d but it's typically 0 on testnets.
+        // Babbage (proto 7-8) and Conway (proto 9+) hardcode d=0.
+        let d = if self.protocol_params.protocol_version_major >= 7 {
+            0.0 // Babbage+ always d=0
         } else {
             let d_num = self.protocol_params.d.numerator as f64;
             let d_den = self.protocol_params.d.denominator.max(1) as f64;
@@ -328,8 +329,26 @@ impl LedgerState {
             owner_stake_by_pool.insert(*pool_id, owner_stake);
         }
 
-        // Calculate rewards per pool
+        // Calculate rewards per pool.
+        //
+        // In Haskell, `mkPoolRewardInfo` is only called for pools that appear
+        // in `BlocksMade` (nesBprev). Pools that produced no non-overlay blocks
+        // are skipped entirely — they receive no rewards. This is critical when
+        // d >= 0.8: all blocks are overlay blocks, BlocksMade is empty, and NO
+        // pools receive rewards (even though apparent performance = 1).
         for (pool_id, pool_active_stake) in &rupd_snapshot.pool_stake {
+            // Only reward pools that produced blocks in the snapshot epoch.
+            // Matches Haskell's startStep which iterates over BlocksMade keys.
+            if rupd_snapshot
+                .epoch_blocks_by_pool
+                .get(pool_id)
+                .copied()
+                .unwrap_or(0)
+                == 0
+            {
+                continue;
+            }
+
             let pool_reg = match rupd_snapshot.pool_params.get(pool_id) {
                 Some(reg) => reg,
                 None => continue,
