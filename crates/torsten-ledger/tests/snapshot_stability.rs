@@ -50,7 +50,7 @@ fn snapshot_format_hash_stability() {
 
     // This hash was computed from the current LedgerState layout.
     // If this changes, existing snapshot files become unreadable.
-    const EXPECTED_HASH: &str = "a18726cb149b22ffb27ba2e6d81303c657b4e0ae113a1297bc7376703c2458c8";
+    const EXPECTED_HASH: &str = "1993210b7ba43d57ca50360be1c21e40690d50f732c8e8f138b373a9b6ba9a3e";
 
     if EXPECTED_HASH == "COMPUTE_ON_FIRST_RUN" {
         panic!(

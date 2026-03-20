@@ -292,6 +292,10 @@ pub struct ShelleyGenesisProtocolParams {
     pub min_pool_cost: u64,
     #[serde(default)]
     pub min_u_tx_o_value: u64,
+    /// Decentralisation parameter (d). 1 = fully federated, 0 = fully decentralised.
+    /// Deprecated since Babbage (always 0 in Conway).
+    #[serde(alias = "decentralisationParam", default)]
+    pub decentralisation_param: f64,
     pub protocol_version: ProtocolVersion,
 }
 
@@ -340,6 +344,7 @@ impl ShelleyGenesis {
         params.protocol_version_major = gp.protocol_version.major;
         params.protocol_version_minor = gp.protocol_version.minor;
         params.active_slots_coeff = self.active_slots_coeff;
+        params.d = float_to_rational(gp.decentralisation_param);
     }
 
     /// Derive the SlotConfig for Plutus time conversion from Shelley genesis.

@@ -166,20 +166,24 @@ impl LedgerState {
         let tau_num = self.protocol_params.tau.numerator as i128;
         let tau_den = self.protocol_params.tau.denominator.max(1) as i128;
 
-        // Monetary expansion with eta performance adjustment:
-        //   expected_blocks = floor(active_slot_coeff * epoch_length) (since d=0 in Conway)
-        //   eta = min(1, actual_blocks / expected_blocks)
-        //   deltaR1 = floor(eta * rho * reserves)
-        let raw_expected_blocks =
-            (self.protocol_params.active_slot_coeff() * self.epoch_length as f64).floor() as u64;
-        if raw_expected_blocks == 0 {
-            warn!(
-                "expected_blocks rounded to 0 (active_slot_coeff={}, epoch_length={}), clamping to 1",
-                self.protocol_params.active_slot_coeff(),
-                self.epoch_length
-            );
-        }
-        let expected_blocks = raw_expected_blocks.max(1);
+        // Monetary expansion with eta performance adjustment.
+        //
+        // Per the Shelley formal specification (RUPD rule) and Haskell
+        // PulsingReward.hs `startStep`:
+        //
+        //   d = decentralisation parameter (0 in Conway, may be >0 in earlier eras)
+        //   expectedBlocks = floor((1 - d) * activeSlotCoeff * epochLength)
+        //   actualBlocks = sum of non-overlay blocks in the epoch (from bprev)
+        //   eta = if d >= 0.8 then 1 else actualBlocks / expectedBlocks
+        //   deltaR1 = floor(min(1, eta) * rho * reserves)
+        //
+        // The d >= 0.8 guard prevents division by near-zero expectedBlocks and
+        // ensures full monetary expansion during the federated era (Shelley/Allegra/Mary).
+        // On preview testnet d starts at 1.0 from genesis, so this guard is critical.
+        let d_num = self.protocol_params.d.numerator as f64;
+        let d_den = self.protocol_params.d.denominator.max(1) as f64;
+        let d = d_num / d_den;
+
         // Use the snapshot's epoch data — Haskell's RUPD computes eta and
         // fees from the epoch that just ended, not the live (new) epoch counters.
         // Fall back to self.* for backward compatibility with legacy snapshots where
@@ -189,17 +193,37 @@ impl LedgerState {
         } else {
             self.epoch_block_count
         };
-        // eta = min(1, actual/expected) — applied as rational: min(actual, expected) / expected
-        let effective_blocks = actual_blocks.min(expected_blocks);
-        // expansion = floor(rho * reserves * (effective/expected))
+
         let rho = Rat::from_i128(rho_num, rho_den);
-        let expansion_rat =
+
+        // Compute expansion with eta adjustment
+        let expansion = if d >= 0.8 {
+            // When d >= 0.8 (highly federated): eta = 1, full expansion.
+            // This matches Haskell: "eta | d >= 0.8 = 1"
+            rho.mul(&Rat::from_i128(self.reserves.0 as i128, 1))
+                .floor_u64()
+        } else {
+            // expectedBlocks = floor((1 - d) * f * epochLength)
+            let one_minus_d = 1.0 - d;
+            let f = self.protocol_params.active_slot_coeff();
+            let raw_expected_blocks = (one_minus_d * f * self.epoch_length as f64).floor() as u64;
+            if raw_expected_blocks == 0 {
+                warn!(
+                    "expected_blocks rounded to 0 (d={d}, f={f}, epoch_length={}), clamping to 1",
+                    self.epoch_length
+                );
+            }
+            let expected_blocks = raw_expected_blocks.max(1);
+
+            // eta = min(1, actual/expected)
+            let effective_blocks = actual_blocks.min(expected_blocks);
             rho.mul(&Rat::from_i128(self.reserves.0 as i128, 1))
                 .mul(&Rat::from_i128(
                     effective_blocks as i128,
                     expected_blocks as i128,
-                ));
-        let expansion = expansion_rat.floor_u64();
+                ))
+                .floor_u64()
+        };
         let epoch_fees = if rupd_snapshot.epoch_fees.0 > 0 {
             rupd_snapshot.epoch_fees.0
         } else {
@@ -327,9 +351,11 @@ impl LedgerState {
             // maxPool = floor(factor1 * factor2)
             let max_pool = f1.mul(&f2).floor_u64();
 
-            // Apparent performance: beta / sigma_a (using total_active_stake)
-            //   perf = (blocks_made / total_blocks) / (pool_stake / total_active_stake)
-            //        = (blocks_made * total_active_stake) / (total_blocks * pool_stake)
+            // Apparent performance: mkApparentPerformance from Haskell Rewards.hs
+            //   When d < 0.8: perf = beta / sigma_a
+            //     beta  = blocks_made / total_blocks
+            //     sigma = pool_stake / total_active_stake
+            //   When d >= 0.8: perf = 1 (no performance adjustment)
             let blocks_made = if !rupd_snapshot.epoch_blocks_by_pool.is_empty() {
                 rupd_snapshot
                     .epoch_blocks_by_pool
@@ -339,7 +365,12 @@ impl LedgerState {
             } else {
                 self.epoch_blocks_by_pool.get(pool_id).copied().unwrap_or(0)
             };
-            let pool_reward = if blocks_made == 0 || pool_active_stake.0 == 0 {
+            let pool_reward = if pool_active_stake.0 == 0 {
+                0u64
+            } else if d >= 0.8 {
+                // When d >= 0.8: apparent performance = 1, so pool_reward = maxPool
+                max_pool
+            } else if blocks_made == 0 {
                 0u64
             } else {
                 let perf = Rat::from_i128(blocks_made as i128, total_blocks_in_epoch as i128).mul(

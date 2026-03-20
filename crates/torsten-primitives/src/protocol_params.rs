@@ -85,6 +85,15 @@ pub struct ProtocolParameters {
     /// Active slot coefficient (probability of a slot having a block)
     #[serde(default = "default_active_slot_coeff")]
     pub active_slots_coeff: f64,
+
+    /// Decentralisation parameter (d): fraction of slots reserved for BFT
+    /// overlay schedule. Range [0, 1] where 0 = fully decentralised (Praos),
+    /// 1 = fully federated (BFT). Deprecated since Babbage (always 0).
+    ///
+    /// Stored as rational numerator/denominator. When d >= 0.8, the Haskell
+    /// reward calculation forces eta = 1 (no performance adjustment).
+    #[serde(default)]
+    pub d: Rational,
 }
 
 fn default_active_slot_coeff() -> f64 {
@@ -248,6 +257,10 @@ impl ProtocolParameters {
             protocol_version_major: 9,
             protocol_version_minor: 0,
             active_slots_coeff: 0.05,
+            d: Rational {
+                numerator: 0,
+                denominator: 1,
+            },
         }
     }
 }

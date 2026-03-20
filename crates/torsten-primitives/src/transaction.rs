@@ -283,6 +283,15 @@ pub struct Rational {
     pub denominator: u64,
 }
 
+impl Default for Rational {
+    fn default() -> Self {
+        Rational {
+            numerator: 0,
+            denominator: 1,
+        }
+    }
+}
+
 impl Rational {
     /// Convert to f64 (for display/logging only — use exact comparison methods for decisions)
     pub fn as_f64(&self) -> f64 {
