@@ -631,7 +631,10 @@ impl Mempool {
             .iter()
             .filter(|entry| {
                 if let Some(ttl) = entry.tx.body.ttl {
-                    current_slot.0 > ttl.0
+                    // Haskell uses half-open interval: tx is valid when slot < ttl.
+                    // The invalid-hereafter slot is the FIRST invalid slot, so
+                    // current_slot >= ttl means the tx has expired.
+                    current_slot.0 >= ttl.0
                 } else {
                     false
                 }
@@ -3099,7 +3102,7 @@ mod tests {
         assert!(mempool.contains(&Hash32::from_bytes([0x03; 32]))); // immortal remains
     }
 
-    /// sweep_expired at the exact TTL slot does NOT evict (boundary: current_slot > ttl).
+    /// sweep_expired at the exact TTL slot DOES evict (Haskell half-open: slot >= ttl means expired).
     #[test]
     fn test_sweep_expired_boundary_exact_ttl_slot() {
         let mempool = Mempool::new(default_config());
@@ -3110,12 +3113,12 @@ mod tests {
             .add_tx(Hash32::from_bytes([0x01; 32]), tx, 200)
             .unwrap();
 
-        // Exactly at TTL slot — not yet expired (TTL is the last valid slot)
-        assert_eq!(mempool.sweep_expired(100), 0);
+        // One slot before TTL — still valid
+        assert_eq!(mempool.sweep_expired(99), 0);
         assert_eq!(mempool.len(), 1);
 
-        // One slot past — now expired
-        assert_eq!(mempool.sweep_expired(101), 1);
+        // Exactly at TTL slot — expired (TTL is the first INVALID slot per Haskell)
+        assert_eq!(mempool.sweep_expired(100), 1);
         assert_eq!(mempool.len(), 0);
     }
 
