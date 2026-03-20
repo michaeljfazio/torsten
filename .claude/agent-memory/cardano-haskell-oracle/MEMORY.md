@@ -56,6 +56,15 @@
 ## lsm-tree (UTxO-HD Storage Backend)
 - See [lsm-tree-architecture.md](lsm-tree-architecture.md) — Complete architecture: lazy levelling merge, 4-file run format, page layout, bloom filters, fence pointers, incremental merge scheduler, NO WAL
 
+## N2N Connection Architecture
+- See [n2n-connection-architecture.md](n2n-connection-architecture.md) — MuxMode, DataFlow, bit-15 convention, protocol temperature, Hot/Warm/Cold, TxSubmission2 delay, error propagation
+
+## TxSubmission2 Architecture
+- See [txsubmission2-architecture.md](txsubmission2-architecture.md) — Complete deep-dive: V1/V2 server, outbound client, governor lifecycle, decision logic, mempool sync, connection stability, Torsten gaps
+
+## Mempool Tx Ordering & Chained Tx Deep-Dive
+- See [mempool-tx-ordering.md](mempool-tx-ordering.md) — FIFO ordering (TicketNo), virtual ledger state for chained txs, TxSubmission2 serving order, block production prefix, revalidation logic, policy constants, Torsten divergences
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order

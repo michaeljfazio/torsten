@@ -3548,6 +3548,7 @@ dependencies = [
  "thiserror 2.0.18",
  "torsten-primitives",
  "vrf_dalek",
+ "zeroize",
 ]
 
 [[package]]

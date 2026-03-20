@@ -537,7 +537,7 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         let epoch_nonce = Hash32::from_bytes([0u8; 32]);
 
-        let schedule = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 1000, 0.0, 0.05);
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1000, 0.0, 0.05);
 
         assert!(
             schedule.is_empty(),
@@ -554,8 +554,8 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x22u8; 32]);
 
-        let schedule_a = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 500, 1.0, 0.05);
-        let schedule_b = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 500, 1.0, 0.05);
+        let schedule_a = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
+        let schedule_b = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
 
         assert_eq!(
             schedule_a.len(),
@@ -576,7 +576,7 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x44u8; 32]);
 
-        let schedule = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 500, 1.0, 0.05);
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
 
         for window in schedule.windows(2) {
             assert!(
@@ -599,7 +599,7 @@ mod tests {
         let epoch_len = 500u64;
 
         let schedule = compute_leader_schedule(
-            &kp.secret_key,
+            kp.secret_key(),
             &epoch_nonce,
             epoch_start,
             epoch_len,
@@ -630,7 +630,7 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x88u8; 32]);
 
-        let schedule = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 500, 1.0, 0.05);
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
 
         assert!(
             !schedule.is_empty(),
@@ -668,9 +668,9 @@ mod tests {
         let epoch_nonce = Hash32::from_bytes([0xCCu8; 32]);
 
         let schedule_a =
-            compute_leader_schedule(&kp_a.secret_key, &epoch_nonce, 0, 1000, 1.0, 0.05);
+            compute_leader_schedule(kp_a.secret_key(), &epoch_nonce, 0, 1000, 1.0, 0.05);
         let schedule_b =
-            compute_leader_schedule(&kp_b.secret_key, &epoch_nonce, 0, 1000, 1.0, 0.05);
+            compute_leader_schedule(kp_b.secret_key(), &epoch_nonce, 0, 1000, 1.0, 0.05);
 
         // Two distinct keys will almost certainly produce different schedules
         // (the probability of identical schedules is astronomically small)
@@ -690,8 +690,8 @@ mod tests {
         let nonce_a = Hash32::from_bytes([0u8; 32]);
         let nonce_b = Hash32::from_bytes([1u8; 32]);
 
-        let schedule_a = compute_leader_schedule(&kp.secret_key, &nonce_a, 0, 1000, 1.0, 0.05);
-        let schedule_b = compute_leader_schedule(&kp.secret_key, &nonce_b, 0, 1000, 1.0, 0.05);
+        let schedule_a = compute_leader_schedule(kp.secret_key(), &nonce_a, 0, 1000, 1.0, 0.05);
+        let schedule_b = compute_leader_schedule(kp.secret_key(), &nonce_b, 0, 1000, 1.0, 0.05);
 
         let slots_a: Vec<u64> = schedule_a.iter().map(|ls| ls.slot.0).collect();
         let slots_b: Vec<u64> = schedule_b.iter().map(|ls| ls.slot.0).collect();
@@ -714,7 +714,7 @@ mod tests {
         for i in 0..50u8 {
             let secret = [i; 32];
             let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
-            let schedule = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 1, 1.0, 0.05);
+            let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1, 1.0, 0.05);
             if schedule.len() == 1 {
                 assert_eq!(
                     schedule[0].slot,
@@ -742,9 +742,9 @@ mod tests {
         // Run two schedules: one starting at 0, one at epoch_start
         // They must produce DIFFERENT slots (since slot is embedded in VRF input)
         let schedule_base =
-            compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 500, 1.0, 0.05);
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
         let schedule_offset =
-            compute_leader_schedule(&kp.secret_key, &epoch_nonce, epoch_start, 500, 1.0, 0.05);
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, epoch_start, 500, 1.0, 0.05);
 
         // All slots in the offset schedule must be >= epoch_start
         for ls in &schedule_offset {
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(seed.len(), 32, "VRF input seed must be 32 bytes");
 
         // Step 2: generate VRF proof
-        let (proof, raw_output) = torsten_crypto::vrf::generate_vrf_proof(&kp.secret_key, &seed)
+        let (proof, raw_output) = torsten_crypto::vrf::generate_vrf_proof(kp.secret_key(), &seed)
             .expect("VRF proof generation must succeed");
 
         // Step 3: verify VRF proof
@@ -949,14 +949,14 @@ mod tests {
         let f = 0.05;
 
         let schedule =
-            compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, epoch_len, stake, f);
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, epoch_len, stake, f);
 
         // Manually check each slot
         let mut manual_schedule: Vec<SlotNo> = Vec::new();
         for offset in 0..epoch_len {
             let slot = SlotNo(offset);
             let seed = vrf_input(&epoch_nonce, slot);
-            if let Ok((_, output)) = torsten_crypto::vrf::generate_vrf_proof(&kp.secret_key, &seed)
+            if let Ok((_, output)) = torsten_crypto::vrf::generate_vrf_proof(kp.secret_key(), &seed)
             {
                 if is_slot_leader(&output, stake, f) {
                     manual_schedule.push(slot);
@@ -982,7 +982,7 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0u8; 32]);
 
-        let schedule = compute_leader_schedule(&kp.secret_key, &epoch_nonce, 0, 0, 1.0, 0.05);
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 0, 1.0, 0.05);
         assert!(
             schedule.is_empty(),
             "Empty epoch must produce empty schedule"
@@ -999,7 +999,7 @@ mod tests {
         let neutral_nonce = Hash32::from_bytes([0u8; 32]);
 
         // Must not panic
-        let schedule = compute_leader_schedule(&kp.secret_key, &neutral_nonce, 0, 500, 1.0, 0.05);
+        let schedule = compute_leader_schedule(kp.secret_key(), &neutral_nonce, 0, 500, 1.0, 0.05);
 
         // Proofs must still verify against the neutral nonce
         for ls in &schedule {

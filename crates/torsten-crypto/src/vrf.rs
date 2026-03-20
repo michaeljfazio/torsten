@@ -1519,10 +1519,20 @@ mod leader_check {
     }
 }
 
-/// A VRF key pair for proof generation
+/// A VRF key pair for proof generation.
+///
+/// The secret key is zeroized on drop to prevent key material from lingering
+/// in memory. The secret_key field is private — use `secret_key()` to access.
 pub struct VrfKeyPair {
-    pub secret_key: [u8; 32],
+    secret_key: zeroize::Zeroizing<[u8; 32]>,
     pub public_key: [u8; 32],
+}
+
+impl VrfKeyPair {
+    /// Access the secret key bytes (for VRF proof generation).
+    pub fn secret_key(&self) -> &[u8; 32] {
+        &self.secret_key
+    }
 }
 
 /// Generate a VRF key pair from an existing 32-byte secret key.
@@ -1533,7 +1543,7 @@ pub fn generate_vrf_keypair_from_secret(secret: &[u8; 32]) -> VrfKeyPair {
     let pk_bytes = point.compress().to_bytes();
 
     VrfKeyPair {
-        secret_key: *secret,
+        secret_key: zeroize::Zeroizing::new(*secret),
         public_key: pk_bytes,
     }
 }
@@ -1551,7 +1561,7 @@ pub fn generate_vrf_keypair() -> VrfKeyPair {
     let pk_bytes = point.compress().to_bytes();
 
     VrfKeyPair {
-        secret_key: secret_bytes,
+        secret_key: zeroize::Zeroizing::new(secret_bytes),
         public_key: pk_bytes,
     }
 }

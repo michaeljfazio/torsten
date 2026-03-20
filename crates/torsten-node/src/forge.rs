@@ -452,7 +452,7 @@ mod tests {
         let (kes_sk, kes_pk) = torsten_crypto::kes::kes_keygen(&seed).unwrap();
 
         BlockProducerCredentials {
-            vrf_skey: vrf_kp.secret_key,
+            vrf_skey: *vrf_kp.secret_key(),
             vrf_vkey: vrf_kp.public_key,
             cold_vkey: cold_vkey.clone(),
             kes_skey: kes_sk,
