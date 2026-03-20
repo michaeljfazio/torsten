@@ -103,15 +103,23 @@ impl From<DuplexError> for ClientError {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/// Maximum tx IDs we serve per MsgReplyTxIds batch.  Matches the initiator cap
-/// in `txsubmission.rs`.
+/// Maximum tx IDs we serve per MsgReplyTxIds batch.
+/// Haskell V1 Server requests 3, V2 requests up to 12. We cap at the
+/// peer's req_count anyway, so this is just a safety limit.
 const MAX_TX_IDS_PER_REPLY: usize = 100;
 
 /// Maximum inflight tx IDs (sent to a single peer, not yet acknowledged).
-const MAX_TX_INFLIGHT: usize = 1000;
+/// Haskell maxUnacknowledgedTxIds = 100.
+const MAX_TX_INFLIGHT: usize = 100;
 
 /// Maximum tx bodies we serve per MsgRequestTxs.
-const MAX_TX_BODY_REQUEST: usize = 1000;
+/// Haskell V1 maxTxToRequest = 2, V2 varies. Keep generous for V2.
+const MAX_TX_BODY_REQUEST: usize = 100;
+
+/// Maximum tx IDs to REQUEST per MsgRequestTxIds when we are the Server.
+/// Haskell V1 = 3, V2 = 12. Use 3 for V1 compatibility.
+/// MUST NOT push unacknowledged count above maxUnacknowledgedTxIds (100).
+const SERVER_REQ_TX_IDS: u16 = 3;
 
 /// Maximum reassembled message size for the TxSubmission2 responder/initiator (8 MB).
 const MAX_REASSEMBLY_SIZE: usize = 8 * 1024 * 1024;
@@ -717,10 +725,14 @@ async fn pull_tx_submission_inner(
 
     loop {
         // Step 2: Send MsgRequestTxIds.
-        // Start non-blocking to drain any queued txs; fall back to blocking
-        // to wait for new ones.
+        // Per Haskell protocol rules:
+        //   blocking MUST be used when unacknowledged count is 0 (after acking)
+        //   non-blocking MUST be used when unacknowledged count > 0
+        // After acking, pending_ack resets to 0, meaning all previous IDs were acked
+        // and we have zero unacknowledged — use blocking.
         let ack = pending_ack;
-        let req_msg = encode_request_tx_ids(false, ack, MAX_TX_IDS_PER_REPLY as u16);
+        let use_blocking = ack > 0 || known_tx_ids.is_empty();
+        let req_msg = encode_request_tx_ids(use_blocking, ack, SERVER_REQ_TX_IDS);
         info!(%peer_addr, ack, "TxSubmission2 server: sending MsgRequestTxIds [{}]",
             hex_prefix(&req_msg));
         send_msg(&mut channel, &req_msg).await?;
@@ -745,7 +757,7 @@ async fn pull_tx_submission_inner(
                 if ids.is_empty() {
                     // Non-blocking returned empty — switch to blocking.
                     debug!(%peer_addr, "TxSubmission2 server: no txs available, sending blocking request");
-                    let blocking_req = encode_request_tx_ids(true, 0, MAX_TX_IDS_PER_REPLY as u16);
+                    let blocking_req = encode_request_tx_ids(true, 0, SERVER_REQ_TX_IDS);
                     info!(%peer_addr, "TxSubmission2 server: sending blocking MsgRequestTxIds [{}]",
                         hex_prefix(&blocking_req));
                     send_msg(&mut channel, &blocking_req).await?;

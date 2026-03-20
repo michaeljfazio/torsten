@@ -35,8 +35,10 @@ use tracing::{debug, info, trace, warn};
 use crate::n2c::TxValidator;
 use torsten_primitives::mempool::{MempoolAddResult, MempoolProvider};
 
-/// Maximum number of tx IDs to request per batch
-const MAX_TX_IDS_REQUEST: u16 = 100;
+/// Maximum number of tx IDs to request per batch.
+/// Haskell V1 uses 3, V2 uses 12. Using 3 for maximum compatibility.
+/// MUST NOT exceed maxUnacknowledgedTxIds (100) minus outstanding unacked.
+const MAX_TX_IDS_REQUEST: u16 = 3;
 
 /// Timeout for receiving a response from a non-blocking request
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
