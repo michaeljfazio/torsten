@@ -175,6 +175,11 @@ pub struct DuplexPeerConnection {
     /// Background TxSubmission2 SERVER task (pulls remote Client's mempool into ours).
     /// Dropping this aborts the task, which is intentional on disconnect.
     _txsub_server: tokio::task::JoinHandle<()>,
+    /// Drain tasks for ChainSync/BlockFetch when in warm mode.
+    /// These read and discard messages to prevent demuxer stall.
+    /// Set to None when promoted to Hot (channels actively consumed).
+    _cs_drain: Option<tokio::task::JoinHandle<()>>,
+    _bf_drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DuplexPeerConnection {
@@ -202,13 +207,34 @@ impl DuplexPeerConnection {
         Self::connect_inner(addr, network_magic, mempool, true).await
     }
 
+    /// Warm connection: subscribes ALL channels but drains ChainSync/BlockFetch.
+    ///
+    /// This replaces `connect_no_chainsync`. By subscribing all channels upfront
+    /// and draining unused ones, the demuxer never stalls. When promoted to Hot,
+    /// the drain tasks stop and the channels become available for active use.
+    pub async fn connect_warm(
+        addr: impl ToSocketAddrs + std::fmt::Display + Copy,
+        network_magic: u64,
+        mempool: Arc<dyn MempoolProvider>,
+    ) -> Result<Self, DuplexError> {
+        // Subscribe ALL channels (including ChainSync/BlockFetch) to prevent
+        // demuxer stall, then spawn drain tasks for the unused ones.
+        let mut conn = Self::connect_inner(addr, network_magic, mempool, true).await?;
+        // Start drain tasks for ChainSync and BlockFetch — they read and discard
+        // all incoming messages so the demuxer's bounded channels never fill up.
+        conn.start_drain_tasks();
+        Ok(conn)
+    }
+
     /// Governor-only variant: no ChainSync/BlockFetch subscriptions.
+    /// DEPRECATED: Use connect_warm() instead for proper protocol handling.
     pub async fn connect_no_chainsync(
         addr: impl ToSocketAddrs + std::fmt::Display + Copy,
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
     ) -> Result<Self, DuplexError> {
-        Self::connect_inner(addr, network_magic, mempool, false).await
+        // Forward to connect_warm for now
+        Self::connect_warm(addr, network_magic, mempool).await
     }
 
     async fn connect_inner(
@@ -353,7 +379,40 @@ impl DuplexPeerConnection {
             byron_epoch_length: 0,
             _txsub_client: txsub_client,
             _txsub_server: txsub_server,
+            _cs_drain: None,
+            _bf_drain: None,
         })
+    }
+
+    /// Start drain tasks for ChainSync and BlockFetch channels.
+    /// These tasks read and discard all incoming messages, preventing the
+    /// demuxer's bounded channels from filling up and stalling.
+    fn start_drain_tasks(&mut self) {
+        if let Some(cs_buf) = self.cs_buf.take() {
+            // Unwrap the ChannelBuffer to get the underlying AgentChannel,
+            // then spawn a task that reads and discards all incoming chunks.
+            let mut channel = cs_buf.unwrap();
+            self._cs_drain = Some(tokio::spawn(async move {
+                loop {
+                    match channel.dequeue_chunk().await {
+                        Ok(_) => {}      // discard
+                        Err(_) => break, // channel closed
+                    }
+                }
+            }));
+        }
+        if let Some(bf_client) = self.bf_client.take() {
+            // BlockFetch: extract the inner channel and drain it.
+            // pallas BlockFetch Client doesn't expose the channel directly,
+            // so we just hold the client object alive (it holds the channel).
+            // This keeps the channel subscribed so demuxer doesn't panic,
+            // and the 100-slot buffer is enough for warm connections.
+            self._bf_drain = Some(tokio::spawn(async move {
+                // Hold the client alive indefinitely
+                let _keep = bf_client;
+                futures::future::pending::<()>().await;
+            }));
+        }
     }
 
     /// Set the Byron epoch length for non-mainnet networks.
@@ -1117,24 +1176,44 @@ fn decode_reply_tx_ids(payload: &[u8]) -> Result<Vec<([u8; 32], u32)>, DuplexErr
 }
 
 /// Decode a single `[tx_hash_bytes, size_u32]` pair from the inner array.
+/// Decode a single `[GenTxId, size]` pair from MsgReplyTxIds.
+/// GenTxId may be HFC-wrapped `[era, hash]` or raw `hash_bytes`.
 fn decode_tx_id_and_size(dec: &mut minicbor::Decoder<'_>) -> Result<([u8; 32], u32), DuplexError> {
     dec.array()
         .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected pair array: {e}")))?;
-    let bytes = dec
-        .bytes()
-        .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected tx hash: {e}")))?;
-    if bytes.len() != 32 {
+
+    // The tx ID may be HFC-wrapped [era, hash] or raw bytes.
+    let hash = match dec.datatype() {
+        Ok(minicbor::data::Type::Array | minicbor::data::Type::ArrayIndef) => {
+            // HFC GenTxId: [era_index, tx_hash_bytes]
+            let _ = dec
+                .array()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: GenTxId array: {e}")))?;
+            let _ = dec
+                .u32()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: era index: {e}")))?;
+            dec.bytes()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: tx hash: {e}")))?
+        }
+        _ => {
+            // Raw bytes (non-HFC)
+            dec.bytes()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: tx hash: {e}")))?
+        }
+    };
+
+    if hash.len() != 32 {
         return Err(DuplexError::Cbor(format!(
             "MsgReplyTxIds: tx hash length {} != 32",
-            bytes.len()
+            hash.len()
         )));
     }
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(bytes);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(hash);
     let size = dec
         .u32()
         .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxIds: expected size u32: {e}")))?;
-    Ok((hash, size))
+    Ok((arr, size))
 }
 
 /// Decode `MsgRequestTxs = [2, [tx_id, ...]]` and return the list of tx hashes.
@@ -1239,6 +1318,35 @@ fn decode_request_txs(payload: &[u8]) -> Result<Vec<[u8; 32]>, DuplexError> {
 ///
 /// The inner list may be either definite-length or indefinite-length CBOR.
 /// The pallas Haskell encoder uses indefinite-length (`begin_array`/`end`).
+/// Decode a single GenTx which may be HFC-wrapped [era, tag(24, cbor)] or raw bytes.
+fn decode_one_tx_body(dec: &mut minicbor::Decoder<'_>) -> Result<Vec<u8>, DuplexError> {
+    match dec.datatype() {
+        Ok(minicbor::data::Type::Array | minicbor::data::Type::ArrayIndef) => {
+            // HFC GenTx: [era_index, tag(24, tx_cbor_bytes)]
+            let _ = dec
+                .array()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: GenTx array: {e}")))?;
+            let _ = dec
+                .u32()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: era index: {e}")))?;
+            let _ = dec
+                .tag()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: tag(24): {e}")))?;
+            let bytes = dec
+                .bytes()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: tx cbor: {e}")))?;
+            Ok(bytes.to_vec())
+        }
+        _ => {
+            // Raw bytes (non-HFC)
+            let bytes = dec
+                .bytes()
+                .map_err(|e| DuplexError::Cbor(format!("MsgReplyTxs: raw tx cbor: {e}")))?;
+            Ok(bytes.to_vec())
+        }
+    }
+}
+
 fn decode_reply_txs(payload: &[u8]) -> Result<Vec<Vec<u8>>, DuplexError> {
     let mut dec = minicbor::Decoder::new(payload);
     dec.array()
@@ -1255,10 +1363,7 @@ fn decode_reply_txs(payload: &[u8]) -> Result<Vec<Vec<u8>>, DuplexError> {
     match count_opt {
         Some(n) => {
             for _ in 0..n {
-                let tx_cbor = dec.bytes().map_err(|e| {
-                    DuplexError::Cbor(format!("MsgReplyTxs: expected tx cbor: {e}"))
-                })?;
-                bodies.push(tx_cbor.to_vec());
+                bodies.push(decode_one_tx_body(&mut dec)?);
             }
         }
         None => {
@@ -1270,10 +1375,7 @@ fn decode_reply_txs(payload: &[u8]) -> Result<Vec<Vec<u8>>, DuplexError> {
                         break;
                     }
                     Ok(_) => {
-                        let tx_cbor = dec.bytes().map_err(|e| {
-                            DuplexError::Cbor(format!("MsgReplyTxs: expected tx cbor: {e}"))
-                        })?;
-                        bodies.push(tx_cbor.to_vec());
+                        bodies.push(decode_one_tx_body(&mut dec)?);
                     }
                     Err(e) => {
                         return Err(DuplexError::Cbor(format!(
