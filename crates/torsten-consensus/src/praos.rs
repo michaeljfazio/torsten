@@ -569,8 +569,8 @@ impl OuroborosPraos {
                     "Praos: opcert counter regression (non-fatal during sync)"
                 );
             }
-            // Counter over-increment: n > m + 1
-            if n > m + 1 {
+            // Counter over-increment: n > m + 1 (using checked_add to prevent u64 wrap)
+            if m.checked_add(1).map_or(true, |m1| n > m1) {
                 if self.strict_verification {
                     warn!(
                         slot = header.slot.0,

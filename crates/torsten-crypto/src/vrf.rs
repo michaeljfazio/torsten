@@ -712,7 +712,9 @@ mod leader_check {
 
     /// Convert an f64 value to fixed-point IBig with 10^34 scale.
     fn float_to_fixed(value: f64) -> IBig {
-        if value <= 0.0 {
+        // Guard against NaN/infinity which would cause infinite recursion
+        // (NaN <= 0.0 is false in Rust, bypassing the zero guard below).
+        if !value.is_finite() || value <= 0.0 {
             return IBig::from(0);
         }
         if value >= 1.0 {

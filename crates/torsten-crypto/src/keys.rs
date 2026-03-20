@@ -48,14 +48,17 @@ impl PaymentSigningKey {
         })
     }
 
+    /// Create a signing key from 32 bytes (seed) or 64 bytes (expanded Ed25519).
+    /// Only the first 32 bytes (seed) are used; bytes 32-63 are the public key
+    /// which is derived automatically. Other lengths are rejected.
     pub fn from_extended_bytes(bytes: &[u8]) -> Result<Self, KeyError> {
-        if bytes.len() < 32 {
-            return Err(KeyError::InvalidLength {
+        match bytes.len() {
+            32 | 64 => Self::from_bytes(&bytes[..32]),
+            other => Err(KeyError::InvalidLength {
                 expected: 32,
-                got: bytes.len(),
-            });
+                got: other,
+            }),
         }
-        Self::from_bytes(&bytes[..32])
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
