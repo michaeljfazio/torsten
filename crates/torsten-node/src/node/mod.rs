@@ -1411,6 +1411,15 @@ impl Node {
             let gov_network_magic = self.network_magic;
             let gov_metrics = self.metrics.clone();
             let gov_byron_epoch_length = self.byron_epoch_length;
+            // Mempool reference for TxSubmission2 responder tasks on governor connections.
+            let gov_mempool: Arc<dyn torsten_primitives::mempool::MempoolProvider> =
+                self.mempool.clone();
+            // Block provider for DuplexPeerConnection (held for API compatibility;
+            // governor connections serve TxSubmission2 only — not ChainSync/BlockFetch).
+            let gov_block_provider: Arc<dyn torsten_network::BlockProvider> =
+                Arc::new(serve::ChainDBBlockProvider {
+                    chain_db: self.chain_db.clone(),
+                });
             let gov_config = {
                 use torsten_network::{GovernorConfig, PeerTargets};
                 let cfg = &self.config;
@@ -1427,6 +1436,24 @@ impl Node {
                     ..Default::default()
                 }
             };
+
+            // Persistent map of live governor-managed DuplexPeerConnections.
+            //
+            // Each entry keeps the TCP session, plexer, KeepAlive loop, and
+            // TxSubmission2 responder alive as long as the peer is warm/hot.
+            // The governor task is the sole writer; connect tasks store entries
+            // here via this Arc after a successful handshake, and the governor
+            // loop removes entries when Disconnect/EvictColdPeer events fire.
+            //
+            // Mutex (not RwLock) because every removal needs `abort()`, which
+            // requires ownership of the `DuplexPeerConnection`, and we never
+            // hold the lock during async I/O.
+            let gov_duplex_conns: Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<std::net::SocketAddr, DuplexPeerConnection>,
+                >,
+            > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
             tokio::spawn(async move {
                 let mut governor = Governor::new(gov_config);
                 // Full evaluation every 30 s; skip the first immediate tick so
@@ -1484,11 +1511,12 @@ impl Node {
 
                     // Apply events to the peer manager.
                     if !events.is_empty() {
-                        // Collect Connect events that need spawning before
-                        // acquiring the write lock, so we can check circuit state
-                        // and temperature under the lock and then release it
-                        // before doing async I/O.
+                        // Collect Connect events that need spawning and addresses
+                        // that need teardown before acquiring the write lock, so
+                        // we can check circuit state and temperature under the
+                        // lock and then release it before doing async I/O.
                         let mut addrs_to_connect: Vec<std::net::SocketAddr> = Vec::new();
+                        let mut addrs_to_disconnect: Vec<std::net::SocketAddr> = Vec::new();
 
                         let mut pm = governor_pm.write().await;
                         for event in &events {
@@ -1501,9 +1529,14 @@ impl Node {
                                 }
                                 GovernorEvent::Disconnect(addr) => {
                                     pm.peer_disconnected(addr);
+                                    // Tear down the persistent duplex connection, if
+                                    // one exists.  Aborting the connection shuts down
+                                    // the plexer and TxSubmission2 responder task.
+                                    addrs_to_disconnect.push(*addr);
                                 }
                                 GovernorEvent::EvictColdPeer(addr) => {
                                     pm.peer_disconnected(addr);
+                                    addrs_to_disconnect.push(*addr);
                                 }
                                 GovernorEvent::Connect(addr) => {
                                     // Skip if we already have an in-flight
@@ -1550,12 +1583,26 @@ impl Node {
                         // Release the write lock before spawning async tasks.
                         drop(pm);
 
+                        // Tear down connections for peers that were
+                        // Disconnect/EvictColdPeer'd in this cycle.
+                        if !addrs_to_disconnect.is_empty() {
+                            let mut conns = gov_duplex_conns.lock().await;
+                            for addr in addrs_to_disconnect {
+                                if let Some(conn) = conns.remove(&addr) {
+                                    debug!(%addr, "Governor: aborting duplex connection on disconnect");
+                                    conn.abort().await;
+                                }
+                            }
+                        }
+
                         // Spawn one fire-and-forget connect task per address.
                         // Each task:
-                        //   1. Attempts TCP + Ouroboros handshake with a 5 s timeout.
-                        //   2. On success, marks the peer Warm in the peer manager
-                        //      (governor will promote to Hot after the dwell period).
-                        //   3. On failure, calls peer_failed() to update the circuit
+                        //   1. Attempts TCP + Ouroboros handshake with a 5 s timeout
+                        //      using DuplexPeerConnection (InitiatorAndResponder mode).
+                        //   2. On success: marks the peer Warm in the peer manager,
+                        //      records RTT, and stores the live connection in
+                        //      gov_duplex_conns so TxSubmission2 keeps running.
+                        //   3. On failure: calls peer_failed() to update the circuit
                         //      breaker so the governor backs off future attempts.
                         //   4. Always sends the address back on connect_done_tx so the
                         //      outer loop removes it from connecting_peers.
@@ -1565,23 +1612,31 @@ impl Node {
                             let task_magic = gov_network_magic;
                             let task_byron = gov_byron_epoch_length;
                             let task_done_tx = connect_done_tx.clone();
+                            let task_mempool = gov_mempool.clone();
+                            let task_block_provider = gov_block_provider.clone();
+                            let task_duplex_conns = gov_duplex_conns.clone();
                             tokio::spawn(async move {
                                 let target = addr.to_string();
-                                debug!(%addr, "Governor: initiating outbound connection");
+                                debug!(%addr, "Governor: initiating outbound duplex connection");
                                 let connect_start = std::time::Instant::now();
                                 let connect_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(GOV_CONNECT_TIMEOUT_SECS),
-                                    NodeToNodeClient::connect(&*target, task_magic),
+                                    DuplexPeerConnection::connect(
+                                        &*target,
+                                        task_magic,
+                                        task_mempool,
+                                        task_block_provider,
+                                    ),
                                 )
                                 .await
                                 .unwrap_or_else(|_| {
-                                    Err(torsten_network::ClientError::Connection(format!(
+                                    Err(torsten_network::DuplexError::Connection(format!(
                                         "{target}: connection timed out after {GOV_CONNECT_TIMEOUT_SECS}s"
                                     )))
                                 });
                                 match connect_result {
-                                    Ok(mut c) => {
-                                        c.set_byron_epoch_length(task_byron);
+                                    Ok(mut conn) => {
+                                        conn.set_byron_epoch_length(task_byron);
                                         let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                                         task_metrics.record_handshake_rtt(rtt_ms);
                                         let mut pm = task_pm.write().await;
@@ -1597,13 +1652,13 @@ impl Node {
                                         info!(
                                             peer = %target,
                                             rtt_ms = format_args!("{rtt_ms:.0}"),
-                                            "Governor: peer connected (warm, dwell pending)"
+                                            "Governor: peer connected (warm, TxSubmission2 active)"
                                         );
-                                        // The NodeToNodeClient is intentionally dropped here.
-                                        // This connection is solely for peer-manager bookkeeping
-                                        // (warm→hot state tracking).  The main sync loop and
-                                        // BlockFetchPool manage their own independent connections
-                                        // to hot peers for ChainSync and BlockFetch traffic.
+                                        // Store the live connection so the plexer, KeepAlive
+                                        // loop, and TxSubmission2 responder task remain alive
+                                        // for as long as the peer is warm/hot.  The governor
+                                        // loop removes this entry on Disconnect/EvictColdPeer.
+                                        task_duplex_conns.lock().await.insert(addr, conn);
                                     }
                                     Err(e) => {
                                         task_pm.write().await.peer_failed(&addr);
@@ -1615,6 +1670,13 @@ impl Node {
                             });
                         }
                     }
+                }
+
+                // Node is shutting down — abort all remaining governor connections.
+                let mut conns = gov_duplex_conns.lock().await;
+                for (addr, conn) in conns.drain() {
+                    debug!(%addr, "Governor: aborting duplex connection on shutdown");
+                    conn.abort().await;
                 }
             });
         }
