@@ -2183,6 +2183,8 @@ impl Node {
                                 last_forge_slot = wc.0;
                                 self.try_forge_block().await;
                             }
+                        } else if last_forge_slot % 60 == 0 {
+                            debug!("Forge ticker: no wall clock slot");
                         }
                     }
                     _ = shutdown_rx.changed() => {

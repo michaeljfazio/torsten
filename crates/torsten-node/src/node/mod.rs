@@ -913,12 +913,11 @@ impl Node {
         }
 
         // NOTE: epoch_transitions_observed is NOT initialized from snapshot state.
-        // The epoch nonce is only reliable after observing live epoch transitions
-        // where VRF contributions are accumulated. A Mithril-imported node must
-        // observe 2+ live epoch boundaries before nonce_established becomes true
-        // and strict VRF verification is enabled. This prevents the node from
-        // rejecting valid blocks whose VRF proofs don't match our replay-derived
-        // (potentially incorrect) epoch nonce.
+        // The epoch nonce may be stale after restore (VRF contributions from the
+        // current epoch may have evolved the nonce since the snapshot was taken).
+        // nonce_established stays false until a live epoch transition recalibrates it.
+        // However, forging is still attempted (nonce_established only gates strict
+        // VRF verification of incoming blocks, not our own forging).
 
         // If running as block producer, log the pool's stake in the set snapshot
         // so operators can immediately diagnose eligibility issues.
@@ -2154,10 +2153,11 @@ impl Node {
             None => return, // relay-only mode
         };
 
-        // Don't forge if epoch nonce isn't established yet (e.g., post-Mithril import)
+        // Log (but don't skip) if epoch nonce isn't established yet.
+        // Allow forging even with uncertain nonce — the network will reject
+        // our block if the nonce is wrong, but it's better to try.
         if !self.consensus.nonce_established {
-            debug!("Forge: skipping — epoch nonce not yet established");
-            return;
+            debug!("Forge: epoch nonce not yet confirmed — forging anyway (block may be rejected)");
         }
 
         // Compute current slot from wall-clock time
@@ -2167,8 +2167,17 @@ impl Node {
         let tip_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
         let next_slot = match wall_clock_slot {
             Some(wc) if wc.0 > tip_slot => wc,
-            _ => {
-                // No genesis or wall clock behind tip — skip forging
+            Some(wc) => {
+                // Wall clock slot is at or behind chain tip — not our slot to forge
+                debug!(
+                    wall_clock = wc.0,
+                    tip_slot,
+                    "Forge: wall clock slot <= tip slot, skipping"
+                );
+                return;
+            }
+            None => {
+                debug!("Forge: no wall clock slot available (genesis not loaded?)");
                 return;
             }
         };
