@@ -302,6 +302,11 @@ impl LedgerState {
             .values()
             .fold(0u64, |acc, s| acc.saturating_add(s.0));
         if total_active_stake == 0 {
+            debug!(
+                "No active stake: GO pools={}, GO pool_stake entries={}",
+                stake_snapshot.pool_params.len(),
+                stake_snapshot.pool_stake.len()
+            );
             // No delegated stake → no pool rewards, only treasury. Fee offset still applies.
             let net = treasury_cut.saturating_sub(epoch_fees);
             return PendingRewardUpdate {

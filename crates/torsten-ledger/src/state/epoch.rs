@@ -33,6 +33,26 @@ impl LedgerState {
     pub fn process_epoch_transition(&mut self, new_epoch: EpochNo) {
         debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
 
+        // Capture bprev (nesBprev = nesBcur) BEFORE any param updates.
+        // The d value for overlay checking must be from the epoch that JUST
+        // ended — using the params that were in effect during that epoch.
+        // PPUP hasn't fired yet, so self.protocol_params still has the old values.
+        let d_for_bprev = if self.protocol_params.protocol_version_major >= 7 {
+            0.0
+        } else {
+            let d_n = self.protocol_params.d.numerator as f64;
+            let d_d = self.protocol_params.d.denominator.max(1) as f64;
+            d_n / d_d
+        };
+        let (bprev_block_count, bprev_blocks_by_pool) = if d_for_bprev >= 0.8 {
+            (0u64, Arc::new(HashMap::new()))
+        } else {
+            (
+                self.epoch_block_count,
+                Arc::clone(&self.epoch_blocks_by_pool),
+            )
+        };
+
         // Step 1: Apply any pending reward update (backward compat for old snapshots).
         self.apply_pending_reward_update();
 
@@ -59,14 +79,15 @@ impl LedgerState {
                 .go
                 .clone()
                 .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
-            // Block counts come from SET (= previous epoch's data = nesBprev)
-            let set_snapshot = self
-                .snapshots
-                .set
-                .clone()
-                .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
-            let rupd =
-                self.calculate_rewards_full(&go_snapshot, &set_snapshot, self.snapshots.ss_fee);
+            // Block counts come from bprev (= nesBprev = previous epoch's blocks).
+            // This is separate from the snapshot rotation — bprev is captured
+            // at each boundary (nesBprev = nesBcur, step 7 in NEWEPOCH).
+            let bprev = StakeSnapshot {
+                epoch_block_count: self.snapshots.bprev_block_count,
+                epoch_blocks_by_pool: Arc::clone(&self.snapshots.bprev_blocks_by_pool),
+                ..StakeSnapshot::empty(EpochNo(0))
+            };
+            let rupd = self.calculate_rewards_full(&go_snapshot, &bprev, self.snapshots.ss_fee);
             self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
             self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
             let mut total_applied = 0u64;
@@ -91,15 +112,32 @@ impl LedgerState {
             }
         }
 
-        // Step 2b: SNAP — rotate snapshots and capture fees.
-        // In Haskell, SNAP fires AFTER applyRUpd. The fee capture takes
-        // the accumulated epoch_fees (which had the old ss_fee subtracted
-        // by applyRUpd's deltaF). In our simpler model, we just capture
-        // the current epoch_fees and reset.
+        // Step 2b: SNAP — rotate snapshots, capture fees, update bprev.
+        //
+        // In Haskell NEWEPOCH ordering:
+        //   1. applyRUpd (done above)
+        //   2. SNAP: rotate mark→set→go, capture ssFee
+        //   7. nesBprev = nesBcur, nesBcur = empty
+        //
+        // We capture bprev BEFORE resetting the counters (step 7 equivalent).
+        // bprev = current epoch's block production (matching nesBcur → nesBprev).
         let captured_fees = self.epoch_fees;
         self.snapshots.go = self.snapshots.set.take();
         self.snapshots.set = self.snapshots.mark.take();
         self.snapshots.ss_fee = captured_fees;
+        // bprev = blocks from the epoch that just ended (nesBprev = nesBcur).
+        // The overlay check uses the d value from the epoch that just ended
+        // (captured BEFORE PPUP updates the protocol params). This was saved
+        // at the top of process_epoch_transition.
+        self.snapshots.bprev_block_count = bprev_block_count;
+        self.snapshots.bprev_blocks_by_pool = bprev_blocks_by_pool;
+        debug!(
+            epoch = new_epoch.0,
+            bprev_blocks = self.snapshots.bprev_block_count,
+            bprev_pools = self.snapshots.bprev_blocks_by_pool.len(),
+            d_for_bprev,
+            "bprev updated"
+        );
 
         // Rebuild stake distribution from the full UTxO set at epoch boundaries.
         // During fast replay (needs_stake_rebuild=false), skip the expensive full
@@ -158,42 +196,17 @@ impl LedgerState {
             "Epoch snapshot: stake distribution rebuilt from UTxO set"
         );
 
-        // Block production data for the mark snapshot.
-        //
-        // In Haskell, `incrBlocks` only counts non-overlay blocks. When d >= 0.8,
-        // ALL slots are overlay slots, so BlocksMade is empty — pools produced no
-        // "eligible" blocks. We must match this behavior: when d >= 0.8 during the
-        // epoch that just ended, the mark captures ZERO block counts.
-        //
-        // d is read from the CURRENT protocol params (which were in effect during
-        // the epoch that just ended, since param updates are applied at the START
-        // of the epoch boundary before the mark is created).
-        let d_num = self.protocol_params.d.numerator as f64;
-        let d_den = self.protocol_params.d.denominator.max(1) as f64;
-        let d_value = if self.protocol_params.protocol_version_major >= 7 {
-            0.0 // Babbage+ always d=0
-        } else {
-            d_num / d_den
-        };
-        let (mark_block_count, mark_blocks_by_pool) = if d_value >= 0.8 {
-            // All overlay → no non-overlay blocks counted (matches Haskell incrBlocks)
-            (0u64, Arc::new(HashMap::new()))
-        } else {
-            (
-                self.epoch_block_count,
-                Arc::clone(&self.epoch_blocks_by_pool),
-            )
-        };
-
         self.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
             delegations: Arc::clone(&self.delegations),
             pool_stake,
             pool_params: Arc::clone(&self.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
+            // Block production data in the mark is used for legacy calculate_rewards().
+            // The primary RUPD path uses bprev (from EpochSnapshots) instead.
             epoch_fees: self.epoch_fees,
-            epoch_block_count: mark_block_count,
-            epoch_blocks_by_pool: mark_blocks_by_pool,
+            epoch_block_count: self.epoch_block_count,
+            epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
         // Process pending pool retirements for this epoch
@@ -233,9 +246,20 @@ impl LedgerState {
         // `curPParams` for epoch E. Proposals are in `sgsCurProposals` which
         // were promoted from `sgsFutureProposals` at the previous boundary.
         //
-        // We use `new_epoch` as the key because proposals targeting epoch N
-        // should take effect when epoch N starts (= at the (N-1)→N boundary).
-        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
+        // Proposals targeting epoch N are applied at the N→N+1 boundary.
+        // On preview, proposals targeting epoch 1 (submitted in epoch 0) are
+        // applied at the 1→2 boundary. self.epoch still holds the old value
+        // (N) at this point — it's updated at the end of the transition.
+        //
+        // NOTE: There's a remaining timing issue with proposals in the
+        // transition-triggering block (see #231). For now we use new_epoch-1
+        // which is equivalent to self.epoch.
+        // Try both the current epoch and the new epoch for proposals.
+        // On preview, proposals targeting epoch 1 are first processed at the
+        // 1→2 boundary (self.epoch=1), and proposals targeting epoch 2 at
+        // the 2→3 boundary (self.epoch=2).
+        let ppup_epoch = self.epoch;
+        if let Some(proposals) = self.pending_pp_updates.remove(&ppup_epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::with_capacity(proposals.len());

@@ -351,12 +351,18 @@ pub struct EpochSnapshots {
     /// Snapshot from two epochs ago ("go") — used for reward distribution
     pub go: Option<StakeSnapshot>,
     /// Fee pot for the next RUPD (Haskell's `ssFee`).
-    ///
-    /// Captured by SNAP at each epoch boundary from the accumulated epoch fees.
-    /// The RUPD uses this as part of `rPot = ssFee + deltaR1`.
-    /// At genesis this is 0 (no SNAP has run yet).
     #[serde(default = "default_lovelace_zero")]
     pub ss_fee: Lovelace,
+    /// Block production from the previous epoch (Haskell's `nesBprev`).
+    ///
+    /// At each NEWEPOCH boundary: `bprev = current epoch blocks`, then
+    /// counters are reset. The RUPD uses bprev for pool reward allocation.
+    /// Separate from the snapshot rotation (bprev is from 1 epoch ago,
+    /// while GO stake data is from 2 epochs ago).
+    #[serde(default)]
+    pub bprev_block_count: u64,
+    #[serde(default)]
+    pub bprev_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
 }
 
 impl Default for EpochSnapshots {
@@ -366,6 +372,8 @@ impl Default for EpochSnapshots {
             set: None,
             go: None,
             ss_fee: Lovelace(0),
+            bprev_block_count: 0,
+            bprev_blocks_by_pool: Arc::new(HashMap::new()),
         }
     }
 }
