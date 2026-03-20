@@ -360,12 +360,10 @@ pub(super) fn calculate_ref_script_tiered_fee(base_fee_per_byte: u64, total_size
         price_den /= g;
     }
 
-    // Single ceiling per the Blueprint spec: add 1 if any fractional remainder.
-    let ceil_bit: u128 = if frac_scaled > 0 { 1 } else { 0 };
-    let total = match acc_whole.checked_add(ceil_bit) {
-        Some(v) => v,
-        None => return u64::MAX,
-    };
+    // Haskell's tierRefScriptFee uses floor (truncation), not ceiling.
+    // The accumulation in `acc_whole` already contains only the integer parts;
+    // `frac_scaled` holds the sub-unit remainder which is simply discarded.
+    let total = acc_whole;
     // Saturate to u64::MAX if the fee exceeds u64 range (only possible for
     // unrealistically large base_fee_per_byte values).
     u64::try_from(total).unwrap_or(u64::MAX)
@@ -745,7 +743,13 @@ pub(super) fn ref_script_fee(
 
 /// Compute the total execution-unit fee component from the transaction's redeemers.
 ///
-/// Formula: `ceil(price_mem * Σ mem) + ceil(price_step * Σ steps)`
+/// Haskell's `txscriptfee` (ExUnits.hs) computes a **single ceiling** over the
+/// sum of both rational products:
+///
+///   `ceil(price_mem * Σ mem + price_step * Σ steps)`
+///
+/// NOT `ceil(price_mem * Σ mem) + ceil(price_step * Σ steps)` — per-component
+/// ceiling would be up to 1 lovelace too high when both have fractional parts.
 pub(super) fn ex_unit_fee(tx: &Transaction, params: &ProtocolParameters) -> u64 {
     let total_mem: u64 = tx
         .witness_set
@@ -758,21 +762,31 @@ pub(super) fn ex_unit_fee(tx: &Transaction, params: &ProtocolParameters) -> u64 
         .iter()
         .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.steps));
 
-    let mem_cost = if total_mem > 0 && params.execution_costs.mem_price.denominator > 0 {
-        let num = params.execution_costs.mem_price.numerator as u128 * total_mem as u128;
-        let den = params.execution_costs.mem_price.denominator as u128;
-        num.div_ceil(den) as u64
-    } else {
-        0
-    };
-    let step_cost = if total_steps > 0 && params.execution_costs.step_price.denominator > 0 {
-        let num = params.execution_costs.step_price.numerator as u128 * total_steps as u128;
-        let den = params.execution_costs.step_price.denominator as u128;
-        num.div_ceil(den) as u64
-    } else {
-        0
-    };
-    mem_cost.saturating_add(step_cost)
+    let mem_price = &params.execution_costs.mem_price;
+    let step_price = &params.execution_costs.step_price;
+
+    if mem_price.denominator == 0 || step_price.denominator == 0 {
+        return 0;
+    }
+
+    // Compute as a single rational sum then apply one ceiling.
+    // sum = (mem_num * total_mem * step_den + step_num * total_steps * mem_den)
+    //       / (mem_den * step_den)
+    let mem_num = mem_price.numerator as u128;
+    let mem_den = mem_price.denominator as u128;
+    let step_num = step_price.numerator as u128;
+    let step_den = step_price.denominator as u128;
+    let m = total_mem as u128;
+    let s = total_steps as u128;
+
+    // Cross-multiply to a common denominator for exact addition.
+    let numerator = mem_num * m * step_den + step_num * s * mem_den;
+    let denominator = mem_den * step_den;
+
+    if denominator == 0 {
+        return 0;
+    }
+    numerator.div_ceil(denominator) as u64
 }
 
 /// Compute the Haskell-compatible transaction size for fee calculation.

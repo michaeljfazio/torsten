@@ -3033,11 +3033,11 @@ mod tests {
     #[test]
     fn test_ref_script_fee_ceiling_vs_floor() {
         // base_fee=1, size=25601: tier 1 = 25600*1 = 25600, tier 2 = 1 * 6/5 = 1.2
-        // total = 25601.2 -> ceiling = 25602, floor would be 25601
+        // total = 25601.2 -> Haskell uses floor = 25601
         let fee = calculate_ref_script_tiered_fee(1, 25_601);
         assert_eq!(
-            fee, 25_602,
-            "Ceiling division must round up (25600 + 6/5 = 25601.2 -> 25602)"
+            fee, 25_601,
+            "Floor: 25600 + 6/5 = 25601.2 -> floor = 25601 (matching Haskell tierRefScriptFee)"
         );
     }
 
@@ -3050,18 +3050,18 @@ mod tests {
         assert_eq!(calculate_ref_script_tiered_fee(15, 25_600), 384_000);
     }
 
-    /// Verify ceiling on multiple partial tiers.
+    /// Verify floor on multiple partial tiers (matching Haskell tierRefScriptFee).
     #[test]
-    fn test_ref_script_fee_ceiling_multiple_partial_tiers() {
+    fn test_ref_script_fee_floor_multiple_partial_tiers() {
         // base_fee=1, size=51201 (two full tiers + 1 byte in third tier)
         // tier 1: 25600*1 = 25600
         // tier 2: 25600*6/5 = 30720
         // tier 3: 1*36/25 = 1.44
-        // total = 56321.44 -> ceiling = 56322
+        // total = 56321.44 -> Haskell floor = 56321
         let fee = calculate_ref_script_tiered_fee(1, 51_201);
         assert_eq!(
-            fee, 56_322,
-            "Ceiling must handle partial third tier (25600 + 30720 + 1.44 = 56321.44 -> 56322)"
+            fee, 56_321,
+            "Floor: 25600 + 30720 + 1.44 = 56321.44 -> floor = 56321 (matching Haskell)"
         );
     }
 
