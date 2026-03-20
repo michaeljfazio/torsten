@@ -69,9 +69,13 @@ fn query_impl(path: &str) -> Option<DiskStats> {
     // fragments.  We use `f_bavail` (blocks available to unprivileged
     // processes) for "free" so that the displayed value matches what `df`
     // reports for unprivileged users.
-    let block_size = stat.f_frsize as u64;
+    #[allow(clippy::unnecessary_cast)]
+    let block_size = stat.f_frsize as u64; // u32 on macOS, u64 on Linux
+    #[allow(clippy::unnecessary_cast)]
     let total = stat.f_blocks as u64 * block_size;
+    #[allow(clippy::unnecessary_cast)]
     let free = stat.f_bavail as u64 * block_size;
+    #[allow(clippy::unnecessary_cast)]
     let used = total.saturating_sub(stat.f_bfree as u64 * block_size);
 
     Some(DiskStats {
