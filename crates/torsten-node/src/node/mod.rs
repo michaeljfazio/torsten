@@ -1894,10 +1894,12 @@ impl Node {
                 break;
             }
 
-            // `_txsub_responder` must be kept alive for the duration of the sync
-            // session: dropping it would abort the TxSubmission2 responder task.
-            // Declared here (outside the block) so it lives as long as `pipelined_client`.
+            // Both TxSubmission2 task handles must be kept alive for the duration
+            // of the sync session: dropping either handle would abort the
+            // corresponding background task prematurely.
+            // Declared here (outside the block) so they live as long as `pipelined_client`.
             let mut _txsub_responder_handle: Option<tokio::task::JoinHandle<()>> = None;
+            let mut _txsub_initiator_handle: Option<tokio::task::JoinHandle<()>> = None;
 
             let pipelined_client = {
                 let target = peer_addr.to_string();
@@ -1928,9 +1930,12 @@ impl Node {
                 match duplex_result {
                     Ok(duplex_conn) => {
                         // Convert DuplexPeerConnection → PipelinedPeerClient.
-                        // The responder task handle is kept alive in the outer scope.
-                        info!(peer = %target, "Full-duplex connection established (InitiatorAndResponder)");
-                        let (mut pc, responder_handle) = duplex_conn.into_pipelined();
+                        // Both TxSubmission2 task handles are kept alive in the outer scope.
+                        //   responder_handle: serves our mempool to the remote peer
+                        //   initiator_handle: pulls the remote peer's mempool txs into ours
+                        info!(peer = %target, "Full-duplex connection established (InitiatorAndResponder, TxSub client+server)");
+                        let (mut pc, responder_handle, initiator_handle) =
+                            duplex_conn.into_pipelined();
                         pc.set_byron_epoch_length(self.byron_epoch_length);
                         pc.set_await_reply_timeout(self.timeout_config.await_reply_timeout());
 
@@ -1949,8 +1954,9 @@ impl Node {
                             );
                         }
 
-                        // Keep the responder task alive until `pipelined_client` is dropped.
+                        // Keep both task handles alive until `pipelined_client` is dropped.
                         _txsub_responder_handle = Some(responder_handle);
+                        _txsub_initiator_handle = Some(initiator_handle);
 
                         Some(pc)
                     }

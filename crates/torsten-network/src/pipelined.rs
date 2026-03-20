@@ -468,9 +468,10 @@ impl PipelinedPeerClient {
     /// `chain_sync_loop` code can drive it for pipelined ChainSync.
     ///
     /// No `txsub_channel` is supplied here because a full-duplex connection
-    /// uses the TxSubmission2 protocol in *server* mode (subscribe_server),
-    /// not client mode.  The caller must not attempt to spawn a TxSubmission2
-    /// client on this connection.
+    /// manages both TxSubmission2 roles (initiator and responder) via dedicated
+    /// background tasks returned from `into_pipelined()`.  The caller keeps
+    /// those task handles alive and must not attempt to spawn an additional
+    /// TxSubmission2 client via `take_txsub_channel()` on this connection.
     #[allow(clippy::too_many_arguments)] // inherent to unwrapping a connection struct
     pub(crate) fn from_duplex_parts(
         cs_buf: ChannelBuffer,
@@ -490,9 +491,10 @@ impl PipelinedPeerClient {
             _peersharing_channel: peersharing_channel,
             remote_addr,
             in_flight,
-            // No TxSubmission2 client channel — the duplex connection uses
-            // subscribe_server for TX_SUBMISSION (responder mode), so there
-            // is no initiator channel to expose here.
+            // No TxSubmission2 channel to expose here — a full-duplex connection
+            // runs both initiator and responder as background tasks returned from
+            // `DuplexPeerConnection::into_pipelined()`.  The caller holds those
+            // task handles directly and does not need a channel for additional spawning.
             txsub_channel: None,
             byron_epoch_length,
             await_reply_timeout: Duration::from_secs(
