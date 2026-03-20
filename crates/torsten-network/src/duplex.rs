@@ -1140,28 +1140,62 @@ fn decode_request_txs(payload: &[u8]) -> Result<Vec<[u8; 32]>, DuplexError> {
         .array()
         .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: expected id array: {e}")))?;
 
+    // Helper: decode a single tx ID which may be HFC-wrapped [era, hash] or raw bytes.
+    let decode_one_tx_id = |dec: &mut minicbor::Decoder| -> Result<Option<[u8; 32]>, DuplexError> {
+        // Peek at the type: if it's an array, it's HFC-wrapped [era_index, hash_bytes]
+        match dec.datatype() {
+            Ok(minicbor::data::Type::Array | minicbor::data::Type::ArrayIndef) => {
+                let _ = dec
+                    .array()
+                    .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: GenTxId array: {e}")))?;
+                // Skip era index
+                let _ = dec
+                    .u32()
+                    .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: era index: {e}")))?;
+                let bytes = dec
+                    .bytes()
+                    .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: tx hash bytes: {e}")))?;
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes);
+                    Ok(Some(arr))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef) => {
+                // Raw bytes (non-HFC, for backwards compatibility)
+                let bytes = dec
+                    .bytes()
+                    .map_err(|e| DuplexError::Cbor(format!("MsgRequestTxs: raw tx hash: {e}")))?;
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes);
+                    Ok(Some(arr))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(other) => Err(DuplexError::Cbor(format!(
+                "MsgRequestTxs: unexpected type {other:?} for tx ID"
+            ))),
+            Err(e) => Err(DuplexError::Cbor(format!(
+                "MsgRequestTxs: datatype error: {e}"
+            ))),
+        }
+    };
+
     let mut hashes = Vec::new();
     match count_opt {
         Some(n) => {
             let cap = (n as usize).min(MAX_TX_BODY_REQUEST);
             for _ in 0..cap {
-                let bytes = dec.bytes().map_err(|e| {
-                    DuplexError::Cbor(format!("MsgRequestTxs: expected tx hash bytes: {e}"))
-                })?;
-                if bytes.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    hashes.push(arr);
-                } else {
-                    warn!(
-                        len = bytes.len(),
-                        "TxSubmission2: ignoring tx hash with unexpected length"
-                    );
+                if let Some(hash) = decode_one_tx_id(&mut dec)? {
+                    hashes.push(hash);
                 }
             }
         }
         None => {
-            // Indefinite-length.
             use minicbor::data::Type;
             loop {
                 match dec.datatype() {
@@ -1170,18 +1204,8 @@ fn decode_request_txs(payload: &[u8]) -> Result<Vec<[u8; 32]>, DuplexError> {
                         break;
                     }
                     Ok(_) => {
-                        let bytes = dec.bytes().map_err(|e| {
-                            DuplexError::Cbor(format!("MsgRequestTxs: expected tx hash bytes: {e}"))
-                        })?;
-                        if bytes.len() == 32 {
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(bytes);
-                            hashes.push(arr);
-                        } else {
-                            warn!(
-                                len = bytes.len(),
-                                "TxSubmission2: ignoring tx hash with unexpected length"
-                            );
+                        if let Some(hash) = decode_one_tx_id(&mut dec)? {
+                            hashes.push(hash);
                         }
                         if hashes.len() >= MAX_TX_BODY_REQUEST {
                             break;
