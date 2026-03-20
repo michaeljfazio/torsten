@@ -2175,9 +2175,17 @@ impl Node {
                                         error!(
                                             consecutive_apply_failures,
                                             "Ledger state diverged from chain — \
-                                             blocks do not connect. Triggering \
-                                             reconnect to re-establish intersection."
+                                             clearing contaminated volatile DB and reconnecting."
                                         );
+                                        // Clear volatile blocks that are from a different
+                                        // fork and don't connect to the ledger tip.
+                                        // This is the last-resort recovery per #192.
+                                        {
+                                            let mut db = self.chain_db.write().await;
+                                            db.clear_volatile();
+                                        }
+                                        // Also clear mempool since UTxO state may have changed.
+                                        self.mempool.clear();
                                         break;
                                     }
                                 }
@@ -2330,9 +2338,13 @@ impl Node {
                                                             error!(
                                                                 consecutive_apply_failures,
                                                                 "Ledger state diverged from chain — \
-                                                                 blocks do not connect. Triggering \
-                                                                 reconnect to re-establish intersection."
+                                                                 clearing contaminated volatile DB and reconnecting."
                                                             );
+                                                            {
+                                                                let mut db = self.chain_db.write().await;
+                                                                db.clear_volatile();
+                                                            }
+                                                            self.mempool.clear();
                                                             break;
                                                         }
                                                     }
