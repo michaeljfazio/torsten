@@ -52,7 +52,7 @@ fn synthetic_credentials() -> BlockProducerCredentials {
     let opcert_sigma = vec![0u8; 64];
 
     BlockProducerCredentials {
-        vrf_skey: vrf_kp.secret_key,
+        vrf_skey: *vrf_kp.secret_key(),
         vrf_vkey: vrf_kp.public_key,
         cold_vkey,
         kes_skey: kes_sk,

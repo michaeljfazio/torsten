@@ -1725,13 +1725,48 @@ impl Node {
             self.consecutive_origin_intersections = 0;
         }
 
-        // Case (B): intersection behind ledger tip — targeted replay.
+        // Case (B): intersection behind ledger tip — the local chain
+        // diverged (e.g. a forged block that lost a slot battle).
+        // Instead of replaying the entire chain from genesis, try a
+        // lightweight rollback first: undo the forged block(s) and
+        // continue from the intersection.
         if intersect_slot > 0 && intersect_slot < ledger_slot {
+            let depth = ledger_slot - intersect_slot;
             warn!(
                 intersect_slot,
                 ledger_slot,
+                depth,
                 "Fork recovery: intersection is behind ledger tip — \
-                 replaying ImmutableDB up to intersection."
+                 attempting rollback (depth={depth} slots)."
+            );
+
+            // If the divergence is shallow (within k blocks), try a
+            // lightweight rollback via handle_rollback. This avoids the
+            // expensive full chain replay.
+            if depth <= self.consensus.security_param * 2 {
+                let rollback_point = intersect.clone().unwrap_or(Point::Origin);
+                info!(
+                    "Fork recovery: lightweight rollback to {rollback_point} \
+                     (depth={depth} slots, within 2k)"
+                );
+                self.handle_rollback(&rollback_point).await;
+                // Clear volatile DB of contaminated blocks
+                {
+                    let mut db = self.chain_db.write().await;
+                    db.clear_volatile();
+                }
+                self.mempool.clear();
+                // Continue with the sync from the intersection — no replay needed.
+                return Err(anyhow::anyhow!(
+                    "fork recovery: rolled back {depth} slots, reconnecting to continue sync"
+                ));
+            }
+
+            // Deep divergence: fall through to full replay.
+            warn!(
+                depth,
+                security_param = self.consensus.security_param,
+                "Fork recovery: deep divergence exceeds 2k — full ImmutableDB replay required."
             );
 
             {

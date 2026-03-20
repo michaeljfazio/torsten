@@ -689,10 +689,11 @@ mod tests {
     #[test]
     fn test_load_vrf_skey_32_bytes() {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
-        let loaded =
-            load_vrf_skey_from_raw(&kp.secret_key).expect("32-byte VRF key must load successfully");
+        let loaded = load_vrf_skey_from_raw(&*kp.secret_key())
+            .expect("32-byte VRF key must load successfully");
         assert_eq!(
-            loaded, kp.secret_key,
+            loaded,
+            *kp.secret_key(),
             "loaded secret key should equal the original seed"
         );
     }
@@ -705,13 +706,14 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         // Construct the 64-byte expanded key as cardano-node writes it
         let mut expanded = [0u8; 64];
-        expanded[..32].copy_from_slice(&kp.secret_key);
+        expanded[..32].copy_from_slice(&*kp.secret_key());
         expanded[32..].copy_from_slice(&kp.public_key);
 
         let loaded =
             load_vrf_skey_from_raw(&expanded).expect("64-byte VRF key must load successfully");
         assert_eq!(
-            loaded, kp.secret_key,
+            loaded,
+            *kp.secret_key(),
             "loaded secret seed should equal the first 32 bytes of the 64-byte key"
         );
     }
@@ -723,10 +725,10 @@ mod tests {
     fn test_vrf_proof_same_from_32_or_64_byte_key() {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         let mut expanded = [0u8; 64];
-        expanded[..32].copy_from_slice(&kp.secret_key);
+        expanded[..32].copy_from_slice(&*kp.secret_key());
         expanded[32..].copy_from_slice(&kp.public_key);
 
-        let seed_32 = load_vrf_skey_from_raw(&kp.secret_key).unwrap();
+        let seed_32 = load_vrf_skey_from_raw(&*kp.secret_key()).unwrap();
         let seed_64 = load_vrf_skey_from_raw(&expanded).unwrap();
         assert_eq!(
             seed_32, seed_64,
@@ -806,7 +808,7 @@ mod tests {
         let (_kes_sk, kes_pk_bytes) = torsten_crypto::kes::kes_keygen(&seed).unwrap();
         let kes_vkey: [u8; 32] = kes_pk_bytes[..32].try_into().unwrap();
 
-        let (vrf_file, _) = make_vrf_skey_json(&vrf_kp.secret_key);
+        let (vrf_file, _) = make_vrf_skey_json(vrf_kp.secret_key());
         let kes_file = make_kes_skey_json(raw_kes);
         let opcert_file = make_opcert_json(&kes_vkey, &cold_vk);
 
@@ -907,7 +909,7 @@ mod tests {
         let kes_vkey: [u8; 32] = kes_pk_bytes[..32].try_into().unwrap();
 
         // Build temp files
-        let (vrf_file, _) = make_vrf_skey_json(&vrf_kp.secret_key);
+        let (vrf_file, _) = make_vrf_skey_json(vrf_kp.secret_key());
         let kes_file = make_kes_skey_json(&kes_sk_608);
         let opcert_file = make_opcert_json(&kes_vkey, cold_vkey.as_slice().try_into().unwrap());
 
