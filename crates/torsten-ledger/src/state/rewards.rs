@@ -311,11 +311,18 @@ impl LedgerState {
             };
         }
 
-        // Total active stake (for apparent performance denominator only)
+        // Total active stake (for apparent performance denominator only).
+        //
+        // Only include stake delegated to REGISTERED pools (pools with entries
+        // in pool_params). In Haskell, the snapshot's ssActiveDelegations only
+        // includes delegations to registered pools. Including unregistered pool
+        // stake would inflate the denominator and change apparent performance
+        // for all pools.
         let total_active_stake: u64 = stake_snapshot
             .pool_stake
-            .values()
-            .fold(0u64, |acc, s| acc.saturating_add(s.0));
+            .iter()
+            .filter(|(pool_id, _)| stake_snapshot.pool_params.contains_key(pool_id))
+            .fold(0u64, |acc, (_, s)| acc.saturating_add(s.0));
         if total_active_stake == 0 {
             debug!(
                 "No active stake: GO pools={}, GO pool_stake entries={}",
