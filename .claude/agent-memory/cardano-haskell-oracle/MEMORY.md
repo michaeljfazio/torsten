@@ -118,6 +118,9 @@
 - Versions 7-13 obsolete
 - Mini-protocol IDs: Handshake=0, ChainSync=2, BlockFetch=3, TxSubmission=4, KeepAlive=8, PeerSharing=10
 
+## Genesis Initialization & Ledger State
+- See [genesis-initialization-ledger-state.md](genesis-initialization-ledger-state.md) — Byron→Shelley translation, genDelegs vs pool registrations, staking section, resetStakeDistribution, initial snapshots, preview testnet init sequence
+
 ## Test Vectors for Conformance
 - See [test-vectors-reference.md](test-vectors-reference.md) — Full catalog of test vectors from all Haskell repos
 - ouroboros-consensus golden: 1620 raw CBOR files (blocks, queries, results, disk state per era/version)

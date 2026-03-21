@@ -250,10 +250,9 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
-        // Capture prevPParams before PPUP updates curPParams.
-        // Haskell: prevPParams = old curPParams; curPParams = pp' (from PPUP).
-        // The RUPD uses prevPParams for d and other fields.
-        self.prev_protocol_version_major = self.protocol_params.protocol_version_major;
+        // NOTE: prev_protocol_version_major is updated at the END of this
+        // function (after PPUP), capturing the curPP for the current epoch.
+        // The RUPD at the NEXT boundary will use it as prevPP.
 
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
@@ -526,6 +525,15 @@ impl LedgerState {
 
         // evolving_nonce and candidate_nonce carry forward unchanged
         // (they are NOT reset at epoch boundaries)
+
+        // Capture prevPParams AFTER PPUP has updated curPP.
+        // In Haskell NEWEPOCH: prevPParams = old curPParams (before UPEC).
+        // But UPEC fires during this boundary, updating curPP.
+        // After UPEC: prevPP = old curPP, curPP = new (from UPEC).
+        // The next epoch's RUPD will use prevPP (this value).
+        // By capturing AFTER PPUP, we get curPP for the new epoch,
+        // which the NEXT epoch's RUPD will see as prevPP.
+        self.prev_protocol_version_major = self.protocol_params.protocol_version_major;
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
