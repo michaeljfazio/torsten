@@ -215,26 +215,18 @@ impl LedgerState {
         // ensures full monetary expansion during the federated era (Shelley/Allegra/Mary).
         // On preview testnet d starts at 1.0 from genesis, so this guard is critical.
         //
-        // Haskell's startStep uses `prevPParams` for d (not curPParams).
-        // prevPParams = the params from the PREVIOUS epoch (set at the last
-        // NEWEPOCH boundary: prevPP = old curPP, then curPP updated by PPUP).
+        // Haskell's startStep uses `prevPParams ^. ppDG` for d.
+        // prevPParams = curPParams from the PREVIOUS epoch, captured at
+        // the last NEWEPOCH boundary AFTER PPUP updated curPP.
         //
-        // Our code uses self.protocol_params which is curPParams (already updated
-        // by PPUP at the current boundary). To match Haskell's prevPParams, we
-        // use self.prev_protocol_version_major which captures the version BEFORE
-        // the PPUP update.
+        // self.prev_d stores the effective d from the previous epoch:
+        // - Alonzo (proto < 7): actual d field value (e.g., 0 from PPUP)
+        // - Babbage+ (proto >= 7): 0 (ppDG returns minBound = 0)
         //
-        // For Babbage+ (ppDG returns 0), prevPParams.ppDG is also 0 once
-        // the PREVIOUS epoch was Babbage. This means d=0 takes effect one
-        // epoch AFTER the proto 7 update (matching Haskell's prevPParams).
-        let prev_proto = self.prev_protocol_version_major;
-        let d = if prev_proto >= 7 {
-            0.0 // Babbage+ ppDG returns 0
-        } else {
-            let d_num = self.protocol_params.d.numerator as f64;
-            let d_den = self.protocol_params.d.denominator.max(1) as f64;
-            d_num / d_den
-        };
+        // This two-tier approach ensures:
+        // - bprev uses curPP.d (from incrBlocks during the epoch)
+        // - RUPD uses prevPP.d (from the previous epoch's curPP)
+        let d = self.prev_d;
 
         // Block count comes from the snapshot (Haskell's bprev = BlocksMade
         // from the previous epoch, passed to startStep). For the first RUPD,

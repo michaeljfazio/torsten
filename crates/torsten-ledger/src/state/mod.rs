@@ -60,6 +60,10 @@ fn default_update_quorum() -> u64 {
     5 // Mainnet default: 5 out of 7 genesis delegates
 }
 
+fn default_d_one() -> f64 {
+    1.0 // Genesis default: d=1 (fully federated)
+}
+
 /// The complete ledger state.
 ///
 /// Large collections (`delegations`, `pool_params`, `reward_accounts`,
@@ -89,11 +93,13 @@ pub struct LedgerState {
     pub byron_epoch_length: u64,
     /// Current protocol parameters
     pub protocol_params: ProtocolParameters,
-    /// Protocol version from the PREVIOUS epoch (Haskell's prevPParams).
-    /// Used by the RUPD for d parameter lookup (startStep uses prevPParams).
-    /// Updated at each epoch boundary: prev = cur, then cur updated by PPUP.
-    #[serde(default)]
-    pub prev_protocol_version_major: u64,
+    /// Previous epoch's d parameter as f64 (Haskell's prevPParams.ppDG).
+    /// Used by the RUPD for eta calculation (startStep uses prevPParams).
+    /// Updated at each epoch boundary AFTER PPUP: prev_d = current effective d.
+    /// The NEXT epoch's RUPD will read this as prevPP.d.
+    /// At genesis this is 1.0 (d=1 from Shelley genesis).
+    #[serde(default = "default_d_one")]
+    pub prev_d: f64,
     /// Stake distribution
     pub stake_distribution: StakeDistributionState,
     /// Treasury balance
@@ -476,7 +482,7 @@ impl LedgerState {
             shelley_transition_epoch: 208, // mainnet default
             byron_epoch_length: 21600,     // mainnet default (10 * 2160)
             protocol_params: params,
-            prev_protocol_version_major: 0,
+            prev_d: 1.0, // Genesis: d=1
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),

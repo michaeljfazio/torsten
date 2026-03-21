@@ -34,35 +34,20 @@ impl LedgerState {
         debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
 
         // Capture bprev (nesBprev = nesBcur) BEFORE any param updates.
-        // The d value for overlay checking must be from the epoch that JUST
-        // ended — using the params that were in effect during that epoch.
-        // PPUP hasn't fired yet, so self.protocol_params still has the old values.
-        let d_for_bprev = if self.protocol_params.protocol_version_major >= 7 {
-            0.0
-        } else {
-            let d_n = self.protocol_params.d.numerator as f64;
-            let d_d = self.protocol_params.d.denominator.max(1) as f64;
-            d_n / d_d
-        };
-        debug!(
-            epoch = self.epoch.0,
-            new_epoch = new_epoch.0,
-            d_for_bprev,
-            proto = self.protocol_params.protocol_version_major,
-            raw_block_count = self.epoch_block_count,
-            raw_pools = self.epoch_blocks_by_pool.len(),
-            d_num = self.protocol_params.d.numerator,
-            d_den = self.protocol_params.d.denominator,
-            "bprev capture"
-        );
-        let (bprev_block_count, bprev_blocks_by_pool) = if d_for_bprev >= 0.8 {
-            (0u64, Arc::new(HashMap::new()))
-        } else {
-            (
-                self.epoch_block_count,
-                Arc::clone(&self.epoch_blocks_by_pool),
-            )
-        };
+        //
+        // In Haskell, `incrBlocks` checks `isOverlaySlot` for each block
+        // DURING the epoch using curPParams.d. We don't do per-block overlay
+        // checking — instead we count ALL blocks and rely on the fact that:
+        // - When d >= 0.8 (overlay), genesis delegates produce blocks with
+        //   key hashes that DON'T match any pool_id in the GO snapshot
+        // - The pool-block guard in calculate_rewards skips pools without
+        //   matching blocks in bprev
+        // - So overlay-era blocks naturally produce no pool rewards
+        //
+        // This avoids the timing issue where the d value at boundary capture
+        // time differs from the d value during the epoch (due to PPUP updates).
+        let bprev_block_count = self.epoch_block_count;
+        let bprev_blocks_by_pool = Arc::clone(&self.epoch_blocks_by_pool);
 
         // Step 1: Apply any pending reward update (backward compat for old snapshots).
         self.apply_pending_reward_update();
@@ -142,13 +127,6 @@ impl LedgerState {
         // at the top of process_epoch_transition.
         self.snapshots.bprev_block_count = bprev_block_count;
         self.snapshots.bprev_blocks_by_pool = bprev_blocks_by_pool;
-        debug!(
-            epoch = new_epoch.0,
-            bprev_blocks = self.snapshots.bprev_block_count,
-            bprev_pools = self.snapshots.bprev_blocks_by_pool.len(),
-            d_for_bprev,
-            "bprev updated"
-        );
 
         // Rebuild stake distribution from the full UTxO set at epoch boundaries.
         // During fast replay (needs_stake_rebuild=false), skip the expensive full
@@ -250,31 +228,35 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
-        // NOTE: prev_protocol_version_major is updated at the END of this
-        // function (after PPUP), capturing the curPP for the current epoch.
-        // The RUPD at the NEXT boundary will use it as prevPP.
+        // NOTE: prev_d is updated at the END of this function (after PPUP),
+        // capturing the effective d for the epoch starting now. The RUPD at
+        // the NEXT boundary will use it as prevPP.d.
 
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
-        // In Haskell, proposals targeting epoch E are evaluated at the (E-1)→E
-        // boundary by the UPEC rule (within NEWEPOCH). The updated params become
-        // `curPParams` for epoch E. Proposals are in `sgsCurProposals` which
-        // were promoted from `sgsFutureProposals` at the previous boundary.
+        // Haskell's PPUP uses a two-step promotion cycle:
+        //   1. Proposals submitted with ppupEpoch = N go to sgsFutureProposals
+        //      (because N ≠ currentEpoch when submitted)
+        //   2. At each NEWEPOCH boundary: updatePpup promotes
+        //      sgsFutureProposals → sgsCurProposals
+        //   3. UPEC evaluates sgsCurProposals → if quorum met, applies to curPP
         //
-        // Proposals targeting epoch N are applied at the N→N+1 boundary.
-        // On preview, proposals targeting epoch 1 (submitted in epoch 0) are
-        // applied at the 1→2 boundary. self.epoch still holds the old value
-        // (N) at this point — it's updated at the end of the transition.
+        // On preview: proposals targeting epoch 1 submitted at slot 0 (epoch 0):
+        //   - ppupEpoch=1 ≠ currentEpoch=0 → goes to future
+        //   - At 0→1 NEWEPOCH: promoted to current
+        //   - At 0→1 UPEC: evaluated and applied → curPP.d = 0
+        //   - Epoch 1 starts with d=0
         //
-        // NOTE: There's a remaining timing issue with proposals in the
-        // transition-triggering block (see #231). For now we use new_epoch-1
-        // which is equivalent to self.epoch.
-        // Try both the current epoch and the new epoch for proposals.
-        // On preview, proposals targeting epoch 1 are first processed at the
-        // 1→2 boundary (self.epoch=1), and proposals targeting epoch 2 at
-        // the 2→3 boundary (self.epoch=2).
-        let ppup_epoch = self.epoch;
-        if let Some(proposals) = self.pending_pp_updates.remove(&ppup_epoch) {
+        // Our simplified model: pending_pp_updates stores proposals by target
+        // epoch. At each boundary, we promote by looking up new_epoch (which
+        // matches the promotion cycle: future proposals targeting N are promoted
+        // and evaluated at the (N-1)→N boundary).
+        debug!(
+            new_epoch = new_epoch.0,
+            pending = ?self.pending_pp_updates.keys().map(|e| e.0).collect::<Vec<_>>(),
+            "PPUP: checking for proposals"
+        );
+        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::with_capacity(proposals.len());
@@ -307,12 +289,7 @@ impl LedgerState {
                     merge_field!(a0);
                     merge_field!(rho);
                     merge_field!(tau);
-                    // d is handled via protocol_version check (proto >= 7 → d=0).
-                    // Merging d from PPUP breaks epoch 3 because prevPParams timing
-                    // causes eta=0 when bprev is empty. The proto 7 upgrade naturally
-                    // sets d=0 at the 2→3 boundary, which matches the observed Koios
-                    // R+T pattern (full expansion through epoch 3).
-                    // merge_field!(d);
+                    merge_field!(d);
                     merge_field!(min_pool_cost);
                     merge_field!(ada_per_utxo_byte);
                     merge_field!(cost_models);
@@ -528,14 +505,23 @@ impl LedgerState {
         // evolving_nonce and candidate_nonce carry forward unchanged
         // (they are NOT reset at epoch boundaries)
 
-        // Capture prevPParams AFTER PPUP has updated curPP.
-        // In Haskell NEWEPOCH: prevPParams = old curPParams (before UPEC).
-        // But UPEC fires during this boundary, updating curPP.
-        // After UPEC: prevPP = old curPP, curPP = new (from UPEC).
-        // The next epoch's RUPD will use prevPP (this value).
-        // By capturing AFTER PPUP, we get curPP for the new epoch,
-        // which the NEXT epoch's RUPD will see as prevPP.
-        self.prev_protocol_version_major = self.protocol_params.protocol_version_major;
+        // Capture prev_d AFTER PPUP has updated curPP.
+        // Haskell: at each NEWEPOCH, prevPParams = old curPParams, then
+        // curPParams = pp' (from UPEC). The RUPD at the NEXT boundary
+        // reads prevPParams.ppDG for the d parameter.
+        //
+        // By capturing d AFTER PPUP, we store the effective d for the
+        // epoch that is STARTING now. The NEXT transition's RUPD will
+        // use this as prevPP.d.
+        //
+        // For Babbage+ (proto >= 7): ppDG returns 0 regardless of params.
+        self.prev_d = if self.protocol_params.protocol_version_major >= 7 {
+            0.0
+        } else {
+            let d_n = self.protocol_params.d.numerator as f64;
+            let d_d = self.protocol_params.d.denominator.max(1) as f64;
+            d_n / d_d
+        };
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
