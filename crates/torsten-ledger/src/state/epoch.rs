@@ -153,32 +153,32 @@ impl LedgerState {
         }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
-        // Pre-size to the number of distinct pools (upper-bounded by delegations).
+        //
+        // Only include delegations to REGISTERED pools (pool_params). In Haskell,
+        // `resolveActiveInstantStakeCredentials` filters delegations by pool
+        // registration status — credentials delegated to retired/unregistered
+        // pools are excluded from the snapshot entirely. This is critical because
+        // when a pool retires, its delegators' stake should NOT appear in subsequent
+        // snapshots even though the delegation record persists in the DState.
         let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
             HashMap::with_capacity(self.pool_params.len());
-        for (cred_hash, pool_id) in self.delegations.iter() {
-            let utxo_stake = self
-                .stake_distribution
-                .stake_map
-                .get(cred_hash)
-                .copied()
-                .unwrap_or(Lovelace(0));
-            let reward_balance = self
-                .reward_accounts
-                .get(cred_hash)
-                .copied()
-                .unwrap_or(Lovelace(0));
-            let total_stake = Lovelace(utxo_stake.0 + reward_balance.0);
-            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
-        }
-
-        // Build per-credential stake including reward balances. Clone the
-        // stake_map as the base and fold in reward account balances. The clone
-        // already carries the correct capacity from the original map.
         let mut snapshot_stake = self.stake_distribution.stake_map.clone();
         for (cred_hash, reward) in self.reward_accounts.iter() {
             if reward.0 > 0 {
                 *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
+            }
+        }
+        for (cred_hash, pool_id) in self.delegations.iter() {
+            // Skip delegations to unregistered/retired pools
+            if !self.pool_params.contains_key(pool_id) {
+                continue;
+            }
+            let total_cred_stake = snapshot_stake
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            if total_cred_stake.0 > 0 {
+                *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_cred_stake;
             }
         }
 
@@ -228,6 +228,7 @@ impl LedgerState {
             let mut dropped = 0u64;
             let pool_params = Arc::make_mut(&mut self.pool_params);
             for (pool_id, pool_reg) in self.future_pool_params.drain() {
+                #[allow(clippy::map_entry)] // intentional: different side-effects per branch
                 if pool_params.contains_key(&pool_id) {
                     // Pool still registered: update with new params
                     pool_params.insert(pool_id, pool_reg);
@@ -254,12 +255,18 @@ impl LedgerState {
         if let Some(retiring_pools) = self.pending_retirements.remove(&new_epoch) {
             let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
-                // Refund pool deposit to operator's registered reward account
+                // Refund pool deposit to operator's registered reward account.
+                // Also remove all delegations pointing to this pool, matching
+                // Haskell's POOLREAP which filters delegations to retired pools:
+                //   adjustedDelegs = Map.filter (\pid -> pid `Set.notMember` retired) delegs
                 if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
                     *Arc::make_mut(&mut self.reward_accounts)
                         .entry(op_key)
                         .or_insert(Lovelace(0)) += pool_deposit;
+                    // Remove delegations to the retired pool
+                    Arc::make_mut(&mut self.delegations)
+                        .retain(|_, delegated_pool| delegated_pool != pool_id);
                     debug!(
                         "Pool retired at epoch {}: {} (deposit {} refunded)",
                         new_epoch.0,
