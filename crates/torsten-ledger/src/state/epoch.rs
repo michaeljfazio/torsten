@@ -44,6 +44,17 @@ impl LedgerState {
             let d_d = self.protocol_params.d.denominator.max(1) as f64;
             d_n / d_d
         };
+        debug!(
+            epoch = self.epoch.0,
+            new_epoch = new_epoch.0,
+            d_for_bprev,
+            proto = self.protocol_params.protocol_version_major,
+            raw_block_count = self.epoch_block_count,
+            raw_pools = self.epoch_blocks_by_pool.len(),
+            d_num = self.protocol_params.d.numerator,
+            d_den = self.protocol_params.d.denominator,
+            "bprev capture"
+        );
         let (bprev_block_count, bprev_blocks_by_pool) = if d_for_bprev >= 0.8 {
             (0u64, Arc::new(HashMap::new()))
         } else {
@@ -292,6 +303,10 @@ impl LedgerState {
                     merge_field!(a0);
                     merge_field!(rho);
                     merge_field!(tau);
+                    // NOTE: d is NOT merged here. On preview, d=0 is proposed
+                    // alongside proto version updates. We handle d via the
+                    // protocol_version check (proto >= 7 → d=0) which correctly
+                    // delays the d change to match Haskell's prevPParams timing.
                     merge_field!(min_pool_cost);
                     merge_field!(ada_per_utxo_byte);
                     merge_field!(cost_models);
