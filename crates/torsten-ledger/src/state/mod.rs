@@ -476,6 +476,7 @@ impl LedgerState {
             shelley_transition_epoch: 208, // mainnet default
             byron_epoch_length: 21600,     // mainnet default (10 * 2160)
             protocol_params: params,
+            prev_protocol_version_major: 0,
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),
