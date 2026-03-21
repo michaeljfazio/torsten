@@ -86,20 +86,35 @@ impl LedgerState {
             let rupd = self.calculate_rewards_full(&go_snapshot, &bprev, self.snapshots.ss_fee);
             self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
             self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+
+            // Apply per-account rewards, matching Haskell's applyRUpdFiltered:
+            // rewards for REGISTERED credentials go to their reward accounts;
+            // rewards for UNREGISTERED credentials are forwarded to treasury.
+            // A credential is "registered" if it has an entry in reward_accounts
+            // (created by StakeRegistration certificate processing).
             let mut total_applied = 0u64;
+            let mut unregistered_total = 0u64;
             for (cred_hash, reward) in &rupd.rewards {
                 if reward.0 > 0 {
-                    *Arc::make_mut(&mut self.reward_accounts)
-                        .entry(*cred_hash)
-                        .or_insert(Lovelace(0)) += *reward;
-                    total_applied += reward.0;
+                    if self.reward_accounts.contains_key(cred_hash) {
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(*cred_hash)
+                            .or_insert(Lovelace(0)) += *reward;
+                        total_applied += reward.0;
+                    } else {
+                        // Unregistered credential: forward to treasury
+                        // (matches Haskell's frTotalUnregistered in applyRUpd)
+                        self.treasury.0 = self.treasury.0.saturating_add(reward.0);
+                        unregistered_total += reward.0;
+                    }
                 }
             }
-            if rupd.delta_treasury > 0 || total_applied > 0 {
+            if rupd.delta_treasury > 0 || total_applied > 0 || unregistered_total > 0 {
                 debug!(
                     epoch = new_epoch.0,
                     accounts = rupd.rewards.len(),
                     total_applied,
+                    unregistered_to_treasury = unregistered_total,
                     treasury_delta = rupd.delta_treasury,
                     reserves_delta = rupd.delta_reserves,
                     ss_fee = self.snapshots.ss_fee.0,
@@ -228,35 +243,48 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
-        // NOTE: prev_d is updated at the END of this function (after PPUP),
-        // capturing the effective d for the epoch starting now. The RUPD at
-        // the NEXT boundary will use it as prevPP.d.
+        // Capture prevPParams BEFORE PPUP updates curPP, matching Haskell's
+        // NEWPP rule: prevPParams = old curPParams (before this boundary's PPUP).
+        //
+        // prev_d: The RUPD at the NEXT boundary reads prevPParams.ppDG for d.
+        //   For Babbage+ (proto >= 7): ppDG returns 0 regardless of params.
+        // prev_protocol_version_major: Used for the pre-Babbage leader reward
+        //   prefilter (hardforkBabbageForgoRewardPrefilter).
+        let old_d = if self.protocol_params.protocol_version_major >= 7 {
+            0.0
+        } else {
+            let d_n = self.protocol_params.d.numerator as f64;
+            let d_d = self.protocol_params.d.denominator.max(1) as f64;
+            d_n / d_d
+        };
+        let old_proto_major = self.protocol_params.protocol_version_major;
 
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
         // Haskell's PPUP uses a two-step promotion cycle:
-        //   1. Proposals submitted with ppupEpoch = N go to sgsFutureProposals
-        //      (because N ≠ currentEpoch when submitted)
-        //   2. At each NEWEPOCH boundary: updatePpup promotes
-        //      sgsFutureProposals → sgsCurProposals
-        //   3. UPEC evaluates sgsCurProposals → if quorum met, applies to curPP
+        //   1. Proposals submitted during epoch E with ppupEpoch = E go to
+        //      sgsCurProposals; with ppupEpoch = E+1 go to sgsFutureProposals
+        //   2. At each NEWEPOCH boundary: UPEC evaluates sgsCurProposals (apply
+        //      if quorum met), then updatePpup promotes sgsFuture → sgsCur
+        //   3. Proposals targeting epoch N (ppupEpoch = N) are applied at the
+        //      N→(N+1) boundary (new_epoch = N+1)
         //
-        // On preview: proposals targeting epoch 1 submitted at slot 0 (epoch 0):
-        //   - ppupEpoch=1 ≠ currentEpoch=0 → goes to future
-        //   - At 0→1 NEWEPOCH: promoted to current
-        //   - At 0→1 UPEC: evaluated and applied → curPP.d = 0
-        //   - Epoch 1 starts with d=0
+        // Our simplified model: pending_pp_updates stores proposals under their
+        // ppupEpoch as key. At boundary (new_epoch = N), we look up key = N-1
+        // since proposals targeting epoch N-1 are applied at this boundary.
         //
-        // Our simplified model: pending_pp_updates stores proposals by target
-        // epoch. At each boundary, we promote by looking up new_epoch (which
-        // matches the promotion cycle: future proposals targeting N are promoted
-        // and evaluated at the (N-1)→N boundary).
+        // This handles both Haskell cases:
+        //   - ppupEpoch = E (= currentEpoch): sgsCur, applied at E→E+1 = N-1→N
+        //   - ppupEpoch = E+1 (≠ currentEpoch): sgsFuture, promoted at E→E+1,
+        //     applied at (E+1)→(E+2) = N-1→N when ppupEpoch = N-1
+        let lookup_epoch = EpochNo(new_epoch.0.saturating_sub(1));
         debug!(
             new_epoch = new_epoch.0,
+            lookup_epoch = lookup_epoch.0,
             pending = ?self.pending_pp_updates.keys().map(|e| e.0).collect::<Vec<_>>(),
             "PPUP: checking for proposals"
         );
-        if let Some(proposals) = self.pending_pp_updates.remove(&new_epoch) {
+        if let Some(proposals) = self.pending_pp_updates.remove(&lookup_epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::with_capacity(proposals.len());
@@ -342,10 +370,12 @@ impl LedgerState {
             }
         }
         // Clean up proposals targeting past epochs (already applied above).
-        // Keep proposals targeting new_epoch or later — they'll be applied at
-        // the NEXT epoch boundary (new_epoch -> new_epoch+1).
+        // Keep proposals with key >= new_epoch-1 since we look up key = N-1
+        // at boundary new_epoch = N. Proposals already consumed are removed
+        // by the `remove` call above. Retain proposals that may be needed at
+        // the next boundary or later.
         self.pending_pp_updates
-            .retain(|epoch, _| *epoch >= new_epoch);
+            .retain(|epoch, _| *epoch >= lookup_epoch);
 
         // Ratify governance proposals that have met their voting thresholds
         self.ratify_proposals();
@@ -505,23 +535,11 @@ impl LedgerState {
         // evolving_nonce and candidate_nonce carry forward unchanged
         // (they are NOT reset at epoch boundaries)
 
-        // Capture prev_d AFTER PPUP has updated curPP.
-        // Haskell: at each NEWEPOCH, prevPParams = old curPParams, then
-        // curPParams = pp' (from UPEC). The RUPD at the NEXT boundary
-        // reads prevPParams.ppDG for the d parameter.
-        //
-        // By capturing d AFTER PPUP, we store the effective d for the
-        // epoch that is STARTING now. The NEXT transition's RUPD will
-        // use this as prevPP.d.
-        //
-        // For Babbage+ (proto >= 7): ppDG returns 0 regardless of params.
-        self.prev_d = if self.protocol_params.protocol_version_major >= 7 {
-            0.0
-        } else {
-            let d_n = self.protocol_params.d.numerator as f64;
-            let d_d = self.protocol_params.d.denominator.max(1) as f64;
-            d_n / d_d
-        };
+        // Set prevPParams fields from values captured BEFORE PPUP (old_d, old_proto_major).
+        // Haskell's NEWPP: prevPParams = old curPParams (before this PPUP).
+        // The RUPD at the NEXT boundary reads these for d and leader reward prefilter.
+        self.prev_d = old_d;
+        self.prev_protocol_version_major = old_proto_major;
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);

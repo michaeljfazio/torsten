@@ -966,8 +966,23 @@ impl LedgerState {
             }
         }
 
-        // Track block production by pool (issuer vkey hash)
-        if !block.header.issuer_vkey.is_empty() {
+        // Track block production by pool (issuer vkey hash).
+        //
+        // Matches Haskell's `incrBlocks`: only non-overlay blocks are counted
+        // in BlocksMade. When d >= 0.8 (federated era), all/most slots are
+        // overlay slots and blocks should NOT be counted toward pool rewards.
+        // For Babbage+ (proto >= 7), d = 0 by definition (ppDG returns minBound).
+        //
+        // This is critical for reward calculation: pools only receive rewards
+        // for blocks that appear in BlocksMade (bprev). Counting overlay blocks
+        // would incorrectly award pool rewards during federated epochs.
+        let current_d = if self.protocol_params.protocol_version_major >= 7 {
+            0.0
+        } else {
+            self.protocol_params.d.numerator as f64
+                / self.protocol_params.d.denominator.max(1) as f64
+        };
+        if current_d < 0.8 && !block.header.issuer_vkey.is_empty() {
             let pool_id = torsten_primitives::hash::blake2b_224(&block.header.issuer_vkey);
             *Arc::make_mut(&mut self.epoch_blocks_by_pool)
                 .entry(pool_id)

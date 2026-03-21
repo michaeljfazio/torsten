@@ -121,22 +121,30 @@ impl LedgerState {
             // Apply treasury increase (tau cut + undistributed)
             self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
 
-            // Apply per-account rewards
+            // Apply per-account rewards (matching Haskell's applyRUpdFiltered):
+            // registered credentials → reward account; unregistered → treasury.
             let mut total_applied = 0u64;
+            let mut unregistered_total = 0u64;
             for (cred_hash, reward) in &rupd.rewards {
                 if reward.0 > 0 {
-                    *Arc::make_mut(&mut self.reward_accounts)
-                        .entry(*cred_hash)
-                        .or_insert(Lovelace(0)) += *reward;
-                    total_applied += reward.0;
+                    if self.reward_accounts.contains_key(cred_hash) {
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(*cred_hash)
+                            .or_insert(Lovelace(0)) += *reward;
+                        total_applied += reward.0;
+                    } else {
+                        self.treasury.0 = self.treasury.0.saturating_add(reward.0);
+                        unregistered_total += reward.0;
+                    }
                 }
             }
 
             debug!(
-                "Applied pending reward update: {} lovelace to {} accounts, \
-                 treasury +{}, reserves -{}",
+                "Applied pending reward update: {} lovelace to {} accounts \
+                 ({} unregistered→treasury), treasury +{}, reserves -{}",
                 total_applied,
                 rupd.rewards.len(),
+                unregistered_total,
                 rupd.delta_treasury,
                 rupd.delta_reserves,
             );
@@ -526,11 +534,30 @@ impl LedgerState {
                 }
             }
 
-            // Operator reward goes to pool's registered reward account
+            // Operator (leader) reward goes to pool's registered reward account.
+            //
+            // Pre-Babbage leader reward prefilter (hardforkBabbageForgoRewardPrefilter):
+            // When prevPParams.protocolVersion <= 6, leader rewards are only delivered
+            // if the pool's reward account credential is registered in the DState
+            // rewards map. Unregistered reward accounts cause the leader reward to be
+            // silently dropped (stays in deltaR2 = back to reserves).
+            // For proto > 6 (Babbage+), the prefilter is disabled and all leader
+            // rewards are included regardless of registration status.
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                *reward_map.entry(op_key).or_insert(Lovelace(0)) += Lovelace(operator_reward);
-                total_distributed += operator_reward;
+                let prefilter_active = self.prev_protocol_version_major <= 6;
+                let account_registered = self.reward_accounts.contains_key(&op_key);
+                if !prefilter_active || account_registered {
+                    *reward_map.entry(op_key).or_insert(Lovelace(0)) +=
+                        Lovelace(operator_reward);
+                    total_distributed += operator_reward;
+                } else {
+                    debug!(
+                        pool = ?pool_id.as_bytes()[..4],
+                        operator_reward,
+                        "Leader reward dropped: pre-Babbage prefilter (proto <= 6, unregistered reward account)"
+                    );
+                }
             }
         }
 
