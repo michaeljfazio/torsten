@@ -7,6 +7,7 @@ use torsten_primitives::value::Lovelace;
 use tracing::debug;
 
 /// Returns true if the certificate is Conway-only and requires protocol version >= 9.
+#[allow(dead_code)]
 pub(crate) fn is_conway_only_certificate(cert: &Certificate) -> bool {
     matches!(
         cert,
@@ -100,7 +101,10 @@ impl LedgerState {
             } => {
                 let key = credential_to_hash(credential);
                 Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
-                debug!("Stake delegated to pool: {}", pool_hash.to_hex());
+                debug!(
+                    "Stake delegated to pool: {}",
+                    pool_hash.to_hex()
+                );
             }
             Certificate::PoolRegistration(params) => {
                 let pool_reg = PoolRegistration {
@@ -128,8 +132,7 @@ impl LedgerState {
                     self.pending_retirements
                         .retain(|_, pools| !pools.is_empty());
                     // Re-registration: defer to future_pool_params
-                    self.future_pool_params
-                        .insert(params.operator, pool_reg);
+                    self.future_pool_params.insert(params.operator, pool_reg);
                     debug!(
                         "Pool re-registered (deferred to next epoch, pending retirement cancelled): {}",
                         params.operator.to_hex()

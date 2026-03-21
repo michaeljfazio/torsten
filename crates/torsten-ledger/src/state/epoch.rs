@@ -194,7 +194,8 @@ impl LedgerState {
             epoch = new_epoch.0,
             credentials = self.stake_distribution.stake_map.len(),
             delegations = self.delegations.len(),
-            pools = pool_stake.len(),
+            pool_params = self.pool_params.len(),
+            pools_with_stake = pool_stake.len(),
             total_utxo_stake_ada = total_utxo_stake / 1_000_000,
             total_pool_stake_ada = total_pool_stake / 1_000_000,
             "Epoch snapshot: stake distribution rebuilt from UTxO set"
@@ -214,19 +215,39 @@ impl LedgerState {
         });
 
         // Apply future pool parameters (re-registrations deferred from previous epoch).
-        // In Haskell's POOL STS rule, re-registrations go to futurePoolParams and are
-        // applied at the next epoch boundary. This ensures the snapshot captured at
-        // this boundary uses the OLD pool parameters, matching the Haskell GO snapshot.
+        //
+        // In Haskell's POOLREAP, futurePoolParams are merged with psStakePools using
+        // Map.merge with Map.dropMissing for future-only entries. This means:
+        //   - Pools in BOTH future AND current: update params from future ✓
+        //   - Pools ONLY in current: keep as-is ✓
+        //   - Pools ONLY in future (e.g., pool retired between re-reg and boundary): DROPPED
+        //
+        // This prevents retired pools from being resurrected by stale futurePoolParams.
         if !self.future_pool_params.is_empty() {
-            let count = self.future_pool_params.len();
+            let mut applied = 0u64;
+            let mut dropped = 0u64;
             let pool_params = Arc::make_mut(&mut self.pool_params);
             for (pool_id, pool_reg) in self.future_pool_params.drain() {
-                pool_params.insert(pool_id, pool_reg);
+                if pool_params.contains_key(&pool_id) {
+                    // Pool still registered: update with new params
+                    pool_params.insert(pool_id, pool_reg);
+                    applied += 1;
+                } else {
+                    // Pool no longer registered (retired): drop the future params
+                    // Matches Haskell's Map.dropMissing behavior
+                    debug!(
+                        "Dropped future pool params for retired pool: {}",
+                        pool_id.to_hex()
+                    );
+                    dropped += 1;
+                }
             }
-            debug!(
-                "Applied {} future pool param updates at epoch {}",
-                count, new_epoch.0
-            );
+            if applied > 0 || dropped > 0 {
+                debug!(
+                    "Future pool params at epoch {}: {} applied, {} dropped (retired)",
+                    new_epoch.0, applied, dropped
+                );
+            }
         }
 
         // Process pending pool retirements for this epoch

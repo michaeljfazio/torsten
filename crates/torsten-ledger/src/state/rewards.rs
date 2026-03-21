@@ -154,6 +154,7 @@ impl LedgerState {
     /// Calculate rewards using the GO snapshot and a separate fee value.
     ///
     /// Legacy entry point that uses GO snapshot for both stake AND block data.
+    #[allow(dead_code)]
     pub(crate) fn calculate_rewards_with_fee(
         &self,
         go_snapshot: &StakeSnapshot,
@@ -188,6 +189,7 @@ impl LedgerState {
     ///
     /// Legacy entry point that reads fees from the snapshot itself. New code
     /// should use `calculate_rewards_full` which separates GO/bprev/fees.
+    #[cfg(test)]
     pub(crate) fn calculate_rewards(&self, rupd_snapshot: &StakeSnapshot) -> PendingRewardUpdate {
         self.calculate_rewards_inner(rupd_snapshot, rupd_snapshot, rupd_snapshot.epoch_fees.0)
     }
