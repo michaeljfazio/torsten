@@ -213,6 +213,22 @@ impl LedgerState {
             epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
+        // Apply future pool parameters (re-registrations deferred from previous epoch).
+        // In Haskell's POOL STS rule, re-registrations go to futurePoolParams and are
+        // applied at the next epoch boundary. This ensures the snapshot captured at
+        // this boundary uses the OLD pool parameters, matching the Haskell GO snapshot.
+        if !self.future_pool_params.is_empty() {
+            let count = self.future_pool_params.len();
+            let pool_params = Arc::make_mut(&mut self.pool_params);
+            for (pool_id, pool_reg) in self.future_pool_params.drain() {
+                pool_params.insert(pool_id, pool_reg);
+            }
+            debug!(
+                "Applied {} future pool param updates at epoch {}",
+                count, new_epoch.0
+            );
+        }
+
         // Process pending pool retirements for this epoch
         if let Some(retiring_pools) = self.pending_retirements.remove(&new_epoch) {
             let pool_deposit = self.protocol_params.pool_deposit;

@@ -117,6 +117,9 @@ impl LedgerState {
                     metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
                 };
                 // If the pool is re-registering, cancel any pending retirement
+                // and store new params in future_pool_params (applied at next epoch
+                // boundary, matching Haskell's POOL STS futurePoolParams mechanism).
+                // First registrations go directly to pool_params.
                 if self.pool_params.contains_key(&params.operator) {
                     for pools in self.pending_retirements.values_mut() {
                         pools.retain(|id| id != &params.operator);
@@ -124,14 +127,18 @@ impl LedgerState {
                     // Remove empty epoch entries
                     self.pending_retirements
                         .retain(|_, pools| !pools.is_empty());
+                    // Re-registration: defer to future_pool_params
+                    self.future_pool_params
+                        .insert(params.operator, pool_reg);
                     debug!(
-                        "Pool re-registered (pending retirement cancelled): {}",
+                        "Pool re-registered (deferred to next epoch, pending retirement cancelled): {}",
                         params.operator.to_hex()
                     );
                 } else {
+                    // First registration: apply immediately
+                    Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
                     debug!("Pool registered: {}", params.operator.to_hex());
                 }
-                Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg);
             }
             Certificate::PoolRetirement { pool_hash, epoch } => {
                 // Apply the retirement unconditionally. The e_max check

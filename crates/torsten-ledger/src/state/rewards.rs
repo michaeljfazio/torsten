@@ -246,10 +246,7 @@ impl LedgerState {
         // Use sum of epoch_blocks_by_pool (= BlocksMade total in Haskell) for
         // actual block count. epoch_block_count may include non-pool blocks
         // (e.g., blocks with empty issuer_vkey that aren't in BlocksMade).
-        let actual_blocks: u64 = block_snapshot
-            .epoch_blocks_by_pool
-            .values()
-            .sum();
+        let actual_blocks: u64 = block_snapshot.epoch_blocks_by_pool.values().sum();
 
         let rho = Rat::from_i128(rho_num, rho_den);
 
@@ -440,10 +437,7 @@ impl LedgerState {
             //   z0 = 1/nOpt
             //   sigma' = min(sigma, z0), p' = min(p, z0)
             //   maxPool = floor(R/(1+a0) * (sigma' + p' * a0 * (sigma' - p'*(z0-sigma')/z0) / z0))
-            let a0_r = Rat::from_i128(
-                pp.a0.numerator as i128,
-                pp.a0.denominator.max(1) as i128,
-            );
+            let a0_r = Rat::from_i128(pp.a0.numerator as i128, pp.a0.denominator.max(1) as i128);
             let z0 = Rat::from_i128(1, n_opt as i128);
             let sigma_raw = Rat::from_i128(pool_active_stake.0 as i128, total_stake as i128);
             let p_raw = Rat::from_i128(pool_reg.pledge.0 as i128, total_stake as i128);
@@ -580,8 +574,7 @@ impl LedgerState {
             // a registered account or proto > 6 (prefilter disabled).
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                *reward_map.entry(op_key).or_insert(Lovelace(0)) +=
-                    Lovelace(operator_reward);
+                *reward_map.entry(op_key).or_insert(Lovelace(0)) += Lovelace(operator_reward);
                 total_distributed += operator_reward;
             }
         }

@@ -128,6 +128,15 @@ pub struct LedgerState {
     pub delegations: Arc<HashMap<Hash32, Hash28>>,
     /// Pool registrations: pool_id -> pool registration (Arc for copy-on-write)
     pub pool_params: Arc<HashMap<Hash28, PoolRegistration>>,
+    /// Future pool parameters for re-registrations (Haskell's futurePoolParams).
+    ///
+    /// In Cardano, pool re-registrations take effect at the NEXT epoch boundary.
+    /// When a pool that is already registered submits a new PoolRegistration
+    /// certificate, the new parameters are stored here and applied during
+    /// the next epoch transition's POOLREAP step (before retirement processing).
+    /// First registrations go directly to pool_params (active at epoch N+2).
+    #[serde(default)]
+    pub future_pool_params: HashMap<Hash28, PoolRegistration>,
     /// Pool retirements pending at a given epoch
     pub pending_retirements: BTreeMap<EpochNo, Vec<Hash28>>,
     /// Stake snapshots for the Cardano "mark/set/go" snapshot model
@@ -501,13 +510,14 @@ impl LedgerState {
             byron_epoch_length: 21600,     // mainnet default (10 * 2160)
             prev_protocol_params: params.clone(),
             protocol_params: params,
-            prev_d: 1.0, // Genesis: d=1
+            prev_d: 1.0,                    // Genesis: d=1
             prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),
             delegations: Arc::new(HashMap::new()),
             pool_params: Arc::new(HashMap::new()),
+            future_pool_params: HashMap::new(),
             pending_retirements: BTreeMap::new(),
             snapshots: EpochSnapshots::default(),
             reward_accounts: Arc::new(HashMap::new()),
