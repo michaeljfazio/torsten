@@ -153,32 +153,29 @@ impl LedgerState {
         }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
-        //
-        // Only include delegations to REGISTERED pools (pool_params). In Haskell,
-        // `resolveActiveInstantStakeCredentials` filters delegations by pool
-        // registration status — credentials delegated to retired/unregistered
-        // pools are excluded from the snapshot entirely. This is critical because
-        // when a pool retires, its delegators' stake should NOT appear in subsequent
-        // snapshots even though the delegation record persists in the DState.
         let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
             HashMap::with_capacity(self.pool_params.len());
+        for (cred_hash, pool_id) in self.delegations.iter() {
+            let utxo_stake = self
+                .stake_distribution
+                .stake_map
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let reward_balance = self
+                .reward_accounts
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let total_stake = Lovelace(utxo_stake.0 + reward_balance.0);
+            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
+        }
+
+        // Build per-credential stake including reward balances for the snapshot.
         let mut snapshot_stake = self.stake_distribution.stake_map.clone();
         for (cred_hash, reward) in self.reward_accounts.iter() {
             if reward.0 > 0 {
                 *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
-            }
-        }
-        for (cred_hash, pool_id) in self.delegations.iter() {
-            // Skip delegations to unregistered/retired pools
-            if !self.pool_params.contains_key(pool_id) {
-                continue;
-            }
-            let total_cred_stake = snapshot_stake
-                .get(cred_hash)
-                .copied()
-                .unwrap_or(Lovelace(0));
-            if total_cred_stake.0 > 0 {
-                *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_cred_stake;
             }
         }
 
@@ -193,6 +190,7 @@ impl LedgerState {
         debug!(
             epoch = new_epoch.0,
             credentials = self.stake_distribution.stake_map.len(),
+            reward_accounts = self.reward_accounts.len(),
             delegations = self.delegations.len(),
             pool_params = self.pool_params.len(),
             pools_with_stake = pool_stake.len(),
