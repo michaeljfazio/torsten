@@ -89,6 +89,11 @@ pub struct LedgerState {
     pub byron_epoch_length: u64,
     /// Current protocol parameters
     pub protocol_params: ProtocolParameters,
+    /// Protocol version from the PREVIOUS epoch (Haskell's prevPParams).
+    /// Used by the RUPD for d parameter lookup (startStep uses prevPParams).
+    /// Updated at each epoch boundary: prev = cur, then cur updated by PPUP.
+    #[serde(default)]
+    pub prev_protocol_version_major: u64,
     /// Stake distribution
     pub stake_distribution: StakeDistributionState,
     /// Treasury balance

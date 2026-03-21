@@ -215,12 +215,21 @@ impl LedgerState {
         // ensures full monetary expansion during the federated era (Shelley/Allegra/Mary).
         // On preview testnet d starts at 1.0 from genesis, so this guard is critical.
         //
-        // In Babbage+ (protocol version >= 7), d is always 0.
-        // The Shelley spec defines d for Shelley/Allegra/Mary (proto 2-4).
-        // Alonzo (proto 5-6) still has d but it's typically 0 on testnets.
-        // Babbage (proto 7-8) and Conway (proto 9+) hardcode d=0.
-        let d = if self.protocol_params.protocol_version_major >= 7 {
-            0.0 // Babbage+ always d=0
+        // Haskell's startStep uses `prevPParams` for d (not curPParams).
+        // prevPParams = the params from the PREVIOUS epoch (set at the last
+        // NEWEPOCH boundary: prevPP = old curPP, then curPP updated by PPUP).
+        //
+        // Our code uses self.protocol_params which is curPParams (already updated
+        // by PPUP at the current boundary). To match Haskell's prevPParams, we
+        // use self.prev_protocol_version_major which captures the version BEFORE
+        // the PPUP update.
+        //
+        // For Babbage+ (ppDG returns 0), prevPParams.ppDG is also 0 once
+        // the PREVIOUS epoch was Babbage. This means d=0 takes effect one
+        // epoch AFTER the proto 7 update (matching Haskell's prevPParams).
+        let prev_proto = self.prev_protocol_version_major;
+        let d = if prev_proto >= 7 {
+            0.0 // Babbage+ ppDG returns 0
         } else {
             let d_num = self.protocol_params.d.numerator as f64;
             let d_den = self.protocol_params.d.denominator.max(1) as f64;

@@ -250,6 +250,11 @@ impl LedgerState {
         self.pending_retirements
             .retain(|epoch, _| *epoch >= new_epoch);
 
+        // Capture prevPParams before PPUP updates curPParams.
+        // Haskell: prevPParams = old curPParams; curPParams = pp' (from PPUP).
+        // The RUPD uses prevPParams for d and other fields.
+        self.prev_protocol_version_major = self.protocol_params.protocol_version_major;
+
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
         // In Haskell, proposals targeting epoch E are evaluated at the (E-1)→E
