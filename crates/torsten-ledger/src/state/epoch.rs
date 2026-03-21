@@ -307,10 +307,12 @@ impl LedgerState {
                     merge_field!(a0);
                     merge_field!(rho);
                     merge_field!(tau);
-                    // NOTE: d is NOT merged here. On preview, d=0 is proposed
-                    // alongside proto version updates. We handle d via the
-                    // protocol_version check (proto >= 7 → d=0) which correctly
-                    // delays the d change to match Haskell's prevPParams timing.
+                    // d is handled via protocol_version check (proto >= 7 → d=0).
+                    // Merging d from PPUP breaks epoch 3 because prevPParams timing
+                    // causes eta=0 when bprev is empty. The proto 7 upgrade naturally
+                    // sets d=0 at the 2→3 boundary, which matches the observed Koios
+                    // R+T pattern (full expansion through epoch 3).
+                    // merge_field!(d);
                     merge_field!(min_pool_cost);
                     merge_field!(ada_per_utxo_byte);
                     merge_field!(cost_models);
