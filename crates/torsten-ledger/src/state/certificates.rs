@@ -27,6 +27,64 @@ pub(crate) fn is_conway_only_certificate(cert: &Certificate) -> bool {
 }
 
 impl LedgerState {
+    /// Process a certificate with pointer tracking for Pointer address resolution.
+    ///
+    /// StakeRegistration certificates create entries in the pointer_map,
+    /// mapping (slot, tx_index, cert_index) → credential hash. This enables
+    /// resolution of Pointer addresses (type 4/5) in stake_credential_hash.
+    pub(crate) fn process_certificate_with_pointer(
+        &mut self,
+        cert: &Certificate,
+        slot: u64,
+        tx_index: u64,
+        cert_index: u64,
+    ) {
+        // Populate pointer_map for StakeRegistration certificates
+        if let Certificate::StakeRegistration(credential)
+        | Certificate::ConwayStakeRegistration {
+            credential,
+            deposit: _,
+        } = cert
+        {
+            let key = credential_to_hash(credential);
+            let pointer = torsten_primitives::credentials::Pointer {
+                slot,
+                tx_index,
+                cert_index,
+            };
+            self.pointer_map.insert(pointer, key);
+        }
+        // Also handle combined registration certificates
+        if let Certificate::RegStakeDeleg {
+            credential,
+            pool_hash: _,
+            ..
+        }
+        | Certificate::RegStakeVoteDeleg {
+            credential,
+            pool_hash: _,
+            drep: _,
+            ..
+        }
+        | Certificate::VoteRegDeleg {
+            credential,
+            drep: _,
+            ..
+        } = cert
+        {
+            let key = credential_to_hash(credential);
+            let pointer = torsten_primitives::credentials::Pointer {
+                slot,
+                tx_index,
+                cert_index,
+            };
+            self.pointer_map.insert(pointer, key);
+        }
+
+        // Delegate to the existing process_certificate for the actual state updates
+        self.process_certificate(cert);
+    }
+
     /// Process a certificate and update the ledger state accordingly.
     ///
     /// Certificates are applied unconditionally during block application.
@@ -53,15 +111,12 @@ impl LedgerState {
             }
             Certificate::StakeDeregistration(credential) => {
                 let key = credential_to_hash(credential);
-                // Apply deregistration unconditionally during block application.
-                // The zero-balance check is a Phase-1 tx validation rule (DELEG STS),
-                // not a block application rule. The block producer already validated
-                // this — re-checking during replay with accumulated rewards causes
-                // false rejections and stale delegation entries.
                 self.stake_distribution.stake_map.remove(&key);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);
+                // Remove pointer entries for this credential
+                self.pointer_map.retain(|_, v| *v != key);
                 debug!("Stake key deregistered: {}", key.to_hex());
             }
             Certificate::ConwayStakeRegistration {

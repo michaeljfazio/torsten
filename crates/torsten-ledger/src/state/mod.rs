@@ -143,6 +143,14 @@ pub struct LedgerState {
     pub snapshots: EpochSnapshots,
     /// Reward accounts: stake credential hash -> accumulated rewards (Arc for copy-on-write)
     pub reward_accounts: Arc<HashMap<Hash32, Lovelace>>,
+    /// Pointer map: certificate pointers → credential hashes (Haskell's DState ptrs).
+    ///
+    /// When a StakeRegistration certificate is processed at (slot, tx_index, cert_index),
+    /// it creates a pointer entry mapping to the credential hash. Pointer addresses
+    /// (type 4/5) reference these pointers instead of embedding the credential directly.
+    /// Used by `stake_credential_hash` to resolve Pointer addresses.
+    #[serde(default)]
+    pub pointer_map: HashMap<torsten_primitives::credentials::Pointer, Hash32>,
     /// Fees collected in the current epoch
     pub epoch_fees: Lovelace,
     /// Number of blocks produced by each pool in the current epoch (Arc for copy-on-write)
@@ -521,6 +529,7 @@ impl LedgerState {
             pending_retirements: BTreeMap::new(),
             snapshots: EpochSnapshots::default(),
             reward_accounts: Arc::new(HashMap::new()),
+            pointer_map: HashMap::new(),
             epoch_fees: Lovelace(0),
             epoch_blocks_by_pool: Arc::new(HashMap::new()),
             epoch_block_count: 0,
@@ -933,8 +942,26 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
     credential.to_hash().to_hash32_padded()
 }
 
-/// Extract the staking credential hash from an address (Base and Reward addresses only).
-/// Returns None for Enterprise, Pointer, and Byron addresses which have no staking part.
+/// Extract the staking credential hash from an address.
+///
+/// Handles Base addresses (embedded credential), Reward addresses, and
+/// Pointer addresses (resolved via the pointer_map, matching Haskell's
+/// DState ptrs). Returns None for Enterprise and Byron addresses.
+fn stake_credential_hash_with_ptrs(
+    address: &torsten_primitives::address::Address,
+    pointer_map: &HashMap<torsten_primitives::credentials::Pointer, Hash32>,
+) -> Option<Hash32> {
+    use torsten_primitives::address::Address;
+    match address {
+        Address::Base(base) => Some(credential_to_hash(&base.stake)),
+        Address::Reward(reward) => Some(credential_to_hash(&reward.stake)),
+        Address::Pointer(ptr_addr) => pointer_map.get(&ptr_addr.pointer).copied(),
+        _ => None,
+    }
+}
+
+/// Legacy: Extract staking credential hash without pointer resolution.
+/// Used in contexts where the pointer_map isn't available.
 fn stake_credential_hash(address: &torsten_primitives::address::Address) -> Option<Hash32> {
     use torsten_primitives::address::Address;
     match address {
