@@ -203,10 +203,13 @@ impl LedgerState {
         block_snapshot: &StakeSnapshot,
         epoch_fees: u64,
     ) -> PendingRewardUpdate {
-        let rho_num = self.protocol_params.rho.numerator as i128;
-        let rho_den = self.protocol_params.rho.denominator.max(1) as i128;
-        let tau_num = self.protocol_params.tau.numerator as i128;
-        let tau_den = self.protocol_params.tau.denominator.max(1) as i128;
+        // Use prev_protocol_params for ALL parameter values, matching Haskell's
+        // startStep which reads from prevPParams (= curPP before the last PPUP).
+        let pp = &self.prev_protocol_params;
+        let rho_num = pp.rho.numerator as i128;
+        let rho_den = pp.rho.denominator.max(1) as i128;
+        let tau_num = pp.tau.numerator as i128;
+        let tau_den = pp.tau.denominator.max(1) as i128;
 
         // Monetary expansion with eta performance adjustment.
         //
@@ -253,7 +256,7 @@ impl LedgerState {
         } else {
             // expectedBlocks = floor((1 - d) * f * epochLength)
             let one_minus_d = 1.0 - d;
-            let f = self.protocol_params.active_slot_coeff();
+            let f = pp.active_slot_coeff();
             let raw_expected_blocks = (one_minus_d * f * self.epoch_length as f64).floor() as u64;
             if raw_expected_blocks == 0 {
                 warn!(
@@ -328,8 +331,8 @@ impl LedgerState {
         // Total blocks produced in the snapshot epoch (for apparent performance)
         let total_blocks_in_epoch = actual_blocks.max(1);
 
-        // Saturation point: z0 = 1/nOpt
-        let n_opt = self.protocol_params.n_opt.max(1);
+        // Saturation point: z0 = 1/nOpt (from prevPParams)
+        let n_opt = pp.n_opt.max(1);
 
         let mut total_distributed: u64 = 0;
         let mut reward_map: HashMap<Hash32, Lovelace> = HashMap::new();
@@ -402,8 +405,8 @@ impl LedgerState {
             //   sigma' = min(sigma, z0), p' = min(p, z0)
             //   maxPool = floor(R/(1+a0) * (sigma' + p' * a0 * (sigma' - p'*(z0-sigma')/z0) / z0))
             let a0_r = Rat::from_i128(
-                self.protocol_params.a0.numerator as i128,
-                self.protocol_params.a0.denominator.max(1) as i128,
+                pp.a0.numerator as i128,
+                pp.a0.denominator.max(1) as i128,
             );
             let z0 = Rat::from_i128(1, n_opt as i128);
             let sigma_raw = Rat::from_i128(pool_active_stake.0 as i128, total_stake as i128);

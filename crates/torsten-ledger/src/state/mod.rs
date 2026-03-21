@@ -68,6 +68,10 @@ fn default_prev_proto_major() -> u64 {
     6 // Genesis default: Alonzo (proto 6)
 }
 
+fn default_prev_protocol_params() -> ProtocolParameters {
+    ProtocolParameters::mainnet_defaults()
+}
+
 /// The complete ledger state.
 ///
 /// Large collections (`delegations`, `pool_params`, `reward_accounts`,
@@ -95,18 +99,23 @@ pub struct LedgerState {
     /// Byron epoch length in slots (10 * k). 0 = mainnet default (21600).
     #[serde(default)]
     pub byron_epoch_length: u64,
-    /// Current protocol parameters
+    /// Current protocol parameters (curPParams in Haskell).
     pub protocol_params: ProtocolParameters,
-    /// Previous epoch's d parameter as f64 (Haskell's prevPParams.ppDG).
-    /// Used by the RUPD for eta calculation (startStep uses prevPParams).
-    /// Captured BEFORE PPUP at each boundary: prev_d = old curPP.d.
-    /// At genesis this is 1.0 (d=1 from Shelley genesis).
+    /// Previous epoch's protocol parameters (Haskell's prevPParams).
+    ///
+    /// Haskell's NEWPP rule: prevPParams = old curPParams (BEFORE each PPUP).
+    /// The RUPD uses prevPParams for ALL parameter values: rho, tau, a0, n_opt,
+    /// active_slot_coeff, d (via ppDG), protocol_version, etc.
+    ///
+    /// Updated at each epoch boundary: prev_protocol_params = curPP before PPUP.
+    /// At genesis: initialized to the same as protocol_params.
+    #[serde(default = "default_prev_protocol_params")]
+    pub prev_protocol_params: ProtocolParameters,
+    /// Cached prev_d for backward compatibility and serde.
+    /// Derived from prev_protocol_params at each boundary.
     #[serde(default = "default_d_one")]
     pub prev_d: f64,
-    /// Previous epoch's protocol major version (Haskell's prevPParams.protocolVersion).
-    /// Used for the pre-Babbage leader reward prefilter (proto <= 6 gates
-    /// leader rewards on reward account registration).
-    /// Captured BEFORE PPUP at each boundary.
+    /// Cached prev protocol major version for backward compatibility.
     #[serde(default = "default_prev_proto_major")]
     pub prev_protocol_version_major: u64,
     /// Stake distribution
@@ -490,6 +499,7 @@ impl LedgerState {
             epoch_length: 432000,          // mainnet default
             shelley_transition_epoch: 208, // mainnet default
             byron_epoch_length: 21600,     // mainnet default (10 * 2160)
+            prev_protocol_params: params.clone(),
             protocol_params: params,
             prev_d: 1.0, // Genesis: d=1
             prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)

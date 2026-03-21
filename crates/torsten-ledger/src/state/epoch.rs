@@ -245,11 +245,8 @@ impl LedgerState {
 
         // Capture prevPParams BEFORE PPUP updates curPP, matching Haskell's
         // NEWPP rule: prevPParams = old curPParams (before this boundary's PPUP).
-        //
-        // prev_d: The RUPD at the NEXT boundary reads prevPParams.ppDG for d.
-        //   For Babbage+ (proto >= 7): ppDG returns 0 regardless of params.
-        // prev_protocol_version_major: Used for the pre-Babbage leader reward
-        //   prefilter (hardforkBabbageForgoRewardPrefilter).
+        // The RUPD at the NEXT boundary will use prev_protocol_params for ALL
+        // parameter values (rho, tau, a0, n_opt, active_slots_coeff, d, proto).
         let old_d = if self.protocol_params.protocol_version_major >= 7 {
             0.0
         } else {
@@ -258,6 +255,7 @@ impl LedgerState {
             d_n / d_d
         };
         let old_proto_major = self.protocol_params.protocol_version_major;
+        let old_params = self.protocol_params.clone();
 
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
@@ -535,11 +533,13 @@ impl LedgerState {
         // evolving_nonce and candidate_nonce carry forward unchanged
         // (they are NOT reset at epoch boundaries)
 
-        // Set prevPParams fields from values captured BEFORE PPUP (old_d, old_proto_major).
+        // Set prevPParams from values captured BEFORE PPUP.
         // Haskell's NEWPP: prevPParams = old curPParams (before this PPUP).
-        // The RUPD at the NEXT boundary reads these for d and leader reward prefilter.
+        // The RUPD at the NEXT boundary uses prev_protocol_params for ALL
+        // parameter values (rho, tau, a0, n_opt, active_slots_coeff, etc.).
         self.prev_d = old_d;
         self.prev_protocol_version_major = old_proto_major;
+        self.prev_protocol_params = old_params;
 
         // Reset per-epoch accumulators
         self.epoch_fees = Lovelace(0);
