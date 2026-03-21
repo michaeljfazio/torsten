@@ -243,7 +243,13 @@ impl LedgerState {
         // from the previous epoch, passed to startStep). For the first RUPD,
         // the initial bprev is empty (0 blocks) — this is correct because
         // no snapshot rotation has captured block counts yet.
-        let actual_blocks = block_snapshot.epoch_block_count;
+        // Use sum of epoch_blocks_by_pool (= BlocksMade total in Haskell) for
+        // actual block count. epoch_block_count may include non-pool blocks
+        // (e.g., blocks with empty issuer_vkey that aren't in BlocksMade).
+        let actual_blocks: u64 = block_snapshot
+            .epoch_blocks_by_pool
+            .values()
+            .sum();
 
         let rho = Rat::from_i128(rho_num, rho_den);
 
@@ -328,8 +334,17 @@ impl LedgerState {
             };
         }
 
-        // Total blocks produced in the snapshot epoch (for apparent performance)
-        let total_blocks_in_epoch = actual_blocks.max(1);
+        // Total blocks produced in the snapshot epoch (for apparent performance).
+        //
+        // Haskell uses `Map.foldl' (+) 0 (unBlocksMade b)` — the sum of all
+        // values in BlocksMade. epoch_block_count may include blocks with empty
+        // issuer_vkey that aren't in BlocksMade, inflating the denominator and
+        // lowering apparent performance. Use sum(epoch_blocks_by_pool) instead.
+        let total_blocks_in_epoch: u64 = block_snapshot
+            .epoch_blocks_by_pool
+            .values()
+            .sum::<u64>()
+            .max(1);
 
         // Saturation point: z0 = 1/nOpt (from prevPParams)
         let n_opt = pp.n_opt.max(1);
@@ -387,6 +402,27 @@ impl LedgerState {
                 Some(reg) => reg,
                 None => continue,
             };
+
+            // Pre-Babbage leader reward prefilter (hardforkBabbageForgoRewardPrefilter):
+            // When prevPParams.protocolVersion <= 6, pools whose reward account is NOT
+            // registered in the DState rewards map are excluded ENTIRELY from reward
+            // computation (both leader AND member rewards). In Haskell, mkPoolRewardInfo
+            // returns Left(LeaderRewardPrefilter) which excludes the pool from the
+            // reward pulser. The dropped rewards stay in deltaR2 (back to reserves).
+            // For proto > 6 (Babbage+), the prefilter is disabled.
+            {
+                let prefilter_active = self.prev_protocol_version_major <= 6;
+                if prefilter_active {
+                    let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
+                    if !self.reward_accounts.contains_key(&op_key) {
+                        debug!(
+                            pool = ?pool_id.as_bytes()[..4],
+                            "Pool excluded: pre-Babbage prefilter (proto <= 6, unregistered reward account)"
+                        );
+                        continue;
+                    }
+                }
+            }
 
             // Pledge check: if owner-delegated stake < declared pledge, pool gets zero
             let self_delegated = owner_stake_by_pool.get(pool_id).copied().unwrap_or(0);
@@ -538,29 +574,15 @@ impl LedgerState {
             }
 
             // Operator (leader) reward goes to pool's registered reward account.
-            //
-            // Pre-Babbage leader reward prefilter (hardforkBabbageForgoRewardPrefilter):
-            // When prevPParams.protocolVersion <= 6, leader rewards are only delivered
-            // if the pool's reward account credential is registered in the DState
-            // rewards map. Unregistered reward accounts cause the leader reward to be
-            // silently dropped (stays in deltaR2 = back to reserves).
-            // For proto > 6 (Babbage+), the prefilter is disabled and all leader
-            // rewards are included regardless of registration status.
+            // Note: the pre-Babbage prefilter (proto <= 6) already excluded pools
+            // with unregistered reward accounts above, so we don't need to check
+            // registration status here — any pool reaching this point has either
+            // a registered account or proto > 6 (prefilter disabled).
             if operator_reward > 0 {
                 let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                let prefilter_active = self.prev_protocol_version_major <= 6;
-                let account_registered = self.reward_accounts.contains_key(&op_key);
-                if !prefilter_active || account_registered {
-                    *reward_map.entry(op_key).or_insert(Lovelace(0)) +=
-                        Lovelace(operator_reward);
-                    total_distributed += operator_reward;
-                } else {
-                    debug!(
-                        pool = ?pool_id.as_bytes()[..4],
-                        operator_reward,
-                        "Leader reward dropped: pre-Babbage prefilter (proto <= 6, unregistered reward account)"
-                    );
-                }
+                *reward_map.entry(op_key).or_insert(Lovelace(0)) +=
+                    Lovelace(operator_reward);
+                total_distributed += operator_reward;
             }
         }
 
