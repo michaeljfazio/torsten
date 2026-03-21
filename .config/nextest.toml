@@ -1,0 +1,4 @@
+[profile.ci]
+# Produce JUnit XML for Codecov Test Analytics
+[profile.ci.junit]
+path = "junit.xml"
