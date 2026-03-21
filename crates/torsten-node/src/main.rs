@@ -403,6 +403,13 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         );
     }
 
+    // NOTE: Byron genesis UTxOs are NOT seeded here (unlike the running node).
+    // The genesis transaction's inputs will show "not found" warnings but
+    // outputs are still created. This produces the correct Shelley UTxO set
+    // because the Byron inputs are consumed by the genesis transaction.
+    // Seeding would require matching the exact tx_hash derivation used by
+    // the Haskell node's Byron UTxO format, which is complex.
+
     // Set the Shelley transition epoch and Byron epoch length.
     // On preview/preprod (no Byron era), transition = 0 and blocks start
     // directly in Alonzo. On mainnet, transition = 208 (Byron epochs 0-207).

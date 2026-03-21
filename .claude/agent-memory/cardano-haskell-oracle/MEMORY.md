@@ -65,6 +65,9 @@
 ## Mempool Tx Ordering & Chained Tx Deep-Dive
 - See [mempool-tx-ordering.md](mempool-tx-ordering.md) — FIFO ordering (TicketNo), virtual ledger state for chained txs, TxSubmission2 serving order, block production prefix, revalidation logic, policy constants, Torsten divergences
 
+## Reward Iteration & Zero-Reward Conditions
+- See [reward-iteration-deep-dive.md](reward-iteration-deep-dive.md) — startStep iterates GO snapshot pool params (not BlocksMade), mkPoolRewardInfo checks BlocksMade for each, effective intersection requirement, genesis pool 2-epoch warm-up, 6 zero-reward conditions, no active_epoch_no check
+
 ## Monetary Expansion & RUPD
 - See [monetary-expansion-rupd.md](monetary-expansion-rupd.md) — deltaR1, eta, expectedBlocks, block counting (incrBlocks/isOverlaySlot), snapshot system, TICK→RUPD data flow, Conway d=0 simplification, first-epoch behavior
 - See [rupd-timing-data-flow.md](rupd-timing-data-flow.md) — COMPLETE trace: timing windows (sr=4k/f not 3*(1/f-1)), TICK/RUPD env extraction, NEWEPOCH ordering (applyRUpd BEFORE SNAP), fee lifecycle (deltaF=-ssFee), epoch 0 behavior, Torsten snapshot divergence

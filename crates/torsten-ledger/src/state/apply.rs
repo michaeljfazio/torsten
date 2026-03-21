@@ -954,6 +954,8 @@ impl LedgerState {
                         genesis_hash = %genesis_hash.to_hex(),
                         target_epoch = update.epoch,
                         protocol_version = ?ppu.protocol_version_major.zip(ppu.protocol_version_minor),
+                        d = ?ppu.d,
+                        n_opt = ?ppu.n_opt,
                         "Collected protocol parameter update proposal"
                     );
                     self.pending_pp_updates
