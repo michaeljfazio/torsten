@@ -401,6 +401,46 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Emit chain-sync block server trace events.",
         tuning_hint: "Enable only for debugging. Increases log volume significantly.",
     },
+    ParamDef {
+        key: "TraceChainDb",
+        section: "Protocol",
+        param_type: ParamType::Bool,
+        default: "false",
+        description: "Emit ChainDB trace events (block storage, volatile/immutable flush, \
+                      rollback operations). Useful for diagnosing storage-layer issues.",
+        tuning_hint: "Enable to debug block storage problems or unexpected rollbacks. \
+                      Moderate log volume; safe to leave enabled in production if needed.",
+    },
+    ParamDef {
+        key: "TraceChainSyncServer",
+        section: "Protocol",
+        param_type: ParamType::Bool,
+        default: "false",
+        description: "Emit chain-sync server trace events (both header and block serving \
+                      to downstream N2N peers).",
+        tuning_hint: "Enable only for debugging downstream sync issues. \
+                      Increases log volume significantly under heavy peer load.",
+    },
+    ParamDef {
+        key: "TraceForge",
+        section: "Protocol",
+        param_type: ParamType::Bool,
+        default: "false",
+        description: "Emit block forging trace events (VRF leader check, block construction, \
+                      KES signing, block announcement). Essential for block producer debugging.",
+        tuning_hint: "Enable on block producers to diagnose missed slots or forging failures. \
+                      Low volume (one event per slot check); safe for production.",
+    },
+    ParamDef {
+        key: "TraceMempool",
+        section: "Protocol",
+        param_type: ParamType::Bool,
+        default: "false",
+        description: "Emit mempool trace events (transaction admission, rejection, removal \
+                      on block application, TTL expiry).",
+        tuning_hint: "Enable to debug transaction flow or mempool capacity issues. \
+                      Volume depends on transaction rate; moderate on mainnet.",
+    },
     // --- Logging section ---------------------------------------------------
     ParamDef {
         key: "MinSeverity",
@@ -444,6 +484,18 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
                       Not applicable to Torsten's tracing-subscriber backend.",
         tuning_hint: "Leave disabled for Torsten. This setting is a legacy flag \
                       that has no effect on Torsten's tracing-subscriber backend.",
+    },
+    ParamDef {
+        key: "MetricsPort",
+        section: "Logging",
+        param_type: ParamType::U64 { min: 0, max: 65535 },
+        default: "12798",
+        description: "TCP port for the Prometheus metrics endpoint. Set to 0 to disable \
+                      the metrics server entirely. The CLI flag --metrics-port takes \
+                      precedence over this config value; --no-metrics forces port to 0.",
+        tuning_hint: "12798 (default) matches cardano-node. Change only if the port \
+                      conflicts with another service. Set to 0 in hardened environments \
+                      where metrics scraping is not needed.",
     },
     // --- Advanced section --------------------------------------------------
     ParamDef {
@@ -495,14 +547,55 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
                       chain divergence on mainnet.",
     },
     ParamDef {
-        key: "EnableP2P",
+        key: "ChurnIntervalNormalSecs",
         section: "Advanced",
-        param_type: ParamType::Bool,
-        default: "true",
-        description: "Duplicate of the Network section entry — shown here only if the \
-                      key is encountered in the Advanced section context.",
-        tuning_hint: "Always enable for production. \
-                      Disable only for isolated testing or legacy topology setups.",
+        param_type: ParamType::U64 {
+            min: 60,
+            max: 86_400,
+        },
+        default: "3300",
+        description: "Peer governor churn interval during normal (caught-up) operation, \
+                      in seconds. Controls how often the governor rotates a random subset \
+                      of peers to prevent the node from becoming permanently attached to \
+                      the same peer set. Default 3300 s (55 minutes) matches cardano-node.",
+        tuning_hint: "Lower values increase peer diversity at the cost of more handshakes. \
+                      Block producers may prefer higher values (3600+) for connection stability.",
+    },
+    ParamDef {
+        key: "ChurnIntervalSyncSecs",
+        section: "Advanced",
+        param_type: ParamType::U64 {
+            min: 30,
+            max: 86_400,
+        },
+        default: "900",
+        description: "Peer governor churn interval during syncing, in seconds. Faster \
+                      rotation while catching up allows the node to quickly shed \
+                      unresponsive peers. Default 900 s (15 minutes) matches cardano-node.",
+        tuning_hint: "Keep below 15 minutes to shed unresponsive peers during catch-up. \
+                      Lower values improve sync speed at the cost of more connection churn.",
+    },
+    ParamDef {
+        key: "StallDemotionCycles",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 1, max: 100 },
+        default: "6",
+        description: "Number of consecutive governor evaluation cycles (each ~30 s) in \
+                      which a hot peer must serve zero new blocks before it is demoted \
+                      back to warm. Default of 6 cycles = 3 minutes of inactivity.",
+        tuning_hint: "Increase if hot peers legitimately produce zero blocks for extended \
+                      periods (e.g., low-stake pools). Decrease for aggressive stall detection.",
+    },
+    ParamDef {
+        key: "ErrorDemotionThreshold",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 1, max: 100 },
+        default: "5",
+        description: "Failure count threshold above which a hot peer is unconditionally \
+                      demoted to warm during each governor evaluation cycle. Local root \
+                      peers are exempt from this check.",
+        tuning_hint: "Lower to aggressively shed failing peers. Raise if peers are being \
+                      demoted too frequently due to transient network issues.",
     },
 ];
 
@@ -655,17 +748,26 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("TraceChainSyncClient".into(), json!(false));
     map.insert("TraceChainSyncHeaderServer".into(), json!(false));
     map.insert("TraceChainSyncBlockServer".into(), json!(false));
+    map.insert("TraceChainDb".into(), json!(false));
+    map.insert("TraceChainSyncServer".into(), json!(false));
+    map.insert("TraceForge".into(), json!(false));
+    map.insert("TraceMempool".into(), json!(false));
 
     // Logging.
     map.insert("MinSeverity".into(), json!("Info"));
     map.insert("TurnOnLogMetrics".into(), json!(true));
     map.insert("TurnOnScripting".into(), json!(false));
+    map.insert("MetricsPort".into(), json!(12798));
 
     // Advanced.
     map.insert("MaxConcurrencyBulkSync".into(), json!(2));
     map.insert("MaxConcurrencyDeadline".into(), json!(4));
     map.insert("SnapshotInterval".into(), json!(72));
     map.insert("ExperimentalHardForksEnabled".into(), json!(false));
+    map.insert("ChurnIntervalNormalSecs".into(), json!(3300));
+    map.insert("ChurnIntervalSyncSecs".into(), json!(900));
+    map.insert("StallDemotionCycles".into(), json!(6));
+    map.insert("ErrorDemotionThreshold".into(), json!(5));
 
     map
 }

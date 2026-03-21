@@ -92,7 +92,7 @@ spec:
             {{- end }}
           env:
             - name: RUST_LOG
-              value: "info"
+              value: {{ .Values.logging.rustLog | default "info" | quote }}
             {{- if .Values.ledger.pipelineDepth }}
             - name: TORSTEN_PIPELINE_DEPTH
               value: {{ .Values.ledger.pipelineDepth | quote }}

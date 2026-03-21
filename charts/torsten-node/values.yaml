@@ -25,6 +25,16 @@ network:
   port: 3001
   # -- Host address to bind
   hostAddr: "0.0.0.0"
+  # -- Peer sharing policy: NoPeerSharing, PeerSharingPrivate, PeerSharingPublic
+  peerSharing: PeerSharingPublic
+  # -- Peer target counts
+  targetRootPeers: 60
+  targetActivePeers: 20
+  targetEstablishedPeers: 40
+  targetKnownPeers: 100
+  targetActiveBigLedgerPeers: 5
+  targetEstablishedBigLedgerPeers: 10
+  targetKnownBigLedgerPeers: 15
 
 # -- Prometheus metrics
 metrics:
@@ -64,12 +74,36 @@ mithril:
   # -- Enable Mithril snapshot import on first startup
   enabled: true
 
+# -- Logging configuration
+logging:
+  # -- Minimum log severity: Debug, Info, Notice, Warning, Error, Critical
+  minSeverity: Info
+  # -- RUST_LOG filter string for fine-grained control
+  rustLog: "info"
+
+# -- Peer governor tuning (advanced)
+peerGovernor:
+  # -- Churn interval during normal operation (seconds, default 3300 = 55 min)
+  churnIntervalNormalSecs: 3300
+  # -- Churn interval during syncing (seconds, default 900 = 15 min)
+  churnIntervalSyncSecs: 900
+  # -- Stalled peer detection cycles (each ~30s, default 6 = 3 min)
+  stallDemotionCycles: 6
+  # -- Failure count before hot peer demotion (default 5)
+  errorDemotionThreshold: 5
+
 # -- Ledger replay configuration
 ledger:
   # -- Max blocks to replay from storage (0 = skip, empty = unlimited)
   replayLimit: null
   # -- Pipeline depth for chain sync
   pipelineDepth: 150
+  # -- Max concurrent block fetchers during bulk sync
+  maxConcurrencyBulkSync: 2
+  # -- Max concurrent block fetchers near tip
+  maxConcurrencyDeadline: 4
+  # -- Ledger snapshot interval in minutes (0 = disabled)
+  snapshotInterval: 72
 
 # -- Block producer configuration (only used when role=producer)
 producer:

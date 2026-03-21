@@ -15,10 +15,14 @@ COPY crates/torsten-serialization/Cargo.toml crates/torsten-serialization/Cargo.
 COPY crates/torsten-network/Cargo.toml crates/torsten-network/Cargo.toml
 COPY crates/torsten-consensus/Cargo.toml crates/torsten-consensus/Cargo.toml
 COPY crates/torsten-ledger/Cargo.toml crates/torsten-ledger/Cargo.toml
+COPY crates/torsten-lsm/Cargo.toml crates/torsten-lsm/Cargo.toml
 COPY crates/torsten-mempool/Cargo.toml crates/torsten-mempool/Cargo.toml
 COPY crates/torsten-storage/Cargo.toml crates/torsten-storage/Cargo.toml
 COPY crates/torsten-node/Cargo.toml crates/torsten-node/Cargo.toml
 COPY crates/torsten-cli/Cargo.toml crates/torsten-cli/Cargo.toml
+COPY crates/torsten-config/Cargo.toml crates/torsten-config/Cargo.toml
+COPY crates/torsten-monitor/Cargo.toml crates/torsten-monitor/Cargo.toml
+COPY crates/torsten-integration-tests/Cargo.toml crates/torsten-integration-tests/Cargo.toml
 
 # Create dummy source files so cargo can resolve the workspace
 RUN for dir in crates/torsten-*/; do \
@@ -26,7 +30,9 @@ RUN for dir in crates/torsten-*/; do \
       echo "" > "$dir/src/lib.rs"; \
     done && \
     mkdir -p crates/torsten-node/src && echo "fn main(){}" > crates/torsten-node/src/main.rs && \
-    mkdir -p crates/torsten-cli/src && echo "fn main(){}" > crates/torsten-cli/src/main.rs
+    mkdir -p crates/torsten-cli/src && echo "fn main(){}" > crates/torsten-cli/src/main.rs && \
+    mkdir -p crates/torsten-config/src && echo "fn main(){}" > crates/torsten-config/src/main.rs && \
+    mkdir -p crates/torsten-monitor/src && echo "fn main(){}" > crates/torsten-monitor/src/main.rs
 
 RUN cargo build --release 2>/dev/null || true
 
@@ -36,7 +42,11 @@ COPY . .
 # Touch all source files so cargo rebuilds with real code
 RUN find crates -name "*.rs" -exec touch {} +
 
-RUN cargo build --release --bin torsten-node --bin torsten-cli
+RUN cargo build --release \
+    --bin torsten-node \
+    --bin torsten-cli \
+    --bin torsten-config \
+    --bin torsten-monitor
 
 # ---- Prep stage: create dirs (distroless has no shell) ----
 FROM debian:bookworm-slim AS prep
@@ -52,6 +62,8 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=prep /opt/torsten /opt/torsten
 COPY --from=builder /build/target/release/torsten-node /usr/local/bin/torsten-node
 COPY --from=builder /build/target/release/torsten-cli /usr/local/bin/torsten-cli
+COPY --from=builder /build/target/release/torsten-config /usr/local/bin/torsten-config
+COPY --from=builder /build/target/release/torsten-monitor /usr/local/bin/torsten-monitor
 
 WORKDIR /opt/torsten
 

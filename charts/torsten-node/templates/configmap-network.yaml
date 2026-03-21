@@ -14,12 +14,29 @@ data:
     {
       "Network": {{ if eq .Values.network.name "mainnet" }}"Mainnet"{{ else }}"Testnet"{{ end }},
       "NetworkMagic": {{ include "torsten-node.networkMagic" . }},
+      "RequiresNetworkMagic": {{ if eq .Values.network.name "mainnet" }}"RequiresNoMagic"{{ else }}"RequiresMagic"{{ end }},
       "EnableP2P": true,
-      "TargetNumberOfActivePeers": 20,
-      "TargetNumberOfEstablishedPeers": 40,
-      "TargetNumberOfKnownPeers": 100,
+      "PeerSharing": {{ .Values.network.peerSharing | default "PeerSharingPublic" | quote }},
+      "TargetNumberOfRootPeers": {{ .Values.network.targetRootPeers | default 60 }},
+      "TargetNumberOfActivePeers": {{ .Values.network.targetActivePeers | default 20 }},
+      "TargetNumberOfEstablishedPeers": {{ .Values.network.targetEstablishedPeers | default 40 }},
+      "TargetNumberOfKnownPeers": {{ .Values.network.targetKnownPeers | default 100 }},
+      "TargetNumberOfActiveBigLedgerPeers": {{ .Values.network.targetActiveBigLedgerPeers | default 5 }},
+      "TargetNumberOfEstablishedBigLedgerPeers": {{ .Values.network.targetEstablishedBigLedgerPeers | default 10 }},
+      "TargetNumberOfKnownBigLedgerPeers": {{ .Values.network.targetKnownBigLedgerPeers | default 15 }},
+      "Protocol": "Cardano",
+      "ByronGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-byron-genesis.json",
       "ShelleyGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-shelley-genesis.json",
       "AlonzoGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-alonzo-genesis.json",
       "ConwayGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-conway-genesis.json",
-      "MinSeverity": "Info"
+      "MinSeverity": {{ .Values.logging.minSeverity | default "Info" | quote }},
+      {{- if .Values.peerGovernor }}
+      "ChurnIntervalNormalSecs": {{ .Values.peerGovernor.churnIntervalNormalSecs | default 3300 }},
+      "ChurnIntervalSyncSecs": {{ .Values.peerGovernor.churnIntervalSyncSecs | default 900 }},
+      "StallDemotionCycles": {{ .Values.peerGovernor.stallDemotionCycles | default 6 }},
+      "ErrorDemotionThreshold": {{ .Values.peerGovernor.errorDemotionThreshold | default 5 }},
+      {{- end }}
+      "MaxConcurrencyBulkSync": {{ .Values.ledger.maxConcurrencyBulkSync | default 2 }},
+      "MaxConcurrencyDeadline": {{ .Values.ledger.maxConcurrencyDeadline | default 4 }},
+      "SnapshotInterval": {{ .Values.ledger.snapshotInterval | default 72 }}
     }
