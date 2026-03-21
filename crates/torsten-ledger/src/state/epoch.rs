@@ -261,9 +261,21 @@ impl LedgerState {
                 //   adjustedDelegs = Map.filter (\pid -> pid `Set.notMember` retired) delegs
                 if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                    *Arc::make_mut(&mut self.reward_accounts)
-                        .entry(op_key)
-                        .or_insert(Lovelace(0)) += pool_deposit;
+                    // Refund deposit: if the reward account is registered, refund to it.
+                    // If unregistered, refund goes to treasury (matching Haskell's POOLREAP
+                    // which filters unclaimed refunds to treasury).
+                    if self.reward_accounts.contains_key(&op_key) {
+                        *Arc::make_mut(&mut self.reward_accounts)
+                            .entry(op_key)
+                            .or_insert(Lovelace(0)) += pool_deposit;
+                    } else {
+                        self.treasury.0 = self.treasury.0.saturating_add(pool_deposit.0);
+                        debug!(
+                            "Pool {} deposit {} -> treasury (unregistered reward account)",
+                            pool_id.to_hex(),
+                            pool_deposit.0
+                        );
+                    }
                     // Remove delegations to the retired pool
                     Arc::make_mut(&mut self.delegations)
                         .retain(|_, delegated_pool| delegated_pool != pool_id);
