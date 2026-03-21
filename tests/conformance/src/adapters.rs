@@ -725,6 +725,10 @@ fn make_protocol_params(pp: &crate::schema::UtxoProtocolParams) -> ProtocolParam
         protocol_version_major: 9,
         protocol_version_minor: 0,
         active_slots_coeff: 0.05,
+        d: Rational {
+            numerator: 0,
+            denominator: 1,
+        },
     }
 }
 

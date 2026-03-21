@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn test_load_vrf_skey_32_bytes() {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
-        let loaded = load_vrf_skey_from_raw(&*kp.secret_key())
+        let loaded = load_vrf_skey_from_raw(kp.secret_key())
             .expect("32-byte VRF key must load successfully");
         assert_eq!(
             loaded,
@@ -745,7 +745,7 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         // Construct the 64-byte expanded key as cardano-node writes it
         let mut expanded = [0u8; 64];
-        expanded[..32].copy_from_slice(&*kp.secret_key());
+        expanded[..32].copy_from_slice(kp.secret_key());
         expanded[32..].copy_from_slice(&kp.public_key);
 
         let loaded =
@@ -764,10 +764,10 @@ mod tests {
     fn test_vrf_proof_same_from_32_or_64_byte_key() {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         let mut expanded = [0u8; 64];
-        expanded[..32].copy_from_slice(&*kp.secret_key());
+        expanded[..32].copy_from_slice(kp.secret_key());
         expanded[32..].copy_from_slice(&kp.public_key);
 
-        let seed_32 = load_vrf_skey_from_raw(&*kp.secret_key()).unwrap();
+        let seed_32 = load_vrf_skey_from_raw(kp.secret_key()).unwrap();
         let seed_64 = load_vrf_skey_from_raw(&expanded).unwrap();
         assert_eq!(
             seed_32, seed_64,

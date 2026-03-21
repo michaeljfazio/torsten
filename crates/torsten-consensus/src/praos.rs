@@ -604,7 +604,7 @@ impl OuroborosPraos {
                 );
             }
             // Counter over-increment: n > m + 1 (using checked_add to prevent u64 wrap)
-            if m.checked_add(1).map_or(true, |m1| n > m1) {
+            if m.checked_add(1).is_none_or(|m1| n > m1) {
                 if self.strict_verification {
                     warn!(
                         slot = header.slot.0,

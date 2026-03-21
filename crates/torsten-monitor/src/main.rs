@@ -27,6 +27,7 @@
 //! | h / ?    | Toggle help overlay             |
 
 mod app;
+#[allow(dead_code)]
 mod disk;
 mod layout;
 mod metrics;

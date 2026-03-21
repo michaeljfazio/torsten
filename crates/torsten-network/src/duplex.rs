@@ -191,6 +191,7 @@ impl DuplexPeerConnection {
     /// - `mempool`        — local mempool; served to the remote Server (Client task),
     ///   and also receives incoming txs from the remote Client (Server task)
     /// - `block_provider` — chain storage (reserved for future ChainSync/BlockFetch server tasks)
+    ///
     /// Open a TCP connection to `addr` and establish a full-duplex N2N session.
     ///
     /// When `subscribe_chainsync` is false, ChainSync and BlockFetch channels
@@ -393,11 +394,8 @@ impl DuplexPeerConnection {
             // then spawn a task that reads and discards all incoming chunks.
             let mut channel = cs_buf.unwrap();
             self._cs_drain = Some(tokio::spawn(async move {
-                loop {
-                    match channel.dequeue_chunk().await {
-                        Ok(_) => {}      // discard
-                        Err(_) => break, // channel closed
-                    }
+                while channel.dequeue_chunk().await.is_ok() {
+                    // discard incoming chunks until channel closes
                 }
             }));
         }
@@ -609,11 +607,10 @@ async fn serve_tx_submission_inner(
                     // The Haskell Server expects us to block until we have txs.
                     // Poll the mempool every 5 seconds until txs appear.
                     let new_ids = if new_ids.is_empty() && blocking {
-                        let mut poll_ids = new_ids;
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             let snapshot = mempool.snapshot();
-                            poll_ids = snapshot
+                            let polled: Vec<_> = snapshot
                                 .tx_hashes
                                 .iter()
                                 .filter(|h| {
@@ -624,9 +621,9 @@ async fn serve_tx_submission_inner(
                                 .filter_map(|h| {
                                     mempool.get_tx_size(h).map(|sz| (*h.as_bytes(), sz as u32))
                                 })
-                                .collect::<Vec<_>>();
-                            if !poll_ids.is_empty() {
-                                break poll_ids;
+                                .collect();
+                            if !polled.is_empty() {
+                                break polled;
                             }
                             // Continue polling — we must block until txs arrive
                         }

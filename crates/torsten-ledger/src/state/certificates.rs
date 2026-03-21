@@ -101,10 +101,7 @@ impl LedgerState {
             } => {
                 let key = credential_to_hash(credential);
                 Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
-                debug!(
-                    "Stake delegated to pool: {}",
-                    pool_hash.to_hex()
-                );
+                debug!("Stake delegated to pool: {}", pool_hash.to_hex());
             }
             Certificate::PoolRegistration(params) => {
                 let pool_reg = PoolRegistration {

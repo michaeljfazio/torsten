@@ -1280,7 +1280,8 @@ impl Node {
 
                     // Extract relay addresses from registered pools and
                     // identify Big Ledger Peers (top 90% of active stake).
-                    let (relays, blp_relays): (Vec<(String, u16)>, Vec<(String, u16)>) = {
+                    type RelayList = Vec<(String, u16)>;
+                    let (relays, blp_relays): (RelayList, RelayList) = {
                         let ls = ledger.read().await;
 
                         // Build pool_id -> stake map for BLP classification
@@ -1305,7 +1306,7 @@ impl Node {
                         let mut relays = Vec::new();
                         let mut blp_relays = Vec::new();
                         for (pool_id, pool_reg) in ls.pool_params.iter() {
-                            let is_blp = big_pool_set.contains(&pool_id.as_bytes().to_vec());
+                            let is_blp = big_pool_set.contains(pool_id.as_bytes().as_slice());
                             for relay in &pool_reg.relays {
                                 match relay {
                                     torsten_primitives::transaction::Relay::SingleHostAddr {
