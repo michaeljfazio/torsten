@@ -743,6 +743,65 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         ),
     ];
 
+    // Connection manager counters (Haskell ConnectionManagerCounters compat).
+    let conn_full_duplex = app.metrics.get_u64("torsten_conn_full_duplex");
+    let conn_duplex = app.metrics.get_u64("torsten_conn_duplex");
+    let conn_unidirectional = app.metrics.get_u64("torsten_conn_unidirectional");
+    let conn_inbound = app.metrics.get_u64("torsten_conn_inbound");
+    let conn_outbound = app.metrics.get_u64("torsten_conn_outbound");
+    let conn_terminating = app.metrics.get_u64("torsten_conn_terminating");
+    let has_conn_metrics = conn_full_duplex > 0
+        || conn_duplex > 0
+        || conn_unidirectional > 0
+        || conn_inbound > 0
+        || conn_outbound > 0;
+    if has_conn_metrics {
+        lines.push(kv_aligned(
+            "ConnDuplex",
+            App::format_number(conn_duplex),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "ConnFullDpx",
+            App::format_number(conn_full_duplex),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "ConnUniDir",
+            App::format_number(conn_unidirectional),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "ConnIn",
+            App::format_number(conn_inbound),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        lines.push(kv_aligned(
+            "ConnOut",
+            App::format_number(conn_outbound),
+            theme.info,
+            theme,
+            col_w,
+        ));
+        if conn_terminating > 0 {
+            lines.push(kv_aligned(
+                "ConnTerm",
+                App::format_number(conn_terminating),
+                theme.warning,
+                theme,
+                col_w,
+            ));
+        }
+    }
+
     // Trim to fit available height.
     lines.truncate(inner.height as usize);
 
