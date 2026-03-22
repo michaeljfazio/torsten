@@ -1757,7 +1757,18 @@ impl Node {
                             let _task_block_provider = gov_block_provider.clone();
                             let task_duplex_conns = gov_duplex_conns.clone();
                             let task_listen_port = gov_listen_port;
+                            let task_sync_managed = gov_sync_managed.clone();
                             tokio::spawn(async move {
+                                // Re-check sync-managed right before connecting
+                                // to avoid race with the sync loop.
+                                if task_sync_managed.read().await.contains(&addr) {
+                                    debug!(
+                                        %addr,
+                                        "Governor: aborting connect — peer now sync-managed"
+                                    );
+                                    let _ = task_done_tx.send(addr);
+                                    return;
+                                }
                                 let target = addr.to_string();
                                 debug!(%addr, "Governor: initiating outbound duplex connection");
                                 let connect_start = std::time::Instant::now();
