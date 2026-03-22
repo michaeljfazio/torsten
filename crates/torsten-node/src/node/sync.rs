@@ -988,6 +988,21 @@ impl Node {
                                 // mode, so witness-set data is never read.
                                 match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(&cbor, self.byron_epoch_length) {
                                     Ok(block) => {
+                                        // Verify the block connects to the ledger tip
+                                        // before applying.  ImmutableDB may contain
+                                        // contaminated blocks from a prior fork that
+                                        // was flushed on shutdown — skip those.
+                                        let current_tip = ls.tip.point.hash().cloned();
+                                        if current_tip.as_ref() != Some(block.prev_hash()) {
+                                            debug!(
+                                                slot = next_slot.0,
+                                                expected = current_tip.map(|h| h.to_hex()).unwrap_or_default(),
+                                                got = block.prev_hash().to_hex(),
+                                                "Gap bridge: skipping non-connecting block (likely fork contamination)"
+                                            );
+                                            bridge_slot = next_slot.0;
+                                            continue; // Skip, try next block
+                                        }
                                         if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                             warn!(
                                                 slot = next_slot.0,
@@ -1013,19 +1028,16 @@ impl Node {
                         debug!("Bridged {bridged} blocks from ChainDB storage");
                     }
                     if bridge_failed {
-                        // ChainDB has blocks from a different fork that don't
-                        // connect to the ledger tip.  Clear volatile so the
-                        // stale fork blocks don't cause an infinite retry loop
-                        // (get_next_block_after_slot would keep finding them).
-                        // ChainSync will deliver the correct chain blocks on
-                        // the next sync cycle.
+                        // Gap bridge found a block that decoded but failed
+                        // apply (not just a prev_hash mismatch).  Clear
+                        // volatile and retry.
                         {
                             let mut db = self.chain_db.write().await;
                             let removed = db.volatile_block_count();
                             db.clear_volatile();
                             warn!(
                                 removed,
-                                "Gap bridge failed — cleared volatile DB (fork divergence). Re-syncing."
+                                "Gap bridge failed — cleared volatile DB. Re-syncing."
                             );
                         }
                         return 0;
@@ -1439,6 +1451,33 @@ impl Node {
                         pm.hot_peer_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
+
+                    // Connection manager counters (Haskell ConnectionManagerCounters compat).
+                    let duplex_count = pm.duplex_peer_count() as u64;
+                    let outbound_count = pm.outbound_peer_count() as u64;
+                    let inbound_count_cm = pm.inbound_peer_count() as u64;
+                    // full_duplex: same as duplex for now (no separate full-duplex tracking yet).
+                    self.metrics
+                        .conn_full_duplex
+                        .store(duplex_count, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .conn_duplex
+                        .store(duplex_count, std::sync::atomic::Ordering::Relaxed);
+                    // unidirectional: outbound connections that are not duplex.
+                    self.metrics.conn_unidirectional.store(
+                        outbound_count.saturating_sub(duplex_count),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    self.metrics
+                        .conn_inbound
+                        .store(inbound_count_cm, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .conn_outbound
+                        .store(outbound_count, std::sync::atomic::Ordering::Relaxed);
+                    // terminating: always 0 for now (no connection teardown tracking).
+                    self.metrics
+                        .conn_terminating
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
                 self.metrics.delegation_count.store(
                     ls.delegations.len() as u64,
