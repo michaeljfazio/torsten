@@ -1494,6 +1494,7 @@ impl Node {
             let governor_shutdown = shutdown_rx.clone();
             // Capture fields needed by governor-initiated connect tasks.
             let gov_network_magic = self.network_magic;
+            let gov_listen_port = self.listen_addr.port();
             let gov_metrics = self.metrics.clone();
             let gov_byron_epoch_length = self.byron_epoch_length;
             // Mempool reference for TxSubmission2 responder tasks on governor connections.
@@ -1739,6 +1740,7 @@ impl Node {
                             let task_mempool = gov_mempool.clone();
                             let _task_block_provider = gov_block_provider.clone();
                             let task_duplex_conns = gov_duplex_conns.clone();
+                            let task_listen_port = gov_listen_port;
                             tokio::spawn(async move {
                                 let target = addr.to_string();
                                 debug!(%addr, "Governor: initiating outbound duplex connection");
@@ -1753,6 +1755,7 @@ impl Node {
                                         &*target,
                                         task_magic,
                                         task_mempool,
+                                        task_listen_port,
                                     ),
                                 )
                                 .await
@@ -2194,6 +2197,7 @@ impl Node {
                             network_magic,
                             mempool_for_duplex,
                             block_provider_for_duplex,
+                            self.listen_addr.port(),
                         ),
                     ) => r.unwrap_or_else(|_| Err(torsten_network::DuplexError::Connection(
                         format!("{target}: duplex connect timed out after {}s", connect_timeout.as_secs()),

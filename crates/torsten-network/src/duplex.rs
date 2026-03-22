@@ -204,8 +204,9 @@ impl DuplexPeerConnection {
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
         _block_provider: Arc<dyn BlockProvider>,
+        listen_port: u16,
     ) -> Result<Self, DuplexError> {
-        Self::connect_inner(addr, network_magic, mempool, true).await
+        Self::connect_inner(addr, network_magic, mempool, true, listen_port).await
     }
 
     /// Warm connection: subscribes ALL channels but drains ChainSync/BlockFetch.
@@ -217,10 +218,11 @@ impl DuplexPeerConnection {
         addr: impl ToSocketAddrs + std::fmt::Display + Copy,
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
+        listen_port: u16,
     ) -> Result<Self, DuplexError> {
         // Subscribe ALL channels (including ChainSync/BlockFetch) to prevent
         // demuxer stall, then spawn drain tasks for the unused ones.
-        let mut conn = Self::connect_inner(addr, network_magic, mempool, true).await?;
+        let mut conn = Self::connect_inner(addr, network_magic, mempool, true, listen_port).await?;
         // Start drain tasks for ChainSync and BlockFetch — they read and discard
         // all incoming messages so the demuxer's bounded channels never fill up.
         conn.start_drain_tasks();
@@ -233,9 +235,10 @@ impl DuplexPeerConnection {
         addr: impl ToSocketAddrs + std::fmt::Display + Copy,
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
+        listen_port: u16,
     ) -> Result<Self, DuplexError> {
         // Forward to connect_warm for now
-        Self::connect_warm(addr, network_magic, mempool).await
+        Self::connect_warm(addr, network_magic, mempool, listen_port).await
     }
 
     async fn connect_inner(
@@ -243,11 +246,56 @@ impl DuplexPeerConnection {
         network_magic: u64,
         mempool: Arc<dyn MempoolProvider>,
         subscribe_chainsync: bool,
+        listen_port: u16,
     ) -> Result<Self, DuplexError> {
         debug!("duplex: connecting to {addr}");
 
-        // --- TCP connect with keepalive ------------------------------------------
-        let stream = tokio::net::TcpStream::connect(addr)
+        // --- TCP connect with port binding (InitiatorAndResponder) ---------------
+        //
+        // In InitiatorAndResponder mode, the Haskell cardano-node binds outbound
+        // sockets to the node's listening port before connect().  This allows the
+        // remote peer to see our listening port as the TCP source port, enabling
+        // it to identify us for duplex connection reuse and to start initiator-side
+        // mini-protocols (TxSubmission2 Client, etc.) on this connection.
+        //
+        // We resolve the target address first to determine IPv4 vs IPv6, then
+        // create a TcpSocket, set SO_REUSEADDR, bind to 0.0.0.0:<listen_port>
+        // (or [::]:port), and connect.
+        let resolved = tokio::net::lookup_host(addr)
+            .await
+            .map_err(|e| DuplexError::Connection(format!("dns lookup: {e}")))?
+            .next()
+            .ok_or_else(|| DuplexError::Connection("no addresses resolved".into()))?;
+
+        let socket = if resolved.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .map_err(|e| DuplexError::Connection(format!("socket create: {e}")))?;
+
+        socket
+            .set_reuseaddr(true)
+            .map_err(|e| DuplexError::Connection(format!("set SO_REUSEADDR: {e}")))?;
+
+        // SO_REUSEPORT allows multiple sockets to bind to the same port.
+        // Required for concurrent outbound connections from the listening port.
+        #[cfg(unix)]
+        socket
+            .set_reuseport(true)
+            .map_err(|e| DuplexError::Connection(format!("set SO_REUSEPORT: {e}")))?;
+
+        let bind_addr: std::net::SocketAddr = if resolved.is_ipv4() {
+            std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), listen_port)
+        } else {
+            std::net::SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), listen_port)
+        };
+        socket
+            .bind(bind_addr)
+            .map_err(|e| DuplexError::Connection(format!("bind to port {listen_port}: {e}")))?;
+
+        let stream = socket
+            .connect(resolved)
             .await
             .map_err(|e| DuplexError::Connection(format!("tcp connect: {e}")))?;
         if let Err(e) = crate::tcp::configure_tcp_keepalive(&stream) {
