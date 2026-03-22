@@ -2079,18 +2079,21 @@ mod tests {
         let no_mempool: Option<Arc<dyn MempoolProvider>> = None;
         let result =
             handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
+        // After MsgInit, Server has agency and responds with MsgRequestTxIds
+        // (not MsgInit echo — Haskell Client doesn't expect MsgInit back).
         assert!(result.is_some());
         let seg = result.unwrap();
         assert_eq!(seg.protocol_id, MINI_PROTOCOL_TXSUBMISSION);
 
         let mut dec = minicbor::Decoder::new(&seg.payload);
-        dec.array().unwrap();
-        assert_eq!(dec.u32().unwrap(), 6); // MsgInit response
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 4); // MsgRequestTxIds = [0, blocking, ack, req]
+        assert_eq!(dec.u32().unwrap(), 0); // tag 0 = MsgRequestTxIds
+        assert!(dec.bool().unwrap()); // blocking = true
+        assert_eq!(dec.u16().unwrap(), 0); // ack_count = 0
+        assert_eq!(dec.u16().unwrap(), 3); // req_count = 3
 
-        // Second init should be a no-op
-        let result2 =
-            handle_n2n_txsubmission(&buf, peer_addr, &mut peer_state, &no_mempool).unwrap();
-        assert!(result2.is_none());
+        assert!(peer_state.tx_submission_init_sent);
     }
 
     #[test]
