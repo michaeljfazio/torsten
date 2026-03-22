@@ -1794,6 +1794,9 @@ impl Node {
                                             torsten_network::ConnectionDirection::Outbound,
                                         );
                                         pm.record_handshake_rtt(&addr, rtt_ms);
+                                        // Mark as duplex — governor connections use
+                                        // DuplexPeerConnection (InitiatorAndResponder).
+                                        pm.mark_peer_duplex(&addr);
                                         drop(pm);
                                         info!(
                                             peer = %target,
