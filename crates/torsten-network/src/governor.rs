@@ -959,7 +959,7 @@ impl Governor {
     ///
     /// Local root peers are exempt from both checks — they are operator-
     /// configured trusted peers that should be promoted again immediately.
-    fn evaluate_stale_hot_peers(&self, pm: &PeerManager, events: &mut Vec<GovernorEvent>) {
+    fn evaluate_stale_hot_peers(&mut self, pm: &PeerManager, events: &mut Vec<GovernorEvent>) {
         // Build the set of addresses already targeted for demotion by earlier
         // phases so we don't emit duplicate Demote events.
         let already_demoted: HashSet<SocketAddr> = events
@@ -1031,6 +1031,10 @@ impl Governor {
                             "Governor: demoting stalled hot peer (no new blocks)"
                         );
                         events.push(GovernorEvent::Demote(addr));
+                        // Reset stale counter to prevent repeated demotion
+                        // on every subsequent cycle while the peer is still
+                        // technically hot (pending external demotion apply).
+                        self.hot_peer_stall.remove(&addr);
                     }
                 }
                 // If blocks grew, the snapshot will be updated in
