@@ -1646,6 +1646,22 @@ impl Node {
                                     addrs_to_disconnect.push(*addr);
                                 }
                                 GovernorEvent::Connect(addr) => {
+                                    // Check if we already have an inbound duplex
+                                    // connection from this IP.  If so, skip the
+                                    // outbound connection — the existing inbound
+                                    // connection already provides bidirectional
+                                    // mini-protocol support.
+                                    if let Some(existing) =
+                                        pm.find_inbound_duplex_by_ip(addr.ip())
+                                    {
+                                        debug!(
+                                            %addr,
+                                            existing = %existing,
+                                            "Governor: skipping outbound connect — \
+                                             inbound duplex connection exists"
+                                        );
+                                        continue;
+                                    }
                                     // Skip if sync loop already manages this peer.
                                     // Prevents duplicate TCP connections per peer.
                                     if gov_sync_managed.read().await.contains(addr) {

@@ -1323,6 +1323,28 @@ impl PeerManager {
             .collect()
     }
 
+    /// Check if we have an existing inbound duplex connection from this IP.
+    ///
+    /// When the governor wants to open an outbound connection to a peer and
+    /// we already hold an inbound duplex (InitiatorAndResponder) connection
+    /// from the same IP, the outbound dial can be skipped — the existing
+    /// inbound connection already provides bidirectional mini-protocol support.
+    ///
+    /// Returns the `SocketAddr` of the inbound peer if found.
+    pub fn find_inbound_duplex_by_ip(&self, ip: std::net::IpAddr) -> Option<SocketAddr> {
+        self.peers.iter().find_map(|(addr, info)| {
+            if addr.ip() == ip
+                && info.direction == Some(ConnectionDirection::Inbound)
+                && info.duplex
+                && info.temperature != PeerTemperature::Cold
+            {
+                Some(*addr)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get peer addresses to share with a requesting peer.
     ///
     /// Only **outbound** connections are eligible for sharing.  Advertising
@@ -2393,6 +2415,39 @@ mod tests {
         assert!(
             matches!(pm.peers[&addr].circuit_state, CircuitState::Open { .. }),
             "is_circuit_open must not transition state"
+        );
+    }
+
+    #[test]
+    fn test_find_inbound_duplex_by_ip() {
+        let config = PeerManagerConfig::default();
+        let mut pm = PeerManager::new(config);
+
+        let addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        pm.register_inbound_peer(addr);
+        pm.mark_peer_duplex(&addr);
+
+        // Should find the inbound duplex peer by IP
+        assert_eq!(
+            pm.find_inbound_duplex_by_ip("1.2.3.4".parse().unwrap()),
+            Some(addr)
+        );
+
+        // Different IP should return None
+        assert_eq!(
+            pm.find_inbound_duplex_by_ip("5.6.7.8".parse().unwrap()),
+            None
+        );
+
+        // Cold inbound duplex peer should NOT be found (temperature gate)
+        let cold_addr: SocketAddr = "10.0.0.1:3001".parse().unwrap();
+        pm.register_inbound_peer(cold_addr);
+        pm.mark_peer_duplex(&cold_addr);
+        // Demote back to cold to verify the temperature check
+        pm.peer_disconnected(&cold_addr);
+        assert_eq!(
+            pm.find_inbound_duplex_by_ip("10.0.0.1".parse().unwrap()),
+            None
         );
     }
 }
