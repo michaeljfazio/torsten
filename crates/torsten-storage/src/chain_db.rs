@@ -581,55 +581,40 @@ impl ChainDB {
         Ok(count)
     }
 
-    /// Flush ALL volatile blocks to ImmutableDB, bypassing the k-depth check.
+    /// Flush volatile blocks to ImmutableDB during graceful shutdown.
     ///
-    /// Only safe to call during graceful shutdown — after this, the VolatileDB
-    /// is empty and the ImmutableDB contains all blocks up to the chain tip.
-    /// This ensures the ledger snapshot (saved at the volatile tip) is
-    /// consistent with the ImmutableDB tip on restart.
+    /// Unlike the old implementation that flushed ALL volatile blocks (violating
+    /// the k-depth invariant), this now respects the same k-depth rule as
+    /// `flush_to_immutable`.  Only blocks that are k-deep on the canonical
+    /// chain are moved to ImmutableDB.  The last k blocks remain in volatile
+    /// and will be re-fetched from peers on restart.
+    ///
+    /// This prevents fork blocks within the rollback window from being
+    /// permanently committed to the append-only ImmutableDB, which would make
+    /// the node unable to recover from forks after restart.
     pub fn flush_all_to_immutable(&mut self) -> Result<u64, ChainDBError> {
-        let vol_tip = match self.volatile.get_tip() {
-            Some(t) => t,
-            None => return Ok(0),
-        };
-
-        let tip_block_no = vol_tip.2;
-
-        // Collect all volatile blocks in block_no order
-        let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
-        for block_no in 1..=tip_block_no {
-            if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
-                if self.immutable.has_block(&hash) {
-                    continue;
-                }
-                to_finalize.push((slot, hash, block_no, cbor.to_vec()));
-            }
-        }
-
-        if to_finalize.is_empty() {
-            return Ok(0);
-        }
-
-        let count = to_finalize.len() as u64;
-
-        for (slot, hash, block_no, cbor) in &to_finalize {
-            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
-        }
-
-        if let Some((slot, hash, block_no, _)) = to_finalize.last() {
-            self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
-        }
-
-        // Clear volatile — everything is now in immutable
-        self.volatile.clear();
+        // Delegate to the k-depth-safe flush — same behavior as normal operation.
+        // This may leave some volatile blocks behind, but that's correct: those
+        // blocks are within the rollback window and should be re-validated.
+        let flushed = self.flush_to_immutable()?;
 
         debug!(
-            flushed = count,
+            flushed,
             immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
-            "ChainDB: flushed all volatile blocks to immutable (shutdown)"
+            volatile_remaining = self.volatile.len(),
+            "ChainDB: flushed k-deep blocks to immutable (shutdown)"
         );
 
-        Ok(count)
+        Ok(flushed)
+    }
+
+    /// Get historical points from older ImmutableDB chunks (canonical blocks).
+    ///
+    /// Used for fork recovery: when the immutable_tip is contaminated (orphan
+    /// fork block), these deeper points from older chunks provide valid
+    /// ancestors for ChainSync intersection negotiation.
+    pub fn get_immutable_historical_points(&self, max_count: usize) -> Vec<(u64, Hash32)> {
+        self.immutable.get_historical_points(max_count)
     }
 
     /// Finalize the current ImmutableDB chunk and start a new one.

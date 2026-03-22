@@ -1529,11 +1529,17 @@ impl Node {
             db.get_chain_points(10)
         };
 
-        // When ChainDB is ahead of the ledger, check if its chain connects.
-        // If not (fork divergence), prefer the ledger tip for intersection.
+        // Detect fork divergence: check if blocks after the ledger tip in
+        // ChainDB actually connect.  If not, the ImmutableDB (or volatile)
+        // contains orphan fork blocks — we must exclude them from the
+        // intersection offer.
+        //
+        // This check runs when chain_slot >= ledger_slot (not just >),
+        // because after a rollback both tips may point to the same orphaned
+        // slot/hash — blocks stored in ImmutableDB from the wrong fork.
         let mut use_chain_tip = chain_slot > ledger_slot;
         let mut chain_diverged = false;
-        if use_chain_tip && ledger_tip != Point::Origin {
+        if chain_slot >= ledger_slot && ledger_tip != Point::Origin {
             let db = self.chain_db.read().await;
             if let Ok(Some((_next_slot, _hash, cbor))) =
                 db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
@@ -1575,10 +1581,19 @@ impl Node {
             }
         } else if chain_diverged {
             // ChainDB has contaminated blocks (e.g., orphan fork flushed to
-            // ImmutableDB). Exclude all ChainDB chain_points — they may
-            // cause the peer to intersect at a block our ledger can't reach.
-            // Only offer the ledger tip so the peer sends blocks from there.
-            if ledger_tip != Point::Origin {
+            // ImmutableDB on shutdown).  Exclude the current chain tip / ledger
+            // tip since they point to the wrong fork.  Instead, offer only
+            // deep historical points from older ImmutableDB chunks — these
+            // are canonical blocks that the peer will recognize.
+            let db = self.chain_db.read().await;
+            for (slot, hash) in db.get_immutable_historical_points(8) {
+                let p = Point::Specific(torsten_primitives::time::SlotNo(slot), hash);
+                if !known_points.contains(&p) {
+                    known_points.push(p);
+                }
+            }
+            // If no historical points found, fall back to ledger tip.
+            if known_points.is_empty() && ledger_tip != Point::Origin {
                 known_points.push(ledger_tip.clone());
             }
         } else {
