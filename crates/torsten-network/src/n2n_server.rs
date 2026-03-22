@@ -1418,26 +1418,40 @@ fn handle_n2n_txsubmission(
         .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
 
     match msg_tag {
-        // MsgInit: [6] — bidirectional initialization
+        // MsgInit: [6] — Client initialization
+        //
+        // The remote Client sends MsgInit to begin the TxSubmission2 session.
+        // As the Server, we do NOT reply with MsgInit — the Haskell codec
+        // expects the Server to stay silent (MsgInit is Client-only).
+        // After MsgInit, the Server has agency in StIdle and should send
+        // MsgRequestTxIds.  In our reactive N2N server model, we simply
+        // acknowledge MsgInit and wait for the next incoming segment (the
+        // remote Client will eventually receive our MsgRequestTxIds in a
+        // subsequent cycle).
         6 => {
-            if !peer_state.tx_submission_init_sent {
-                peer_state.tx_submission_init_sent = true;
-                let mut buf = Vec::new();
-                let mut enc = minicbor::Encoder::new(&mut buf);
-                enc.array(1)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                enc.u32(6)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                info!(peer = %peer_addr, "TxSubmission2: init handshake complete");
-                Ok(Some(Segment {
-                    transmission_time: 0,
-                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
-                    is_responder: true,
-                    payload: buf,
-                }))
-            } else {
-                Ok(None)
-            }
+            peer_state.tx_submission_init_sent = true;
+            info!(peer = %peer_addr, "TxSubmission2: received MsgInit from client");
+            // Server has agency now — send MsgRequestTxIds (blocking, ack=0, req=3)
+            // to begin pulling tx IDs from the remote Client.
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(4)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.u32(0)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // tag 0 = MsgRequestTxIds
+            enc.bool(true)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // blocking = true
+            enc.u16(0)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // ack_count = 0
+            enc.u16(3)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // req_count = 3
+            info!(peer = %peer_addr, "TxSubmission2: sending initial MsgRequestTxIds (blocking)");
+            Ok(Some(Segment {
+                transmission_time: 0,
+                protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                is_responder: true,
+                payload: buf,
+            }))
         }
         // MsgRequestTxIds: [0, blocking, ack_count, req_count]
         0 => {

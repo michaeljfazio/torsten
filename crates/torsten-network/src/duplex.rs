@@ -328,16 +328,35 @@ impl DuplexPeerConnection {
             None
         };
 
-        // TxSubmission2 CLIENT channel (subscribe_client):
-        //   We send on bit-15=0: MsgInit, MsgReplyTxIds, MsgReplyTxs, MsgDone
-        //   We receive on bit-15=1: MsgRequestTxIds, MsgRequestTxs
-        //   → serve_tx_submission: we are the tx-advertiser Client serving our mempool
+        // TxSubmission2 channel assignment for duplex connections:
+        //
+        // We are the TCP initiator.  The pallas mux convention is:
+        //   subscribe_client(P) → sends on P (bit-15=0), receives on P|0x8000
+        //   subscribe_server(P) → sends on P|0x8000, receives on P (bit-15=0)
+        //
+        // The remote (TCP responder) demuxer FLIPS the direction:
+        //   Our bit-15=0 → delivered to remote's ResponderDir (their Server side)
+        //   Our bit-15=1 → delivered to remote's InitiatorDir (their Client side)
+        //
+        // For TxSubmission2, the Ouroboros roles are:
+        //   Client = tx advertiser (sends MsgInit, MsgReplyTxIds, MsgReplyTxs)
+        //   Server = tx consumer (sends MsgRequestTxIds, MsgRequestTxs)
+        //
+        // Our Client (tx advertiser) messages must arrive at the remote's
+        // Server (ResponderDir).  So we send with bit-15=0 → subscribe_client.
+        //
+        // But wait — the remote ALSO runs a Client (InitiatorDir) on this same
+        // connection.  The remote's Client sends MsgInit with bit-15=0 from
+        // their perspective.  After the demuxer flip, that arrives as our
+        // ResponderDir = subscribe_server receive channel.
+        //
+        // So our mapping is:
+        //   subscribe_client(4) → OUR TxSubmission2 Client (we advertise our mempool)
+        //   subscribe_server(4) → OUR TxSubmission2 Server (we consume remote's mempool)
+        //
+        // The serve_tx_submission function is our CLIENT (advertiser).
+        // The pull_tx_submission function is our SERVER (consumer).
         let txsub_client_channel = plexer.subscribe_client(PROTOCOL_N2N_TX_SUBMISSION);
-
-        // TxSubmission2 SERVER channel (subscribe_server):
-        //   We send on bit-15=1: MsgRequestTxIds, MsgRequestTxs
-        //   We receive on bit-15=0: MsgInit, MsgReplyTxIds, MsgReplyTxs, MsgDone
-        //   → pull_tx_submission: we are the tx-consumer Server pulling from remote Client
         let txsub_server_channel = plexer.subscribe_server(PROTOCOL_N2N_TX_SUBMISSION);
 
         // KeepAlive: initiator (we ping; remote echoes).
