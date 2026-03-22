@@ -969,6 +969,7 @@ fn stake_credential_hash_with_ptrs(
 
 /// Legacy: Extract staking credential hash without pointer resolution.
 /// Used in contexts where the pointer_map isn't available.
+#[cfg(test)]
 fn stake_credential_hash(address: &torsten_primitives::address::Address) -> Option<Hash32> {
     use torsten_primitives::address::Address;
     match address {

@@ -10,7 +10,8 @@
 //! - Applying UTxO changes, certificates, governance, and fee accumulation
 
 use super::{
-    credential_to_hash, stake_credential_hash, stake_credential_hash_with_ptrs, BlockValidationMode, LedgerError, LedgerState,
+    credential_to_hash, stake_credential_hash_with_ptrs, BlockValidationMode, LedgerError,
+    LedgerState,
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
@@ -725,7 +726,9 @@ impl LedgerState {
                 for col_input in &tx.body.collateral {
                     if let Some(spent) = self.utxo_set.lookup(col_input) {
                         collateral_input_value += spent.value.coin.0;
-                        if let Some(cred) = stake_credential_hash_with_ptrs(&spent.address, &self.pointer_map) {
+                        if let Some(cred) =
+                            stake_credential_hash_with_ptrs(&spent.address, &self.pointer_map)
+                        {
                             if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred) {
                                 stake.0 = stake.0.saturating_sub(spent.value.coin.0);
                             }
@@ -737,7 +740,9 @@ impl LedgerState {
                 }
                 // If there's a collateral return output, add it
                 let collateral_return_value = if let Some(col_return) = &tx.body.collateral_return {
-                    if let Some(cred) = stake_credential_hash_with_ptrs(&col_return.address, &self.pointer_map) {
+                    if let Some(cred) =
+                        stake_credential_hash_with_ptrs(&col_return.address, &self.pointer_map)
+                    {
                         *self
                             .stake_distribution
                             .stake_map
@@ -794,7 +799,9 @@ impl LedgerState {
 
             // Update stake distribution from consumed inputs (subtract)
             for (_input, spent_output) in &spent_outputs {
-                if let Some(cred_hash) = stake_credential_hash_with_ptrs(&spent_output.address, &self.pointer_map) {
+                if let Some(cred_hash) =
+                    stake_credential_hash_with_ptrs(&spent_output.address, &self.pointer_map)
+                {
                     if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
                         stake.0 = stake.0.saturating_sub(spent_output.value.coin.0);
                     }
@@ -890,7 +897,9 @@ impl LedgerState {
 
                 // Pass 4: update stake distribution from new outputs.
                 for output in &tx.body.outputs {
-                    if let Some(cred_hash) = stake_credential_hash_with_ptrs(&output.address, &self.pointer_map) {
+                    if let Some(cred_hash) =
+                        stake_credential_hash_with_ptrs(&output.address, &self.pointer_map)
+                    {
                         *self
                             .stake_distribution
                             .stake_map

@@ -637,8 +637,7 @@ impl LedgerState {
     pub(crate) fn calculate_and_distribute_rewards(&mut self, rupd_snapshot: StakeSnapshot) {
         // Use self.epoch_fees (matching the live path which uses ss_fee from SNAP).
         // Tests set state.epoch_fees before calling this function.
-        let rupd =
-            self.calculate_rewards_inner(&rupd_snapshot, &rupd_snapshot, self.epoch_fees.0);
+        let rupd = self.calculate_rewards_inner(&rupd_snapshot, &rupd_snapshot, self.epoch_fees.0);
         // Apply immediately (legacy behavior for test compatibility)
         self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
         self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);

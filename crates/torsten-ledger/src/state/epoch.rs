@@ -1,4 +1,4 @@
-use super::{stake_credential_hash, stake_credential_hash_with_ptrs, LedgerState, StakeSnapshot};
+use super::{stake_credential_hash_with_ptrs, LedgerState, StakeSnapshot};
 use std::collections::HashMap;
 use std::sync::Arc;
 use torsten_primitives::hash::Hash32;
@@ -611,7 +611,9 @@ impl LedgerState {
         let mut new_map: HashMap<Hash32, Lovelace> =
             HashMap::with_capacity(self.stake_distribution.stake_map.len());
         for (_, output) in self.utxo_set.iter() {
-            if let Some(cred_hash) = stake_credential_hash_with_ptrs(&output.address, &self.pointer_map) {
+            if let Some(cred_hash) =
+                stake_credential_hash_with_ptrs(&output.address, &self.pointer_map)
+            {
                 *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
             }
         }

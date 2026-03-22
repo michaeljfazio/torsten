@@ -536,6 +536,12 @@ async fn serve_tx_submission_inner(
     // from the front when the peer sends ack_count > 0.
     let mut inflight: Vec<[u8; 32]> = Vec::new();
 
+    // Track ALL tx IDs ever offered to this peer (inflight + acknowledged).
+    // Without this, acked txs still in the mempool would be re-offered
+    // in subsequent MsgRequestTxIds rounds, causing an infinite loop
+    // instead of progressing through the full mempool.
+    let mut sent: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+
     loop {
         // Use a generous timeout for the blocking MsgRequestTxIds case:
         // the peer may hold us for up to 5 minutes while waiting for new txs.
@@ -570,6 +576,15 @@ async fn serve_tx_submission_inner(
                     inflight.drain(..drain_count);
                 }
 
+                // Prune the sent set: remove entries for txs no longer in the
+                // mempool (confirmed or expired) so the set doesn't grow unbounded.
+                if sent.len() > MAX_TX_INFLIGHT * 2 {
+                    let snapshot = mempool.snapshot();
+                    let mempool_hashes: std::collections::HashSet<[u8; 32]> =
+                        snapshot.tx_hashes.iter().map(|h| *h.as_bytes()).collect();
+                    sent.retain(|h| mempool_hashes.contains(h));
+                }
+
                 // Enforce inflight cap: if at the limit, reply empty so the
                 // peer can send more acks before we push new tx IDs.
                 let reply = if inflight.len() >= MAX_TX_INFLIGHT {
@@ -585,7 +600,7 @@ async fn serve_tx_submission_inner(
                     let capped_req = req_count.min(MAX_TX_IDS_PER_REPLY).min(remaining_cap);
 
                     // Pull up to capped_req new tx IDs from the mempool, excluding
-                    // those already in-flight to this peer.
+                    // those already sent (inflight or acknowledged) to this peer.
                     let new_ids: Vec<([u8; 32], u32)> = {
                         let snapshot = mempool.snapshot();
                         snapshot
@@ -593,7 +608,7 @@ async fn serve_tx_submission_inner(
                             .iter()
                             .filter(|h| {
                                 let bytes = *h.as_bytes();
-                                !inflight.iter().any(|inf| inf == &bytes)
+                                !sent.contains(&bytes)
                             })
                             .take(capped_req)
                             .filter_map(|h| {
@@ -615,7 +630,7 @@ async fn serve_tx_submission_inner(
                                 .iter()
                                 .filter(|h| {
                                     let bytes = *h.as_bytes();
-                                    !inflight.iter().any(|inf| inf == &bytes)
+                                    !sent.contains(&bytes)
                                 })
                                 .take(capped_req)
                                 .filter_map(|h| {
@@ -631,11 +646,12 @@ async fn serve_tx_submission_inner(
                         new_ids
                     };
 
-                    // Record newly sent IDs as inflight.
+                    // Record newly sent IDs as inflight and in the sent set.
                     for (hash, _) in &new_ids {
                         if inflight.len() < MAX_TX_INFLIGHT {
                             inflight.push(*hash);
                         }
+                        sent.insert(*hash);
                     }
 
                     if !new_ids.is_empty() {
