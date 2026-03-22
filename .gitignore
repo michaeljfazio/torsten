@@ -32,3 +32,4 @@ result-*
 logs/
 fuzz/target/
 epoch-snapshots/
+cstreamer-reference/
