@@ -290,14 +290,35 @@ impl DuplexPeerConnection {
         } else {
             std::net::SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), listen_port)
         };
-        socket
-            .bind(bind_addr)
-            .map_err(|e| DuplexError::Connection(format!("bind to port {listen_port}: {e}")))?;
 
-        let stream = socket
-            .connect(resolved)
-            .await
-            .map_err(|e| DuplexError::Connection(format!("tcp connect: {e}")))?;
+        // Attempt to bind to the listening port.  If this fails (e.g., socket
+        // in TIME_WAIT from a prior connection), fall back to OS-assigned port.
+        // Port binding is an optimization for duplex identity — not required
+        // for protocol correctness.
+        let stream = match socket.bind(bind_addr) {
+            Ok(()) => {
+                socket
+                    .connect(resolved)
+                    .await
+                    .map_err(|e| DuplexError::Connection(format!("tcp connect: {e}")))?
+            }
+            Err(bind_err) => {
+                debug!(
+                    "duplex: bind to port {listen_port} failed ({bind_err}), using ephemeral port"
+                );
+                // Create a new socket without binding
+                let socket2 = if resolved.is_ipv4() {
+                    tokio::net::TcpSocket::new_v4()
+                } else {
+                    tokio::net::TcpSocket::new_v6()
+                }
+                .map_err(|e| DuplexError::Connection(format!("socket create (fallback): {e}")))?;
+                socket2
+                    .connect(resolved)
+                    .await
+                    .map_err(|e| DuplexError::Connection(format!("tcp connect (fallback): {e}")))?
+            }
+        };
         if let Err(e) = crate::tcp::configure_tcp_keepalive(&stream) {
             warn!("duplex: failed to set TCP keepalive: {e}");
         }
