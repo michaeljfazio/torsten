@@ -1370,6 +1370,9 @@ mod tests {
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
         state.needs_stake_rebuild = false;
+        // Zero reserves to prevent RUPD monetary expansion from interfering
+        // with governance-specific assertions about treasury changes.
+        state.reserves = Lovelace(0);
 
         // Set up CC
         let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));

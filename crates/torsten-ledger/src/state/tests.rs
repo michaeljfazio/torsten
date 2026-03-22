@@ -2054,6 +2054,8 @@ fn test_treasury_withdrawal_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
+    state.needs_stake_rebuild = false;
     state.treasury = Lovelace(10_000_000_000);
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
@@ -4612,9 +4614,14 @@ fn test_pool_reregistration_cancels_pending_retirement() {
                 .values()
                 .any(|v| v.contains(&pool_id))
     );
-    // Pool should still exist with updated params
+    // Pool should still exist (original params remain until next epoch boundary)
     assert!(state.pool_params.contains_key(&pool_id));
-    assert_eq!(state.pool_params[&pool_id].pledge, Lovelace(1_000_000_000));
+    // Re-registration params are deferred to futurePoolParams (applied at next epoch boundary),
+    // matching Haskell's POOL rule which stores re-registrations in futurePoolParams.
+    assert_eq!(
+        state.future_pool_params[&pool_id].pledge,
+        Lovelace(1_000_000_000)
+    );
 }
 
 #[test]
@@ -7013,6 +7020,7 @@ fn test_pool_retirement_at_scheduled_epoch() {
     state.epoch_length = 100;
     state.epoch = EpochNo(4);
     state.needs_stake_rebuild = false;
+    state.reserves = Lovelace(0); // Prevent RUPD expansion
 
     let pool_id = Hash28::from_bytes([0xAA; 28]);
     let reward_addr = {
@@ -7034,6 +7042,11 @@ fn test_pool_retirement_at_scheduled_epoch() {
         metadata_hash: None,
     };
     Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg);
+
+    // Register the operator's reward account so pool deposit refund goes there
+    // (unregistered accounts have their refund sent to treasury per Haskell POOLREAP).
+    let hash_key = LedgerState::reward_account_to_hash(&reward_addr);
+    Arc::make_mut(&mut state.reward_accounts).insert(hash_key, Lovelace(0));
 
     // Schedule retirement at epoch 5
     state
@@ -11444,6 +11457,10 @@ fn test_reward_cross_validation_epoch_1239() {
     const EPOCH_LENGTH: u64 = 86_400;
     state.epoch_length = EPOCH_LENGTH;
 
+    // Conway (proto >= 7): d = 0 (ppDG returns minBound = 0).
+    // Without this, prev_d defaults to 1.0 which bypasses the eta calculation.
+    state.prev_d = 0.0;
+
     // ---- Build the go snapshot for epoch 1239 ----
     //
     // The go snapshot carries:
@@ -11456,6 +11473,13 @@ fn test_reward_cross_validation_epoch_1239() {
     const ACTUAL_BLOCKS: u64 = 613;
     const FEES_1239: u64 = 1_599_730_138;
 
+    // epoch_blocks_by_pool must contain the block counts (calculate_rewards_inner
+    // uses the sum of epoch_blocks_by_pool for actual_blocks, not epoch_block_count).
+    // Use a single dummy pool ID since this is a no-pool reward test — the block
+    // count affects eta but no per-pool rewards are computed without pool_params.
+    let mut blocks_by_pool = HashMap::new();
+    blocks_by_pool.insert(Hash28::from_bytes([0x01; 28]), ACTUAL_BLOCKS);
+
     let go_snapshot = StakeSnapshot {
         epoch: EpochNo(1239),
         delegations: Arc::new(HashMap::new()),
@@ -11464,7 +11488,7 @@ fn test_reward_cross_validation_epoch_1239() {
         stake_distribution: Arc::new(HashMap::new()),
         epoch_fees: Lovelace(FEES_1239),
         epoch_block_count: ACTUAL_BLOCKS,
-        epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        epoch_blocks_by_pool: Arc::new(blocks_by_pool),
     };
 
     // ---- Step 1: verify eta and expansion ----
@@ -13294,7 +13318,8 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.treasury = Lovelace(10_000_000_000); // 10T lovelace
+    state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
+    state.treasury = Lovelace(10_000_000_000); // 10B lovelace
     state.needs_stake_rebuild = false;
 
     // Set CC threshold to 0 so CC auto-approves

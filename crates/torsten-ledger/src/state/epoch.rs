@@ -57,27 +57,22 @@ impl LedgerState {
         // here in NEWEPOCH. We compute it now using the CURRENT GO snapshot and
         // ss_fee — these represent what Haskell's mid-epoch RUPD would have used.
         //
-        // GO snapshot: installed at the PREVIOUS epoch boundary, contains data from
-        // 2 epochs ago. At genesis, GO is a valid empty snapshot (not None).
-        //
-        // ss_fee: captured by SNAP at the previous boundary, contains fees from the
-        // epoch before the one that just ended. At genesis, ss_fee = 0.
-        {
+        // At genesis (first boundary), Haskell's nesRu = SNothing: no reward update
+        // to apply. We skip RUPD until the first snapshot rotation has captured
+        // bprev/ss_fee data from an actual epoch (rupd_ready = true).
+        if self.snapshots.rupd_ready {
             // Haskell's startStep uses THREE separate data sources:
             //   1. ssStakeGo: stake/pool/delegation data (2 epochs ago)
             //   2. nesBprev (BlocksMade): block production from previous epoch
             //   3. ssFee: fees captured by SNAP at previous boundary
             //
-            // GO provides stake distribution. SET provides block counts
-            // (SET = old mark = epoch that just ended = nesBprev equivalent).
+            // GO provides stake distribution. Block counts come from bprev
+            // (= nesBprev = previous epoch's blocks, separate from snapshot rotation).
             let go_snapshot = self
                 .snapshots
                 .go
                 .clone()
                 .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
-            // Block counts come from bprev (= nesBprev = previous epoch's blocks).
-            // This is separate from the snapshot rotation — bprev is captured
-            // at each boundary (nesBprev = nesBcur, step 7 in NEWEPOCH).
             let bprev = StakeSnapshot {
                 epoch_block_count: self.snapshots.bprev_block_count,
                 epoch_blocks_by_pool: Arc::clone(&self.snapshots.bprev_blocks_by_pool),
@@ -142,6 +137,9 @@ impl LedgerState {
         // at the top of process_epoch_transition.
         self.snapshots.bprev_block_count = bprev_block_count;
         self.snapshots.bprev_blocks_by_pool = bprev_blocks_by_pool;
+        // After the first rotation, bprev/ss_fee contain real epoch data.
+        // Subsequent RUPD computations can fire (matching Haskell's nesRu = SJust).
+        self.snapshots.rupd_ready = true;
 
         // Rebuild stake distribution from the full UTxO set at epoch boundaries.
         // During fast replay (needs_stake_rebuild=false), skip the expensive full

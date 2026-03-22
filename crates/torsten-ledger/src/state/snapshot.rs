@@ -219,6 +219,10 @@ impl LedgerState {
         }
         // Keep needs_stake_rebuild=true so every live epoch boundary rebuilds.
         state.needs_stake_rebuild = true;
+        // After loading a snapshot, the node is past genesis — RUPD should fire
+        // at the next epoch boundary. Old snapshots without this field will
+        // deserialize with rupd_ready=false (serde default), so set it here.
+        state.snapshots.rupd_ready = true;
         debug!(
             "Snapshot loaded from {} ({:.1} MB, {} UTxOs, epoch {})",
             path.display(),

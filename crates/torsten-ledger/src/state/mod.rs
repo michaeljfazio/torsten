@@ -409,6 +409,12 @@ pub struct EpochSnapshots {
     pub bprev_block_count: u64,
     #[serde(default)]
     pub bprev_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
+    /// Whether bprev/ss_fee have been populated by a prior snapshot rotation.
+    /// False at genesis; set to true after the first rotation captures epoch
+    /// data. Matches Haskell's initial `nesRu = SNothing` (no reward update
+    /// to apply at the first boundary).
+    #[serde(default)]
+    pub rupd_ready: bool,
 }
 
 impl Default for EpochSnapshots {
@@ -420,6 +426,7 @@ impl Default for EpochSnapshots {
             ss_fee: Lovelace(0),
             bprev_block_count: 0,
             bprev_blocks_by_pool: Arc::new(HashMap::new()),
+            rupd_ready: false,
         }
     }
 }
