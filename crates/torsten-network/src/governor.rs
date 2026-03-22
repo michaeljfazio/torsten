@@ -960,6 +960,17 @@ impl Governor {
     /// Local root peers are exempt from both checks — they are operator-
     /// configured trusted peers that should be promoted again immediately.
     fn evaluate_stale_hot_peers(&mut self, pm: &PeerManager, events: &mut Vec<GovernorEvent>) {
+        // Don't stall-demote when at or below the active peer target.
+        // Demoting in this situation creates a promote→demote loop since
+        // the deficit phase immediately re-promotes the peer.  Stall
+        // demotion is only meaningful when there are surplus hot peers
+        // and we can afford to drop an underperforming one.
+        let targets = self.active_targets();
+        let hot_count = pm.hot_peer_count();
+        if hot_count <= targets.active_peers {
+            return;
+        }
+
         // Build the set of addresses already targeted for demotion by earlier
         // phases so we don't emit duplicate Demote events.
         let already_demoted: HashSet<SocketAddr> = events
@@ -2419,9 +2430,12 @@ mod tests {
 
         // Use a small threshold to make the test fast.
         let threshold = 3u32;
+        // active_peers must be < hot_count for stall demotion to apply
+        // (stall demotion is suppressed when at/below target to avoid
+        // promote→demote loops).  We have 1 hot peer, so target 0.
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_peers: 0,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
@@ -2470,9 +2484,11 @@ mod tests {
         pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&addr);
 
+        // active_peers: 1 — peer is at target so stall demotion is
+        // suppressed (by design, to avoid promote→demote loops).
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_peers: 1,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
@@ -2519,9 +2535,10 @@ mod tests {
         let threshold = 3u32;
         pm.set_failure_count(&addr, threshold + 1);
 
+        // active_peers: 0 so stall/error logic applies.
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_peers: 0,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
@@ -2558,9 +2575,10 @@ mod tests {
         // High failure count.
         pm.set_failure_count(&addr, 100);
 
+        // active_peers: 0 so stall/error logic applies.
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_peers: 0,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
@@ -2599,9 +2617,10 @@ mod tests {
         pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&addr);
 
+        // active_peers: 0 so stall logic applies.
         let config = GovernorConfig {
             normal_targets: PeerTargets {
-                active_peers: 5,
+                active_peers: 0,
                 established_peers: 10,
                 ..PeerTargets::default()
             },
