@@ -632,7 +632,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(lines), text_area);
 
     // Mempool gauge — full-width bar on the last row inside the chain panel.
-    // Shows pending tx count relative to the configurable cap (default 4,000 txs).
+    // Shows pending tx count relative to the configurable cap (default 16,384 txs).
     // If the node publishes a `torsten_mempool_tx_max` gauge, use it for scaling.
     if rest.height >= 1 {
         let gauge_y = rest.y + text_row_height as u16;

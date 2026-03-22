@@ -2211,8 +2211,10 @@ mod tests {
 
     // ── #199: Warm-to-hot promotion liveness gate ─────────────────────────────
 
-    /// A warm peer that has not yet fetched any blocks and connected more than
-    /// PROMOTION_NEW_PEER_GRACE ago must NOT be promoted to hot.
+    /// A warm peer that has accumulated failures, has not fetched any blocks,
+    /// and connected more than PROMOTION_NEW_PEER_GRACE ago must NOT be
+    /// promoted to hot.  (Peers with zero failures are always eligible for
+    /// promotion to allow TxSubmission2-only connections.)
     #[test]
     fn test_promotion_blocked_for_idle_peer_past_grace() {
         use crate::peer_manager::PROMOTION_NEW_PEER_GRACE;
@@ -2232,6 +2234,8 @@ mod tests {
             &addr,
             Instant::now() - PROMOTION_NEW_PEER_GRACE - Duration::from_secs(10),
         );
+        // Set a non-zero failure count so the zero-failure bypass doesn't apply.
+        pm.set_failure_count(&addr, 1);
         // blocks_fetched is still 0 and last_good_fetch is None.
 
         let config = GovernorConfig {
@@ -2389,7 +2393,9 @@ mod tests {
     // ── #200: Stall detection and error-rate demotion ─────────────────────────
 
     /// A hot peer that serves no new blocks for stall_demotion_cycles consecutive
-    /// evaluation cycles must be demoted back to warm.
+    /// evaluation cycles must be demoted back to warm.  The peer must have
+    /// fetched at least one block initially — peers with `blocks_fetched == 0`
+    /// are exempt from stall checks (TxSubmission2-only connections).
     #[test]
     fn test_stall_demotion_after_threshold_cycles() {
         let pm_config = PeerManagerConfig {
@@ -2404,7 +2410,8 @@ mod tests {
         pm.add_config_peer(addr, false, false);
         pm.peer_connected(&addr, 14, ConnectionDirection::Outbound);
         pm.promote_to_hot(&addr);
-        // blocks_fetched starts at 0; no record_block_fetch call.
+        // Record one block fetch so the peer is subject to stall detection.
+        pm.record_block_fetch(&addr, 50.0, 1, 1024);
 
         // Use a small threshold to make the test fast.
         let threshold = 3u32;

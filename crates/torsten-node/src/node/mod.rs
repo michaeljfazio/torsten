@@ -837,6 +837,7 @@ impl Node {
             self.metrics.set_epoch(ls.epoch.0);
             self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
             self.metrics.set_mempool_count(self.mempool.len() as u64);
+            self.metrics.set_mempool_max(self.mempool.capacity() as u64);
             self.metrics.delegation_count.store(
                 ls.delegations.len() as u64,
                 std::sync::atomic::Ordering::Relaxed,

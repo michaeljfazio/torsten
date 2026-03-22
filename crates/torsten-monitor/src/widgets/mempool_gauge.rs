@@ -18,7 +18,7 @@ use ratatui::{
 use crate::theme::Theme;
 
 /// Default mempool capacity used for gauge scaling.
-const DEFAULT_MEMPOOL_MAX: u64 = 4_000;
+const DEFAULT_MEMPOOL_MAX: u64 = 16_384;
 
 /// A horizontal gauge widget showing mempool fill level.
 pub struct MempoolGauge<'a> {
@@ -128,36 +128,36 @@ mod tests {
         let line: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(line.contains("0/4000 txs"));
+        assert!(line.contains("0/16384 txs"));
     }
 
     #[test]
     fn test_mempool_gauge_half_full() {
-        let gauge = MempoolGauge::new(2000, &THEME_DEFAULT);
+        let gauge = MempoolGauge::new(8192, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         gauge.render(area, &mut buf);
         let line: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(line.contains("2000/4000 txs"));
+        assert!(line.contains("8192/16384 txs"));
     }
 
     #[test]
     fn test_mempool_gauge_full() {
-        let gauge = MempoolGauge::new(4000, &THEME_DEFAULT);
+        let gauge = MempoolGauge::new(16384, &THEME_DEFAULT);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         gauge.render(area, &mut buf);
         let line: String = (0..area.width)
             .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(line.contains("4000/4000 txs"));
+        assert!(line.contains("16384/16384 txs"));
     }
 
     #[test]
     fn test_mempool_gauge_over_capacity() {
-        let gauge = MempoolGauge::new(5000, &THEME_DEFAULT);
+        let gauge = MempoolGauge::new(20000, &THEME_DEFAULT);
         assert_eq!(gauge.fill_ratio(), 1.0);
     }
 
@@ -170,16 +170,16 @@ mod tests {
 
     #[test]
     fn test_mempool_gauge_color_thresholds() {
-        // 12.5% → success (green)
-        let low = MempoolGauge::new(500, &THEME_DEFAULT);
+        // ~12% → success (green)
+        let low = MempoolGauge::new(2000, &THEME_DEFAULT);
         assert_eq!(low.bar_color(), THEME_DEFAULT.success);
 
         // 50% → warning (yellow)
-        let mid = MempoolGauge::new(2000, &THEME_DEFAULT);
+        let mid = MempoolGauge::new(8192, &THEME_DEFAULT);
         assert_eq!(mid.bar_color(), THEME_DEFAULT.warning);
 
-        // 87.5% → error (red)
-        let high = MempoolGauge::new(3500, &THEME_DEFAULT);
+        // ~88% → error (red)
+        let high = MempoolGauge::new(14336, &THEME_DEFAULT);
         assert_eq!(high.bar_color(), THEME_DEFAULT.error);
     }
 

@@ -1436,11 +1436,11 @@ fn encode_request_tx_ids(blocking: bool, ack_count: u16, req_count: u16) -> Vec<
 /// Encode `MsgReplyTxIds = [1, [[GenTxId, size], ...]]`.
 ///
 /// Each tx ID is HFC-wrapped as `GenTxId = [era_index, tx_hash_bytes]`.
-/// Conway is era index 5 in the Haskell HFC encoding.
+/// Conway is era index 6 in the Haskell HFC encoding (Byron=0..Conway=6).
 /// Uses indefinite-length arrays to match Haskell wire format.
 fn encode_reply_tx_ids(ids: &[([u8; 32], u32)]) -> Vec<u8> {
     // Conway era index in the HFC GenTxId encoding
-    const CONWAY_ERA_INDEX: u32 = 5;
+    const CONWAY_ERA_INDEX: u32 = 6;
 
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
@@ -1484,7 +1484,7 @@ fn encode_request_txs(hashes: &[[u8; 32]]) -> Vec<u8> {
 /// Each tx body is HFC-wrapped as `GenTx = [era_index, tag(24, tx_cbor)]`.
 /// The tag(24) wrapping matches Haskell's `Serialised` encoding.
 fn encode_reply_txs(bodies: &[Vec<u8>]) -> Vec<u8> {
-    const CONWAY_ERA_INDEX: u32 = 5;
+    const CONWAY_ERA_INDEX: u32 = 6;
 
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);

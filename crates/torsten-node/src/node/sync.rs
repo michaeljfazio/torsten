@@ -1396,6 +1396,7 @@ impl Node {
                 self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
                 self.metrics.set_sync_progress(progress);
                 self.metrics.set_mempool_count(self.mempool.len() as u64);
+                self.metrics.set_mempool_max(self.mempool.capacity() as u64);
                 self.metrics.mempool_bytes.store(
                     self.mempool.total_bytes() as u64,
                     std::sync::atomic::Ordering::Relaxed,
@@ -1414,10 +1415,10 @@ impl Node {
                     self.metrics
                         .peers_inbound
                         .store(inbound_count, std::sync::atomic::Ordering::Relaxed);
-                    // Duplex = outbound + inbound: total peers with bidirectional
-                    // mini-protocol bundles (InitiatorAndResponder diffusion mode).
+                    // Duplex = peers with explicit duplex flag set (bidirectional
+                    // mini-protocol bundles via InitiatorAndResponder diffusion mode).
                     self.metrics.peers_duplex.store(
-                        pm.outbound_peer_count() as u64 + inbound_count,
+                        pm.duplex_peer_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     self.metrics.peers_cold.store(

@@ -364,6 +364,7 @@ pub struct NodeMetrics {
     pub epoch_number: AtomicU64,
     pub utxo_count: AtomicU64,
     pub mempool_tx_count: AtomicU64,
+    pub mempool_tx_max: AtomicU64,
     pub mempool_bytes: AtomicU64,
     pub rollback_count: AtomicU64,
     pub blocks_forged: AtomicU64,
@@ -452,6 +453,7 @@ impl NodeMetrics {
             epoch_number: AtomicU64::new(0),
             utxo_count: AtomicU64::new(0),
             mempool_tx_count: AtomicU64::new(0),
+            mempool_tx_max: AtomicU64::new(0),
             mempool_bytes: AtomicU64::new(0),
             rollback_count: AtomicU64::new(0),
             blocks_forged: AtomicU64::new(0),
@@ -556,6 +558,10 @@ impl NodeMetrics {
 
     pub fn set_mempool_count(&self, count: u64) {
         self.mempool_tx_count.store(count, Ordering::Relaxed);
+    }
+
+    pub fn set_mempool_max(&self, max: u64) {
+        self.mempool_tx_max.store(max, Ordering::Relaxed);
     }
 
     pub fn set_disk_available_bytes(&self, bytes: u64) {
@@ -849,6 +855,11 @@ impl NodeMetrics {
                 "torsten_mempool_tx_count",
                 "Number of transactions in the mempool",
                 &self.mempool_tx_count,
+            ),
+            (
+                "torsten_mempool_tx_max",
+                "Maximum transaction capacity of the mempool",
+                &self.mempool_tx_max,
             ),
             (
                 "torsten_mempool_bytes",
