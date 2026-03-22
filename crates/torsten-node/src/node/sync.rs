@@ -1014,14 +1014,20 @@ impl Node {
                     }
                     if bridge_failed {
                         // ChainDB has blocks from a different fork that don't
-                        // connect to the ledger. Fork blocks are retained in
-                        // volatile (non-destructive) and will be GC'd after 60s.
-                        // The caller reconnects and ChainSync delivers the
-                        // correct chain blocks.
-                        warn!(
-                            "Gap bridge failed due to fork divergence. \
-                             Fork blocks retained in volatile for GC. Re-syncing."
-                        );
+                        // connect to the ledger tip.  Clear volatile so the
+                        // stale fork blocks don't cause an infinite retry loop
+                        // (get_next_block_after_slot would keep finding them).
+                        // ChainSync will deliver the correct chain blocks on
+                        // the next sync cycle.
+                        {
+                            let mut db = self.chain_db.write().await;
+                            let removed = db.volatile_block_count();
+                            db.clear_volatile();
+                            warn!(
+                                removed,
+                                "Gap bridge failed — cleared volatile DB (fork divergence). Re-syncing."
+                            );
+                        }
                         return 0;
                     }
                 }

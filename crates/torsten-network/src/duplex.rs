@@ -401,10 +401,9 @@ impl DuplexPeerConnection {
         // --- BlockFetch client ---------------------------------------------------
         let bf_client = bf_channel.map(pallas_network::miniprotocols::blockfetch::Client::new);
 
-        let remote_addr_str = format!("{addr}");
-        let remote_addr: SocketAddr = remote_addr_str
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+        // Use the resolved address (from DNS lookup above) as the remote_addr.
+        // This ensures we have a valid SocketAddr even when `addr` is a hostname.
+        let remote_addr: SocketAddr = resolved;
 
         // --- TxSubmission2 CLIENT task (subscribe_client channel) ----------------
         //
