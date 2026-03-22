@@ -1759,12 +1759,20 @@ impl Node {
                             let task_listen_port = gov_listen_port;
                             let task_sync_managed = gov_sync_managed.clone();
                             tokio::spawn(async move {
-                                // Re-check sync-managed right before connecting
-                                // to avoid race with the sync loop.
+                                // Re-check sync-managed and existing duplex connections
+                                // right before connecting to avoid races.
                                 if task_sync_managed.read().await.contains(&addr) {
                                     debug!(
                                         %addr,
                                         "Governor: aborting connect — peer now sync-managed"
+                                    );
+                                    let _ = task_done_tx.send(addr);
+                                    return;
+                                }
+                                if task_duplex_conns.lock().await.contains_key(&addr) {
+                                    debug!(
+                                        %addr,
+                                        "Governor: aborting connect — duplex connection already exists"
                                     );
                                     let _ = task_done_tx.send(addr);
                                     return;

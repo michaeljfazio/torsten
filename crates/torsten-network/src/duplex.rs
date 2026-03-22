@@ -690,7 +690,8 @@ async fn serve_tx_submission_inner(
                     // those already sent (inflight or acknowledged) to this peer.
                     let new_ids: Vec<([u8; 32], u32)> = {
                         let snapshot = mempool.snapshot();
-                        snapshot
+                        let total_in_mempool = snapshot.tx_hashes.len();
+                        let ids: Vec<_> = snapshot
                             .tx_hashes
                             .iter()
                             .filter(|h| {
@@ -701,7 +702,16 @@ async fn serve_tx_submission_inner(
                             .filter_map(|h| {
                                 mempool.get_tx_size(h).map(|sz| (*h.as_bytes(), sz as u32))
                             })
-                            .collect()
+                            .collect();
+                        debug!(
+                            %peer_addr,
+                            sent_set_size = sent.len(),
+                            mempool_total = total_in_mempool,
+                            selected = ids.len(),
+                            first_hash = ids.first().map(|(h, _)| hex::encode(&h[..8])).unwrap_or_default(),
+                            "TxSubmission2 client: tx selection"
+                        );
+                        ids
                     };
 
                     // When blocking=true and no txs available, we MUST NOT
