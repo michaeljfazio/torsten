@@ -111,9 +111,18 @@ impl PipelinedPeerClient {
         let cs_buf = ChannelBuffer::new(cs_channel);
         let bf_client = pallas_network::miniprotocols::blockfetch::Client::new(bf_channel);
 
-        let remote_addr = format!("{addr}")
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+        // Resolve the address: if it's a hostname, do DNS lookup to get a SocketAddr.
+        let remote_addr: SocketAddr = match format!("{addr}").parse() {
+            Ok(sa) => sa,
+            Err(_) => {
+                // Hostname — resolve via DNS
+                tokio::net::lookup_host(format!("{addr}"))
+                    .await
+                    .ok()
+                    .and_then(|mut addrs| addrs.next())
+                    .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)))
+            }
+        };
 
         debug!("pipelined client: connected to {remote_addr}");
 
