@@ -496,6 +496,14 @@ struct PeerState {
     tx_submission_init_sent: bool,
     /// TxSubmission2 flow control: tx IDs sent but not yet acknowledged
     tx_inflight: Vec<[u8; 32]>,
+    /// TxSubmission2: tx IDs we have requested from the peer (our consumer side).
+    /// After we send MsgRequestTxIds, the peer replies with MsgReplyTxIds.
+    /// We then send MsgRequestTxs for the IDs listed here, and the peer replies
+    /// with MsgReplyTxs containing the actual tx bodies.
+    tx_requested_from_peer: Vec<[u8; 32]>,
+    /// TxSubmission2: number of tx IDs received from the peer but not yet
+    /// acknowledged via ack_count in the next MsgRequestTxIds we send.
+    tx_peer_unacked: u16,
 }
 
 impl PeerState {
@@ -506,6 +514,8 @@ impl PeerState {
             chainsync_must_reply: false,
             tx_submission_init_sent: false,
             tx_inflight: Vec::new(),
+            tx_requested_from_peer: Vec::new(),
+            tx_peer_unacked: 0,
         }
     }
 }
@@ -1639,6 +1649,103 @@ fn handle_n2n_txsubmission(
                 payload: buf,
             }))
         }
+        // MsgReplyTxIds: [1, [[tx_id, size], ...]]
+        //
+        // The peer's Client replies with the tx IDs it has available.
+        // We filter out txs already in our mempool and send MsgRequestTxs
+        // for the remaining unknown ones.
+        1 => {
+            let ids_arr_len = decoder
+                .array()
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?
+                .unwrap_or(0);
+
+            let mut new_ids: Vec<[u8; 32]> = Vec::new();
+            for _ in 0..ids_arr_len {
+                // Each entry is [tx_id, size]
+                let _inner_len = decoder
+                    .array()
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                let tx_id_bytes = decoder
+                    .bytes()
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                let _size = decoder.u32().unwrap_or(0);
+
+                if let Ok(hash_arr) = <[u8; 32]>::try_from(tx_id_bytes) {
+                    let hash = torsten_primitives::hash::Hash32::from_bytes(hash_arr);
+                    // Only request txs we don't already have in the mempool
+                    let already_have = mempool
+                        .as_ref()
+                        .map(|mp| mp.contains(&hash))
+                        .unwrap_or(false);
+                    if !already_have {
+                        new_ids.push(hash_arr);
+                    }
+                }
+            }
+
+            // Track how many IDs we received for acknowledgment in the next round
+            peer_state.tx_peer_unacked += ids_arr_len as u16;
+
+            if new_ids.is_empty() {
+                // No new txs to fetch — send MsgRequestTxIds to continue the loop
+                debug!(
+                    peer = %peer_addr,
+                    received = ids_arr_len,
+                    "TxSubmission2: all replied tx IDs already known, requesting more"
+                );
+                let ack = peer_state.tx_peer_unacked;
+                peer_state.tx_peer_unacked = 0;
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(4)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(0)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // MsgRequestTxIds
+                enc.bool(true)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // blocking
+                enc.u16(ack)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // ack previous
+                enc.u16(3)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // req_count
+                Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                    is_responder: true,
+                    payload: buf,
+                }))
+            } else {
+                // Store the IDs we're about to request so we can match them
+                // against MsgReplyTxs bodies.
+                peer_state.tx_requested_from_peer = new_ids.clone();
+
+                info!(
+                    peer = %peer_addr,
+                    count = new_ids.len(),
+                    "TxSubmission2: requesting tx bodies from peer"
+                );
+
+                // MsgRequestTxs: [2, [tx_id, ...]]
+                let mut buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut buf);
+                enc.array(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(2)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.array(new_ids.len() as u64)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                for id in &new_ids {
+                    enc.bytes(id)
+                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                }
+                Ok(Some(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                    is_responder: true,
+                    payload: buf,
+                }))
+            }
+        }
         // MsgRequestTxs: [2, [tx_ids]]
         2 => {
             // Parse requested tx IDs (capped to prevent memory exhaustion)
@@ -1697,6 +1804,115 @@ fn handle_n2n_txsubmission(
                 count = tx_bodies.len(),
                 "TxSubmission2: replied with MsgReplyTxs"
             );
+            Ok(Some(Segment {
+                transmission_time: 0,
+                protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                is_responder: true,
+                payload: buf,
+            }))
+        }
+        // MsgReplyTxs: [3, [tx_cbor, ...]]
+        //
+        // The peer's Client replies with the tx bodies we requested.
+        // Decode each tx and add it to our mempool, then send the next
+        // MsgRequestTxIds to continue the protocol loop.
+        3 => {
+            let bodies_len = decoder
+                .array()
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?
+                .unwrap_or(0);
+
+            let requested = std::mem::take(&mut peer_state.tx_requested_from_peer);
+            let mut added = 0u64;
+
+            if let Some(mp) = mempool {
+                for i in 0..bodies_len as usize {
+                    let tx_cbor = match decoder.bytes() {
+                        Ok(b) => b,
+                        Err(_) => break,
+                    };
+
+                    let tx_hash_bytes = if i < requested.len() {
+                        requested[i]
+                    } else {
+                        // More bodies than we requested — skip
+                        continue;
+                    };
+                    let tx_hash =
+                        torsten_primitives::hash::Hash32::from_bytes(tx_hash_bytes);
+
+                    // Try decoding across eras (Conway=6 first, then backwards)
+                    let mut decoded = false;
+                    for era in [6u16, 5, 4, 3, 2] {
+                        match torsten_serialization::decode_transaction(era, tx_cbor) {
+                            Ok(tx) => {
+                                let tx_size = tx_cbor.len();
+                                let fee = tx.body.fee;
+                                match mp.add_tx_with_fee(tx_hash, tx, tx_size, fee) {
+                                    Ok(
+                                        torsten_primitives::mempool::MempoolAddResult::Added,
+                                    ) => {
+                                        info!(
+                                            hash = %tx_hash,
+                                            size = tx_size,
+                                            peer = %peer_addr,
+                                            "TxSubmission2 N2N: tx added to mempool"
+                                        );
+                                        added += 1;
+                                    }
+                                    Ok(
+                                        torsten_primitives::mempool::MempoolAddResult::AlreadyExists,
+                                    ) => {
+                                        debug!(
+                                            hash = %tx_hash,
+                                            "TxSubmission2 N2N: tx already in mempool"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        debug!(
+                                            hash = %tx_hash,
+                                            "TxSubmission2 N2N: mempool rejected tx: {e}"
+                                        );
+                                    }
+                                }
+                                decoded = true;
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    if !decoded {
+                        warn!(
+                            hash = %tx_hash,
+                            peer = %peer_addr,
+                            "TxSubmission2 N2N: failed to decode tx in any era"
+                        );
+                    }
+                }
+            }
+
+            info!(
+                peer = %peer_addr,
+                received = bodies_len,
+                added,
+                "TxSubmission2 N2N: processed MsgReplyTxs, requesting more"
+            );
+
+            // Send next MsgRequestTxIds to continue the protocol loop
+            let ack = peer_state.tx_peer_unacked;
+            peer_state.tx_peer_unacked = 0;
+            let mut buf = Vec::new();
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(4)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            enc.u32(0)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // MsgRequestTxIds
+            enc.bool(true)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // blocking
+            enc.u16(ack)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // ack previous
+            enc.u16(3)
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // req_count
             Ok(Some(Segment {
                 transmission_time: 0,
                 protocol_id: MINI_PROTOCOL_TXSUBMISSION,

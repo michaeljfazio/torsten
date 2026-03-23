@@ -252,11 +252,35 @@ impl LedgerState {
             }
             Certificate::UnregDRep {
                 credential,
-                refund: _,
+                refund,
             } => {
                 let key = credential_to_hash(credential);
-                Arc::make_mut(&mut self.governance).dreps.remove(&key);
-                debug!("DRep deregistered: {}", key.to_hex());
+                // Refund the DRep deposit to their reward account.
+                // Per the Haskell ledger spec (Conway DELEG rule), the deposit
+                // is returned to the credential's reward account upon
+                // unregistration.  If a refund amount is specified in the
+                // certificate it must match the recorded deposit (enforced by
+                // validation); we use the recorded deposit when available.
+                let deposit_amount = Arc::make_mut(&mut self.governance)
+                    .dreps
+                    .remove(&key)
+                    .map(|reg| reg.deposit)
+                    .unwrap_or(*refund);
+                if deposit_amount.0 > 0 {
+                    // Credit the deposit back to the credential's reward account.
+                    // The reward account key is the same credential hash used for
+                    // DRep registration (Hash32 of the credential).
+                    *Arc::make_mut(&mut self.reward_accounts)
+                        .entry(key)
+                        .or_insert(Lovelace(0)) += deposit_amount;
+                    debug!(
+                        "DRep deregistered: {}, deposit {} refunded to reward account",
+                        key.to_hex(),
+                        deposit_amount.0
+                    );
+                } else {
+                    debug!("DRep deregistered: {}", key.to_hex());
+                }
             }
             Certificate::UpdateDRep { credential, anchor } => {
                 let key = credential_to_hash(credential);

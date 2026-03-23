@@ -48,9 +48,20 @@ impl PaymentSigningKey {
         })
     }
 
-    /// Create a signing key from 32 bytes (seed) or 64 bytes (expanded Ed25519).
-    /// Only the first 32 bytes (seed) are used; bytes 32-63 are the public key
-    /// which is derived automatically. Other lengths are rejected.
+    /// Create a signing key from 32 bytes (seed) or 64 bytes (seed + public key).
+    ///
+    /// For 32 bytes: used directly as an ed25519-dalek seed (SHA-512 hashed
+    /// internally to derive the scalar).
+    ///
+    /// For 64 bytes: the first 32 bytes are used as the seed; bytes 32-63 are
+    /// the public key which is derived automatically and ignored.
+    ///
+    /// **Important:** This function handles standard Ed25519 seed-based keys.
+    /// It does NOT support Cardano Ed25519-BIP32 extended keys where the first
+    /// 32 bytes are a pre-clamped private scalar (not a seed).  For BIP32
+    /// extended signing keys (e.g., from `cardano-cli` `PaymentExtendedSigningKeyShelley_ed25519_bip32`),
+    /// the scalar must be used directly without SHA-512 hashing, which requires
+    /// the `ed25519-bip32` crate or equivalent low-level scalar construction.
     pub fn from_extended_bytes(bytes: &[u8]) -> Result<Self, KeyError> {
         match bytes.len() {
             32 | 64 => Self::from_bytes(&bytes[..32]),
