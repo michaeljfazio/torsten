@@ -1796,132 +1796,33 @@ impl Node {
                  attempting rollback (depth={depth} slots)."
             );
 
-            // If the divergence is shallow (within k blocks), try a
-            // lightweight rollback via handle_rollback. Non-destructive:
-            // fork blocks remain in VolatileDB and are GC'd after 60s
-            // (matching Haskell cardano-node behavior).
-            if depth <= self.consensus.security_param * 2 {
-                let rollback_point = intersect.clone().unwrap_or(Point::Origin);
-                info!(
-                    "Fork recovery: lightweight rollback to {rollback_point} \
-                     (depth={depth} slots, within 2k). Fork blocks retained for GC."
-                );
-                self.handle_rollback(&rollback_point).await;
-                // Non-destructive: fork blocks stay in volatile for GC.
-                self.mempool.clear();
-                return Err(anyhow::anyhow!(
-                    "fork recovery: rolled back {depth} slots, reconnecting to continue sync"
-                ));
-            }
-
-            // Deep divergence: fall through to full replay.
-            warn!(
+            // Rollback the ledger to the intersection point.
+            // In the Haskell implementation (ouroboros-consensus LedgerDB/Forker.hs),
+            // rollback uses the last-k cached ledger states — NEVER a genesis replay.
+            // The max rollback depth is k blocks (not slots).
+            //
+            // Our simplified approach: discard the stale ledger snapshot and
+            // let the sync pipeline rebuild from the ImmutableDB intersection.
+            // This avoids the catastrophic genesis replay.
+            let rollback_point = intersect.clone().unwrap_or(Point::Origin);
+            info!(
                 depth,
                 security_param = self.consensus.security_param,
-                "Fork recovery: deep divergence exceeds 2k — full ImmutableDB replay required."
+                "Fork recovery: rollback to intersection {rollback_point} \
+                 (depth={depth} slots). Discarding stale ledger state."
             );
+            self.handle_rollback(&rollback_point).await;
+            self.mempool.clear();
 
+            // Clear volatile DB — fork blocks should not persist
             {
                 let mut db = self.chain_db.write().await;
                 db.clear_volatile();
             }
 
-            // Reset ledger and replay up to the intersection slot.
-            // Detach the LSM UTxO store so the replay uses a fast
-            // in-memory UtxoSet (~30K blk/s vs ~300 blk/s with LSM).
-            // The store is reattached after replay completes.
-            let immutable_dir = self.database_path.join("immutable");
-            if immutable_dir.is_dir() {
-                let ledger_state = self.ledger_state.clone();
-                let bel = self.byron_epoch_length;
-                let target = intersect_slot;
-
-                let saved_utxo_store = {
-                    let mut ls = ledger_state.write().await;
-                    let utxo_store = ls.utxo_set.detach_store();
-                    *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
-                    utxo_store
-                };
-
-                info!(
-                    target_slot = target,
-                    "Fork recovery: replaying from genesis to intersection"
-                );
-
-                let replay_result = tokio::task::spawn_blocking(move || {
-                    let start = std::time::Instant::now();
-                    let mut replayed = 0u64;
-                    let mut last_log = std::time::Instant::now();
-
-                    // Hold write lock for the entire replay to avoid
-                    // per-block lock contention with N2C/N2N servers.
-                    let mut ls = ledger_state.blocking_write();
-
-                    let result = crate::mithril::replay_from_chunk_files(
-                        &immutable_dir,
-                        |cbor| {
-                            match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(cbor, bel) {
-                                Ok(block) => {
-                                    if block.slot().0 > target {
-                                        return Err(anyhow::anyhow!("reached target slot"));
-                                    }
-                                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
-                                        tracing::debug!(slot = block.slot().0, "Fork recovery: apply skipped: {e}");
-                                    }
-                                    replayed += 1;
-                                    if last_log.elapsed().as_secs() >= 5 {
-                                        let elapsed = start.elapsed().as_secs();
-                                        let speed = if elapsed > 0 { replayed / elapsed } else { replayed };
-                                        tracing::info!(
-                                            replayed,
-                                            slot = block.slot().0,
-                                            target_slot = target,
-                                            speed = format_args!("{speed} blk/s"),
-                                            "Fork recovery: replay progress",
-                                        );
-                                        last_log = std::time::Instant::now();
-                                    }
-                                    Ok(())
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Fork recovery: decode error: {e}");
-                                    Ok(())
-                                }
-                            }
-                        },
-                    );
-
-                    drop(ls);
-
-                    let elapsed = start.elapsed().as_secs_f64();
-                    tracing::info!(
-                        replayed,
-                        target_slot = target,
-                        elapsed_secs = format!("{elapsed:.1}"),
-                        "Fork recovery: replay complete"
-                    );
-
-                    match result {
-                        Ok(_) | Err(_) => replayed,
-                    }
-                })
-                .await;
-
-                // Reattach the LSM UTxO store.  The in-memory UtxoSet
-                // built during replay has the correct canonical state;
-                // the LSM store will be reconciled on the next snapshot.
-                if let Some(store) = saved_utxo_store {
-                    let mut ls = self.ledger_state.write().await;
-                    ls.attach_utxo_store(store);
-                }
-
-                match replay_result {
-                    Ok(n) => info!(blocks = n, "Fork recovery: finished"),
-                    Err(e) => error!("Fork recovery: replay task failed: {e}"),
-                }
-            }
-
-            self.consensus.set_strict_verification(false);
+            return Err(anyhow::anyhow!(
+                "fork recovery: rolled back {depth} slots to intersection, reconnecting"
+            ));
         }
 
         // Genesis State Machine: register this peer with the intersection slot so
