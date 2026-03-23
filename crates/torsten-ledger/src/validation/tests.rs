@@ -2164,6 +2164,7 @@ mod tests {
             Some(&registered),
             None,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2211,6 +2212,7 @@ mod tests {
             Some(&registered),
             None,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2253,6 +2255,7 @@ mod tests {
             300,
             None,
             Some(&registered),
+            None,
             None,
             None,
         );
@@ -8004,6 +8007,7 @@ mod tests {
             None,      // registered_pools
             Some(500), // current_treasury — mismatches declared 999
             None,      // reward_accounts
+            None,      // current_epoch
         );
 
         assert!(
@@ -8062,6 +8066,7 @@ mod tests {
             None,
             Some(500), // current_treasury matches declared
             None,      // reward_accounts
+            None,      // current_epoch
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8108,6 +8113,7 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None, None,
             None, // current_treasury = None → check must be skipped
             None, // reward_accounts
+            None, // current_epoch
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.

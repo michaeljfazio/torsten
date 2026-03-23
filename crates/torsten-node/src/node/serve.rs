@@ -351,6 +351,23 @@ pub(crate) fn convert_validation_error(
                 "Incorrect withdrawal amount for {account}: declared={declared}, actual={actual}"
             ),
         },
+        VE::PoolRetirementTooLate {
+            retirement_epoch,
+            current_epoch,
+            e_max,
+            ..
+        } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Pool retirement epoch {retirement_epoch} exceeds max (current {current_epoch} + e_max {e_max})"
+            ),
+        },
+        VE::StakeRegistrationDepositMismatch { declared, expected } => {
+            TxValidationError::ScriptFailed {
+                reason: format!(
+                    "Conway stake registration deposit mismatch: declared={declared}, expected={expected}"
+                ),
+            }
+        }
     }
 }
 

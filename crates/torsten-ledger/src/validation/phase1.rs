@@ -32,7 +32,7 @@ use torsten_primitives::credentials::Credential;
 use torsten_primitives::hash::Hash28;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
-use torsten_primitives::transaction::Transaction;
+use torsten_primitives::transaction::{Certificate, Transaction};
 
 use crate::utxo::UtxoLookup;
 
@@ -186,6 +186,7 @@ fn verify_witness_signatures<W: HasWitnessFields>(
 ///
 /// Returns `input_value` (sum of ADA across all resolved inputs) so the caller
 /// can pass it to the value-conservation check without re-scanning inputs.
+#[allow(clippy::too_many_arguments)] // validation entry point needs full context
 pub(super) fn run_phase1_rules(
     tx: &Transaction,
     utxo_set: &dyn UtxoLookup,
@@ -193,6 +194,7 @@ pub(super) fn run_phase1_rules(
     current_slot: u64,
     tx_size: u64,
     registered_pools: Option<&std::collections::HashSet<Hash28>>,
+    current_epoch: Option<u64>,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
@@ -233,6 +235,54 @@ pub(super) fn run_phase1_rules(
     // Rule 1d: Era gating
     // ------------------------------------------------------------------
     super::conway::check_era_gating(params, body, errors);
+
+    // ------------------------------------------------------------------
+    // Rule 1e: Pool retirement epoch <= current_epoch + e_max
+    //
+    // Per Haskell's POOL rule (Shelley spec, Figure 14): the announced
+    // retirement epoch must not exceed `cepoch + emax`. Skipped when
+    // `current_epoch` is not provided (e.g. mempool admission without
+    // epoch context).
+    // ------------------------------------------------------------------
+    if let Some(epoch) = current_epoch {
+        for cert in &body.certificates {
+            if let Certificate::PoolRetirement {
+                epoch: retirement_epoch,
+                ..
+            } = cert
+            {
+                let max_epoch = epoch.saturating_add(params.e_max);
+                if *retirement_epoch > max_epoch {
+                    errors.push(ValidationError::PoolRetirementTooLate {
+                        retirement_epoch: *retirement_epoch,
+                        current_epoch: epoch,
+                        e_max: params.e_max,
+                        max_epoch,
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 1f: Conway stake registration deposit must match key_deposit
+    //
+    // Per Haskell's Conway DELEG rule: `ConwayStakeRegistration` carries
+    // an inline deposit amount that must equal `keyDeposit` from the
+    // current protocol parameters.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for cert in &body.certificates {
+            if let Certificate::ConwayStakeRegistration { deposit, .. } = cert {
+                if deposit.0 != params.key_deposit.0 {
+                    errors.push(ValidationError::StakeRegistrationDepositMismatch {
+                        declared: deposit.0,
+                        expected: params.key_deposit.0,
+                    });
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Rule 2: All inputs must exist in the UTxO set

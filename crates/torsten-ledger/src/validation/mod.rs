@@ -212,6 +212,30 @@ pub enum ValidationError {
          {limit} bytes (Conway ppMaxRefScriptSizePerTxG)"
     )]
     TxRefScriptSizeTooLarge { actual: u64, limit: u64 },
+    /// Pool retirement epoch exceeds `current_epoch + e_max`.
+    ///
+    /// Per Haskell's POOL rule (Shelley spec, Figure 14): "The pool's announced
+    /// retirement epoch must satisfy `e <= cepoch + emax`."
+    #[error(
+        "Pool retirement epoch {retirement_epoch} exceeds maximum allowed \
+         {max_epoch} (current_epoch={current_epoch} + e_max={e_max})"
+    )]
+    PoolRetirementTooLate {
+        retirement_epoch: u64,
+        current_epoch: u64,
+        e_max: u64,
+        max_epoch: u64,
+    },
+    /// Conway `ConwayStakeRegistration` deposit does not match protocol parameter
+    /// `key_deposit`.
+    ///
+    /// Per Haskell's Conway `DELEG` rule: "The deposit amount declared in the
+    /// certificate must equal the current `keyDeposit` protocol parameter."
+    #[error(
+        "Conway stake registration deposit mismatch: declared={declared}, \
+         expected key_deposit={expected}"
+    )]
+    StakeRegistrationDepositMismatch { declared: u64, expected: u64 },
     /// Haskell `wdrlNotZero`: withdrawals with a zero amount are rejected.
     #[error("Zero withdrawal amount for reward account: {account}")]
     ZeroWithdrawal { account: String },
@@ -254,6 +278,7 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -285,6 +310,7 @@ pub fn validate_transaction_with_pools(
     registered_pools: Option<&HashSet<Hash28>>,
     current_treasury: Option<u64>,
     reward_accounts: Option<&HashMap<Hash32, Lovelace>>,
+    current_epoch: Option<u64>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -308,6 +334,7 @@ pub fn validate_transaction_with_pools(
         current_slot,
         tx_size,
         registered_pools,
+        current_epoch,
         &mut errors,
     );
 

@@ -599,6 +599,7 @@ impl LedgerState {
                         Some(&registered_pool_ids),
                         Some(self.treasury.0),
                         Some(&self.reward_accounts),
+                        Some(self.epoch.0),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

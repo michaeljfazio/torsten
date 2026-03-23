@@ -83,19 +83,154 @@ struct SecondaryEntry {
     slot: u64,
     /// CRC32 checksum of the block CBOR data (0 for legacy entries).
     checksum: u32,
+    /// Byte offset from the start of the block CBOR to the header element.
+    /// Used by db-sync for efficient header extraction. 0 if unknown.
+    header_offset: u16,
+    /// Byte size of the header CBOR element.
+    /// Used by db-sync for efficient header extraction. 0 if unknown.
+    header_size: u16,
 }
 
 impl SecondaryEntry {
     fn encode(&self) -> [u8; SECONDARY_ENTRY_SIZE] {
         let mut entry = [0u8; SECONDARY_ENTRY_SIZE];
         entry[0..8].copy_from_slice(&self.block_offset.to_be_bytes());
-        // bytes 8..12: header_offset(2), header_size(2) — zeros
+        // bytes 8..10: header_offset (u16 big-endian)
+        entry[8..10].copy_from_slice(&self.header_offset.to_be_bytes());
+        // bytes 10..12: header_size (u16 big-endian)
+        entry[10..12].copy_from_slice(&self.header_size.to_be_bytes());
         // bytes 12..16: CRC32 checksum
         entry[12..16].copy_from_slice(&self.checksum.to_be_bytes());
         entry[16..48].copy_from_slice(&self.header_hash);
         entry[48..56].copy_from_slice(&self.slot.to_be_bytes());
         entry
     }
+}
+
+/// Extract the byte offset and size of the block header within block CBOR.
+///
+/// Cardano post-Shelley blocks are encoded as:
+///   `array(2) [era_id, array(N) [header, tx_bodies, witnesses, ...]]`
+///
+/// Byron blocks (era 0) use the same outer structure but with a different
+/// inner layout; we still extract the first element of the inner structure.
+///
+/// This function performs minimal CBOR parsing — it only needs to skip the
+/// outer array tag, the era_id integer, the inner array tag, and then read
+/// the header element length. Returns `(header_offset, header_size)` or
+/// `(0, 0)` if parsing fails.
+fn extract_header_bounds(cbor: &[u8]) -> (u16, u16) {
+    // Helper: decode a CBOR initial byte and return (major_type, argument, bytes_consumed).
+    // For indefinite-length items (additional info 31), argument is 0.
+    fn decode_cbor_head(data: &[u8]) -> Option<(u8, u64, usize)> {
+        if data.is_empty() {
+            return None;
+        }
+        let major = data[0] >> 5;
+        let additional = data[0] & 0x1f;
+        match additional {
+            0..=23 => Some((major, additional as u64, 1)),
+            24 => {
+                if data.len() < 2 {
+                    return None;
+                }
+                Some((major, data[1] as u64, 2))
+            }
+            25 => {
+                if data.len() < 3 {
+                    return None;
+                }
+                let val = u16::from_be_bytes([data[1], data[2]]);
+                Some((major, val as u64, 3))
+            }
+            26 => {
+                if data.len() < 5 {
+                    return None;
+                }
+                let val = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+                Some((major, val as u64, 5))
+            }
+            27 => {
+                if data.len() < 9 {
+                    return None;
+                }
+                let val = u64::from_be_bytes([
+                    data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
+                ]);
+                Some((major, val, 9))
+            }
+            31 => Some((major, 0, 1)), // indefinite length
+            _ => None,
+        }
+    }
+
+    // Helper: skip one complete CBOR data item, returning bytes consumed.
+    fn skip_cbor_item(data: &[u8]) -> Option<usize> {
+        let (major, arg, head_len) = decode_cbor_head(data)?;
+        match major {
+            // 0: unsigned int, 1: negative int — head only
+            0 | 1 => Some(head_len),
+            // 2: byte string, 3: text string — head + arg bytes
+            2 | 3 => Some(head_len + arg as usize),
+            // 4: array — head + skip `arg` items
+            4 => {
+                let mut pos = head_len;
+                for _ in 0..arg {
+                    pos += skip_cbor_item(&data[pos..])?;
+                }
+                Some(pos)
+            }
+            // 5: map — head + skip 2*arg items (key+value pairs)
+            5 => {
+                let mut pos = head_len;
+                for _ in 0..arg * 2 {
+                    pos += skip_cbor_item(&data[pos..])?;
+                }
+                Some(pos)
+            }
+            // 6: tag — head + one nested item
+            6 => {
+                let nested = skip_cbor_item(&data[head_len..])?;
+                Some(head_len + nested)
+            }
+            // 7: simple/float — head only
+            7 => Some(head_len),
+            _ => None,
+        }
+    }
+
+    let result = (|| -> Option<(u16, u16)> {
+        let mut pos = 0;
+
+        // Outer: array(2) [era_id, block_body]
+        let (major, _len, head_len) = decode_cbor_head(&cbor[pos..])?;
+        if major != 4 {
+            return None;
+        }
+        pos += head_len;
+
+        // Skip era_id (unsigned integer)
+        let era_skip = skip_cbor_item(&cbor[pos..])?;
+        pos += era_skip;
+
+        // Inner: array(N) [header, ...]
+        let (major, _len, head_len) = decode_cbor_head(&cbor[pos..])?;
+        if major != 4 {
+            return None;
+        }
+        pos += head_len;
+
+        // `pos` now points to the start of the header element.
+        let header_start = pos;
+        let header_skip = skip_cbor_item(&cbor[pos..])?;
+
+        // Clamp to u16 range (headers should never exceed 64 KiB)
+        let offset = u16::try_from(header_start).ok()?;
+        let size = u16::try_from(header_skip).ok()?;
+        Some((offset, size))
+    })();
+
+    result.unwrap_or((0, 0))
 }
 
 /// Storage backed by Cardano immutable chunk files.
@@ -671,12 +806,17 @@ impl ImmutableDB {
         // Compute CRC32 of the block CBOR for integrity verification
         let checksum = crc32fast::hash(cbor);
 
+        // Extract header offset and size for db-sync compatibility
+        let (header_offset, header_size) = extract_header_bounds(cbor);
+
         // Buffer secondary entry and block data for reads
         active.secondary_entries.push(SecondaryEntry {
             block_offset,
             header_hash: *hash.as_bytes(),
             slot,
             checksum,
+            header_offset,
+            header_size,
         });
         active.pending_blocks.insert(*hash, cbor.to_vec());
 

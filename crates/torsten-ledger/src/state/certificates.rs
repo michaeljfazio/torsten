@@ -250,10 +250,7 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance).drep_registration_count += 1;
                 debug!("DRep registered: {}", key.to_hex());
             }
-            Certificate::UnregDRep {
-                credential,
-                refund,
-            } => {
+            Certificate::UnregDRep { credential, refund } => {
                 let key = credential_to_hash(credential);
                 // Refund the DRep deposit to their reward account.
                 // Per the Haskell ledger spec (Conway DELEG rule), the deposit

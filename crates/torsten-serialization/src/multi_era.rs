@@ -709,6 +709,8 @@ fn convert_mint(tx: &PallasTx) -> BTreeMap<Hash28, BTreeMap<AssetName, i64>> {
 /// becomes necessary, a pallas issue should be filed to add per-era PostAlonzoAuxiliaryData
 /// variants to the enum.
 fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
+    use pallas_codec::utils::Nullable;
+    use pallas_primitives::alonzo::AuxiliaryData as PallasAuxData;
     use pallas_traverse::MultiEraMeta;
 
     // Extract metadata labels via pallas's public metadata() API.
@@ -720,19 +722,80 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
         _ => BTreeMap::new(),
     };
 
+    // Extract scripts from auxiliary data by accessing the raw pallas AuxiliaryData
+    // enum through era-specific accessors. The pallas `aux_data()` method is pub(crate),
+    // so we access the `auxiliary_data` field directly on each era's Tx struct.
+    //
+    // Wire-format variants:
+    //   - Shelley(Metadata):         metadata only, no scripts
+    //   - ShelleyMa(ShelleyMaAuxiliaryData): metadata + optional native scripts
+    //   - PostAlonzo(PostAlonzoAuxiliaryData): metadata + native scripts + Plutus V1
+    //     (alonzo struct; V2/V3 fields exist in babbage/conway PostAlonzoAuxiliaryData
+    //      but pallas reuses the alonzo AuxiliaryData enum for all eras, so only V1
+    //      is accessible through this path)
+    let mut native_scripts = Vec::new();
+    let mut plutus_v1_scripts: Vec<Vec<u8>> = Vec::new();
+    let plutus_v2_scripts: Vec<Vec<u8>> = Vec::new();
+    let plutus_v3_scripts: Vec<Vec<u8>> = Vec::new();
+
+    // Try to get the raw AuxiliaryData from whichever era this tx belongs to.
+    // All eras reuse `pallas_primitives::alonzo::AuxiliaryData` for the enum.
+    let raw_aux: Option<&pallas_codec::utils::KeepRaw<'_, PallasAuxData>> =
+        if let Some(alonzo_tx) = tx.as_alonzo() {
+            match &alonzo_tx.auxiliary_data {
+                Nullable::Some(x) => Some(x),
+                _ => None,
+            }
+        } else if let Some(babbage_tx) = tx.as_babbage() {
+            match &babbage_tx.auxiliary_data {
+                Nullable::Some(x) => Some(x),
+                _ => None,
+            }
+        } else if let Some(conway_tx) = tx.as_conway() {
+            match &conway_tx.auxiliary_data {
+                Nullable::Some(x) => Some(x),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+    if let Some(aux) = raw_aux {
+        use std::ops::Deref;
+        match aux.deref() {
+            PallasAuxData::Shelley(_) => {
+                // Plain metadata map — no scripts to extract.
+            }
+            PallasAuxData::ShelleyMa(shelley_ma) => {
+                if let Some(scripts) = &shelley_ma.auxiliary_scripts {
+                    native_scripts = scripts.iter().map(convert_native_script_inner).collect();
+                }
+            }
+            PallasAuxData::PostAlonzo(post_alonzo) => {
+                if let Some(scripts) = &post_alonzo.native_scripts {
+                    native_scripts = scripts.iter().map(convert_native_script_inner).collect();
+                }
+                if let Some(scripts) = &post_alonzo.plutus_scripts {
+                    plutus_v1_scripts = scripts.iter().map(|s| s.0.to_vec()).collect();
+                }
+            }
+        }
+    }
+
     // If the tx body declares an auxiliary_data_hash, the aux data IS present
     // on the wire — even if it contains only scripts and no metadata labels
     // (e.g. PostAlonzo tag(259){} with an empty map). Return Some so that
     // phase-1 rule 1c doesn't falsely reject.
     let has_aux_data_hash = extract_auxiliary_data_hash(tx).is_some();
+    let has_scripts = !native_scripts.is_empty() || !plutus_v1_scripts.is_empty();
 
-    if has_aux_data_hash || !metadata.is_empty() {
+    if has_aux_data_hash || !metadata.is_empty() || has_scripts {
         Some(AuxiliaryData {
             metadata,
-            native_scripts: Vec::new(),
-            plutus_v1_scripts: Vec::new(),
-            plutus_v2_scripts: Vec::new(),
-            plutus_v3_scripts: Vec::new(),
+            native_scripts,
+            plutus_v1_scripts,
+            plutus_v2_scripts,
+            plutus_v3_scripts,
         })
     } else {
         None

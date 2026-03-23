@@ -1838,8 +1838,7 @@ fn handle_n2n_txsubmission(
                         // More bodies than we requested — skip
                         continue;
                     };
-                    let tx_hash =
-                        torsten_primitives::hash::Hash32::from_bytes(tx_hash_bytes);
+                    let tx_hash = torsten_primitives::hash::Hash32::from_bytes(tx_hash_bytes);
 
                     // Try decoding across eras (Conway=6 first, then backwards)
                     let mut decoded = false;
