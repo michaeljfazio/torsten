@@ -8,6 +8,7 @@ mod logging;
 mod metrics;
 mod mithril;
 mod node;
+mod startup;
 mod topology;
 
 use anyhow::Result;
