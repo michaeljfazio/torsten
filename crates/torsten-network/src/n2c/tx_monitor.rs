@@ -146,6 +146,15 @@ pub(crate) async fn handle_tx_monitor(
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
 
+            // Derive era ID from the current ledger era (via QueryHandler snapshot).
+            // The mempool only holds transactions from the current era, so this
+            // correctly tags every returned tx. Previously this was hardcoded to 6
+            // (Conway), which would be wrong if the node were running in an earlier era.
+            let current_era_id = {
+                let handler = query_handler.read().await;
+                handler.state().era
+            };
+
             // Find the next tx in the snapshot that still exists in the mempool
             let mut found = false;
             while cursor.position < cursor.snapshot.len() {
@@ -160,8 +169,8 @@ pub(crate) async fn handle_tx_monitor(
                     // GenTx encoding: encodeNS [era_id, wrapCBORinCBOR tx]
                     enc.array(2)
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
-                    enc.u32(6)
-                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?; // era 6 = Conway
+                    enc.u32(current_era_id)
+                        .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.tag(minicbor::data::Tag::new(24))
                         .map_err(|e| N2CServerError::Protocol(e.to_string()))?;
                     enc.bytes(&tx_cbor)

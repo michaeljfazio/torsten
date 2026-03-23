@@ -2601,16 +2601,23 @@ impl Node {
             "Slot leader check: ELECTED — forging block",
         );
 
-        // Collect transactions from mempool using protocol params limits
+        // Collect transactions from mempool using protocol params limits.
+        // Enforce byte-size AND execution-unit budgets so the forged block
+        // stays within maxBlockBodySize and maxBlockExecutionUnits.
         let ls = self.ledger_state.read().await;
         let max_block_body_size = ls.protocol_params.max_block_body_size;
+        let max_block_ex_mem = ls.protocol_params.max_block_ex_units.mem;
+        let max_block_ex_steps = ls.protocol_params.max_block_ex_units.steps;
         let protocol_version_major = ls.protocol_params.protocol_version_major;
         let protocol_version_minor = ls.protocol_params.protocol_version_minor;
         let current_era = ls.era;
         drop(ls);
-        let transactions = self
-            .mempool
-            .get_txs_for_block(500, max_block_body_size as usize);
+        let transactions = self.mempool.get_txs_for_block_with_ex_units(
+            500,
+            max_block_body_size as usize,
+            max_block_ex_mem,
+            max_block_ex_steps,
+        );
         let config = crate::forge::BlockProducerConfig {
             protocol_version: torsten_primitives::block::ProtocolVersion {
                 major: protocol_version_major,
@@ -2647,11 +2654,18 @@ impl Node {
                     }
                 }
 
-                // Apply to ledger
+                // Apply to ledger with full validation.
+                // Re-validate our own forged block before announcing it to peers,
+                // matching Haskell cardano-node behavior. This prevents producing
+                // and propagating blocks that contain invalid transactions.
                 {
                     let mut ls = self.ledger_state.write().await;
-                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
-                        error!("Failed to apply forged block to ledger: {e}");
+                    if let Err(e) = ls.apply_block(&block, BlockValidationMode::ValidateAll) {
+                        error!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            "Forged block failed validation — NOT announcing: {e}"
+                        );
                         return;
                     }
                 }

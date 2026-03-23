@@ -207,6 +207,18 @@ pub enum MempoolAddResult {
     AlreadyExists,
 }
 
+/// Sum the execution units (memory + steps) declared by all redeemers in a transaction.
+/// Returns `(0, 0)` for transactions with no Plutus scripts.
+fn tx_ex_units(tx: &Transaction) -> (u64, u64) {
+    let mut mem: u64 = 0;
+    let mut steps: u64 = 0;
+    for r in &tx.witness_set.redeemers {
+        mem = mem.saturating_add(r.ex_units.mem);
+        steps = steps.saturating_add(r.ex_units.steps);
+    }
+    (mem, steps)
+}
+
 impl Mempool {
     pub fn new(config: MempoolConfig) -> Self {
         Mempool {
@@ -706,9 +718,28 @@ impl Mempool {
     /// chained txs are admitted parent-first. Using fee-density ordering would
     /// break dependency chains (child selected before parent = invalid block).
     pub fn get_txs_for_block(&self, max_count: usize, max_size: usize) -> Vec<Transaction> {
+        self.get_txs_for_block_with_ex_units(max_count, max_size, u64::MAX, u64::MAX)
+    }
+
+    /// Select transactions for block production in **FIFO order** (matching Haskell),
+    /// enforcing both byte-size and execution-unit budget limits.
+    ///
+    /// `max_block_ex_mem` and `max_block_ex_steps` are the per-block ExUnit limits
+    /// from protocol parameters (`maxBlockExecutionUnits`). The selection stops as
+    /// soon as adding the next transaction would exceed any of the four limits
+    /// (count, size, memory, steps).
+    pub fn get_txs_for_block_with_ex_units(
+        &self,
+        max_count: usize,
+        max_size: usize,
+        max_block_ex_mem: u64,
+        max_block_ex_steps: u64,
+    ) -> Vec<Transaction> {
         let order = self.order.read();
         let mut result = Vec::new();
         let mut total_size = 0;
+        let mut total_ex_mem: u64 = 0;
+        let mut total_ex_steps: u64 = 0;
 
         // Take FIFO prefix (oldest first) that fits within block capacity.
         for tx_hash in order.iter() {
@@ -717,11 +748,24 @@ impl Mempool {
             }
             if let Some(entry) = self.txs.get(tx_hash) {
                 if total_size + entry.size_bytes > max_size {
-                    // Block is full — stop (strict prefix, no skipping)
+                    // Block is full by size — stop (strict prefix, no skipping)
                     break;
                 }
+
+                // Accumulate execution units from all redeemers in this transaction
+                let (tx_mem, tx_steps) = tx_ex_units(&entry.tx);
+
+                if total_ex_mem.saturating_add(tx_mem) > max_block_ex_mem
+                    || total_ex_steps.saturating_add(tx_steps) > max_block_ex_steps
+                {
+                    // Adding this tx would exceed block ExUnit budget — stop
+                    break;
+                }
+
                 result.push(entry.tx.clone());
                 total_size += entry.size_bytes;
+                total_ex_mem = total_ex_mem.saturating_add(tx_mem);
+                total_ex_steps = total_ex_steps.saturating_add(tx_steps);
             }
         }
 
