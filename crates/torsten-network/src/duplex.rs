@@ -670,10 +670,19 @@ async fn serve_tx_submission_inner(
                     sent.retain(|h| mempool_hashes.contains(h));
                 }
 
-                // Enforce inflight cap: if at the limit, reply empty so the
-                // peer can send more acks before we push new tx IDs.
+                // Enforce inflight cap: if at the limit and non-blocking,
+                // reply empty. For blocking requests, wait for mempool txs.
+                // Rate-limit empty replies to prevent tight loops when a
+                // self-connection or misconfigured peer sends rapid non-blocking
+                // requests.
                 let reply = if inflight.len() >= MAX_TX_INFLIGHT {
-                    warn!(
+                    if !blocking {
+                        // Non-blocking: rate-limit to prevent CPU-burning tight loop.
+                        // The Haskell TxSubmission2 server backs off after empty replies,
+                        // but self-connections and edge cases can create tight loops.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    debug!(
                         %peer_addr,
                         inflight = inflight.len(),
                         "TxSubmission2 client: inflight cap reached, sending empty reply"
