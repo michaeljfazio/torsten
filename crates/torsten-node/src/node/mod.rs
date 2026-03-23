@@ -2474,7 +2474,25 @@ impl Node {
     /// Attempt to forge a block if we are in block producer mode and are the slot leader.
     ///
     /// Called every slot when the node is caught up to the chain tip.
+    /// Convenience wrapper that reads the wall-clock slot and calls
+    /// `try_forge_block_at`.  Used by code paths where the slot hasn't
+    /// already been sampled (e.g. after catching up to tip).
     pub(crate) async fn try_forge_block(&mut self) {
+        if let Some(wc) = self.current_wall_clock_slot() {
+            self.try_forge_block_at(wc).await;
+        }
+    }
+
+    /// Try to forge a block at the given wall-clock slot.
+    ///
+    /// The slot is passed from the caller (sync loop forge ticker) to avoid
+    /// a TOCTOU race: the sync loop reads the wall clock once and passes the
+    /// same value here, preventing a double-forge if the clock advances
+    /// between the guard check and the actual forge attempt.
+    pub(crate) async fn try_forge_block_at(
+        &mut self,
+        wall_clock_slot: torsten_primitives::time::SlotNo,
+    ) {
         let creds = match &self.block_producer {
             Some(c) => c,
             None => return, // relay-only mode
@@ -2487,25 +2505,17 @@ impl Node {
             debug!("Forge: epoch nonce not yet confirmed — forging anyway (block may be rejected)");
         }
 
-        // Compute current slot from wall-clock time
-        let wall_clock_slot = self.current_wall_clock_slot();
-
         let ls = self.ledger_state.read().await;
         let tip_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
-        let next_slot = match wall_clock_slot {
-            Some(wc) if wc.0 > tip_slot => wc,
-            Some(wc) => {
-                // Wall clock slot is at or behind chain tip — not our slot to forge
-                debug!(
-                    wall_clock = wc.0,
-                    tip_slot, "Forge: wall clock slot <= tip slot, skipping"
-                );
-                return;
-            }
-            None => {
-                debug!("Forge: no wall clock slot available (genesis not loaded?)");
-                return;
-            }
+        let next_slot = if wall_clock_slot.0 > tip_slot {
+            wall_clock_slot
+        } else {
+            // Wall clock slot is at or behind chain tip — not our slot to forge
+            debug!(
+                wall_clock = wall_clock_slot.0,
+                tip_slot, "Forge: wall clock slot <= tip slot, skipping"
+            );
+            return;
         };
         // Use epoch_nonce_for_slot to handle first slot of new epoch correctly.
         // At epoch boundaries, the TICKN transition hasn't been applied yet, so

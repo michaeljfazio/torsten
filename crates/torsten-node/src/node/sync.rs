@@ -2309,7 +2309,7 @@ impl Node {
                         if let Some(wc) = self.current_wall_clock_slot() {
                             if wc.0 > last_forge_slot {
                                 last_forge_slot = wc.0;
-                                self.try_forge_block().await;
+                                self.try_forge_block_at(wc).await;
                             }
                         } else if last_forge_slot.is_multiple_of(60) {
                             debug!("Forge ticker: no wall clock slot");
