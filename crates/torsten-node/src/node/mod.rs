@@ -227,16 +227,18 @@ impl Node {
                 (None, None)
             };
 
-        // Load Alonzo genesis if configured
+        // Load Alonzo genesis if configured (with hash validation)
+        let mut alonzo_genesis_file_hash: Option<torsten_primitives::hash::Hash32> = None;
         if let Some(ref genesis_path) = args.config.alonzo_genesis_file {
             let genesis_path = config_dir.join(genesis_path);
-            match AlonzoGenesis::load(&genesis_path) {
-                Ok(genesis) => {
+            match AlonzoGenesis::load_with_hash(&genesis_path) {
+                Ok((genesis, hash)) => {
                     info!(
                         max_val_size = genesis.max_value_size,
                         collateral_pct = genesis.collateral_percentage,
                         "Alonzo genesis loaded",
                     );
+                    alonzo_genesis_file_hash = Some(hash);
                     genesis.apply_to_protocol_params(&mut protocol_params);
                 }
                 Err(e) => {
@@ -245,25 +247,59 @@ impl Node {
             }
         }
 
-        // Load Conway genesis if configured
+        // Validate Alonzo genesis hash if configured
+        if let Some(ref expected_hex) = args.config.alonzo_genesis_hash {
+            if let Ok(expected) = torsten_primitives::hash::Hash32::from_hex(expected_hex) {
+                if let Some(ref actual) = alonzo_genesis_file_hash {
+                    if *actual != expected {
+                        anyhow::bail!(
+                            "Alonzo genesis hash mismatch: expected {}, got {}",
+                            expected.to_hex(),
+                            actual.to_hex()
+                        );
+                    }
+                    debug!("Alonzo genesis hash validated: {}", expected.to_hex());
+                }
+            }
+        }
+
+        // Load Conway genesis if configured (with hash validation)
         let mut conway_committee_threshold: Option<(u64, u64)> = None;
         let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
+        let mut conway_genesis_file_hash: Option<torsten_primitives::hash::Hash32> = None;
         if let Some(ref genesis_path) = args.config.conway_genesis_file {
             let genesis_path = config_dir.join(genesis_path);
-            match ConwayGenesis::load(&genesis_path) {
-                Ok(genesis) => {
+            match ConwayGenesis::load_with_hash(&genesis_path) {
+                Ok((genesis, hash)) => {
                     info!(
                         drep_deposit = genesis.d_rep_deposit,
                         gov_deposit = genesis.gov_action_deposit,
                         committee_min = genesis.committee_min_size,
                         "Conway genesis loaded",
                     );
+                    conway_genesis_file_hash = Some(hash);
                     conway_committee_threshold = genesis.committee_threshold();
                     conway_committee_members = genesis.committee_members();
                     genesis.apply_to_protocol_params(&mut protocol_params);
                 }
                 Err(e) => {
                     warn!("Failed to load Conway genesis: {e}");
+                }
+            }
+        }
+
+        // Validate Conway genesis hash if configured
+        if let Some(ref expected_hex) = args.config.conway_genesis_hash {
+            if let Ok(expected) = torsten_primitives::hash::Hash32::from_hex(expected_hex) {
+                if let Some(ref actual) = conway_genesis_file_hash {
+                    if *actual != expected {
+                        anyhow::bail!(
+                            "Conway genesis hash mismatch: expected {}, got {}",
+                            expected.to_hex(),
+                            actual.to_hex()
+                        );
+                    }
+                    debug!("Conway genesis hash validated: {}", expected.to_hex());
                 }
             }
         }

@@ -436,6 +436,23 @@ impl AlonzoGenesis {
             .with_context(|| format!("Failed to parse Alonzo genesis: {}", path.display()))
     }
 
+    /// Load the genesis file and compute its Blake2b-256 hash.
+    ///
+    /// The hash is computed over the raw file content (canonical JSON), matching
+    /// the Cardano reference implementation.
+    pub fn load_with_hash(path: &Path) -> Result<(Self, torsten_primitives::hash::Hash32)> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read Alonzo genesis: {}", path.display()))?;
+        let genesis: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Alonzo genesis: {}", path.display()))?;
+        let hash = torsten_primitives::hash::blake2b_256(content.as_bytes());
+        debug!(
+            genesis_hash = %hash.to_hex(),
+            "Alonzo genesis hash computed"
+        );
+        Ok((genesis, hash))
+    }
+
     /// Apply Alonzo genesis parameters to protocol parameters
     pub fn apply_to_protocol_params(&self, params: &mut ProtocolParameters) {
         debug!(
@@ -616,6 +633,23 @@ impl ConwayGenesis {
             .with_context(|| format!("Failed to read Conway genesis: {}", path.display()))?;
         serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse Conway genesis: {}", path.display()))
+    }
+
+    /// Load the genesis file and compute its Blake2b-256 hash.
+    ///
+    /// The hash is computed over the raw file content (canonical JSON), matching
+    /// the Cardano reference implementation.
+    pub fn load_with_hash(path: &Path) -> Result<(Self, torsten_primitives::hash::Hash32)> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read Conway genesis: {}", path.display()))?;
+        let genesis: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse Conway genesis: {}", path.display()))?;
+        let hash = torsten_primitives::hash::blake2b_256(content.as_bytes());
+        debug!(
+            genesis_hash = %hash.to_hex(),
+            "Conway genesis hash computed"
+        );
+        Ok((genesis, hash))
     }
 
     /// Apply Conway genesis parameters to protocol parameters

@@ -1126,9 +1126,6 @@ impl Node {
                         hash = %block.hash().to_hex(),
                         "Failed to apply block to ledger: {e} — skipping remaining blocks in batch"
                     );
-                    self.metrics
-                        .transactions_rejected
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
                 applied_count += 1;

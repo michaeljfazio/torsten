@@ -117,9 +117,9 @@ const MAX_TX_INFLIGHT: usize = 10;
 const MAX_TX_BODY_REQUEST: usize = 100;
 
 /// Maximum tx IDs to REQUEST per MsgRequestTxIds when we are the Server.
-/// Haskell V1 = 3, V2 = 12. Use 3 for V1 compatibility.
+/// Haskell V2 TxDecisionPolicy requests up to 12 at a time.
 /// MUST NOT push unacknowledged count above maxUnacknowledgedTxIds (100).
-const SERVER_REQ_TX_IDS: u16 = 3;
+const SERVER_REQ_TX_IDS: u16 = 12;
 
 /// Maximum reassembled message size for the TxSubmission2 responder/initiator (8 MB).
 const MAX_REASSEMBLY_SIZE: usize = 8 * 1024 * 1024;
