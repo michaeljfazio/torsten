@@ -650,6 +650,260 @@ impl GenesisDensityComparator {
     }
 }
 
+// ── Subsystem 3: Fragment-level chain preference and maximal candidates ───────
+//
+// These free functions implement the Ouroboros Praos chain selection rule at
+// the level of `ChainFragment` objects rather than the legacy `Tip` / header
+// pair API above.  They match the Haskell source:
+//
+//   • `Praos/Common.hs:comparePraos` — the four-case tiebreaker
+//   • `ChainSel.hs:chainSelectionForBlock` — pick the better chain
+//   • `Paths.hs:maximalCandidates` — enumerate all maximal fork paths
+//
+// Design note: `torsten-consensus` does NOT depend on `torsten-storage` (that
+// would create a dependency cycle through `torsten-node`).  The
+// `SuccessorProvider` trait is therefore the only coupling point — callers
+// (node, storage layer) implement it for `VolatileDB` and inject it here.
+
+use crate::chain_fragment::ChainFragment;
+
+/// Compare two anchored chain fragments using the Ouroboros Praos chain
+/// selection rule.
+///
+/// This is the authoritative entry point for Subsystem 3 chain selection,
+/// matching Haskell's `comparePraos` in `Ouroboros.Consensus.Protocol.Praos.Common`.
+///
+/// # Rules (applied in order)
+///
+/// 1. **Longer chain wins** — the fragment whose tip has the higher block
+///    number is preferred.  This is the primary Praos invariant: the
+///    longest valid chain is always the winner.
+///
+/// 2. **Equal length, same pool** — if both tip headers were issued by the
+///    same stake pool (identified by the blake2b-224 hash of `issuer_vkey`),
+///    the block with the **higher opcert sequence number** wins.  Valid
+///    opcerts increment by at most 1 per block so this is deterministic.
+///
+/// 3. **Equal length, different pools** — the block with the **lower VRF
+///    output value** (lexicographic byte comparison) wins.  In Conway
+///    (protocol version ≥ 9) this VRF comparison is only applied when the
+///    two tip slots are within `slot_window` of each other; when the gap
+///    exceeds the window the current chain is preferred (prevents very late
+///    blocks from displacing an already-adopted chain).
+///
+/// Pass `u64::MAX` for `slot_window` to disable the Conway distance limit
+/// (matches pre-Conway behaviour).
+///
+/// # Empty fragments
+///
+/// - If both fragments are empty (tip == anchor) the result is `Equal`.
+/// - An empty fragment always loses to a non-empty one because its effective
+///   block number is 0 (the anchor, which has no block number embedded).
+///
+/// # Haskell Reference
+///
+/// ```text
+/// comparePraos :: PraosChainSelectConfig -> SelectView Praos b
+///              -> SelectView Praos b -> Ordering
+/// ```
+/// in `ouroboros-consensus/src/ouroboros-consensus/Ouroboros/Consensus/Protocol/Praos/Common.hs`
+pub fn chain_preference(
+    current: &ChainFragment,
+    candidate: &ChainFragment,
+    slot_window: u64,
+) -> ChainPreference {
+    let current_no = current.tip_block_no();
+    let candidate_no = candidate.tip_block_no();
+
+    // Step 1: compare by length (block number at tip).
+    use std::cmp::Ordering;
+    match candidate_no.0.cmp(&current_no.0) {
+        Ordering::Greater => return ChainPreference::PreferCandidate,
+        Ordering::Less => return ChainPreference::PreferCurrent,
+        Ordering::Equal => {}
+    }
+
+    // Step 2: equal length — apply the Praos tiebreaker on the tip headers.
+    // If either fragment is empty (no headers), use block-number only (Equal).
+    let current_tip_header = current.headers().back();
+    let candidate_tip_header = candidate.headers().back();
+
+    match (current_tip_header, candidate_tip_header) {
+        (Some(cur), Some(cand)) => {
+            // Determine the protocol era from the current tip's protocol version.
+            // Conway is major ≥ 9; we derive the Era here rather than importing
+            // torsten_primitives::era directly (it's already available via the
+            // block module which we import above).
+            let era = cur.protocol_version.era();
+            praos_tiebreak(cur, cand, era, slot_window)
+        }
+        // Both empty or one empty: no tiebreak possible.
+        _ => ChainPreference::Equal,
+    }
+}
+
+// ── SuccessorProvider trait ───────────────────────────────────────────────────
+
+/// Abstraction over the VolatileDB successor index.
+///
+/// This trait allows `maximal_candidates` to be independent of the
+/// `torsten-storage` crate, avoiding a circular dependency.  The concrete
+/// implementation for `VolatileDB` lives in `torsten-storage` (or `torsten-node`)
+/// and is injected at the call site.
+///
+/// # Contract
+///
+/// - `successors_of(hash)` returns the hashes of all blocks whose `prev_hash`
+///   equals `hash`.  An empty slice means `hash` is a leaf in the DAG.
+/// - `header_of(hash)` returns the `BlockHeader` for the block with that hash,
+///   or `None` if the block is not in the volatile window.
+///
+/// Implementors must return slices/values only for blocks that are currently
+/// in VolatileDB.  The ImmutableDB portion of the chain is represented by
+/// the `anchor` parameter passed to `maximal_candidates`.
+pub trait SuccessorProvider {
+    /// Return the hashes of all volatile blocks whose parent is `parent_hash`.
+    fn successors_of(
+        &self,
+        parent_hash: &torsten_primitives::hash::Hash32,
+    ) -> Vec<torsten_primitives::hash::Hash32>;
+
+    /// Return the `BlockHeader` for a volatile block, or `None` if unknown.
+    fn header_of(
+        &self,
+        hash: &torsten_primitives::hash::Hash32,
+    ) -> Option<torsten_primitives::block::BlockHeader>;
+}
+
+// ── maximal_candidates ───────────────────────────────────────────────────────
+
+/// Compute all maximal chain paths through the VolatileDB that include
+/// `new_block_hash`.
+///
+/// A *maximal* path is one that cannot be extended further within VolatileDB —
+/// i.e. it ends at a leaf (a block with no successors).  This matches Haskell's
+/// `maximalCandidates` in `Ouroboros.Consensus.Storage.ChainDB.Impl.Paths`.
+///
+/// # Algorithm
+///
+/// 1. Walk *backward* from `new_block_hash` toward `immutable_tip` to collect
+///    the prefix of the chain that connects the new block to the anchor.
+/// 2. Walk *forward* from `new_block_hash` through all successor paths (DFS),
+///    collecting every leaf.
+/// 3. For each leaf, build a `ChainFragment` anchored at `immutable_tip`
+///    containing the full path: prefix + suffix ending at the leaf.
+///
+/// # Why include all forward paths?
+///
+/// A single new block can unlock multiple maximal paths if earlier fork blocks
+/// are already in VolatileDB and the new block is their shared parent.  We must
+/// evaluate all of them to find the globally preferred chain.
+///
+/// # Empty result
+///
+/// Returns an empty `Vec` if `new_block_hash` is not reachable from
+/// `immutable_tip` within VolatileDB (e.g. a disconnected block).
+///
+/// # Haskell Reference
+///
+/// ```text
+/// maximalCandidates :: VolatileDB m blk -> Point blk -> [BlockNo] -> m [AnchoredFragment (Header blk)]
+/// ```
+/// in `ouroboros-consensus/src/ouroboros-consensus/Ouroboros/Consensus/Storage/ChainDB/Impl/Paths.hs`
+pub fn maximal_candidates(
+    immutable_tip: &torsten_primitives::block::Point,
+    provider: &dyn SuccessorProvider,
+    new_block_hash: &torsten_primitives::hash::Hash32,
+) -> Vec<ChainFragment> {
+    use torsten_primitives::block::Point;
+    use torsten_primitives::hash::Hash32;
+
+    // Step 1: Walk backward from new_block_hash to immutable_tip.
+    // Collect the ordered prefix of headers (oldest first) that connects
+    // the immutable anchor to the new block.
+    let prefix: Vec<torsten_primitives::block::BlockHeader> = {
+        let mut headers = Vec::new();
+        let mut current = *new_block_hash;
+        loop {
+            match provider.header_of(&current) {
+                None => {
+                    // Block not in VolatileDB — disconnected chain, abort.
+                    return Vec::new();
+                }
+                Some(hdr) => {
+                    let is_anchored = match immutable_tip {
+                        Point::Origin => {
+                            // Anchored at genesis: the chain is rooted at a
+                            // block whose prev_hash is the zero hash.
+                            hdr.prev_hash == Hash32::ZERO
+                        }
+                        Point::Specific(_, anchor_hash) => hdr.prev_hash == *anchor_hash,
+                    };
+                    headers.push(hdr.clone());
+                    if is_anchored || hdr.prev_hash == current {
+                        // Reached the anchor or detected a cycle (safety guard).
+                        break;
+                    }
+                    current = hdr.prev_hash;
+                }
+            }
+        }
+        headers.reverse(); // oldest first
+        headers
+    };
+
+    // If we built an empty prefix the walk didn't reach the anchor.
+    // Return nothing.
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 2: Walk forward from new_block_hash through all successor paths.
+    // We enumerate every maximal path (leaf) reachable from new_block_hash.
+    //
+    // We use an iterative DFS.  Each stack entry is a partial suffix
+    // (most-recent header last).  When a node has no successors we record the
+    // completed suffix as a leaf.
+    let mut leaf_suffixes: Vec<Vec<torsten_primitives::block::BlockHeader>> = Vec::new();
+
+    // Stack: (current_hash, headers_accumulated_so_far_in_this_path)
+    let mut stack: Vec<(Hash32, Vec<torsten_primitives::block::BlockHeader>)> = Vec::new();
+    stack.push((*new_block_hash, Vec::new()));
+
+    while let Some((hash, mut path)) = stack.pop() {
+        if let Some(hdr) = provider.header_of(&hash) {
+            let succs = provider.successors_of(&hash);
+            if succs.is_empty() {
+                // Leaf node — this is a maximal tip.
+                path.push(hdr);
+                leaf_suffixes.push(path);
+            } else {
+                path.push(hdr);
+                for succ_hash in succs {
+                    stack.push((succ_hash, path.clone()));
+                }
+            }
+        }
+        // If header_of returns None for a successor, that path is orphaned;
+        // we simply don't emit it.
+    }
+
+    // Step 3: Build one ChainFragment per leaf.
+    leaf_suffixes
+        .into_iter()
+        .map(|suffix| {
+            // Full ordered path: prefix (up to new_block) + suffix starting at new_block.
+            // The prefix already ends with the new block's header.  The suffix
+            // starts with the new block (DFS includes it), so we skip it to avoid
+            // duplication.
+            let mut all_headers: Vec<torsten_primitives::block::BlockHeader> = prefix.to_vec();
+            // Skip the first element of suffix (it duplicates new_block_hash).
+            all_headers.extend(suffix.into_iter().skip(1));
+            ChainFragment::from_headers(immutable_tip.clone(), all_headers)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

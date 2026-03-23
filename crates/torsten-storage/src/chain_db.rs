@@ -1071,12 +1071,14 @@ mod tests {
         assert_eq!(db.flush_to_immutable().unwrap(), 0);
         assert_eq!(db.volatile.len(), 20);
 
-        // flush_all should move everything
+        // flush_all now delegates to flush_to_immutable which respects k-depth.
+        // With only 20 blocks (well under k=2160), nothing should be flushed.
+        // This matches Haskell behavior: shutdown never flushes beyond k.
         let flushed = db.flush_all_to_immutable().unwrap();
-        assert_eq!(flushed, 20);
-        assert_eq!(db.volatile.len(), 0);
+        assert_eq!(flushed, 0);
+        assert_eq!(db.volatile.len(), 20);
 
-        // All blocks should still be readable from immutable
+        // All blocks should still be readable (from volatile, not immutable)
         for i in 1..=20u64 {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
