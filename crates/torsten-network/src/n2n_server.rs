@@ -411,6 +411,13 @@ impl N2NServer {
                         continue;
                     }
 
+                    // Disable Nagle's algorithm for low-latency responses.
+                    // The ChainSync protocol has a 10-second StCanAwait timeout;
+                    // without TCP_NODELAY, small responses like MsgAwaitReply may
+                    // be buffered by Nagle for up to 200ms, adding latency.
+                    if let Err(e) = stream.set_nodelay(true) {
+                        warn!(peer = %peer_addr, "Failed to set TCP_NODELAY: {e}");
+                    }
                     // Configure TCP keepalive for dead connection detection
                     if let Err(e) = crate::tcp::configure_tcp_keepalive(&stream) {
                         warn!(peer = %peer_addr, "Failed to set TCP keepalive: {e}");

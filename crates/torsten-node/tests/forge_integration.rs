@@ -263,10 +263,8 @@ fn test_forged_block_header_hash_stable() {
     // Verify that header_hash == blake2b_256(full_header_cbor) where
     // full_header_cbor = [header_body, kes_signature].  The canonical
     // Cardano block hash includes the KES signature, not just the body.
-    let full_header_cbor = torsten_serialization::encode_block_header(
-        &block_a.header,
-        &block_a.header.kes_signature,
-    );
+    let full_header_cbor =
+        torsten_serialization::encode_block_header(&block_a.header, &block_a.header.kes_signature);
     let expected_hash = blake2b_256(&full_header_cbor);
     assert_eq!(
         block_a.header.header_hash, expected_hash,

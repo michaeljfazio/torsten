@@ -370,8 +370,7 @@ pub fn forge_block(
     // which is a 2-element CBOR array: [header_body_cbor, kes_signature].
     // Using header_body_cbor alone produces a wrong hash that peers cannot
     // verify, causing block rejection and wrong prev_hash in subsequent blocks.
-    let full_header_cbor =
-        torsten_serialization::encode_block_header(&header, &kes_signature);
+    let full_header_cbor = torsten_serialization::encode_block_header(&header, &kes_signature);
     let header_hash = blake2b_256(&full_header_cbor);
 
     // Build the final block with correct header hash
