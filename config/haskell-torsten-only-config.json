@@ -5,7 +5,7 @@
   "ByronGenesisHash": "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
   "CheckpointsFile": "haskell-checkpoints.json",
   "CheckpointsFileHash": "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
-  "ConsensusMode": "GenesisMode",
+  "ConsensusMode": "PraosMode",
   "ConwayGenesisFile": "haskell-conway-genesis.json",
   "ConwayGenesisHash": "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
   "ExperimentalHardForksEnabled": false,
@@ -49,7 +49,13 @@
     "BlockFetch.Client.CompletedBlockFetch": {
       "maxFrequency": 2.0
     },
+    "BlockFetch.Client": {
+      "severity": "Info"
+    },
     "BlockFetch.Decision": {
+      "severity": "Info"
+    },
+    "BlockFetch.Server": {
       "severity": "Info"
     },
     "ChainDB": {
@@ -74,7 +80,13 @@
       "severity": "Silence"
     },
     "ChainSync.Client": {
-      "severity": "Warning"
+      "severity": "Info"
+    },
+    "ChainSync.ServerHeader": {
+      "severity": "Info"
+    },
+    "ChainSync.ServerBlock": {
+      "severity": "Info"
     },
     "Forge.Loop": {
       "severity": "Info"
@@ -85,11 +97,29 @@
     "Mempool": {
       "severity": "Info"
     },
+    "Mempool.AddedTx": {
+      "severity": "Info"
+    },
+    "Mempool.RejectedTx": {
+      "severity": "Info"
+    },
     "Mempool.AttemptAdd": {
-      "severity": "Silence"
+      "severity": "Info"
     },
     "Mempool.SyncNotNeeded": {
       "severity": "Silence"
+    },
+    "TxSubmission.TxInbound": {
+      "severity": "Info"
+    },
+    "TxSubmission.TxOutbound": {
+      "severity": "Info"
+    },
+    "TxSubmission2.Receive": {
+      "severity": "Info"
+    },
+    "TxSubmission2.Send": {
+      "severity": "Info"
     },
     "Net.ConnectionManager.Remote": {
       "severity": "Info"
