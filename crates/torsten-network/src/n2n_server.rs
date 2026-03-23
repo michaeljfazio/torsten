@@ -770,7 +770,7 @@ async fn process_n2n_segment(
                 enc.u32(0).expect("encode tag"); // tag 0 = MsgRequestTxIds
                 enc.bool(true).expect("encode blocking"); // blocking = true
                 enc.u16(0).expect("encode ack"); // ack_count = 0
-                enc.u16(12).expect("encode req"); // req_count = 12
+                enc.u16(3).expect("encode req"); // req_count = 3 (within maxUnacknowledgedTxIds=10)
                 segments.push(Segment {
                     transmission_time: 0,
                     protocol_id: MINI_PROTOCOL_TXSUBMISSION,
