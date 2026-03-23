@@ -753,7 +753,35 @@ async fn process_n2n_segment(
                 initiator_and_responder,
                 peer_sharing_mode,
             )?;
-            Ok(resp.into_iter().collect())
+            let mut segments: Vec<Segment> = resp.into_iter().collect();
+
+            // After a successful handshake with InitiatorAndResponder mode,
+            // proactively send MsgRequestTxIds on TxSubmission2.  In the
+            // Ouroboros TxSubmission2 protocol, the Server has initial agency
+            // and must send MsgRequestTxIds first — the Haskell Client waits
+            // for this before sending anything.  Without this, the Haskell
+            // peer sees a deadlocked connection and tears it down in <2ms,
+            // preventing ChainSync from starting.
+            if initiator_and_responder && !segments.is_empty() {
+                let mut txsub_buf = Vec::new();
+                let mut enc = minicbor::Encoder::new(&mut txsub_buf);
+                // MsgRequestTxIds: [0, blocking, ack_count, req_count]
+                enc.array(4).expect("encode array");
+                enc.u32(0).expect("encode tag"); // tag 0 = MsgRequestTxIds
+                enc.bool(true).expect("encode blocking"); // blocking = true
+                enc.u16(0).expect("encode ack"); // ack_count = 0
+                enc.u16(12).expect("encode req"); // req_count = 12
+                segments.push(Segment {
+                    transmission_time: 0,
+                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
+                    is_responder: true,
+                    payload: txsub_buf,
+                });
+                peer_state.tx_submission_init_sent = true;
+                info!("N2N: proactive TxSubmission2 MsgRequestTxIds sent after handshake");
+            }
+
+            Ok(segments)
         }
         MINI_PROTOCOL_CHAINSYNC => {
             let resp =
