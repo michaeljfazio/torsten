@@ -260,13 +260,17 @@ fn test_forged_block_header_hash_stable() {
         "Serialised block bytes must be byte-for-byte identical for identical inputs"
     );
 
-    // Also verify that the header hash is actually the blake2b-256 of the
-    // encoded header body — i.e. the field is correctly populated.
-    let recomputed_header_body = torsten_serialization::encode_block_header_body(&block_a.header);
-    let expected_hash = blake2b_256(&recomputed_header_body);
+    // Verify that header_hash == blake2b_256(full_header_cbor) where
+    // full_header_cbor = [header_body, kes_signature].  The canonical
+    // Cardano block hash includes the KES signature, not just the body.
+    let full_header_cbor = torsten_serialization::encode_block_header(
+        &block_a.header,
+        &block_a.header.kes_signature,
+    );
+    let expected_hash = blake2b_256(&full_header_cbor);
     assert_eq!(
         block_a.header.header_hash, expected_hash,
-        "header_hash field must equal blake2b_256(encode_block_header_body(header))"
+        "header_hash field must equal blake2b_256(encode_block_header(header, kes_sig))"
     );
 }
 
