@@ -45,10 +45,13 @@ use tracing::{debug, info, warn};
 /// WAL entry magic bytes: "TWAL"
 const WAL_MAGIC: [u8; 4] = *b"TWAL";
 
-/// Size of the current (v2) WAL entry header.
+/// Size of the v2 WAL entry header (no trailing CRC).
 ///
 /// Layout: magic(4) + slot(8) + block_no(8) + hash(32) + prev_hash(32) + cbor_len(4)
 const WAL_HEADER_SIZE: usize = 4 + 8 + 8 + 32 + 32 + 4; // 88 bytes
+
+/// Size of the CRC32 trailer appended after CBOR in v3 entries.
+const WAL_CRC_SIZE: usize = 4;
 
 /// Size of the legacy (v1) WAL entry header, which lacked prev_hash.
 ///
@@ -76,9 +79,13 @@ impl WalWriter {
 
     /// Append a WAL entry and sync to disk.
     ///
-    /// Writes the 88-byte v2 header followed by the block CBOR, then
-    /// flushes the BufWriter and issues a `sync_data()` to guarantee the
-    /// entry is durable before the caller proceeds.
+    /// Writes the 88-byte header followed by the block CBOR and a 4-byte
+    /// CRC32 trailer, then flushes the BufWriter and issues a `sync_data()`
+    /// to guarantee the entry is durable before the caller proceeds.
+    ///
+    /// The CRC32 covers the entire entry (header + CBOR) and is used during
+    /// replay to detect partial or corrupted writes that passed the magic
+    /// and length checks but have damaged payload data.
     fn append(
         &mut self,
         slot: u64,
@@ -95,13 +102,25 @@ impl WalWriter {
                 cbor.len()
             ))
         })?;
-        self.file.write_all(&WAL_MAGIC)?;
-        self.file.write_all(&slot.to_be_bytes())?;
-        self.file.write_all(&block_no.to_be_bytes())?;
-        self.file.write_all(hash.as_bytes())?;
-        self.file.write_all(prev_hash.as_bytes())?;
-        self.file.write_all(&cbor_len.to_be_bytes())?;
+
+        // Build the header for CRC computation
+        let mut header = [0u8; WAL_HEADER_SIZE];
+        header[0..4].copy_from_slice(&WAL_MAGIC);
+        header[4..12].copy_from_slice(&slot.to_be_bytes());
+        header[12..20].copy_from_slice(&block_no.to_be_bytes());
+        header[20..52].copy_from_slice(hash.as_bytes());
+        header[52..84].copy_from_slice(prev_hash.as_bytes());
+        header[84..88].copy_from_slice(&cbor_len.to_be_bytes());
+
+        // Compute CRC32 over header + CBOR
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header);
+        hasher.update(cbor);
+        let crc = hasher.finalize();
+
+        self.file.write_all(&header)?;
         self.file.write_all(cbor)?;
+        self.file.write_all(&crc.to_be_bytes())?;
         self.file.flush()?;
         self.file.get_ref().sync_data()?;
         Ok(())
@@ -147,18 +166,37 @@ impl WalWriter {
                         cbor.len()
                     ))
                 })?;
-                writer.write_all(&WAL_MAGIC)?;
-                writer.write_all(&slot.to_be_bytes())?;
-                writer.write_all(&block_no.to_be_bytes())?;
-                writer.write_all(hash.as_bytes())?;
-                writer.write_all(prev_hash.as_bytes())?;
-                writer.write_all(&cbor_len.to_be_bytes())?;
+
+                // Build header for CRC computation
+                let mut header = [0u8; WAL_HEADER_SIZE];
+                header[0..4].copy_from_slice(&WAL_MAGIC);
+                header[4..12].copy_from_slice(&slot.to_be_bytes());
+                header[12..20].copy_from_slice(&block_no.to_be_bytes());
+                header[20..52].copy_from_slice(hash.as_bytes());
+                header[52..84].copy_from_slice(prev_hash.as_bytes());
+                header[84..88].copy_from_slice(&cbor_len.to_be_bytes());
+
+                let mut hasher = crc32fast::Hasher::new();
+                hasher.update(&header);
+                hasher.update(cbor);
+                let crc = hasher.finalize();
+
+                writer.write_all(&header)?;
                 writer.write_all(cbor)?;
+                writer.write_all(&crc.to_be_bytes())?;
             }
             writer.flush()?;
             writer.get_ref().sync_data()?;
         }
         fs::rename(&tmp_path, &self.path)?;
+        // Fsync the parent directory to ensure the rename is durable.
+        // Without this, a crash could leave the directory entry pointing
+        // at the old file.
+        if let Some(parent) = self.path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         // Re-open in append mode
         let file = OpenOptions::new()
             .create(true)
@@ -228,19 +266,31 @@ fn detect_legacy_format(data: &[u8]) -> bool {
 
     // There is data beyond the first entry. Under legacy assumption the next
     // entry must begin with TWAL.
-    if data[next_pos..next_pos + 4] == WAL_MAGIC {
+    if next_pos + 4 <= data.len() && data[next_pos..next_pos + 4] == WAL_MAGIC {
         return true;
     }
 
     // The next position does not start with TWAL under the legacy assumption.
-    // Check if it does under the new-format assumption.
+    // Check if it does under the new-format assumption (v2 or v3).
     if data.len() >= WAL_HEADER_SIZE {
         let new_cbor_len = u32::from_be_bytes(data[84..88].try_into().unwrap()) as usize;
-        let new_next = WAL_HEADER_SIZE + new_cbor_len;
-        if new_next <= data.len()
-            && (new_next == data.len() || data[new_next..new_next + 4] == WAL_MAGIC)
+        // v2: header + cbor (no CRC)
+        let new_next_v2 = WAL_HEADER_SIZE + new_cbor_len;
+        if new_next_v2 <= data.len()
+            && (new_next_v2 == data.len()
+                || (new_next_v2 + 4 <= data.len()
+                    && data[new_next_v2..new_next_v2 + 4] == WAL_MAGIC))
         {
-            return false; // New format aligns correctly.
+            return false; // v2 format aligns correctly.
+        }
+        // v3: header + cbor + CRC trailer
+        let new_next_v3 = WAL_HEADER_SIZE + new_cbor_len + WAL_CRC_SIZE;
+        if new_next_v3 <= data.len()
+            && (new_next_v3 == data.len()
+                || (new_next_v3 + 4 <= data.len()
+                    && data[new_next_v3..new_next_v3 + 4] == WAL_MAGIC))
+        {
+            return false; // v3 format aligns correctly.
         }
     }
 
@@ -251,11 +301,36 @@ fn detect_legacy_format(data: &[u8]) -> bool {
     false
 }
 
+/// Detect whether a WAL file uses the v3 format (with CRC32 trailers).
+///
+/// Strategy: parse the first entry using 88-byte headers, then check if
+/// the 4 bytes after the CBOR contain a valid CRC32 of (header + cbor).
+/// Legacy (56-byte) files are never v3.
+fn detect_crc_format(data: &[u8]) -> bool {
+    if data.len() < WAL_HEADER_SIZE {
+        return false;
+    }
+    if data[..4] != WAL_MAGIC {
+        return false;
+    }
+    let cbor_len = u32::from_be_bytes(data[84..88].try_into().unwrap()) as usize;
+    let cbor_end = WAL_HEADER_SIZE + cbor_len;
+    if cbor_end + WAL_CRC_SIZE > data.len() {
+        return false;
+    }
+    let stored_crc =
+        u32::from_be_bytes(data[cbor_end..cbor_end + WAL_CRC_SIZE].try_into().unwrap());
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&data[..cbor_end]);
+    let computed_crc = hasher.finalize();
+    stored_crc == computed_crc
+}
+
 /// Replay WAL entries from the given file path.
 ///
 /// Validates magic bytes for each entry and stops on corrupted/truncated
-/// data. Automatically detects legacy 56-byte format and logs a one-time
-/// warning when upgrading.
+/// data. Automatically detects legacy 56-byte format and v3 CRC format,
+/// logging a one-time warning when upgrading from legacy.
 fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
 
@@ -277,6 +352,9 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
              The WAL will be upgraded to 88-byte format on the next rewrite."
         );
     }
+
+    // Detect v3 CRC format (only applicable to non-legacy files).
+    let has_crc = !legacy && detect_crc_format(&data);
 
     let header_size = if legacy {
         WAL_HEADER_SIZE_LEGACY
@@ -333,6 +411,31 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
             break;
         }
 
+        // For v3 (CRC) format, validate the trailing CRC32 checksum.
+        if has_crc {
+            if cbor_end + WAL_CRC_SIZE > data.len() {
+                warn!(pos, "WAL: truncated CRC32 trailer, stopping replay");
+                break;
+            }
+            let stored_crc =
+                u32::from_be_bytes(data[cbor_end..cbor_end + WAL_CRC_SIZE].try_into().unwrap());
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&data[pos..cbor_end]);
+            let computed_crc = hasher.finalize();
+            if stored_crc != computed_crc {
+                warn!(
+                    pos,
+                    stored_crc,
+                    computed_crc,
+                    "WAL: CRC32 mismatch, entry corrupted — stopping replay"
+                );
+                break;
+            }
+            pos = cbor_end + WAL_CRC_SIZE;
+        } else {
+            pos = cbor_end;
+        }
+
         entries.push(WalEntry {
             slot,
             block_no,
@@ -340,8 +443,6 @@ fn replay_wal(path: &Path) -> io::Result<Vec<WalEntry>> {
             prev_hash,
             cbor: data[cbor_start..cbor_end].to_vec(),
         });
-
-        pos = cbor_end;
     }
 
     Ok(entries)
@@ -1616,13 +1717,13 @@ mod tests {
             assert_eq!(db.len(), 1);
         }
 
-        // The WAL file should now be in new 88-byte format
+        // The WAL file should now be in new format with CRC trailer
         let wal_data = fs::read(&wal_path).unwrap();
-        // One entry: 88-byte header + 2 bytes CBOR
+        // One entry: 88-byte header + 2 bytes CBOR + 4 bytes CRC trailer
         assert_eq!(
             wal_data.len(),
-            WAL_HEADER_SIZE + 2,
-            "rewritten WAL must use 88-byte headers"
+            WAL_HEADER_SIZE + 2 + WAL_CRC_SIZE,
+            "rewritten WAL must use v3 format (88-byte header + CRC trailer)"
         );
 
         // Reopen and verify prev_hash is correct for the surviving block
@@ -1943,5 +2044,133 @@ mod tests {
         // B is longer: h(1)→h(3)→h(4)→h(5)
         assert_eq!(db.selected_chain_len(), 4);
         assert_eq!(db.get_tip(), Some((400, h(5), 40)));
+    }
+
+    // -----------------------------------------------------------------------
+    // WAL CRC32 validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wal_crc_validates_on_replay() {
+        // Write entries via the normal API (produces v3 with CRC), then
+        // verify that replay succeeds and all entries are recovered.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"block1".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"block2".to_vec());
+            db.add_block(h(3), 300, 30, h(2), b"block3".to_vec());
+        }
+
+        // Reopen — must recover all three blocks via CRC-validated replay.
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 3);
+        assert!(db.has_block(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert!(db.has_block(&h(3)));
+    }
+
+    #[test]
+    fn test_wal_crc_detects_corrupted_cbor() {
+        // Write a v3 WAL entry, then corrupt the CBOR data. Replay should
+        // detect the CRC mismatch and stop before the corrupted entry.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        // Write two valid v3 entries via the API
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"block1".to_vec());
+            db.add_block(h(2), 200, 20, h(1), b"block2".to_vec());
+        }
+
+        // Corrupt the CBOR of the second entry by flipping a byte.
+        {
+            let mut data = fs::read(&wal_path).unwrap();
+            // First entry: 88 header + 6 cbor + 4 crc = 98 bytes
+            // Second entry starts at 98: header(88) + cbor starts at 186
+            let cbor_offset = 98 + WAL_HEADER_SIZE;
+            assert!(cbor_offset < data.len(), "offset must be within file");
+            data[cbor_offset] ^= 0xFF; // flip bits
+            fs::write(&wal_path, &data).unwrap();
+        }
+
+        // Reopen — should recover only the first (uncorrupted) entry.
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 1, "only the first entry should survive CRC check");
+        assert!(db.has_block(&h(1)));
+        assert!(!db.has_block(&h(2)));
+    }
+
+    #[test]
+    fn test_wal_crc_detects_truncated_trailer() {
+        // Write a v3 entry then truncate the CRC trailer.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        // Write one valid entry
+        {
+            let mut db = VolatileDB::open(&wal_dir).unwrap();
+            db.add_block(h(1), 100, 10, h(0), b"block1".to_vec());
+        }
+
+        // Truncate the last 2 bytes (partial CRC)
+        {
+            let data = fs::read(&wal_path).unwrap();
+            fs::write(&wal_path, &data[..data.len() - 2]).unwrap();
+        }
+
+        // Reopen — the single entry has a truncated CRC trailer.
+        // detect_crc_format returns false (CRC doesn't validate because
+        // it's truncated), so replay treats it as v2 and recovers the
+        // entry since the header+cbor are complete.
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(
+            db.len(),
+            1,
+            "should recover entry when CRC is truncated (v2 fallback)"
+        );
+        assert!(db.has_block(&h(1)));
+    }
+
+    #[test]
+    fn test_wal_v2_entries_replay_without_crc() {
+        // Manually construct a v2 WAL file (no CRC trailers) and verify
+        // that replay works correctly without CRC validation.
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("volatile");
+        fs::create_dir_all(&wal_dir).unwrap();
+        let wal_path = wal_dir.join(WAL_FILENAME);
+
+        {
+            use std::io::Write;
+            let mut file = File::create(&wal_path).unwrap();
+            // Write two v2 entries (no CRC trailer)
+            for i in 1..=2u8 {
+                let cbor = format!("block{i}");
+                let cbor_bytes = cbor.as_bytes();
+                file.write_all(&WAL_MAGIC).unwrap();
+                file.write_all(&(i as u64 * 100).to_be_bytes()).unwrap(); // slot
+                file.write_all(&(i as u64 * 10).to_be_bytes()).unwrap(); // block_no
+                file.write_all(h(i).as_bytes()).unwrap(); // hash
+                file.write_all(h(i - 1).as_bytes()).unwrap(); // prev_hash
+                file.write_all(&(cbor_bytes.len() as u32).to_be_bytes())
+                    .unwrap();
+                file.write_all(cbor_bytes).unwrap();
+                // No CRC trailer — v2 format
+            }
+        }
+
+        let db = VolatileDB::open(&wal_dir).unwrap();
+        assert_eq!(db.len(), 2, "v2 entries must replay without CRC");
+        assert!(db.has_block(&h(1)));
+        assert!(db.has_block(&h(2)));
+        assert_eq!(db.get_block(&h(2)).unwrap().prev_hash, h(1));
     }
 }

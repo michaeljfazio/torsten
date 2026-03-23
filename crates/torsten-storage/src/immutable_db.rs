@@ -854,9 +854,13 @@ impl ImmutableDB {
             None => return Ok(()),
         };
 
-        // Flush the chunk file
+        // Flush and fsync the chunk file to guarantee durability before
+        // writing the secondary index. Without this, a crash could leave the
+        // chunk file with missing tail data while the secondary index already
+        // references those blocks.
         let mut chunk_file = active.chunk_file;
         chunk_file.flush()?;
+        chunk_file.get_ref().sync_data()?;
 
         // Write secondary index
         let secondary_path = self.dir.join(format!("{:05}.secondary", active.chunk_num));
@@ -865,6 +869,9 @@ impl ImmutableDB {
             secondary_file.write_all(&entry.encode())?;
         }
         secondary_file.flush()?;
+        // Fsync the secondary index so that the chunk is fully recoverable
+        // on restart even if the OS crashes immediately after this call.
+        secondary_file.get_ref().sync_data()?;
 
         // Update chunk metadata
         if let (Some(first), Some(last)) = (
@@ -907,8 +914,11 @@ impl ImmutableDB {
             None => return Ok(()),
         };
 
-        // Flush chunk data
+        // Flush and fsync chunk data to guarantee durability. Without
+        // sync_data(), the OS may buffer writes indefinitely and a crash
+        // could lose the tail of the active chunk.
         active.chunk_file.flush()?;
+        active.chunk_file.get_ref().sync_data()?;
 
         // Write secondary index for current state
         let secondary_path = self.dir.join(format!("{:05}.secondary", active.chunk_num));
@@ -917,6 +927,7 @@ impl ImmutableDB {
             secondary_file.write_all(&entry.encode())?;
         }
         secondary_file.flush()?;
+        secondary_file.get_ref().sync_data()?;
 
         // Update chunk metadata (replace existing entry for this chunk if present)
         if let (Some(first), Some(last)) = (

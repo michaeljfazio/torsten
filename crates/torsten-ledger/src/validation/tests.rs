@@ -1037,13 +1037,43 @@ mod tests {
 
     #[test]
     fn test_native_script_validation_in_tx() {
-        let (utxo_set, input) = make_simple_utxo_set();
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        // Create a native script that requires a signer not present in witnesses
+        let required_key = Hash32::from_bytes([0xBB; 32]);
+        let script = NativeScript::ScriptPubkey(required_key);
+
+        // Compute the script hash so we can create a script-locked input
+        let script_cbor = torsten_serialization::encode_native_script(&script);
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&script_cbor);
+        let script_hash = torsten_primitives::hash::blake2b_224(&tagged);
+
+        // Create a UTxO set with a script-locked input (so the script is "needed")
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
         let params = ProtocolParameters::mainnet_defaults();
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
-        let required_key = Hash32::from_bytes([0xBB; 32]);
-        tx.witness_set
-            .native_scripts
-            .push(NativeScript::ScriptPubkey(required_key));
+        tx.witness_set.native_scripts.push(script);
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
@@ -1054,14 +1084,46 @@ mod tests {
 
     #[test]
     fn test_native_script_timelock_in_tx() {
-        let (utxo_set, input) = make_simple_utxo_set();
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+
+        // Create a timelock native script
+        let script = NativeScript::InvalidBefore(SlotNo(200));
+
+        // Compute the script hash so we can create a script-locked input
+        let script_cbor = torsten_serialization::encode_native_script(&script);
+        let mut tagged = vec![0x00];
+        tagged.extend_from_slice(&script_cbor);
+        let script_hash = torsten_primitives::hash::blake2b_224(&tagged);
+
+        // Create a UTxO set with a script-locked input (so the script is "needed")
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: torsten_primitives::network::NetworkId::Testnet,
+                    payment: Credential::Script(script_hash),
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
         let params = ProtocolParameters::mainnet_defaults();
         let mut tx = make_simple_tx(input, 9_800_000, 200_000);
-        tx.witness_set
-            .native_scripts
-            .push(NativeScript::InvalidBefore(SlotNo(200)));
+        tx.witness_set.native_scripts.push(script);
+        // Slot 100 < InvalidBefore(200), so validation should fail
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
+        // Slot 200 >= InvalidBefore(200), so validation should pass
         let result = validate_transaction(&tx, &utxo_set, &params, 200, 300, None);
         assert!(result.is_ok());
     }

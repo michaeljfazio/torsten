@@ -672,7 +672,78 @@ pub(super) fn run_phase1_rules(
     // ------------------------------------------------------------------
     // Rule 13: Native script evaluation
     // ------------------------------------------------------------------
+    // Per Cardano spec (Haskell `validateFailedScripts`), only evaluate
+    // native scripts whose hashes appear in `scriptsNeeded(tx)`. Extra
+    // scripts in the witness set are allowed but should not be evaluated.
     if !tx.witness_set.native_scripts.is_empty() {
+        // Collect the set of script hashes that are actually needed by
+        // the transaction: script-locked spending inputs, minting policy
+        // IDs, script-locked withdrawals, and script-locked certificates.
+        let mut scripts_needed: HashSet<Hash28> = HashSet::new();
+
+        // 1. Script-locked spending inputs (address type bit 4 set)
+        for input in &body.inputs {
+            if let Some(utxo) = utxo_set.lookup(input) {
+                let ab = utxo.address.to_bytes();
+                if !ab.is_empty() {
+                    let t = (ab[0] >> 4) & 0x0F;
+                    // Script address types: 1,3,5,7 (bit 4 of header = 1)
+                    if matches!(t, 1 | 3 | 5 | 7) && ab.len() >= 29 {
+                        if let Ok(h) = Hash28::try_from(&ab[1..29]) {
+                            scripts_needed.insert(h);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Minting policy IDs
+        for policy_id in body.mint.keys() {
+            scripts_needed.insert(*policy_id);
+        }
+
+        // 3. Script-locked withdrawals (reward address with script bit set)
+        for reward_addr in body.withdrawals.keys() {
+            if reward_addr.len() >= 29 {
+                let header = reward_addr[0];
+                // Reward address type: 0xF0/0xF1 — bit 4 = script
+                if (header & 0x10) != 0 {
+                    if let Ok(h) = Hash28::try_from(&reward_addr[1..29]) {
+                        scripts_needed.insert(h);
+                    }
+                }
+            }
+        }
+
+        // 4. Certificates with script credentials
+        for cert in &body.certificates {
+            let cred: Option<&Credential> = match cert {
+                Certificate::StakeDeregistration(c) => Some(c),
+                Certificate::StakeDelegation { credential: c, .. } => Some(c),
+                Certificate::ConwayStakeRegistration { credential: c, .. } => Some(c),
+                Certificate::ConwayStakeDeregistration { credential: c, .. } => Some(c),
+                Certificate::VoteDelegation { credential: c, .. } => Some(c),
+                Certificate::StakeVoteDelegation { credential: c, .. } => Some(c),
+                Certificate::RegStakeDeleg { credential: c, .. } => Some(c),
+                Certificate::RegStakeVoteDeleg { credential: c, .. } => Some(c),
+                Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+                Certificate::CommitteeHotAuth {
+                    cold_credential: c, ..
+                } => Some(c),
+                Certificate::CommitteeColdResign {
+                    cold_credential: c, ..
+                } => Some(c),
+                Certificate::RegDRep { credential: c, .. } => Some(c),
+                Certificate::UnregDRep { credential: c, .. } => Some(c),
+                Certificate::UpdateDRep { credential: c, .. } => Some(c),
+                _ => None,
+            };
+            if let Some(Credential::Script(h)) = cred {
+                scripts_needed.insert(*h);
+            }
+        }
+
+        // Now evaluate only needed native scripts
         let signers: HashSet<torsten_primitives::hash::Hash32> = tx
             .witness_set
             .vkey_witnesses
@@ -685,7 +756,17 @@ pub(super) fn run_phase1_rules(
         let slot = SlotNo(current_slot);
 
         for script in &tx.witness_set.native_scripts {
-            if !evaluate_native_script(script, &signers, slot) {
+            // Compute this script's hash: blake2b_224(0x00 || cbor(script))
+            let script_cbor = torsten_serialization::encode_native_script(script);
+            let mut tagged = Vec::with_capacity(1 + script_cbor.len());
+            tagged.push(0x00);
+            tagged.extend_from_slice(&script_cbor);
+            let script_hash = torsten_primitives::hash::blake2b_224(&tagged);
+
+            // Only evaluate scripts that are actually needed
+            if scripts_needed.contains(&script_hash)
+                && !evaluate_native_script(script, &signers, slot)
+            {
                 errors.push(ValidationError::NativeScriptFailed);
                 break;
             }
