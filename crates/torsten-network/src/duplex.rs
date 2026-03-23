@@ -1106,7 +1106,9 @@ async fn process_tx_ids_server(
         let mut decoded = false;
         for era in [6u16, 5, 4, 3, 2] {
             match torsten_serialization::decode_transaction(era, tx_cbor) {
-                Ok(tx) => {
+                Ok(mut tx) => {
+                    // Preserve original CBOR for re-transmission via TxSubmission2
+                    tx.raw_cbor = Some(tx_cbor.to_vec());
                     let tx_size = tx_cbor.len();
                     let fee = tx.body.fee;
                     match mempool.add_tx_with_fee(tx_hash, tx, tx_size, fee) {

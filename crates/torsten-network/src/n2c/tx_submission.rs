@@ -70,7 +70,12 @@ pub(crate) fn handle_tx_submission(
 
                     // Parse the full transaction
                     match torsten_serialization::decode_transaction(era_id, &tx_bytes) {
-                        Ok(tx) => {
+                        Ok(mut tx) => {
+                            // Preserve the original CBOR bytes so TxSubmission2
+                            // can re-transmit the exact wire-format tx to peers.
+                            // Without this, get_tx_cbor() returns None and tx
+                            // bodies are silently dropped from MsgReplyTxs.
+                            tx.raw_cbor = Some(tx_bytes.to_vec());
                             let tx_hash = tx.hash;
 
                             match mempool.add_tx(tx_hash, tx, tx_size) {
