@@ -1,6 +1,7 @@
 //! Cardano ledger: UTxO management, transaction validation, rewards, governance.
 
 pub mod eras;
+pub mod ledger_seq;
 pub mod plutus;
 pub mod rules;
 pub mod state;
