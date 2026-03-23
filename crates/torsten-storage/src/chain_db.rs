@@ -465,6 +465,15 @@ impl ChainDB {
 
     // -- Flush / Lifecycle --------------------------------------------------
 
+    /// Remove a single block from the VolatileDB by hash.
+    ///
+    /// Used by [`crate::background::GcScheduler`] to remove blocks after
+    /// their GC delay has elapsed. Hash-exact removal avoids accidentally
+    /// deleting EBBs that share a slot with the next epoch's first block.
+    pub fn remove_volatile_block(&mut self, hash: &Hash32) {
+        self.volatile.remove_block(hash);
+    }
+
     /// Flush finalized blocks from VolatileDB to ImmutableDB.
     ///
     /// Blocks with block_no <= (tip_block_no - k) are considered finalized.

@@ -1,3 +1,4 @@
+pub mod background;
 pub mod block_index;
 pub mod chain_db;
 pub mod chain_sel_queue;
