@@ -321,9 +321,8 @@ pub fn forge_block(
         nonce_vrf_output,
     };
 
-    // Encode the header body for hashing and KES signing
+    // Encode the header body for KES signing
     let header_body_cbor = torsten_serialization::encode_block_header_body(&header);
-    let header_hash = blake2b_256(&header_body_cbor);
 
     // KES signing: evolve key to the correct period and sign the header body
     let current_slot_kes_period = slot.0 / config.slots_per_kes_period;
@@ -363,6 +362,17 @@ pub fn forge_block(
     } else {
         anyhow::bail!("Cannot forge block: KES secret key is empty");
     };
+
+    // Compute the canonical block header hash from the FULL header CBOR
+    // (header_body + KES signature), NOT just the header body.
+    //
+    // The Cardano block hash is blake2b_256 of the serialized Header struct,
+    // which is a 2-element CBOR array: [header_body_cbor, kes_signature].
+    // Using header_body_cbor alone produces a wrong hash that peers cannot
+    // verify, causing block rejection and wrong prev_hash in subsequent blocks.
+    let full_header_cbor =
+        torsten_serialization::encode_block_header(&header, &kes_signature);
+    let header_hash = blake2b_256(&full_header_cbor);
 
     // Build the final block with correct header hash
     let mut block = Block {
