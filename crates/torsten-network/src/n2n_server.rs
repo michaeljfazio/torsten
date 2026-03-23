@@ -1114,17 +1114,7 @@ async fn handle_n2n_chainsync(
                     }
                 }
             }
-            // When the client sends an empty point list, the intersection
-            // is at Origin — the server should start from the beginning of
-            // the chain.  This matches the Haskell ChainSync spec where
-            // MsgFindIntersect [] always succeeds at Origin.
-            if intersect_point.is_none() && points_len == 0 {
-                // Intersect at Origin — set cursor to slot 0 so
-                // MsgRequestNext starts serving from the first block.
-                peer_state.chainsync_cursor_slot = Some(0);
-                peer_state.chainsync_cursor_hash = None;
-                info!("N2N ChainSync: intersection at Origin (empty points)");
-            } else if intersect_point.is_some() {
+            if intersect_point.is_some() {
                 info!("N2N ChainSync: intersection found");
             } else {
                 warn!(
@@ -1150,18 +1140,6 @@ async fn handle_n2n_chainsync(
 
                 // Intersection point
                 encode_point(&mut enc, int_slot, &int_hash)?;
-                // Tip
-                encode_tip(&mut enc, tip.slot, &tip.hash, tip.block_number)?;
-            } else if points_len == 0 {
-                // Origin intersection: MsgIntersectFound with Origin point
-                // The Cardano CDDL encodes Origin as an empty array: []
-                enc.array(3)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                enc.u32(5)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                // Origin point: empty array
-                enc.array(0)
-                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 // Tip
                 encode_tip(&mut enc, tip.slot, &tip.hash, tip.block_number)?;
             } else {
