@@ -1094,8 +1094,23 @@ async fn handle_n2n_chainsync(
                 "N2N ChainSync: received MsgFindIntersect"
             );
 
+            // Search points in client-preferred order (first match wins,
+            // matching Haskell's `followerForward` behavior).
             let mut intersect_point: Option<(u64, [u8; 32])> = None;
+            let mut found_origin = false;
             for _ in 0..points_len {
+                if intersect_point.is_some() {
+                    // Already found — skip remaining points but consume CBOR
+                    let _ = decoder.skip();
+                    continue;
+                }
+                // Check if this is an Origin point (empty array)
+                if is_origin_point(&mut decoder) {
+                    // Origin is always on chain — set cursor to start
+                    found_origin = true;
+                    let _ = parse_point_slot_hash(&mut decoder); // consume the origin array
+                    continue;
+                }
                 if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
                     let hash32 = torsten_primitives::hash::Hash32::from_bytes(hash);
                     let has = block_provider.has_block(&hash);
@@ -1105,16 +1120,17 @@ async fn handle_n2n_chainsync(
                         has_block = has,
                         "N2N ChainSync: checking intersection point"
                     );
-                    // Check if we have this block
                     if has {
-                        // Found intersection — use the highest slot
-                        if intersect_point.is_none_or(|(s, _)| slot > s) {
-                            intersect_point = Some((slot, hash));
-                        }
+                        // First match wins (client-preferred order)
+                        intersect_point = Some((slot, hash));
                     }
                 }
             }
-            if intersect_point.is_some() {
+            // If no specific point matched but Origin was in the list,
+            // use Origin as the intersection (always valid).
+            if intersect_point.is_none() && found_origin {
+                info!("N2N ChainSync: intersection at Origin");
+            } else if intersect_point.is_some() {
                 info!("N2N ChainSync: intersection found");
             } else {
                 warn!(
@@ -1140,6 +1156,22 @@ async fn handle_n2n_chainsync(
 
                 // Intersection point
                 encode_point(&mut enc, int_slot, &int_hash)?;
+                // Tip
+                encode_tip(&mut enc, tip.slot, &tip.hash, tip.block_number)?;
+            } else if found_origin {
+                // Origin intersection — the client included Origin in its points
+                // and no specific block matched. Set cursor to genesis.
+                peer_state.chainsync_cursor_slot = Some(0);
+                peer_state.chainsync_cursor_hash = None;
+
+                // MsgIntersectFound: [5, origin_point, tip]
+                enc.array(3)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                enc.u32(5)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                // Origin point: empty array []
+                enc.array(0)
+                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
                 // Tip
                 encode_tip(&mut enc, tip.slot, &tip.hash, tip.block_number)?;
             } else {
@@ -2040,17 +2072,44 @@ async fn handle_peersharing(
 }
 
 /// Parse a point's (slot, hash) from a CBOR-encoded [slot, hash] array
+/// Parse a CBOR-encoded Point: either Origin `[]` or Specific `[slot, hash]`.
+/// Returns `None` for Origin (empty array) or parse failure.
+/// Returns `Some((slot, hash))` for a specific point.
 fn parse_point_slot_hash(decoder: &mut minicbor::Decoder) -> Option<(u64, [u8; 32])> {
-    decoder.array().ok()?;
-    let slot = decoder.u64().ok()?;
-    let hash_bytes = decoder.bytes().ok()?;
-    if hash_bytes.len() == 32 {
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(hash_bytes);
-        Some((slot, hash))
-    } else {
-        None
+    let arr_len = decoder.array().ok()?;
+    match arr_len {
+        Some(0) | None => {
+            // Origin point: empty array or indefinite-length empty.
+            // Skip any remaining CBOR in case of malformed data.
+            None
+        }
+        Some(2) => {
+            let slot = decoder.u64().ok()?;
+            let hash_bytes = decoder.bytes().ok()?;
+            if hash_bytes.len() == 32 {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(hash_bytes);
+                Some((slot, hash))
+            } else {
+                None
+            }
+        }
+        _ => {
+            // Unexpected array length — skip
+            None
+        }
     }
+}
+
+/// Check if a point is the Origin point (empty CBOR array).
+/// Peeks at the decoder without consuming it for non-origin points.
+fn is_origin_point(decoder: &mut minicbor::Decoder) -> bool {
+    // Save position and peek at the array length
+    let pos = decoder.position();
+    let result = decoder.array().ok().map(|len| matches!(len, Some(0)));
+    // Reset position so the caller can re-parse
+    decoder.set_position(pos);
+    result.unwrap_or(false)
 }
 
 #[cfg(test)]
