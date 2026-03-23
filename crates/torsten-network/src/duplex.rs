@@ -725,6 +725,13 @@ async fn serve_tx_submission_inner(
                     // reply with an empty list — that's a protocol violation.
                     // The Haskell Server expects us to block until we have txs.
                     // Poll the mempool every 5 seconds until txs appear.
+                    //
+                    // When blocking=false and no txs available, rate-limit to
+                    // prevent CPU-burning tight loops. The Haskell TxSubmission2
+                    // server sends rapid non-blocking requests when idle.
+                    if new_ids.is_empty() && !blocking {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     let new_ids = if new_ids.is_empty() && blocking {
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
