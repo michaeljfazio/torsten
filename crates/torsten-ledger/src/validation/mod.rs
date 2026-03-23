@@ -41,11 +41,12 @@ pub(crate) use collateral::plutus_script_version_map;
 // redeemer executes, allowing the Unit check to be applied only to V3 redeemers.
 pub(crate) use collateral::redeemer_script_version_map;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use torsten_primitives::hash::Hash28;
+use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::Transaction;
+use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
 
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
@@ -211,6 +212,16 @@ pub enum ValidationError {
          {limit} bytes (Conway ppMaxRefScriptSizePerTxG)"
     )]
     TxRefScriptSizeTooLarge { actual: u64, limit: u64 },
+    /// Haskell `wdrlNotZero`: withdrawals with a zero amount are rejected.
+    #[error("Zero withdrawal amount for reward account: {account}")]
+    ZeroWithdrawal { account: String },
+    /// Withdrawal amount does not match the on-chain reward balance for the account.
+    #[error("Incorrect withdrawal amount for {account}: declared={declared}, actual={actual}")]
+    IncorrectWithdrawalAmount {
+        account: String,
+        declared: u64,
+        actual: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +251,7 @@ pub fn validate_transaction(
         current_slot,
         tx_size,
         slot_config,
+        None,
         None,
         None,
     )
@@ -272,6 +284,7 @@ pub fn validate_transaction_with_pools(
     slot_config: Option<&SlotConfig>,
     registered_pools: Option<&HashSet<Hash28>>,
     current_treasury: Option<u64>,
+    reward_accounts: Option<&HashMap<Hash32, Lovelace>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -297,6 +310,54 @@ pub fn validate_transaction_with_pools(
         registered_pools,
         &mut errors,
     );
+
+    // ------------------------------------------------------------------
+    // Withdrawal validation (Haskell `wdrlNotZero` + balance check)
+    //
+    // - Zero-amount withdrawals are always rejected (structural rule).
+    // - When `reward_accounts` is provided (block application mode),
+    //   each withdrawal amount must exactly match the on-chain reward
+    //   balance, and the account must be registered.
+    // ------------------------------------------------------------------
+    for (reward_account_bytes, amount) in &tx.body.withdrawals {
+        // Format the reward account as a hex string for error messages.
+        let account_hex = reward_account_bytes.iter().fold(
+            String::with_capacity(reward_account_bytes.len() * 2),
+            |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            },
+        );
+        if amount.0 == 0 {
+            errors.push(ValidationError::ZeroWithdrawal {
+                account: account_hex.clone(),
+            });
+        }
+        if let Some(accounts) = reward_accounts {
+            let key = crate::state::LedgerState::reward_account_to_hash(reward_account_bytes);
+            match accounts.get(&key) {
+                Some(balance) => {
+                    if amount.0 != balance.0 {
+                        errors.push(ValidationError::IncorrectWithdrawalAmount {
+                            account: account_hex,
+                            declared: amount.0,
+                            actual: balance.0,
+                        });
+                    }
+                }
+                None => {
+                    // Unregistered reward account — the withdrawal amount cannot
+                    // match any balance, so report as incorrect (actual = 0).
+                    errors.push(ValidationError::IncorrectWithdrawalAmount {
+                        account: account_hex,
+                        declared: amount.0,
+                        actual: 0,
+                    });
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Conway LEDGER rule: currentTreasuryValue must match ledger treasury.

@@ -486,6 +486,12 @@ struct PeerState {
     /// we advance from this point.
     chainsync_cursor_slot: Option<u64>,
     chainsync_cursor_hash: Option<[u8; 32]>,
+    /// ChainSync agency tracking: true when we sent MsgAwaitReply and are
+    /// waiting for a block to push.  The Ouroboros ChainSync state machine
+    /// only allows the server to send MsgRollForward / MsgRollBackward after
+    /// MsgAwaitReply (StMustReply state).  Without this flag, broadcast
+    /// announcements could send unsolicited MsgRollForward, violating agency.
+    chainsync_must_reply: bool,
     /// TxSubmission2 state: whether we've sent MsgInit
     tx_submission_init_sent: bool,
     /// TxSubmission2 flow control: tx IDs sent but not yet acknowledged
@@ -497,6 +503,7 @@ impl PeerState {
         PeerState {
             chainsync_cursor_slot: None,
             chainsync_cursor_hash: None,
+            chainsync_must_reply: false,
             tx_submission_init_sent: false,
             tx_inflight: Vec::new(),
         }
@@ -611,34 +618,41 @@ async fn handle_n2n_connection(
             announcement = announcement_rx.recv() => {
                 match announcement {
                     Ok(ann) => {
-                        // If peer is at tip (waiting for new block), send them the new
-                        // block via MsgRollForward on ChainSync protocol.
-                        if let Some(cursor_slot) = peer_state.chainsync_cursor_slot {
-                            if cursor_slot < ann.slot {
-                                // Peer is behind the announced block — serve the next block
-                                if let Some((_next_slot, next_hash, block_cbor)) =
-                                    block_provider.get_next_block_after_slot(cursor_slot)
-                                {
-                                    peer_state.chainsync_cursor_slot = Some(ann.slot);
-                                    peer_state.chainsync_cursor_hash = Some(next_hash);
+                        // Only send MsgRollForward if the peer previously sent
+                        // MsgRequestNext and we responded with MsgAwaitReply
+                        // (chainsync_must_reply == true).  Sending unsolicited
+                        // MsgRollForward would violate Ouroboros ChainSync agency.
+                        if peer_state.chainsync_must_reply {
+                            if let Some(cursor_slot) = peer_state.chainsync_cursor_slot {
+                                if cursor_slot < ann.slot {
+                                    // Peer is behind the announced block — serve the next block
+                                    if let Some((_next_slot, next_hash, block_cbor)) =
+                                        block_provider.get_next_block_after_slot(cursor_slot)
+                                    {
+                                        peer_state.chainsync_cursor_slot = Some(ann.slot);
+                                        peer_state.chainsync_cursor_hash = Some(next_hash);
+                                        // Clear the must-reply flag: we are fulfilling
+                                        // the outstanding MsgRequestNext obligation.
+                                        peer_state.chainsync_must_reply = false;
 
-                                    let payload = build_chainsync_roll_forward(
-                                        &block_cbor, ann.slot, &ann.hash, ann.block_number,
-                                    )?;
+                                        let payload = build_chainsync_roll_forward(
+                                            &block_cbor, ann.slot, &ann.hash, ann.block_number,
+                                        )?;
 
-                                    let segment = Segment {
-                                        transmission_time: 0,
-                                        protocol_id: MINI_PROTOCOL_CHAINSYNC,
-                                        is_responder: true,
-                                        payload,
-                                    };
-                                    let encoded = segment.encode();
-                                    stream.write_all(&encoded).await?;
-                                    debug!(
-                                        peer = %peer_addr,
-                                        slot = ann.slot,
-                                        "Pushed block announcement to peer"
-                                    );
+                                        let segment = Segment {
+                                            transmission_time: 0,
+                                            protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                                            is_responder: true,
+                                            payload,
+                                        };
+                                        let encoded = segment.encode();
+                                        stream.write_all(&encoded).await?;
+                                        debug!(
+                                            peer = %peer_addr,
+                                            slot = ann.slot,
+                                            "Pushed block announcement to peer"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -656,36 +670,41 @@ async fn handle_n2n_connection(
             rollback = rollback_rx.recv() => {
                 match rollback {
                     Ok(rb) => {
-                        // Only send rollback if peer's cursor is beyond the rollback point
-                        if let Some(cursor_slot) = peer_state.chainsync_cursor_slot {
-                            if cursor_slot > rb.slot {
-                                // Update peer cursor to the rollback point
-                                peer_state.chainsync_cursor_slot = Some(rb.slot);
-                                peer_state.chainsync_cursor_hash = Some(rb.hash);
+                        // Only send MsgRollBackward if the peer has an outstanding
+                        // MsgRequestNext (must_reply) and cursor is beyond rollback point.
+                        if peer_state.chainsync_must_reply {
+                            if let Some(cursor_slot) = peer_state.chainsync_cursor_slot {
+                                if cursor_slot > rb.slot {
+                                    // Update peer cursor to the rollback point
+                                    peer_state.chainsync_cursor_slot = Some(rb.slot);
+                                    peer_state.chainsync_cursor_hash = Some(rb.hash);
+                                    // Clear the must-reply flag
+                                    peer_state.chainsync_must_reply = false;
 
-                                // MsgRollBackward: [3, point, tip]
-                                let mut payload = Vec::new();
-                                let mut enc = minicbor::Encoder::new(&mut payload);
-                                enc.array(3)
-                                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                                enc.u32(3)
-                                    .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-                                encode_point(&mut enc, rb.slot, &rb.hash)?;
-                                encode_tip(&mut enc, rb.tip_slot, &rb.tip_hash, rb.tip_block_number)?;
+                                    // MsgRollBackward: [3, point, tip]
+                                    let mut payload = Vec::new();
+                                    let mut enc = minicbor::Encoder::new(&mut payload);
+                                    enc.array(3)
+                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                                    enc.u32(3)
+                                        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+                                    encode_point(&mut enc, rb.slot, &rb.hash)?;
+                                    encode_tip(&mut enc, rb.tip_slot, &rb.tip_hash, rb.tip_block_number)?;
 
-                                let segment = Segment {
-                                    transmission_time: 0,
-                                    protocol_id: MINI_PROTOCOL_CHAINSYNC,
-                                    is_responder: true,
-                                    payload,
-                                };
-                                let encoded = segment.encode();
-                                stream.write_all(&encoded).await?;
-                                debug!(
-                                    peer = %peer_addr,
-                                    rollback_slot = rb.slot,
-                                    "Sent MsgRollBackward to peer"
-                                );
+                                    let segment = Segment {
+                                        transmission_time: 0,
+                                        protocol_id: MINI_PROTOCOL_CHAINSYNC,
+                                        is_responder: true,
+                                        payload,
+                                    };
+                                    let encoded = segment.encode();
+                                    stream.write_all(&encoded).await?;
+                                    debug!(
+                                        peer = %peer_addr,
+                                        rollback_slot = rb.slot,
+                                        "Sent MsgRollBackward to peer"
+                                    );
+                                }
                             }
                         }
                     }
@@ -795,8 +814,30 @@ fn handle_n2n_handshake(
         .map()
         .map_err(|e| N2NServerError::HandshakeFailed(e.to_string()))?;
 
-    let count = map_len.unwrap_or(0);
-    for _ in 0..count {
+    // Handle both definite-length (Some(n)) and indefinite-length (None) CBOR maps.
+    // Indefinite-length maps are terminated by a CBOR break byte (0xFF).
+    let mut entries_remaining = map_len;
+    loop {
+        // For definite-length maps, count down entries
+        if let Some(ref mut n) = entries_remaining {
+            if *n == 0 {
+                break;
+            }
+            *n -= 1;
+        }
+
+        // For indefinite-length maps, check for the CBOR break stop code
+        if entries_remaining.is_none() {
+            // Peek at the next byte to check for break (0xFF)
+            let pos = decoder.position();
+            if decoder.datatype().ok() == Some(minicbor::data::Type::Break) {
+                // Consume the break byte
+                let _ = decoder.skip();
+                break;
+            }
+            decoder.set_position(pos);
+        }
+
         let version = decoder
             .u32()
             .map_err(|e| N2NServerError::HandshakeFailed(e.to_string()))?;
@@ -944,7 +985,10 @@ async fn handle_n2n_chainsync(
             // If no cursor set or cursor is at tip, await
             let cursor_slot = peer_state.chainsync_cursor_slot.unwrap_or(0);
             if cursor_slot >= tip.slot {
-                // At tip — send MsgAwaitReply
+                // At tip — send MsgAwaitReply and mark that we owe
+                // this peer a MsgRollForward when a new block arrives.
+                peer_state.chainsync_must_reply = true;
+
                 let mut buf = Vec::new();
                 let mut enc = minicbor::Encoder::new(&mut buf);
                 enc.array(1)
@@ -1119,7 +1163,15 @@ fn build_chainsync_roll_forward(
         enc.bytes(&header_bytes)
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
     } else {
-        // Fallback: send full block CBOR if header extraction fails
+        // Fallback: header extraction failed — wrap the full block CBOR
+        // in the HFC era wrapper.  Default to era 7 (Conway) since header
+        // extraction only fails on atypical CBOR and Conway is the current era.
+        // The era wrapper is mandatory: [era_tag, tag(24, block_bytes)].
+        let fallback_era: u32 = 7;
+        enc.array(2)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+        enc.u32(fallback_era)
+            .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
         enc.tag(minicbor::data::Tag::new(24))
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
         enc.bytes(block_cbor)
@@ -1322,13 +1374,18 @@ fn handle_n2n_blockfetch(
     }
 }
 
-/// Create a MsgBlock segment: [4, block_bytes]
+/// Create a MsgBlock segment: [4, tag(24, block_cbor)]
+///
+/// The Cardano N2N BlockFetch protocol wraps the block body in CBOR tag 24
+/// (embedded CBOR / "CBOR-in-CBOR") as specified by the Haskell codec.
 fn make_block_segment(block_data: &[u8]) -> Result<Segment, N2NServerError> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2)
         .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
     enc.u32(4)
+        .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+    enc.tag(minicbor::data::Tag::new(24))
         .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
     enc.bytes(block_data)
         .map_err(|e| N2NServerError::Protocol(e.to_string()))?;

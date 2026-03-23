@@ -54,6 +54,9 @@ pub struct ChainDB {
     immutable: ImmutableDB,
     volatile: VolatileDB,
     immutable_tip: Option<(SlotNo, Hash32, BlockNo)>,
+    /// The highest block_no that has already been flushed to ImmutableDB.
+    /// Avoids re-scanning from block 1 on every `flush_to_immutable` call.
+    last_flushed_block_no: u64,
 }
 
 impl ChainDB {
@@ -111,11 +114,18 @@ impl ChainDB {
             volatile_blocks = volatile.len(),
             "ChainDB opened successfully"
         );
+        // Initialize last_flushed_block_no from the immutable tip so we
+        // never re-scan blocks that were already persisted in a prior run.
+        let last_flushed_block_no = immutable_tip
+            .map(|(_, _, block_no)| block_no.0)
+            .unwrap_or(0);
+
         Ok(ChainDB {
             _path: db_path.to_path_buf(),
             immutable,
             volatile,
             immutable_tip,
+            last_flushed_block_no,
         })
     }
 
@@ -472,9 +482,12 @@ impl ChainDB {
 
         let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
 
-        // Collect blocks to finalize (in order by block_no)
+        // Collect blocks to finalize (in order by block_no).
+        // Start from last_flushed_block_no + 1 to avoid re-scanning blocks
+        // that were already persisted in a prior flush call.
+        let start_block_no = self.last_flushed_block_no + 1;
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new(); // (slot, hash, block_no, cbor)
-        for block_no in 1..=finalize_up_to_block_no {
+        for block_no in start_block_no..=finalize_up_to_block_no {
             if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
                 // Skip if already in immutable
                 if self.immutable.has_block(&hash) {
@@ -495,9 +508,10 @@ impl ChainDB {
             self.immutable.append_block(*slot, *block_no, hash, cbor)?;
         }
 
-        // Update immutable tip
+        // Update immutable tip and last flushed tracking
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
             self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+            self.last_flushed_block_no = *block_no;
         }
 
         // Remove finalized blocks from VolatileDB
@@ -538,9 +552,12 @@ impl ChainDB {
 
         let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
 
-        // Collect finalizable blocks that are also within the LoE slot ceiling.
+        // Collect finalizable blocks within the LoE slot ceiling.
+        // Start from last_flushed_block_no + 1 to avoid re-scanning already
+        // persisted blocks.
+        let start_block_no = self.last_flushed_block_no + 1;
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
-        for block_no in 1..=finalize_up_to_block_no {
+        for block_no in start_block_no..=finalize_up_to_block_no {
             if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
                 // LoE: skip blocks whose slot exceeds the limit
                 if slot > loe_slot {
@@ -563,8 +580,10 @@ impl ChainDB {
             self.immutable.append_block(*slot, *block_no, hash, cbor)?;
         }
 
+        // Update immutable tip and last flushed tracking
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
             self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+            self.last_flushed_block_no = *block_no;
         }
 
         let max_slot = to_finalize.last().map(|(s, _, _, _)| *s).unwrap_or(0);

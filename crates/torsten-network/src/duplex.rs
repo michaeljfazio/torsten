@@ -296,12 +296,10 @@ impl DuplexPeerConnection {
         // Port binding is an optimization for duplex identity — not required
         // for protocol correctness.
         let stream = match socket.bind(bind_addr) {
-            Ok(()) => {
-                socket
-                    .connect(resolved)
-                    .await
-                    .map_err(|e| DuplexError::Connection(format!("tcp connect: {e}")))?
-            }
+            Ok(()) => socket
+                .connect(resolved)
+                .await
+                .map_err(|e| DuplexError::Connection(format!("tcp connect: {e}")))?,
             Err(bind_err) => {
                 debug!(
                     "duplex: bind to port {listen_port} failed ({bind_err}), using ephemeral port"

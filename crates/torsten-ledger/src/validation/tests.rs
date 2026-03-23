@@ -2163,6 +2163,7 @@ mod tests {
             None,
             Some(&registered),
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2209,6 +2210,7 @@ mod tests {
             None,
             Some(&registered),
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2251,6 +2253,7 @@ mod tests {
             300,
             None,
             Some(&registered),
+            None,
             None,
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
@@ -8000,6 +8003,7 @@ mod tests {
             None,      // slot_config
             None,      // registered_pools
             Some(500), // current_treasury — mismatches declared 999
+            None,      // reward_accounts
         );
 
         assert!(
@@ -8057,6 +8061,7 @@ mod tests {
             None,
             None,
             Some(500), // current_treasury matches declared
+            None,      // reward_accounts
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8102,6 +8107,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None,
             None, // current_treasury = None → check must be skipped
+            None, // reward_accounts
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.

@@ -339,6 +339,18 @@ pub(crate) fn convert_validation_error(
             maximum: limit,
             actual,
         },
+        VE::ZeroWithdrawal { account } => TxValidationError::ScriptFailed {
+            reason: format!("Zero withdrawal amount for reward account: {account}"),
+        },
+        VE::IncorrectWithdrawalAmount {
+            account,
+            declared,
+            actual,
+        } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Incorrect withdrawal amount for {account}: declared={declared}, actual={actual}"
+            ),
+        },
     }
 }
 

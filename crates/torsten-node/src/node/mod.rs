@@ -1651,8 +1651,7 @@ impl Node {
                                     // outbound connection — the existing inbound
                                     // connection already provides bidirectional
                                     // mini-protocol support.
-                                    if let Some(existing) =
-                                        pm.find_inbound_duplex_by_ip(addr.ip())
+                                    if let Some(existing) = pm.find_inbound_duplex_by_ip(addr.ip())
                                     {
                                         debug!(
                                             %addr,

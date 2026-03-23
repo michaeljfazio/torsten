@@ -362,8 +362,9 @@ impl ImmutableDB {
     /// Get block CBOR by header hash.
     ///
     /// Verifies CRC32 checksum if one was stored in the secondary index.
-    /// On mismatch, logs a warning but still returns the data (the block
-    /// may have been written before CRC was implemented).
+    /// On mismatch, logs an error and returns `None` so the caller can
+    /// re-fetch from a peer rather than silently propagating corrupt data.
+    /// Legacy entries (no stored CRC) are returned without verification.
     pub fn get_block(&self, hash: &Hash32) -> Option<Vec<u8>> {
         // Check active chunk's pending blocks first (not yet on disk via memmap)
         if let Some(ref active) = self.active_chunk {
@@ -382,8 +383,9 @@ impl ImmutableDB {
                     hash = %hash.to_hex(),
                     expected = expected_crc,
                     actual = actual_crc,
-                    "CRC32 mismatch for block (possible data corruption)"
+                    "CRC32 mismatch for block — rejecting corrupted data"
                 );
+                return None;
             }
         }
 
@@ -1511,9 +1513,9 @@ mod tests {
     }
 
     #[test]
-    fn test_crc32_mismatch_detection_warns_but_returns_data() {
+    fn test_crc32_mismatch_detection_rejects_corrupted_data() {
         // Create a chunk with valid CRC, then corrupt the chunk data.
-        // The read should still return the data but log a warning.
+        // The read should return None to prevent propagation of corrupt data.
         let dir = tempfile::tempdir().unwrap();
         let hash = [42u8; 32];
         let cbor = b"original data";
@@ -1531,10 +1533,9 @@ mod tests {
         let hash32 = Hash32::from_bytes(hash);
         assert!(db.checksums.contains_key(&hash32));
 
-        // Read should still return data (just warns)
+        // Read should return None because CRC mismatch indicates corruption
         let result = db.get_block(&hash32);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), b"corrupted dat");
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1663,9 +1664,9 @@ mod tests {
     }
 
     #[test]
-    fn test_crc32_mismatch_still_returns_data() {
-        // Corrupt the block data on disk, verify get_block still returns it
-        // (CRC mismatch only logs a warning, doesn't reject)
+    fn test_crc32_mismatch_rejects_corrupted_block() {
+        // Corrupt the block data on disk, verify get_block returns None
+        // (CRC mismatch rejects the block to prevent propagation of corrupt data)
         let dir = tempfile::tempdir().unwrap();
         let hash = Hash32::from_bytes([42u8; 32]);
         let original = b"original_block_data_here";
@@ -1682,11 +1683,10 @@ mod tests {
         assert_eq!(corrupted.len(), original.len());
         fs::write(&chunk_path, corrupted).unwrap();
 
-        // Reopen - CRC mismatch should warn but still return data
+        // Reopen - CRC mismatch should reject the corrupted block
         let db = ImmutableDB::open(dir.path()).unwrap();
         let result = db.get_block(&hash);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), corrupted.as_slice());
+        assert!(result.is_none());
     }
 
     #[test]
