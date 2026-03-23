@@ -332,7 +332,7 @@ impl Node {
                                 {
                                     // Non-fatal: some early blocks may not connect
                                     // when the UTxO store is from a later state.
-                                    tracing::debug!(
+                                    tracing::warn!(
                                         slot = block.slot().0,
                                         "Rollback: replay apply skipped: {e}"
                                     );

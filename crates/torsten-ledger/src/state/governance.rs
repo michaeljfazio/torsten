@@ -805,28 +805,28 @@ impl LedgerState {
                 );
             }
             GovAction::TreasuryWithdrawals { withdrawals, .. } => {
-                // Compute total first and cap at available treasury
-                let requested: u64 = withdrawals
+                // Matching Haskell's enactTreasury: debit the total from treasury
+                // in one shot, then credit each withdrawal to its reward account
+                // unconditionally (without per-withdrawal capping). The
+                // ratification layer is expected to reject proposals that exceed
+                // the available treasury balance. We use saturating_sub to
+                // prevent underflow if local treasury tracking drifts.
+                let total: u64 = withdrawals
                     .values()
                     .fold(0u64, |acc, a| acc.saturating_add(a.0));
-                let available = self.treasury.0;
-                if requested > available {
+                if total > self.treasury.0 {
                     warn!(
-                        "Treasury withdrawal capped: requested {} but only {} available",
-                        requested, available
+                        "Treasury withdrawal exceeds balance: requested {} but only {} available",
+                        total, self.treasury.0
                     );
                 }
-                let mut total = 0u64;
+                self.treasury.0 = self.treasury.0.saturating_sub(total);
                 for (reward_addr, amount) in withdrawals {
-                    let actual = amount.0.min(self.treasury.0);
-                    self.treasury.0 = self.treasury.0.saturating_sub(actual);
-                    total += actual;
-                    // Credit the withdrawal to the recipient's reward account
-                    if actual > 0 && reward_addr.len() >= 29 {
+                    if amount.0 > 0 && reward_addr.len() >= 29 {
                         let key = Self::reward_account_to_hash(reward_addr);
                         *Arc::make_mut(&mut self.reward_accounts)
                             .entry(key)
-                            .or_insert(Lovelace(0)) += Lovelace(actual);
+                            .or_insert(Lovelace(0)) += *amount;
                     }
                 }
                 debug!(

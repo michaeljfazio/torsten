@@ -558,12 +558,20 @@ impl VolatileDB {
         self.blocks.contains_key(hash)
     }
 
-    /// Get the first block strictly after a given slot.
+    /// Get the first block on the selected chain strictly after a given slot.
+    ///
+    /// Only blocks that belong to the current `selected_chain` are considered.
+    /// This prevents returning fork/orphan blocks that are still in `slot_index`
+    /// but pending garbage collection after a rollback.
     pub fn get_next_block_after_slot(&self, after_slot: u64) -> Option<(u64, Hash32, &[u8])> {
+        // Build a set of hashes on the selected chain for O(1) lookup.
+        let on_chain: HashSet<&Hash32> = self.selected_chain.iter().collect();
         for (&slot, hashes) in self.slot_index.range((after_slot + 1)..) {
-            if let Some(hash) = hashes.first() {
-                if let Some(block) = self.blocks.get(hash) {
-                    return Some((slot, *hash, &block.cbor));
+            for hash in hashes {
+                if on_chain.contains(hash) {
+                    if let Some(block) = self.blocks.get(hash) {
+                        return Some((slot, *hash, &block.cbor));
+                    }
                 }
             }
         }
