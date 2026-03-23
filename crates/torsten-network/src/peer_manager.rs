@@ -424,6 +424,9 @@ pub struct PeerManager {
     /// Registered local-root groups with their per-group valency targets.
     /// Populated once at startup from the topology; immutable thereafter.
     local_root_groups: Vec<LocalRootGroupInfo>,
+    /// Our own listen addresses — filtered out to prevent self-connections.
+    /// Peers learned via sharing or ledger that match these are rejected.
+    local_addrs: HashSet<SocketAddr>,
 }
 
 impl PeerManager {
@@ -436,7 +439,32 @@ impl PeerManager {
             cold_peers: HashSet::new(),
             inbound_count: 0,
             local_root_groups: Vec::new(),
+            local_addrs: HashSet::new(),
         }
+    }
+
+    /// Register our own listen address so we can reject self-connections.
+    /// Call with every (host_addr, port) combination the node listens on.
+    /// Also adds the loopback variant (127.0.0.1:port) and wildcard (0.0.0.0:port)
+    /// to catch peer sharing responses that reference us by different addresses.
+    pub fn set_local_addr(&mut self, addr: SocketAddr) {
+        self.local_addrs.insert(addr);
+        // If listening on 0.0.0.0, also block 127.0.0.1 variant
+        if addr.ip().is_unspecified() {
+            self.local_addrs
+                .insert(SocketAddr::new("127.0.0.1".parse().unwrap(), addr.port()));
+        }
+        // If listening on 127.0.0.1, also block 0.0.0.0 variant
+        if addr.ip().is_loopback() {
+            self.local_addrs
+                .insert(SocketAddr::new("0.0.0.0".parse().unwrap(), addr.port()));
+        }
+        debug!(?self.local_addrs, "Local addresses registered for self-connection filtering");
+    }
+
+    /// Check if an address is our own listen address (self-connection).
+    fn is_self(&self, addr: &SocketAddr) -> bool {
+        self.local_addrs.contains(addr)
     }
 
     /// Register a local-root group with its valency targets.
@@ -579,6 +607,9 @@ impl PeerManager {
 
     /// Add a peer discovered from the ledger (SPO relay registrations)
     pub fn add_ledger_peer(&mut self, addr: SocketAddr) {
+        if self.is_self(&addr) {
+            return; // Don't connect to ourselves
+        }
         if self.peers.contains_key(&addr) {
             return; // Already known
         }
@@ -593,6 +624,11 @@ impl PeerManager {
 
     /// Add a peer discovered via peer sharing
     pub fn add_shared_peer(&mut self, addr: SocketAddr) {
+        // Filter self-connections (our own listen address shared back to us)
+        if self.is_self(&addr) {
+            debug!(%addr, "Rejected shared peer: self-connection");
+            return;
+        }
         // Filter non-routable addresses to prevent peer table poisoning
         if !Self::is_routable(&addr.ip()) {
             debug!(%addr, "Rejected non-routable shared peer");

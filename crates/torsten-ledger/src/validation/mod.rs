@@ -341,11 +341,14 @@ pub fn validate_transaction_with_pools(
     // ------------------------------------------------------------------
     // Withdrawal validation (Haskell `wdrlNotZero` + balance check)
     //
-    // - Zero-amount withdrawals are always rejected (structural rule).
+    // - Zero-amount withdrawals are rejected in Shelley–Babbage (proto < 9).
+    //   In Conway (proto >= 9), zero-amount withdrawals are valid — they
+    //   allow "touching" a reward account for DRep activity tracking.
     // - When `reward_accounts` is provided (block application mode),
     //   each withdrawal amount must exactly match the on-chain reward
     //   balance, and the account must be registered.
     // ------------------------------------------------------------------
+    let conway_or_later = params.protocol_version_major >= 9;
     for (reward_account_bytes, amount) in &tx.body.withdrawals {
         // Format the reward account as a hex string for error messages.
         let account_hex = reward_account_bytes.iter().fold(
@@ -356,7 +359,9 @@ pub fn validate_transaction_with_pools(
                 s
             },
         );
-        if amount.0 == 0 {
+        // Conway relaxed the wdrlNotZero predicate — zero withdrawals are
+        // now valid (used for DRep activity / reward account touching).
+        if amount.0 == 0 && !conway_or_later {
             errors.push(ValidationError::ZeroWithdrawal {
                 account: account_hex.clone(),
             });

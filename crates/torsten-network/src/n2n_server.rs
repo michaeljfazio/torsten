@@ -1007,6 +1007,18 @@ async fn handle_n2n_chainsync(
     block_provider: &Arc<dyn BlockProvider>,
     peer_state: &mut PeerState,
 ) -> Result<Option<Segment>, N2NServerError> {
+    // Debug: log raw CBOR for ChainSync messages (first 128 bytes)
+    let hex_preview: String = payload
+        .iter()
+        .take(128)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    debug!(
+        hex = %hex_preview,
+        len = payload.len(),
+        "N2N ChainSync: raw payload"
+    );
+
     let mut decoder = minicbor::Decoder::new(payload);
     let _arr_len = decoder
         .array()
@@ -1083,49 +1095,93 @@ async fn handle_n2n_chainsync(
         }
         // MsgFindIntersect → search for an intersection point with the peer's chain
         4 => {
-            // Parse the list of points the peer sends
-            let points_len = decoder
+            // Parse the list of points the peer sends.
+            // Haskell nodes may send indefinite-length arrays (None from decoder.array()),
+            // so we must handle both definite and indefinite CBOR arrays.
+            let maybe_points_len = decoder
                 .array()
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?
-                .unwrap_or(0);
-
-            info!(
-                points_count = points_len,
-                "N2N ChainSync: received MsgFindIntersect"
-            );
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
+            let is_indefinite = maybe_points_len.is_none();
 
             // Search points in client-preferred order (first match wins,
             // matching Haskell's `followerForward` behavior).
             let mut intersect_point: Option<(u64, [u8; 32])> = None;
             let mut found_origin = false;
-            for _ in 0..points_len {
-                if intersect_point.is_some() {
-                    // Already found — skip remaining points but consume CBOR
-                    let _ = decoder.skip();
-                    continue;
+            let mut points_parsed: u64 = 0;
+
+            if let Some(n) = maybe_points_len {
+                // Definite-length array: parse exactly n points
+                for _ in 0..n {
+                    points_parsed += 1;
+                    if intersect_point.is_some() {
+                        let _ = decoder.skip();
+                        continue;
+                    }
+                    if is_origin_point(&mut decoder) {
+                        found_origin = true;
+                        let _ = parse_point_slot_hash(&mut decoder);
+                        continue;
+                    }
+                    if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
+                        let hash32 = torsten_primitives::hash::Hash32::from_bytes(hash);
+                        let has = block_provider.has_block(&hash);
+                        debug!(
+                            slot,
+                            hash = %hash32.to_hex(),
+                            has_block = has,
+                            "N2N ChainSync: checking intersection point"
+                        );
+                        if has {
+                            intersect_point = Some((slot, hash));
+                        }
+                    }
                 }
-                // Check if this is an Origin point (empty array)
-                if is_origin_point(&mut decoder) {
-                    // Origin is always on chain — set cursor to start
-                    found_origin = true;
-                    let _ = parse_point_slot_hash(&mut decoder); // consume the origin array
-                    continue;
-                }
-                if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
-                    let hash32 = torsten_primitives::hash::Hash32::from_bytes(hash);
-                    let has = block_provider.has_block(&hash);
-                    debug!(
-                        slot,
-                        hash = %hash32.to_hex(),
-                        has_block = has,
-                        "N2N ChainSync: checking intersection point"
-                    );
-                    if has {
-                        // First match wins (client-preferred order)
-                        intersect_point = Some((slot, hash));
+            } else {
+                // Indefinite-length array: parse until CBOR break marker.
+                // minicbor signals end-of-indefinite via datatype() returning Break.
+                loop {
+                    // Check for the CBOR break marker (0xFF)
+                    match decoder.datatype() {
+                        Ok(minicbor::data::Type::Break) => {
+                            // Consume the break marker
+                            let _ = decoder.skip();
+                            break;
+                        }
+                        Ok(_) => {
+                            // Another point element
+                            points_parsed += 1;
+                            if intersect_point.is_some() {
+                                let _ = decoder.skip();
+                                continue;
+                            }
+                            if is_origin_point(&mut decoder) {
+                                found_origin = true;
+                                let _ = parse_point_slot_hash(&mut decoder);
+                                continue;
+                            }
+                            if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
+                                let hash32 = torsten_primitives::hash::Hash32::from_bytes(hash);
+                                let has = block_provider.has_block(&hash);
+                                debug!(
+                                    slot,
+                                    hash = %hash32.to_hex(),
+                                    has_block = has,
+                                    "N2N ChainSync: checking intersection point"
+                                );
+                                if has {
+                                    intersect_point = Some((slot, hash));
+                                }
+                            }
+                        }
+                        Err(_) => break, // Parsing error, stop
                     }
                 }
             }
+
+            info!(
+                points_count = points_parsed,
+                is_indefinite, "N2N ChainSync: received MsgFindIntersect"
+            );
             // If no specific point matched but Origin was in the list,
             // use Origin as the intersection (always valid).
             if intersect_point.is_none() && found_origin {
@@ -1134,8 +1190,8 @@ async fn handle_n2n_chainsync(
                 info!("N2N ChainSync: intersection found");
             } else {
                 warn!(
-                    points_count = points_len,
-                    "N2N ChainSync: NO intersection found — all points unknown"
+                    points_count = points_parsed,
+                    is_indefinite, "N2N ChainSync: NO intersection found — all points unknown"
                 );
             }
 
@@ -1244,10 +1300,19 @@ fn build_chainsync_roll_forward(
 
     // Extract header from full block CBOR for bandwidth efficiency
     if let Some((era_tag, header_bytes)) = extract_header_from_block(block_cbor) {
-        // Wrapped header: [era_tag, tag(24) header_cbor]
+        // Convert disk era_tag to HFC era index.
+        // Disk format: Byron EBB=0, Byron=1, Shelley=2, ..., Conway=7
+        // HFC index:   Byron=0, Shelley=1, ..., Conway=6
+        // Formula: Byron (0,1) → 0, Shelley+ → era_tag - 1
+        let hfc_era_index = if era_tag <= 1 {
+            0u32
+        } else {
+            (era_tag as u32) - 1
+        };
+        // Wrapped header: [hfc_era_index, tag(24) header_cbor]
         enc.array(2)
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
-        enc.u32(era_tag as u32)
+        enc.u32(hfc_era_index)
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
         enc.tag(minicbor::data::Tag::new(24))
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
@@ -1255,10 +1320,9 @@ fn build_chainsync_roll_forward(
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
     } else {
         // Fallback: header extraction failed — wrap the full block CBOR
-        // in the HFC era wrapper.  Default to era 7 (Conway) since header
-        // extraction only fails on atypical CBOR and Conway is the current era.
-        // The era wrapper is mandatory: [era_tag, tag(24, block_bytes)].
-        let fallback_era: u32 = 7;
+        // in the HFC era wrapper.  Default to era 6 (Conway HFC index).
+        // The era wrapper is mandatory: [hfc_era_index, tag(24, block_bytes)].
+        let fallback_era: u32 = 6;
         enc.array(2)
             .map_err(|e| N2NServerError::Protocol(e.to_string()))?;
         enc.u32(fallback_era)
@@ -2395,11 +2459,11 @@ mod tests {
 
     #[test]
     fn test_build_chainsync_roll_forward() {
-        // Build a mock block
+        // Build a mock Conway block (disk era_tag = 7)
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // era tag
+        enc.u32(7).unwrap(); // Conway disk era_tag
         enc.array(5).unwrap();
         enc.array(2).unwrap(); // header
         enc.u64(42).unwrap(); // header_body placeholder
@@ -2412,16 +2476,17 @@ mod tests {
         let tip_hash = [0xCC; 32];
         let payload = build_chainsync_roll_forward(&buf, 100, &tip_hash, 50).unwrap();
 
-        // Decode: [2, [era_tag, tag(24) header_cbor], tip]
+        // Decode: [2, [hfc_era_index, tag(24) header_cbor], tip]
         let mut dec = minicbor::Decoder::new(&payload);
         let arr = dec.array().unwrap().unwrap();
         assert_eq!(arr, 3);
         assert_eq!(dec.u32().unwrap(), 2); // MsgRollForward tag
 
-        // Wrapped header: [era_tag, tag(24) header_bytes]
+        // Wrapped header: [hfc_era_index, tag(24) header_bytes]
+        // Conway disk era_tag=7 → HFC era index=6
         let inner_arr = dec.array().unwrap().unwrap();
         assert_eq!(inner_arr, 2);
-        assert_eq!(dec.u32().unwrap(), 6); // era tag
+        assert_eq!(dec.u32().unwrap(), 6); // HFC Conway era index
         assert_eq!(dec.tag().unwrap(), minicbor::data::Tag::new(24));
         let header_bytes = dec.bytes().unwrap();
         assert!(!header_bytes.is_empty());

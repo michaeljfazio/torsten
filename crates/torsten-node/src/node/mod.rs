@@ -1102,7 +1102,11 @@ impl Node {
                 target_known_peers: self.config.target_number_of_known_peers,
                 ..PeerManagerConfig::default()
             };
-            *self.peer_manager.write().await = PeerManager::new(pm_config);
+            let mut pm = PeerManager::new(pm_config);
+            // Register our own listen address to prevent self-connections
+            // (peers may share our address back to us via peer sharing)
+            pm.set_local_addr(self.listen_addr);
+            *self.peer_manager.write().await = pm;
         }
         let peer_manager = self.peer_manager.clone();
 

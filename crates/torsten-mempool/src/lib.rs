@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
@@ -133,8 +133,13 @@ struct MempoolEntry {
 pub struct Mempool {
     /// Transactions indexed by hash
     txs: DashMap<TransactionHash, MempoolEntry>,
-    /// FIFO order for fair processing
+    /// FIFO order for fair processing.
+    /// Tombstoned entries (in `order_tombstones`) are skipped during iteration
+    /// and compacted when the tombstone ratio exceeds 50%.
     order: RwLock<VecDeque<TransactionHash>>,
+    /// O(1) tombstone set: hashes removed from the mempool but not yet
+    /// compacted out of the `order` VecDeque. Avoids O(n) retain per removal.
+    order_tombstones: RwLock<HashSet<TransactionHash>>,
     /// Fee-density sorted index: iterates highest fee density first
     fee_index: RwLock<BTreeSet<FeeDensityKey>>,
     /// Input-conflict index: maps each claimed TransactionInput to the hash of
@@ -224,6 +229,7 @@ impl Mempool {
         Mempool {
             txs: DashMap::new(),
             order: RwLock::new(VecDeque::new()),
+            order_tombstones: RwLock::new(HashSet::new()),
             fee_index: RwLock::new(BTreeSet::new()),
             claimed_inputs: DashMap::new(),
             virtual_utxo: DashMap::new(),
@@ -577,7 +583,8 @@ impl Mempool {
         };
 
         self.tx_count.fetch_sub(1, Ordering::Relaxed);
-        self.order.write().retain(|h| h != tx_hash);
+        // O(1) tombstone instead of O(n) retain — compacted lazily
+        self.order_tombstones.write().insert(*tx_hash);
 
         // Release every spending input claimed by this tx so that
         // replacement or successor transactions can now be admitted.
@@ -638,7 +645,7 @@ impl Mempool {
                     // (we handle it in this BFS loop instead).
                     if let Some((_, child_entry)) = self.txs.remove(child_hash) {
                         self.tx_count.fetch_sub(1, Ordering::Relaxed);
-                        self.order.write().retain(|h| h != child_hash);
+                        self.order_tombstones.write().insert(*child_hash);
 
                         for input in &child_entry.tx.body.inputs {
                             self.claimed_inputs.remove(input);
@@ -813,14 +820,24 @@ impl Mempool {
             .and_then(|entry| entry.tx.raw_cbor.clone())
     }
 
-    /// Get the first transaction hash in the mempool (for iteration)
+    /// Get the first transaction hash in the mempool (for iteration).
+    /// Skips tombstoned entries (removed but not yet compacted).
     pub fn first_tx_hash(&self) -> Option<TransactionHash> {
-        self.order.read().front().copied()
+        let order = self.order.read();
+        let tombstones = self.order_tombstones.read();
+        order.iter().find(|h| !tombstones.contains(h)).copied()
     }
 
-    /// Get all transaction hashes in FIFO order (for TxMonitor snapshot cursor)
+    /// Get all transaction hashes in FIFO order (for TxMonitor snapshot cursor).
+    /// Skips tombstoned entries.
     pub fn tx_hashes_ordered(&self) -> Vec<TransactionHash> {
-        self.order.read().iter().copied().collect()
+        let order = self.order.read();
+        let tombstones = self.order_tombstones.read();
+        order
+            .iter()
+            .filter(|h| !tombstones.contains(h))
+            .copied()
+            .collect()
     }
 
     /// Snapshot of current mempool state
@@ -828,7 +845,23 @@ impl Mempool {
         MempoolSnapshot {
             tx_count: self.txs.len(),
             total_bytes: *self.total_bytes.read(),
-            tx_hashes: self.order.read().iter().copied().collect(),
+            tx_hashes: self.tx_hashes_ordered(),
+        }
+    }
+
+    /// Compact the order VecDeque by removing tombstoned entries.
+    /// Called when the tombstone ratio exceeds 50% to prevent unbounded growth.
+    fn maybe_compact_order(&self) {
+        let tombstone_count = self.order_tombstones.read().len();
+        let order_len = self.order.read().len();
+        // Compact when tombstones exceed 50% of order length and there are
+        // at least 100 tombstones (avoid compacting tiny mempools)
+        if tombstone_count > 100 && tombstone_count * 2 > order_len {
+            let mut order = self.order.write();
+            let mut tombstones = self.order_tombstones.write();
+            order.retain(|h| !tombstones.contains(h));
+            tombstones.clear();
+            trace!(new_len = order.len(), "Mempool: compacted order VecDeque");
         }
     }
 
@@ -861,6 +894,8 @@ impl Mempool {
                 slot = current_slot.0,
                 "Mempool: evicted expired transactions"
             );
+            // Compact tombstones after batch eviction
+            self.maybe_compact_order();
         }
         count
     }
@@ -956,8 +991,8 @@ impl Mempool {
     where
         F: FnMut(&Transaction) -> bool,
     {
-        // Snapshot FIFO order to iterate deterministically
-        let hashes: Vec<TransactionHash> = self.order.read().iter().copied().collect();
+        // Snapshot FIFO order to iterate deterministically (skip tombstoned)
+        let hashes: Vec<TransactionHash> = self.tx_hashes_ordered();
         let mut removed = Vec::new();
 
         for hash in hashes {
@@ -985,8 +1020,9 @@ impl Mempool {
     pub fn drain_all(&self) -> Vec<Transaction> {
         let count = self.tx_count.swap(0, Ordering::Relaxed);
         let mut txs = Vec::with_capacity(count);
-        // Collect transactions in FIFO order
+        // Collect transactions in FIFO order (skip tombstoned entries)
         let order: Vec<TransactionHash> = self.order.write().drain(..).collect();
+        self.order_tombstones.write().clear();
         for hash in &order {
             if let Some((_, entry)) = self.txs.remove(hash) {
                 txs.push(entry.tx);
@@ -1013,6 +1049,7 @@ impl Mempool {
         let count = self.tx_count.swap(0, Ordering::Relaxed);
         self.txs.clear();
         self.order.write().clear();
+        self.order_tombstones.write().clear();
         self.fee_index.write().clear();
         self.claimed_inputs.clear();
         // Clear virtual UTxO and dependency graph so no stale entries remain.
