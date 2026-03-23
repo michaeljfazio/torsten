@@ -1048,7 +1048,7 @@ async fn handle_n2n_chainsync(
 
             // If no cursor set or cursor is at tip, await
             let cursor_slot = peer_state.chainsync_cursor_slot.unwrap_or(0);
-            trace!(
+            info!(
                 cursor_slot,
                 tip_slot = tip.slot,
                 "N2N ChainSync: MsgRequestNext received"
@@ -1057,7 +1057,7 @@ async fn handle_n2n_chainsync(
                 // At tip — send MsgAwaitReply and mark that we owe
                 // this peer a MsgRollForward when a new block arrives.
                 peer_state.chainsync_must_reply = true;
-                debug!("N2N ChainSync: at tip, sending MsgAwaitReply");
+                info!("N2N ChainSync: at tip, sending MsgAwaitReply");
 
                 let mut buf = Vec::new();
                 let mut enc = minicbor::Encoder::new(&mut buf);
