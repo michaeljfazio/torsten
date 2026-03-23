@@ -1061,17 +1061,38 @@ async fn handle_n2n_chainsync(
                 .map_err(|e| N2NServerError::Protocol(e.to_string()))?
                 .unwrap_or(0);
 
+            info!(
+                points_count = points_len,
+                "N2N ChainSync: received MsgFindIntersect"
+            );
+
             let mut intersect_point: Option<(u64, [u8; 32])> = None;
             for _ in 0..points_len {
                 if let Some((slot, hash)) = parse_point_slot_hash(&mut decoder) {
+                    let hash32 = torsten_primitives::hash::Hash32::from_bytes(hash);
+                    let has = block_provider.has_block(&hash);
+                    debug!(
+                        slot,
+                        hash = %hash32.to_hex(),
+                        has_block = has,
+                        "N2N ChainSync: checking intersection point"
+                    );
                     // Check if we have this block
-                    if block_provider.has_block(&hash) {
+                    if has {
                         // Found intersection — use the highest slot
                         if intersect_point.is_none_or(|(s, _)| slot > s) {
                             intersect_point = Some((slot, hash));
                         }
                     }
                 }
+            }
+            if intersect_point.is_some() {
+                info!("N2N ChainSync: intersection found");
+            } else {
+                warn!(
+                    points_count = points_len,
+                    "N2N ChainSync: NO intersection found — all points unknown"
+                );
             }
 
             let tip = block_provider.get_tip();
