@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::miniprotocols::peersharing::{self, PeerAddress, PeerSharingMessage};
 use crate::multiplexer::Segment;
@@ -612,6 +612,11 @@ async fn handle_n2n_connection(
                                 let encoded = resp.encode();
                                 stream.write_all(&encoded).await?;
                             }
+                            // Flush after each segment batch to ensure responses
+                            // reach the peer promptly. Without flush, TCP Nagle
+                            // may buffer small responses (e.g. MsgAwaitReply),
+                            // causing the 10s StCanAwait timeout to expire.
+                            stream.flush().await?;
                         }
                         Err(_) => {
                             break; // Incomplete segment, wait for more data
@@ -657,6 +662,7 @@ async fn handle_n2n_connection(
                                         };
                                         let encoded = segment.encode();
                                         stream.write_all(&encoded).await?;
+                                        stream.flush().await?;
                                         debug!(
                                             peer = %peer_addr,
                                             slot = ann.slot,
@@ -709,6 +715,7 @@ async fn handle_n2n_connection(
                                     };
                                     let encoded = segment.encode();
                                     stream.write_all(&encoded).await?;
+                                    stream.flush().await?;
                                     debug!(
                                         peer = %peer_addr,
                                         rollback_slot = rb.slot,
@@ -1034,10 +1041,16 @@ async fn handle_n2n_chainsync(
 
             // If no cursor set or cursor is at tip, await
             let cursor_slot = peer_state.chainsync_cursor_slot.unwrap_or(0);
+            trace!(
+                cursor_slot,
+                tip_slot = tip.slot,
+                "N2N ChainSync: MsgRequestNext received"
+            );
             if cursor_slot >= tip.slot {
                 // At tip — send MsgAwaitReply and mark that we owe
                 // this peer a MsgRollForward when a new block arrives.
                 peer_state.chainsync_must_reply = true;
+                debug!("N2N ChainSync: at tip, sending MsgAwaitReply");
 
                 let mut buf = Vec::new();
                 let mut enc = minicbor::Encoder::new(&mut buf);
@@ -1061,6 +1074,12 @@ async fn handle_n2n_chainsync(
                 // Update cursor to this block
                 peer_state.chainsync_cursor_slot = Some(next_slot);
                 peer_state.chainsync_cursor_hash = Some(next_hash);
+                info!(
+                    next_slot,
+                    cursor_slot,
+                    block_size = block_cbor.len(),
+                    "N2N ChainSync: sending MsgRollForward"
+                );
 
                 // MsgRollForward: [2, [era_tag, tag(24) header_cbor], tip]
                 let buf = build_chainsync_roll_forward(
