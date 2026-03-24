@@ -181,8 +181,50 @@ pub fn decode_message(data: &[u8]) -> Result<ChainSyncMessage, String> {
         TAG_REQUEST_NEXT => Ok(ChainSyncMessage::MsgRequestNext),
         TAG_AWAIT_REPLY => Ok(ChainSyncMessage::MsgAwaitReply),
         TAG_ROLL_FORWARD => {
-            // Header as raw CBOR bytes
-            let header = dec.bytes().map_err(|e| e.to_string())?.to_vec();
+            // The header is HFC-wrapped: [era_id, CBOR_tag_24(header_bytes)]
+            // We need to handle both the HFC-wrapped format (from Haskell nodes)
+            // and raw bytes (from Torsten-to-Torsten connections).
+            //
+            // Haskell sends: [2, [era_id, tag24(header_cbor)], tip]
+            // We extract the raw header bytes from inside the tag24 wrapper.
+            let header = match dec.datatype().map_err(|e| e.to_string())? {
+                minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
+                    // Raw bytes (Torsten-to-Torsten or simple encoding)
+                    dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                }
+                minicbor::data::Type::Array => {
+                    // HFC-wrapped: [era_id, tag24(header_bytes)]
+                    let _arr = dec.array().map_err(|e| e.to_string())?;
+                    let _era_id = dec.u64().map_err(|e| e.to_string())?;
+                    // The header is typically wrapped in CBOR tag 24 (embedded CBOR)
+                    match dec.datatype().map_err(|e| e.to_string())? {
+                        minicbor::data::Type::Tag => {
+                            let tag = dec.tag().map_err(|e| e.to_string())?;
+                            if tag.as_u64() == 24 {
+                                // tag24(header_bytes) — extract the inner bytes
+                                dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                            } else {
+                                // Unknown tag — try to read as bytes
+                                dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                            }
+                        }
+                        minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
+                            // Plain bytes inside the array (no tag24 wrapper)
+                            dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                        }
+                        other => {
+                            return Err(format!(
+                                "ChainSync RollForward: unexpected type {other:?} inside HFC wrapper"
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "ChainSync RollForward: unexpected header type {other:?}, expected bytes or array"
+                    ));
+                }
+            };
             let (tip_slot, tip_hash, tip_block_number) =
                 codec::decode_tip(&mut dec).map_err(|e| e.to_string())?;
             Ok(ChainSyncMessage::MsgRollForward {
