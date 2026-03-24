@@ -26,11 +26,12 @@ use torsten_consensus::chain_fragment::ChainFragment;
 use torsten_consensus::OuroborosPraos;
 use torsten_ledger::{BlockValidationMode, LedgerState};
 use torsten_mempool::{Mempool, MempoolConfig};
-use torsten_network::server::NodeServerConfig;
-use torsten_network::{
-    BlockFetchPool, DiffusionMode, DuplexPeerConnection, Governor, GovernorEvent, N2CServer,
-    NodeServer, NodeToNodeClient, PeerManager, PeerManagerConfig, PipelinedPeerClient,
-    QueryHandler, TxValidator,
+use torsten_network::{Governor, GovernorConfig, PeerTargets};
+
+use crate::node::n2c_query::QueryHandler;
+use crate::node::networking::{
+    ConnectionDirection, DiffusionMode, NodePeerManager, PeerCategory, PeerManagerConfig,
+    RollbackAnnouncement, TimeoutConfig,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -92,10 +93,12 @@ pub struct Node {
     pub(crate) ledger_state: Arc<RwLock<LedgerState>>,
     pub(crate) consensus: OuroborosPraos,
     pub(crate) mempool: Arc<Mempool>,
-    /// Held to keep the N2N/N2C server tasks alive for the node's lifetime
-    _server: NodeServer,
+    /// Held to keep the N2N/N2C server tasks alive for the node's lifetime.
+    /// TODO: Replace with new server infrastructure once networking rewrite
+    /// provides equivalent TCP/Unix listener orchestration.
+    _server_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
-    pub(crate) peer_manager: Arc<RwLock<PeerManager>>,
+    pub(crate) peer_manager: Arc<RwLock<NodePeerManager>>,
     pub(crate) socket_path: PathBuf,
     pub(crate) database_path: PathBuf,
     pub(crate) listen_addr: std::net::SocketAddr,
@@ -115,7 +118,7 @@ pub struct Node {
         Option<tokio::sync::broadcast::Sender<torsten_network::BlockAnnouncement>>,
     /// Broadcast sender for notifying connected peers of chain rollbacks
     pub(crate) rollback_announcement_tx:
-        Option<tokio::sync::broadcast::Sender<torsten_network::RollbackAnnouncement>>,
+        Option<tokio::sync::broadcast::Sender<RollbackAnnouncement>>,
     /// Prometheus metrics port
     pub(crate) metrics_port: u16,
     /// Expected Blake2b-256 hash of the Byron genesis block (from config or computed from file)
@@ -134,7 +137,7 @@ pub struct Node {
     /// replay-built snapshots may have approximate stake values.
     pub(crate) live_epoch_transitions: u32,
     /// Network timeout configuration (keepalive, await-reply, connection).
-    pub(crate) timeout_config: torsten_network::TimeoutConfig,
+    pub(crate) timeout_config: TimeoutConfig,
     /// Snapshot policy controlling when ledger snapshots are taken.
     pub(crate) snapshot_policy: epoch::SnapshotPolicy,
     /// Consensus mode: "praos" (default) or "genesis"
@@ -727,12 +730,9 @@ impl Node {
         let listen_addr: std::net::SocketAddr =
             format!("{}:{}", args.host_addr, args.port).parse()?;
         // network_magic computed earlier (before ledger snapshot loading)
-        let server_config = NodeServerConfig {
-            listen_addr,
-            socket_path: args.socket_path,
-            max_connections: 200,
-        };
-        let server = NodeServer::new(server_config);
+        // TODO: Replace with new server infrastructure once networking rewrite
+        // provides equivalent TCP/Unix listener orchestration. For now, server
+        // tasks are spawned in run() and their JoinHandles are not tracked here.
 
         // Wire up live UTxO provider before wrapping in lock
         let mut qh = QueryHandler::new();
@@ -906,9 +906,9 @@ impl Node {
             ledger_state,
             consensus,
             mempool,
-            _server: server,
+            _server_tasks: Vec::new(),
             query_handler,
-            peer_manager: Arc::new(RwLock::new(PeerManager::new(PeerManagerConfig::default()))),
+            peer_manager: Arc::new(RwLock::new(NodePeerManager::new(PeerManagerConfig::default()))),
             socket_path,
             database_path: args.database_path,
             listen_addr,
@@ -1177,31 +1177,22 @@ impl Node {
             });
         }
 
-        // Start N2C server on Unix socket
-        let mut n2c_server = N2CServer::new(self.query_handler.clone(), self.mempool.clone());
-        let slot_config = self.ledger_state.read().await.slot_config;
-        n2c_server.set_tx_validator(Arc::new(serve::LedgerTxValidator {
-            ledger: self.ledger_state.clone(),
-            slot_config,
-            metrics: self.metrics.clone(),
-            mempool: Some(self.mempool.clone()),
-        }));
-        n2c_server.set_block_provider(Arc::new(serve::ChainDBBlockProvider {
-            chain_db: self.chain_db.clone(),
-        }));
-        n2c_server.set_connection_metrics(Arc::new(serve::N2CConnectionMetrics {
-            metrics: self.metrics.clone(),
-        }));
-        debug!("N2C server: Plutus tx validation and block delivery enabled");
-        let n2c_socket_path = self.socket_path.clone();
-        let n2c_shutdown_rx = shutdown_rx.clone();
-        let n2c_shutdown_tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = n2c_server.listen(&n2c_socket_path, n2c_shutdown_rx).await {
-                error!("N2C server error: {e}");
-                n2c_shutdown_tx.send(true).ok();
-            }
-        });
+        // TODO: Start N2C server on Unix socket using new networking API.
+        // The old N2CServer type was removed from torsten-network. The new
+        // ConnectionManager + LocalStateQuery server protocol will be wired
+        // up here once the networking rewrite is complete.
+        //
+        // The N2C server needs:
+        //   - Unix socket listener (from new bearer::unix module)
+        //   - Mux per connection
+        //   - LocalStateQuery server protocol (QueryHandler trait impl)
+        //   - LocalTxSubmission server protocol
+        //   - LocalTxMonitor server protocol
+        //   - LocalChainSync server protocol
+        debug!("N2C server: TODO — awaiting new networking API integration");
+        let _n2c_socket_path = self.socket_path.clone();
+        let _n2c_shutdown_rx = shutdown_rx.clone();
+        let _n2c_shutdown_tx = shutdown_tx.clone();
 
         // Initialize peer manager
         {
@@ -1216,7 +1207,7 @@ impl Node {
                 target_known_peers: self.config.target_number_of_known_peers,
                 ..PeerManagerConfig::default()
             };
-            let mut pm = PeerManager::new(pm_config);
+            let mut pm = NodePeerManager::new(pm_config);
             // Register our own listen address to prevent self-connections
             // (peers may share our address back to us via peer sharing)
             pm.set_local_addr(self.listen_addr);
@@ -1239,12 +1230,12 @@ impl Node {
         {
             // Resolve all DNS addresses BEFORE acquiring the write lock to avoid
             // holding the lock during potentially slow DNS lookups.
-            let mut resolved_peers = Vec::new();
+            let mut resolved_peers: Vec<std::net::SocketAddr> = Vec::new();
             for peer in &detailed_peers {
                 match tokio::net::lookup_host(format!("{}:{}", peer.address, peer.port)).await {
                     Ok(addrs) => {
                         for socket_addr in addrs {
-                            resolved_peers.push((socket_addr, peer.trustable, peer.advertise));
+                            resolved_peers.push(socket_addr);
                         }
                     }
                     Err(e) => {
@@ -1288,17 +1279,22 @@ impl Node {
             }
 
             let mut pm = peer_manager.write().await;
-            for (socket_addr, trustable, advertise) in resolved_peers {
-                pm.add_config_peer(socket_addr, trustable, advertise);
+            for socket_addr in resolved_peers {
+                pm.add_config_peer(socket_addr);
             }
             // Register per-group valency targets.  This must happen AFTER
             // add_config_peer() calls so the peer table contains the members.
             for (group_addrs, hot_val, warm_val) in resolved_groups {
-                pm.add_local_root_group(group_addrs, hot_val, warm_val);
+                pm.add_local_root_group(networking::LocalRootGroupInfo {
+                    name: String::new(),
+                    addrs: group_addrs,
+                    hot_valency: hot_val,
+                    warm_valency: warm_val,
+                });
             }
             let stats = pm.stats();
             info!(
-                known = stats.known_peers,
+                known = stats.cold + stats.warm + stats.hot,
                 local_root_groups = pm.local_root_groups().len(),
                 mode = ?pm.diffusion_mode(),
                 "Peers",
@@ -1329,7 +1325,7 @@ impl Node {
                         Ok(new_topology) => {
                             let new_peers = new_topology.detailed_peers();
                             // Resolve DNS before acquiring the write lock
-                            let mut resolved = Vec::new();
+                            let mut resolved: Vec<std::net::SocketAddr> = Vec::new();
                             for peer in &new_peers {
                                 match tokio::net::lookup_host(format!(
                                     "{}:{}",
@@ -1339,11 +1335,7 @@ impl Node {
                                 {
                                     Ok(addrs) => {
                                         for socket_addr in addrs {
-                                            resolved.push((
-                                                socket_addr,
-                                                peer.trustable,
-                                                peer.advertise,
-                                            ));
+                                            resolved.push(socket_addr);
                                         }
                                     }
                                     Err(e) => {
@@ -1357,8 +1349,8 @@ impl Node {
                             }
                             let mut pm = pm_for_sighup.write().await;
                             let added = resolved.len();
-                            for (socket_addr, trustable, advertise) in resolved {
-                                pm.add_config_peer(socket_addr, trustable, advertise);
+                            for socket_addr in resolved {
+                                pm.add_config_peer(socket_addr);
                             }
                             info!(
                                 "Topology reloaded: {added} peers registered, {}",
@@ -1373,39 +1365,33 @@ impl Node {
             });
         }
 
-        // Start N2N server for inbound peer connections (bidirectional mode)
-        let mut n2n_server = torsten_network::n2n_server::N2NServer::with_config(
-            self.listen_addr,
-            self.network_magic,
-            self.query_handler.clone(),
-            Arc::new(serve::ChainDBBlockProvider {
-                chain_db: self.chain_db.clone(),
-            }),
-            200,
-            self.peer_manager.read().await.diffusion_mode() == DiffusionMode::InitiatorAndResponder,
-            torsten_network::n2n_server::PeerSharingMode::PeerSharingEnabled,
-        );
-        n2n_server.set_mempool(self.mempool.clone());
-        n2n_server.set_peer_manager(self.peer_manager.clone());
-        n2n_server.set_connection_metrics(Arc::new(serve::N2NConnectionMetrics {
-            metrics: self.metrics.clone(),
-        }));
-        // Get the broadcast senders before spawning the server
-        self.block_announcement_tx = Some(n2n_server.block_announcement_sender());
-        self.rollback_announcement_tx = Some(n2n_server.rollback_announcement_sender());
+        // TODO: Start N2N server for inbound peer connections using new networking API.
+        // The old N2NServer type was removed from torsten-network. The new
+        // ConnectionManager + N2N protocol handlers will be wired up here once
+        // the networking rewrite is complete.
+        //
+        // The N2N server needs:
+        //   - TCP listener (from new bearer::tcp module)
+        //   - Mux per connection
+        //   - Handshake responder
+        //   - ChainSync server protocol
+        //   - BlockFetch server protocol
+        //   - TxSubmission2 server protocol
+        //   - KeepAlive server protocol
+        //   - PeerSharing server protocol
+        //
+        // For now, create broadcast channels directly so the rest of the code
+        // (block announcement, rollback announcement) can still compile.
+        let (block_ann_tx, _) = tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
+        let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
+        self.block_announcement_tx = Some(block_ann_tx);
+        self.rollback_announcement_tx = Some(rollback_ann_tx);
         debug!(
-            "N2N server: diffusion_mode={:?}, peer_sharing=enabled",
+            "N2N server: TODO — awaiting new networking API integration, diffusion_mode={:?}",
             self.peer_manager.read().await.diffusion_mode()
         );
-        let n2n_shutdown_rx = shutdown_rx.clone();
-        let n2n_shutdown_tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = n2n_server.listen(n2n_shutdown_rx).await {
-                error!("N2N server error: {e}");
-                // Fatal: trigger node shutdown on bind failure (e.g. address already in use)
-                n2n_shutdown_tx.send(true).ok();
-            }
-        });
+        let _n2n_shutdown_rx = shutdown_rx.clone();
+        let _n2n_shutdown_tx = shutdown_tx.clone();
 
         // Start ledger-based peer discovery task
         {
@@ -1567,7 +1553,8 @@ impl Node {
             });
         }
 
-        let network_magic = self.network_magic;
+        // TODO: network_magic will be needed by new sync client for handshake.
+        let _network_magic = self.network_magic;
 
         // The GSM is initialized in Node::new() and stored as self.gsm.
         // Clone the Arc here so the background evaluation task can hold a
@@ -1647,31 +1634,25 @@ impl Node {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
             // Capture fields needed by governor-initiated connect tasks.
-            let gov_network_magic = self.network_magic;
-            let gov_listen_port = self.listen_addr.port();
+            let _gov_network_magic = self.network_magic;
+            let _gov_listen_port = self.listen_addr.port();
             let gov_metrics = self.metrics.clone();
-            let gov_byron_epoch_length = self.byron_epoch_length;
-            // Mempool reference for TxSubmission2 responder tasks on governor connections.
-            let gov_mempool: Arc<dyn torsten_primitives::mempool::MempoolProvider> =
+            let _gov_byron_epoch_length = self.byron_epoch_length;
+            // TODO: Mempool and block provider will be needed once the new
+            // networking API provides connection lifecycle management.
+            let _gov_mempool: Arc<dyn torsten_primitives::mempool::MempoolProvider> =
                 self.mempool.clone();
-            // Block provider for DuplexPeerConnection (held for API compatibility;
-            // governor connections serve TxSubmission2 only — not ChainSync/BlockFetch).
-            let gov_block_provider: Arc<dyn torsten_network::BlockProvider> =
+            let _gov_block_provider: Arc<dyn torsten_network::BlockProvider> =
                 Arc::new(serve::ChainDBBlockProvider {
                     chain_db: self.chain_db.clone(),
                 });
             let gov_config = {
-                use torsten_network::{GovernorConfig, PeerTargets};
                 let cfg = &self.config;
                 GovernorConfig {
-                    normal_targets: PeerTargets {
-                        root_peers: cfg.target_number_of_root_peers,
-                        known_peers: cfg.target_number_of_known_peers,
-                        established_peers: cfg.target_number_of_established_peers,
-                        active_peers: cfg.target_number_of_active_peers,
-                        known_blp: cfg.target_number_of_known_big_ledger_peers,
-                        established_blp: cfg.target_number_of_established_big_ledger_peers,
-                        active_blp: cfg.target_number_of_active_big_ledger_peers,
+                    targets: PeerTargets {
+                        target_warm: cfg.target_number_of_established_peers,
+                        target_hot: cfg.target_number_of_active_peers,
+                        max_cold: cfg.target_number_of_known_peers,
                     },
                     ..Default::default()
                 }
@@ -1679,20 +1660,18 @@ impl Node {
 
             let gov_sync_managed = sync_managed_peers.clone();
 
-            // Persistent map of live governor-managed DuplexPeerConnections.
+            // Persistent map of live governor-managed connection task handles.
             //
-            // Each entry keeps the TCP session, plexer, KeepAlive loop, and
-            // TxSubmission2 responder alive as long as the peer is warm/hot.
-            // The governor task is the sole writer; connect tasks store entries
-            // here via this Arc after a successful handshake, and the governor
-            // loop removes entries when Disconnect/EvictColdPeer events fire.
+            // Each entry keeps the per-peer connection tasks alive as long as
+            // the peer is warm/hot. The governor task is the sole writer;
+            // connect tasks store entries here after a successful handshake,
+            // and the governor loop removes entries on disconnect events.
             //
-            // Mutex (not RwLock) because every removal needs `abort()`, which
-            // requires ownership of the `DuplexPeerConnection`, and we never
-            // hold the lock during async I/O.
-            let gov_duplex_conns: Arc<
+            // TODO: Replace JoinHandle<()> with proper PeerConnection type once
+            // the new networking API provides connection lifecycle management.
+            let gov_conn_handles: Arc<
                 tokio::sync::Mutex<
-                    std::collections::HashMap<std::net::SocketAddr, DuplexPeerConnection>,
+                    std::collections::HashMap<std::net::SocketAddr, tokio::task::JoinHandle<()>>,
                 >,
             > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -1719,18 +1698,8 @@ impl Node {
                 let mut connecting_peers: std::collections::HashSet<std::net::SocketAddr> =
                     std::collections::HashSet::new();
 
-                // Track in-flight peer-sharing requests so that we never send
-                // more than one PeerSharing request to the same peer concurrently.
-                // Mirrors the connect_done_tx/connecting_peers pattern above.
-                let (peer_sharing_done_tx, mut peer_sharing_done_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<std::net::SocketAddr>();
-                // Set of peers for which a PeerSharing request is in flight.
-                let mut peer_sharing_in_flight: std::collections::HashSet<std::net::SocketAddr> =
-                    std::collections::HashSet::new();
-                // Maximum concurrent PeerSharing requests.  Peer sharing is
-                // low-priority background work; a small cap keeps resource
-                // usage bounded without starving higher-priority connects.
-                const MAX_CONCURRENT_PEER_SHARING: usize = 4;
+                // TODO: Track in-flight peer-sharing requests once PeerSharingClient
+                // is integrated into the governor loop.
                 // Maximum concurrent governor-initiated outbound connections.
                 // This prevents a burst of `Connect` events from opening dozens
                 // of TCP connections simultaneously.
@@ -1739,20 +1708,17 @@ impl Node {
                 const GOV_CONNECT_TIMEOUT_SECS: u64 = 5;
 
                 loop {
-                    // Collect events from whichever timer fires next, or exit
+                    // Collect actions from whichever timer fires next, or exit
                     // immediately on shutdown.
-                    let events: Vec<GovernorEvent> = tokio::select! {
+                    use torsten_network::peer::governor::GovernorAction;
+                    let actions: Vec<GovernorAction> = tokio::select! {
                         _ = full_interval.tick() => {
                             let pm = governor_pm.read().await;
-                            let mut all_events = governor.evaluate(&pm);
-                            all_events.extend(governor.maybe_churn(&pm));
-                            all_events
+                            governor.compute_actions(&pm.inner)
                         }
                         _ = warm_interval.tick() => {
-                            // Fast-path warm promotion: run a lightweight
-                            // evaluate to promote dwell-eligible warm peers.
                             let pm = governor_pm.read().await;
-                            governor.evaluate(&pm)
+                            governor.compute_actions(&pm.inner)
                         }
                         _ = shutdown.changed() => { break; }
                     };
@@ -1763,113 +1729,60 @@ impl Node {
                     while let Ok(addr) = connect_done_rx.try_recv() {
                         connecting_peers.remove(&addr);
                     }
-                    // Drain completed peer-sharing tasks before processing new events.
-                    while let Ok(addr) = peer_sharing_done_rx.try_recv() {
-                        peer_sharing_in_flight.remove(&addr);
-                    }
+                    // TODO: Drain completed peer-sharing tasks once integrated.
 
-                    // Apply events to the peer manager.
-                    if !events.is_empty() {
-                        // Collect Connect events that need spawning and addresses
-                        // that need teardown before acquiring the write lock, so
-                        // we can check circuit state and temperature under the
-                        // lock and then release it before doing async I/O.
+                    // Apply actions to the peer manager.
+                    if !actions.is_empty() {
                         let mut addrs_to_connect: Vec<std::net::SocketAddr> = Vec::new();
                         let mut addrs_to_disconnect: Vec<std::net::SocketAddr> = Vec::new();
-                        // Collect peer-sharing requests that need spawning.
-                        let mut addrs_to_share: Vec<(std::net::SocketAddr, u8)> = Vec::new();
 
                         let mut pm = governor_pm.write().await;
-                        for event in &events {
-                            match event {
-                                GovernorEvent::Promote(addr) => {
-                                    pm.promote_to_hot(addr);
+                        for action in &actions {
+                            match action {
+                                GovernorAction::PromoteToHot(addr) => {
+                                    pm.inner.promote_to_hot(addr);
                                 }
-                                GovernorEvent::Demote(addr) => {
-                                    pm.demote_to_warm(addr);
+                                GovernorAction::DemoteToWarm(addr) => {
+                                    pm.inner.demote_to_warm(addr);
                                 }
-                                GovernorEvent::Disconnect(addr) => {
-                                    pm.peer_disconnected(addr);
-                                    // Tear down the persistent duplex connection, if
-                                    // one exists.  Aborting the connection shuts down
-                                    // the plexer and TxSubmission2 responder task.
-                                    addrs_to_disconnect.push(*addr);
-                                }
-                                GovernorEvent::EvictColdPeer(addr) => {
+                                GovernorAction::DemoteToCold(addr) => {
                                     pm.peer_disconnected(addr);
                                     addrs_to_disconnect.push(*addr);
                                 }
-                                GovernorEvent::Connect(addr) => {
-                                    // Check if we already have an inbound duplex
-                                    // connection from this IP.  If so, skip the
-                                    // outbound connection — the existing inbound
-                                    // connection already provides bidirectional
-                                    // mini-protocol support.
-                                    if let Some(existing) = pm.find_inbound_duplex_by_ip(addr.ip())
-                                    {
-                                        debug!(
-                                            %addr,
-                                            existing = %existing,
-                                            "Governor: skipping outbound connect — \
-                                             inbound duplex connection exists"
-                                        );
-                                        continue;
-                                    }
+                                GovernorAction::PromoteToWarm(addr) => {
+                                    // PromoteToWarm = establish TCP connection to cold peer.
                                     // Skip if sync loop already manages this peer.
-                                    // Prevents duplicate TCP connections per peer.
                                     if gov_sync_managed.read().await.contains(addr) {
                                         debug!(
                                             %addr,
-                                            "Governor: skipping Connect — peer managed by sync loop"
+                                            "Governor: skipping PromoteToWarm — peer managed by sync loop"
                                         );
                                         continue;
                                     }
-                                    // Skip if we already have an in-flight
-                                    // connect attempt for this address.
                                     if connecting_peers.contains(addr) {
                                         continue;
                                     }
-                                    // Skip if the connection cap is reached.
                                     if connecting_peers.len() >= MAX_CONCURRENT_GOV_CONNECTS {
                                         debug!(
                                             %addr,
                                             in_flight = connecting_peers.len(),
-                                            "Governor: Connect skipped — concurrent limit reached"
+                                            "Governor: PromoteToWarm skipped — concurrent limit reached"
                                         );
                                         continue;
                                     }
-                                    // Skip if the circuit breaker is open for
-                                    // this peer (transitions Open→HalfOpen as a
-                                    // side-effect when the cooldown has expired).
                                     if !pm.should_attempt_connection(addr) {
                                         continue;
                                     }
-                                    // Skip peers that are already warm or hot —
-                                    // they are already connected.
                                     if pm.connected_peer_addrs().contains(addr) {
                                         continue;
                                     }
                                     connecting_peers.insert(*addr);
                                     addrs_to_connect.push(*addr);
                                 }
-                                GovernorEvent::RequestPeerSharing(addr, count) => {
-                                    // Skip if a PeerSharing request is already in flight
-                                    // to this peer (avoid duplicate concurrent requests).
-                                    if peer_sharing_in_flight.contains(addr) {
-                                        continue;
-                                    }
-                                    // Enforce concurrency cap so that a large batch of
-                                    // sharing events doesn't open many connections at once.
-                                    if peer_sharing_in_flight.len() >= MAX_CONCURRENT_PEER_SHARING {
-                                        debug!(
-                                            %addr,
-                                            in_flight = peer_sharing_in_flight.len(),
-                                            "Governor: PeerSharing skipped — concurrent limit reached"
-                                        );
-                                        continue;
-                                    }
-                                    peer_sharing_in_flight.insert(*addr);
-                                    addrs_to_share.push((*addr, *count));
+                                GovernorAction::DiscoverMore => {
+                                    // TODO: trigger peer sharing requests once
+                                    // PeerSharingClient is wired into the node.
+                                    debug!("Governor: DiscoverMore — peer sharing not yet integrated");
                                 }
                             }
                         }
@@ -1877,43 +1790,29 @@ impl Node {
                         // Release the write lock before spawning async tasks.
                         drop(pm);
 
-                        // Tear down connections for peers that were
-                        // Disconnect/EvictColdPeer'd in this cycle.
+                        // Tear down connections for peers that were demoted to cold.
                         if !addrs_to_disconnect.is_empty() {
-                            let mut conns = gov_duplex_conns.lock().await;
+                            let mut conns = gov_conn_handles.lock().await;
                             for addr in addrs_to_disconnect {
-                                if let Some(conn) = conns.remove(&addr) {
-                                    debug!(%addr, "Governor: aborting duplex connection on disconnect");
-                                    conn.abort().await;
+                                if let Some(handle) = conns.remove(&addr) {
+                                    debug!(%addr, "Governor: aborting connection on disconnect");
+                                    handle.abort();
                                 }
                             }
                         }
 
-                        // Spawn one fire-and-forget connect task per address.
-                        // Each task:
-                        //   1. Attempts TCP + Ouroboros handshake with a 5 s timeout
-                        //      using DuplexPeerConnection (InitiatorAndResponder mode).
-                        //   2. On success: marks the peer Warm in the peer manager,
-                        //      records RTT, and stores the live connection in
-                        //      gov_duplex_conns so TxSubmission2 keeps running.
-                        //   3. On failure: calls peer_failed() to update the circuit
-                        //      breaker so the governor backs off future attempts.
-                        //   4. Always sends the address back on connect_done_tx so the
-                        //      outer loop removes it from connecting_peers.
+                        // TODO: Spawn connect tasks using new networking API.
+                        // The old DuplexPeerConnection type was removed. The new
+                        // ConnectionManager will handle TCP connect + handshake +
+                        // protocol mux. For now, stub out with direct TCP connects.
                         for addr in addrs_to_connect {
                             let task_pm = governor_pm.clone();
                             let task_metrics = gov_metrics.clone();
-                            let task_magic = gov_network_magic;
-                            let task_byron = gov_byron_epoch_length;
                             let task_done_tx = connect_done_tx.clone();
-                            let task_mempool = gov_mempool.clone();
-                            let _task_block_provider = gov_block_provider.clone();
-                            let task_duplex_conns = gov_duplex_conns.clone();
-                            let task_listen_port = gov_listen_port;
+                            let task_conn_handles = gov_conn_handles.clone();
                             let task_sync_managed = gov_sync_managed.clone();
                             tokio::spawn(async move {
-                                // Re-check sync-managed and existing duplex connections
-                                // right before connecting to avoid races.
+                                // Re-check sync-managed right before connecting to avoid races.
                                 if task_sync_managed.read().await.contains(&addr) {
                                     debug!(
                                         %addr,
@@ -1922,135 +1821,46 @@ impl Node {
                                     let _ = task_done_tx.send(addr);
                                     return;
                                 }
-                                if task_duplex_conns.lock().await.contains_key(&addr) {
-                                    debug!(
-                                        %addr,
-                                        "Governor: aborting connect — duplex connection already exists"
-                                    );
-                                    let _ = task_done_tx.send(addr);
-                                    return;
-                                }
                                 let target = addr.to_string();
-                                debug!(%addr, "Governor: initiating outbound duplex connection");
+                                debug!(%addr, "Governor: initiating outbound connection");
                                 let connect_start = std::time::Instant::now();
+
+                                // TODO: Replace with new networking API connection.
+                                // For now, just attempt a TCP connect to verify reachability.
                                 let connect_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(GOV_CONNECT_TIMEOUT_SECS),
-                                    // Governor connections use connect_no_chainsync to avoid
-                                    // demuxer stall: subscribing to ChainSync/BlockFetch without
-                                    // reading fills the bounded channel, blocking the demuxer
-                                    // and killing all protocols including KeepAlive.
-                                    DuplexPeerConnection::connect_no_chainsync(
-                                        &*target,
-                                        task_magic,
-                                        task_mempool,
-                                        task_listen_port,
-                                    ),
+                                    tokio::net::TcpStream::connect(&target),
                                 )
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(torsten_network::DuplexError::Connection(format!(
-                                        "{target}: connection timed out after {GOV_CONNECT_TIMEOUT_SECS}s"
-                                    )))
-                                });
+                                .await;
+
                                 match connect_result {
-                                    Ok(mut conn) => {
-                                        conn.set_byron_epoch_length(task_byron);
+                                    Ok(Ok(_tcp_stream)) => {
                                         let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                                         task_metrics.record_handshake_rtt(rtt_ms);
                                         let mut pm = task_pm.write().await;
-                                        // Land in Warm; the governor's 2 s warm-promotion
-                                        // check will promote to Hot after WARM_DWELL_TIME.
                                         pm.peer_connected(
                                             &addr,
-                                            14,
-                                            torsten_network::ConnectionDirection::Outbound,
+                                            ConnectionDirection::Outbound,
                                         );
                                         pm.record_handshake_rtt(&addr, rtt_ms);
-                                        // Mark as duplex — governor connections use
-                                        // DuplexPeerConnection (InitiatorAndResponder).
-                                        pm.mark_peer_duplex(&addr);
                                         drop(pm);
                                         info!(
                                             peer = %target,
                                             rtt_ms = format_args!("{rtt_ms:.0}"),
-                                            "Governor: peer connected (warm, TxSubmission2 active)"
+                                            "Governor: peer connected (warm)"
                                         );
-                                        // Store the live connection so the plexer, KeepAlive
-                                        // loop, and TxSubmission2 responder task remain alive
-                                        // for as long as the peer is warm/hot.  The governor
-                                        // loop removes this entry on Disconnect/EvictColdPeer.
-                                        task_duplex_conns.lock().await.insert(addr, conn);
+                                        // TODO: Store proper connection handle once
+                                        // new networking API provides one.
+                                        let handle = tokio::spawn(async {});
+                                        task_conn_handles.lock().await.insert(addr, handle);
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         task_pm.write().await.peer_failed(&addr);
                                         debug!(%addr, "Governor: failed to connect — {e}");
                                     }
-                                }
-                                // Always notify the outer loop that this slot is free.
-                                let _ = task_done_tx.send(addr);
-                            });
-                        }
-
-                        // Spawn one fire-and-forget peer-sharing task per address.
-                        //
-                        // Each task:
-                        //   1. Opens a fresh N2N connection to the target peer.
-                        //   2. Performs Ouroboros handshake.
-                        //   3. Sends MsgShareRequest(count) on the PeerSharing channel.
-                        //   4. Reads MsgSharePeers and adds each returned address as a
-                        //      cold peer via PeerManager::add_shared_peer (non-routable
-                        //      addresses are silently rejected inside that method).
-                        //   5. Sends MsgDone and disconnects.
-                        //   6. Always notifies the outer loop so the slot is freed.
-                        //
-                        // The connection opened here is solely for peer discovery;
-                        // it does not interact with ChainSync or BlockFetch state.
-                        for (addr, count) in addrs_to_share {
-                            let task_pm = governor_pm.clone();
-                            let task_magic = gov_network_magic;
-                            let task_done_tx = peer_sharing_done_tx.clone();
-                            tokio::spawn(async move {
-                                debug!(
-                                    %addr,
-                                    count,
-                                    "Governor: initiating PeerSharing request"
-                                );
-                                // 60 s total timeout for the entire PeerSharing exchange
-                                // (connect + handshake + request/response round trip).
-                                const PEER_SHARING_TIMEOUT_SECS: u64 = 60;
-                                let result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(PEER_SHARING_TIMEOUT_SECS),
-                                    torsten_network::request_peers_from(addr, task_magic, count),
-                                )
-                                .await;
-
-                                match result {
-                                    Ok(Ok(peers)) if !peers.is_empty() => {
-                                        let discovered = peers.len();
-                                        let mut pm = task_pm.write().await;
-                                        for peer_addr in peers {
-                                            pm.add_shared_peer(peer_addr);
-                                        }
-                                        drop(pm);
-                                        info!(
-                                            %addr,
-                                            discovered,
-                                            "PeerSharing: added peers from share response"
-                                        );
-                                    }
-                                    Ok(Ok(_)) => {
-                                        // Empty response — peer returned no addresses.
-                                        debug!(%addr, "PeerSharing: peer returned no addresses");
-                                    }
-                                    Ok(Err(e)) => {
-                                        debug!(%addr, "PeerSharing: request failed — {e}");
-                                    }
                                     Err(_) => {
-                                        debug!(
-                                            %addr,
-                                            timeout_secs = PEER_SHARING_TIMEOUT_SECS,
-                                            "PeerSharing: request timed out"
-                                        );
+                                        task_pm.write().await.peer_failed(&addr);
+                                        debug!(%addr, "Governor: connection timed out after {GOV_CONNECT_TIMEOUT_SECS}s");
                                     }
                                 }
                                 // Always notify the outer loop that this slot is free.
@@ -2061,32 +1871,31 @@ impl Node {
                 }
 
                 // Node is shutting down — abort all remaining governor connections.
-                let mut conns = gov_duplex_conns.lock().await;
-                for (addr, conn) in conns.drain() {
-                    debug!(%addr, "Governor: aborting duplex connection on shutdown");
-                    conn.abort().await;
+                let mut conns = gov_conn_handles.lock().await;
+                for (addr, handle) in conns.drain() {
+                    debug!(%addr, "Governor: aborting connection on shutdown");
+                    handle.abort();
                 }
             });
         }
 
         // Main connection loop — connect to peers and sync
         //
+        // TODO: This entire section needs to be reimplemented using the new
+        // networking API. The old types (NodeToNodeClient, PipelinedPeerClient,
+        // BlockFetchPool, DuplexPeerConnection) were removed from torsten-network.
+        // The new implementation should use:
+        //   - TcpBearer + Mux for connection establishment
+        //   - PipelinedChainSyncClient for header sync
+        //   - BlockFetchClient for block download
+        //   - ConnectionManager for lifecycle management
+        //
         // Backoff parameters are intentionally short so that after a network
         // outage (e.g., sleep/hibernate, router restart) the node reconnects
-        // within seconds rather than minutes.  The exponential schedule is:
-        //   retry 1:  2 * 2^1 =  4 s
-        //   retry 2:  2 * 2^2 =  8 s
-        //   retry 3:  2 * 2^3 = 16 s
-        //   retry 4+: clamped to 20 s
-        // Maximum total reconnect time (4 retries, 4+8+16+20 s) < 60 s.
+        // within seconds rather than minutes.
         let mut retry_count = 0u32;
         let base_delay_secs = 2u64;
         let max_delay_secs = 20u64;
-
-        // Per-peer TCP connect timeout.  Keeping this tight (5 s) ensures
-        // that a topology list with several unreachable peers does not add
-        // more than ~5 s per peer before we move on to the next candidate.
-        // The OS default can be 20-120 s depending on the platform.
         let connect_timeout = std::time::Duration::from_secs(5);
 
         loop {
@@ -2099,12 +1908,11 @@ impl Node {
             let targets: Vec<std::net::SocketAddr> = {
                 let pm = peer_manager.read().await;
                 let gsm_state = self.gsm.read().await.state();
-                let mut peers = pm.peers_to_connect();
+                let mut peers = pm.peers_to_connect(20);
                 if gsm_state != crate::gsm::GenesisSyncState::CaughtUp {
                     // Sort BLPs first for Genesis-mode sync
                     peers.sort_by_key(|addr| {
-                        if pm.peer_category(addr)
-                            == Some(torsten_network::PeerCategory::BigLedgerPeer)
+                        if pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer)
                         {
                             0 // BLPs first
                         } else {
@@ -2115,8 +1923,11 @@ impl Node {
                 peers
             };
 
-            // If peer manager has no targets, fall back to topology list
-            let mut client = None;
+            // TODO: Replace with new networking API connection establishment.
+            // The old NodeToNodeClient type was removed. The new implementation
+            // should use TcpBearer + Mux + handshake for connection setup.
+            let mut peer_addr_connected: Option<std::net::SocketAddr> = None;
+
             if !targets.is_empty() {
                 for addr in &targets {
                     if *shutdown_rx.borrow() {
@@ -2125,39 +1936,33 @@ impl Node {
                     let target = addr.to_string();
                     debug!("Connecting to peer {target}...");
                     let connect_start = std::time::Instant::now();
-                    let connect_result = tokio::select! {
-                        r = tokio::time::timeout(
-                            connect_timeout,
-                            NodeToNodeClient::connect(&*target, network_magic),
-                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
-                            format!("{target}: connection timed out after {}s", connect_timeout.as_secs()),
-                        ))),
-                        _ = shutdown_rx.changed() => break,
-                    };
+                    let connect_result = tokio::time::timeout(
+                        connect_timeout,
+                        tokio::net::TcpStream::connect(&target),
+                    )
+                    .await;
                     match connect_result {
-                        Ok(mut c) => {
-                            c.set_byron_epoch_length(self.byron_epoch_length);
+                        Ok(Ok(_stream)) => {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            // Transition peer to Warm.  Promotion to Hot is deferred
-                            // to the governor's warm-promotion check (every 2 s) so
-                            // that the peer is visible as Warm in the TUI for at
-                            // least WARM_DWELL_TIME (5 s) before jumping to Hot.
                             pm.peer_connected(
                                 addr,
-                                14,
-                                torsten_network::ConnectionDirection::Outbound,
+                                ConnectionDirection::Outbound,
                             );
                             pm.record_handshake_rtt(addr, rtt_ms);
                             drop(pm);
                             info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected (warm, dwell pending)");
-                            client = Some((c, *addr));
+                            peer_addr_connected = Some(*addr);
                             break;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             peer_manager.write().await.peer_failed(addr);
                             debug!("Failed to connect to {target}: {e}");
+                        }
+                        Err(_) => {
+                            peer_manager.write().await.peer_failed(addr);
+                            debug!("Connection to {target} timed out after {}s", connect_timeout.as_secs());
                         }
                     }
                 }
@@ -2169,37 +1974,36 @@ impl Node {
                     }
                     let target = format!("{addr}:{port}");
                     debug!("Connecting to peer {target}...");
-                    let connect_result = tokio::select! {
-                        r = tokio::time::timeout(
-                            connect_timeout,
-                            NodeToNodeClient::connect(&*target, network_magic),
-                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
-                            format!("{target}: connection timed out after {}s", connect_timeout.as_secs()),
-                        ))),
-                        _ = shutdown_rx.changed() => break,
-                    };
+                    let connect_result = tokio::time::timeout(
+                        connect_timeout,
+                        tokio::net::TcpStream::connect(&target),
+                    )
+                    .await;
                     match connect_result {
-                        Ok(mut c) => {
-                            c.set_byron_epoch_length(self.byron_epoch_length);
+                        Ok(Ok(_stream)) => {
                             info!(peer = %target, "Peer connected");
-                            let sock_addr = c.remote_addr().to_owned();
-                            client = Some((c, sock_addr));
+                            if let Ok(sock_addr) = target.parse::<std::net::SocketAddr>() {
+                                peer_addr_connected = Some(sock_addr);
+                            }
                             break;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             debug!("Failed to connect to {target}: {e}");
+                        }
+                        Err(_) => {
+                            debug!("Connection to {target} timed out after {}s", connect_timeout.as_secs());
                         }
                     }
                 }
             }
 
-            let (mut active_client, peer_addr) = match client {
-                Some(c) => {
+            let peer_addr = match peer_addr_connected {
+                Some(addr) => {
                     retry_count = 0;
                     // Register this peer as sync-managed so the governor
                     // doesn't create a duplicate connection.
-                    sync_managed_peers.write().await.insert(c.1);
-                    c
+                    sync_managed_peers.write().await.insert(addr);
+                    addr
                 }
                 None => {
                     retry_count += 1;
@@ -2225,338 +2029,43 @@ impl Node {
                 debug!("P2P: {}", pm.stats());
             }
 
-            // Spawn PeerSharing client: request peers from connected peer in background
-            {
-                let ps_peer_addr = peer_addr;
-                let ps_network_magic = network_magic;
-                let ps_peer_manager = peer_manager.clone();
-                tokio::spawn(async move {
-                    match torsten_network::request_peers_from(
-                        ps_peer_addr.to_string().as_str(),
-                        ps_network_magic,
-                        10,
-                    )
-                    .await
-                    {
-                        Ok(peers) => {
-                            if peers.is_empty() {
-                                debug!("PeerSharing: no peers received from {ps_peer_addr}");
-                            } else {
-                                debug!(
-                                    "PeerSharing: received {} peers from {ps_peer_addr}",
-                                    peers.len()
-                                );
-                                let mut pm = ps_peer_manager.write().await;
-                                for addr in peers {
-                                    pm.add_shared_peer(addr);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            debug!("PeerSharing with {ps_peer_addr}: {e}");
-                        }
-                    }
-                });
-            }
+            // TODO: Spawn PeerSharing client using new PeerSharingClient.
+            // The old request_peers_from() was removed. The new implementation
+            // should use PeerSharingClient::request_peers() directly.
 
-            // Connect additional peers as block fetchers for parallel block fetch
-            let mut fetch_pool = BlockFetchPool::new();
-            {
-                let pm = peer_manager.read().await;
-                let additional_peers: Vec<std::net::SocketAddr> = pm
-                    .peers_to_connect()
-                    .into_iter()
-                    .filter(|a| *a != peer_addr)
-                    .take(4)
-                    .collect();
-                drop(pm);
-
-                for addr in &additional_peers {
-                    if *shutdown_rx.borrow() {
-                        break;
-                    }
-                    let target = addr.to_string();
-                    let connect_start = std::time::Instant::now();
-                    // Use the same 5s TCP connect timeout as the primary peer
-                    // to avoid 20-120s stalls per unreachable fetcher candidate.
-                    let connect_result = tokio::select! {
-                        r = tokio::time::timeout(
-                            connect_timeout,
-                            NodeToNodeClient::connect(&*target, network_magic),
-                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
-                            format!("{target}: fetcher connection timed out after {}s", connect_timeout.as_secs()),
-                        ))),
-                        _ = shutdown_rx.changed() => break,
-                    };
-                    match connect_result {
-                        Ok(mut c) => {
-                            c.set_byron_epoch_length(self.byron_epoch_length);
-                            let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
-                            self.metrics.record_handshake_rtt(rtt_ms);
-                            let mut pm = peer_manager.write().await;
-                            // Same deferral as the primary peer: land in Warm
-                            // first and let the governor promote after dwell time.
-                            pm.peer_connected(
-                                addr,
-                                14,
-                                torsten_network::ConnectionDirection::Outbound,
-                            );
-                            pm.record_handshake_rtt(addr, rtt_ms);
-                            drop(pm);
-                            debug!("Connected block fetcher to {target} ({rtt_ms:.0}ms, dwell pending)");
-                            fetch_pool.add_fetcher(c);
-                        }
-                        Err(e) => {
-                            peer_manager.write().await.peer_failed(addr);
-                            warn!("Failed to connect fetcher to {target}: {e}");
-                        }
-                    }
-                }
-                // If no fetchers connected, add a dedicated fetcher to the primary peer.
-                // This is necessary because the primary client connection is used for
-                // pipelined ChainSync headers and can't simultaneously fetch blocks.
-                if fetch_pool.is_empty() && !*shutdown_rx.borrow() {
-                    let target = peer_addr.to_string();
-                    let connect_result = tokio::select! {
-                        r = tokio::time::timeout(
-                            connect_timeout,
-                            NodeToNodeClient::connect(&*target, network_magic),
-                        ) => r.unwrap_or_else(|_| Err(torsten_network::ClientError::Connection(
-                            format!("{target}: dedicated fetcher connection timed out after {}s", connect_timeout.as_secs()),
-                        ))),
-                        _ = shutdown_rx.changed() => {
-                            info!(fetchers = 0, "Block fetchers ready");
-                            continue;
-                        }
-                    };
-                    match connect_result {
-                        Ok(mut c) => {
-                            c.set_byron_epoch_length(self.byron_epoch_length);
-                            debug!("Connected dedicated block fetcher to primary peer {target}");
-                            fetch_pool.add_fetcher(c);
-                        }
-                        Err(e) => {
-                            warn!("Failed to connect dedicated fetcher to {target}: {e}");
-                        }
-                    }
-                }
-                info!(fetchers = fetch_pool.len(), "Block fetchers ready");
-            }
-
-            // Create pipelined ChainSync connection to the primary peer for
-            // high-throughput headers.
+            // TODO: Replace with new networking API for sync.
+            // The old types (NodeToNodeClient, PipelinedPeerClient, BlockFetchPool,
+            // DuplexPeerConnection) were removed. The new implementation should use:
+            //   - PipelinedChainSyncClient for header sync
+            //   - BlockFetchClient for block download
+            //   - TxSubmissionClient/Server for mempool propagation
             //
-            // Phase 3 — full-duplex upgrade:
-            //   We first attempt `DuplexPeerConnection::connect()`, which
-            //   negotiates InitiatorAndResponder mode and starts a background
-            //   TxSubmission2 responder so the peer can pull our mempool txs.
-            //   On success the connection is converted to a `PipelinedPeerClient`
-            //   (same ChainSync/BlockFetch channels) and the peer manager records
-            //   the duplex flag.
-            //
-            //   If the duplex connect fails (e.g. the peer only supports
-            //   InitiatorOnly mode or a transient TCP error), we fall back to a
-            //   plain `PipelinedPeerClient::connect()` so sync is never blocked by
-            //   the duplex upgrade attempt.
-            if *shutdown_rx.borrow() {
-                break;
-            }
+            // For now, stub out the chain sync loop. The node will connect to
+            // peers (TCP only) but cannot yet perform ChainSync/BlockFetch.
+            warn!(
+                peer = %peer_addr,
+                "TODO: chain sync not yet implemented with new networking API — \
+                 waiting for shutdown or reconnect"
+            );
 
-            // Both TxSubmission2 task handles must be kept alive for the duration
-            // of the sync session: dropping either handle would abort the
-            // corresponding background task prematurely.
-            // Declared here (outside the block) so they live as long as `pipelined_client`.
-            let mut _txsub_responder_handle: Option<tokio::task::JoinHandle<()>> = None;
-            let mut _txsub_initiator_handle: Option<tokio::task::JoinHandle<()>> = None;
-
-            let pipelined_client = {
-                let target = peer_addr.to_string();
-                let mempool_for_duplex = self.mempool.clone();
-                // Build a block_provider for DuplexPeerConnection (currently unused
-                // inside duplex — kept for future ChainSync/BlockFetch server tasks).
-                let block_provider_for_duplex: Arc<dyn torsten_network::BlockProvider> =
-                    Arc::new(serve::ChainDBBlockProvider {
-                        chain_db: self.chain_db.clone(),
-                    });
-
-                // ── Attempt full-duplex connection ───────────────────────────
-                let duplex_result = tokio::select! {
-                    r = tokio::time::timeout(
-                        connect_timeout,
-                        DuplexPeerConnection::connect(
-                            &*target,
-                            network_magic,
-                            mempool_for_duplex,
-                            block_provider_for_duplex,
-                            self.listen_addr.port(),
-                        ),
-                    ) => r.unwrap_or_else(|_| Err(torsten_network::DuplexError::Connection(
-                        format!("{target}: duplex connect timed out after {}s", connect_timeout.as_secs()),
-                    ))),
-                    _ = shutdown_rx.changed() => { break; }
-                };
-
-                match duplex_result {
-                    Ok(duplex_conn) => {
-                        // Convert DuplexPeerConnection → PipelinedPeerClient.
-                        // Both TxSubmission2 task handles are kept alive in the outer scope.
-                        //   responder_handle: serves our mempool to the remote peer
-                        //   initiator_handle: pulls the remote peer's mempool txs into ours
-                        info!(peer = %target, "Full-duplex connection established (InitiatorAndResponder, TxSub client+server)");
-                        let (mut pc, responder_handle, initiator_handle) =
-                            duplex_conn.into_pipelined();
-                        pc.set_byron_epoch_length(self.byron_epoch_length);
-                        pc.set_await_reply_timeout(self.timeout_config.await_reply_timeout());
-
-                        // Record the duplex flag in the peer manager so the
-                        // TUI and metrics can surface it.
-                        {
-                            let mut pm = peer_manager.write().await;
-                            pm.mark_peer_duplex(&peer_addr);
-                        }
-                        // Update the Prometheus duplex peer gauge.
-                        {
-                            let pm = peer_manager.read().await;
-                            self.metrics.peers_duplex.store(
-                                pm.duplex_peer_count() as u64,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
-                        }
-
-                        // Keep both task handles alive until `pipelined_client` is dropped.
-                        _txsub_responder_handle = Some(responder_handle);
-                        _txsub_initiator_handle = Some(initiator_handle);
-
-                        Some(pc)
-                    }
-                    Err(duplex_err) => {
-                        // Duplex upgrade failed — fall back to plain pipelined connection.
-                        // This is non-fatal: the peer may only support InitiatorOnly mode.
-                        debug!(peer = %target, "Duplex connect failed ({duplex_err}), falling back to InitiatorOnly pipelined client");
-
-                        let connect_result = tokio::select! {
-                            r = PipelinedPeerClient::connect(&*target, network_magic) => r,
-                            _ = shutdown_rx.changed() => { break; }
-                        };
-                        match connect_result {
-                            Ok(mut pc) => {
-                                pc.set_byron_epoch_length(self.byron_epoch_length);
-                                pc.set_await_reply_timeout(
-                                    self.timeout_config.await_reply_timeout(),
-                                );
-                                debug!("Pipelined ChainSync client connected to {target} (InitiatorOnly fallback)");
-
-                                // Spawn a TxSubmission2 CLIENT on the fallback connection
-                                // so that we receive mempool txs from the peer.
-                                // (On the duplex path the peer receives OUR txs instead.)
-                                if let Some(txsub_channel) = pc.take_txsub_channel() {
-                                    let mempool = self.mempool.clone();
-                                    let ledger = self.ledger_state.clone();
-                                    let slot_config = self.ledger_state.read().await.slot_config;
-                                    let shutdown = shutdown_rx.clone();
-                                    let txsub_metrics = self.metrics.clone();
-                                    tokio::spawn(async move {
-                                        let validator: Option<Arc<dyn TxValidator>> =
-                                            Some(Arc::new(serve::LedgerTxValidator {
-                                                ledger,
-                                                slot_config,
-                                                metrics: txsub_metrics,
-                                                mempool: None, // N2N TxSubmission doesn't need chaining
-                                            }));
-                                        let mut client =
-                                            torsten_network::TxSubmissionClient::new(txsub_channel);
-                                        let mut shutdown = shutdown;
-                                        tokio::select! {
-                                            result = client.run(mempool, validator) => {
-                                                match result {
-                                                    Ok(stats) => {
-                                                        debug!(
-                                                            "TxSubmission2 session ended \
-                                                             (rx={}, ok={}, rej={}, dup={})",
-                                                            stats.received, stats.accepted,
-                                                            stats.rejected, stats.duplicate,
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        debug!("TxSubmission2 client error: {e}");
-                                                    }
-                                                }
-                                                // Keep the channel alive until the connection closes
-                                                // so the demuxer doesn't crash on delayed responses.
-                                                shutdown.changed().await.ok();
-                                            }
-                                            _ = shutdown.changed() => {
-                                                debug!("TxSubmission2 client: shutdown");
-                                            }
-                                        }
-                                    });
-                                }
-                                Some(pc)
-                            }
-                            Err(e) => {
-                                warn!("Pipelined client failed, using serial headers: {e}");
-                                None
-                            }
-                        }
-                    }
-                }
-            };
-
-            // Run chain sync with connected peer + fetch pool
-            let sync_shutdown = shutdown_rx.clone();
-            match self
-                .chain_sync_loop(
-                    &mut active_client,
-                    pipelined_client,
-                    fetch_pool,
-                    sync_shutdown,
-                    peer_addr,
-                )
-                .await
-            {
-                Ok(()) => {
-                    active_client.disconnect().await;
+            // Wait until shutdown is requested, then disconnect.
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    // Periodic reconnect attempt
                     peer_manager.write().await.peer_disconnected(&peer_addr);
-                    // Refresh the duplex peer count after disconnection
-                    // (peer_disconnected clears the duplex flag).
-                    {
-                        let pm = peer_manager.read().await;
-                        self.metrics.peers_duplex.store(
-                            pm.duplex_peer_count() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    if *shutdown_rx.borrow() {
-                        break;
-                    }
-                    // Unregister from sync-managed so governor can connect.
-                    sync_managed_peers.write().await.remove(&peer_addr);
-                    info!("Peer disconnected, reconnecting...");
                 }
-                Err(e) => {
-                    // Unregister from sync-managed so governor can connect.
+                _ = shutdown_rx.changed() => {
+                    peer_manager.write().await.peer_disconnected(&peer_addr);
                     sync_managed_peers.write().await.remove(&peer_addr);
-                    // Mark as failed (not just disconnected) so PeerManager
-                    // deprioritizes this peer on the next connection attempt.
-                    // This is important after sleep/hibernate where stale peers
-                    // should be avoided in favor of responsive ones.
-                    peer_manager.write().await.peer_failed(&peer_addr);
-                    // Refresh the duplex peer count after a failed sync session.
-                    // peer_failed does not clear the duplex flag directly, but we
-                    // know the connection is gone so count what the manager reports.
-                    {
-                        let pm = peer_manager.read().await;
-                        self.metrics.peers_duplex.store(
-                            pm.duplex_peer_count() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    warn!("Sync error: {e}, will reconnect...");
+                    break;
                 }
             }
 
-            // Brief delay before reconnecting — short enough that a transient
-            // disconnect (e.g., peer restart) is recovered in well under 5 s.
+            // Unregister from sync-managed so governor can connect.
+            sync_managed_peers.write().await.remove(&peer_addr);
+            info!("Peer disconnected, reconnecting...");
+
+            // Brief delay before reconnecting.
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
                 _ = shutdown_rx.changed() => { break; }
@@ -3175,7 +2684,7 @@ mod tests {
     /// The fix wraps them in `tokio::task::block_in_place`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_block_provider_works_inside_async_runtime() {
-        use torsten_network::n2n_server::BlockProvider;
+        use torsten_network::BlockProvider;
         use torsten_storage::ChainDB;
 
         let tmp = tempfile::tempdir().unwrap();
