@@ -1928,21 +1928,40 @@ impl Node {
                     };
 
                     if !actions.is_empty() {
-                        // Dispatch each action through the lifecycle manager.
                         if let Some(ref mut lifecycle) = self.connection_lifecycle {
                             let mut pm = peer_manager.write().await;
-                            for action in actions {
-                                lifecycle.handle_governor_action(action, &mut pm).await;
+
+                            // Process all actions. For Connect actions, immediately
+                            // follow up with Promote (Cold→Warm→Hot atomically).
+                            for action in &actions {
+                                match action {
+                                    torsten_network::peer::governor::GovernorAction::PromoteToWarm(addr) => {
+                                        // Cold→Warm→Hot atomically per peer.
+                                        // Each connect takes ~600ms (TCP+handshake),
+                                        // but we must do it sequentially because
+                                        // lifecycle needs &mut self.
+                                        if let Err(e) = lifecycle.promote_to_warm(*addr, &mut pm).await {
+                                            warn!(%addr, "Cold→Warm failed: {e}");
+                                            pm.peer_failed(addr);
+                                            continue;
+                                        }
+                                        // Immediately promote to Hot on the SAME connection.
+                                        if let Err(e) = lifecycle.promote_to_hot(*addr, &mut pm).await {
+                                            warn!(%addr, "Warm→Hot failed: {e}");
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
 
-                            // CRITICAL: Re-evaluate immediately after completing actions.
-                            // Peers promoted Cold→Warm need to be promoted Warm→Hot
-                            // in the SAME cycle. The Haskell peer's protocolIdleTimeout
-                            // is only 5 seconds — if we wait for the next Governor tick
-                            // (2s later), the peer might close the connection.
-                            let follow_up = governor.compute_actions(&pm.inner);
-                            for action in follow_up {
-                                lifecycle.handle_governor_action(action, &mut pm).await;
+                            // Process non-connect actions.
+                            for action in actions {
+                                match action {
+                                    torsten_network::peer::governor::GovernorAction::PromoteToWarm(_) => {} // already handled
+                                    other => {
+                                        lifecycle.handle_governor_action(other, &mut pm).await;
+                                    }
+                                }
                             }
 
                             pm.recompute_reputations();
