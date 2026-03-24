@@ -864,11 +864,10 @@ impl Node {
         // For a node restarted after syncing, we seed the fragment from the
         // VolatileDB (via ChainDB) so the chain selection has correct context.
         //
-        // We use `blocking_read()` here because `Node::new()` is not async;
-        // no concurrent tasks are running at this point so there is no risk
-        // of deadlock.
+        // Use `try_read()` to avoid blocking in the async runtime.
+        // At this point in startup, no other tasks hold the lock.
         let chain_fragment = {
-            let db = chain_db.blocking_read();
+            let db = chain_db.try_read().expect("ChainDB lock available during startup");
             let immutable_tip = db.get_immutable_tip();
             let anchor = match &immutable_tip.point {
                 Point::Origin => Point::Origin,
