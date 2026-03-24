@@ -270,3 +270,32 @@ pub trait ConnectionMetrics: Send + Sync + 'static {
     /// Called when a connection-level error occurs.
     fn on_error(&self, label: &str);
 }
+
+// ─── Convenience re-exports ───
+// Key types re-exported at crate root for ergonomic imports.
+
+pub use protocol::blockfetch::client::BlockFetchClient;
+pub use protocol::blockfetch::decision::BlockFetchDecision;
+pub use protocol::chainsync::client::{ChainSyncEvent, PipelinedChainSyncClient};
+pub use protocol::chainsync::server::BlockAnnouncement;
+pub use protocol::keepalive::client::KeepAliveClient;
+pub use protocol::keepalive::server::KeepAliveServer;
+pub use protocol::local_state_query::server::QueryHandler;
+pub use protocol::peersharing::client::PeerSharingClient;
+pub use protocol::txsubmission::client::TxSubmissionClient;
+pub use protocol::txsubmission::server::TxSubmissionServer;
+
+pub use peer::manager::{PeerInfo, PeerManager, PeerSource, PeerState};
+pub use peer::{Governor, GovernorConfig, PeerTargets};
+
+pub use connection::manager::ConnectionManagerConfig;
+pub use connection::{ConnectionHandler, ConnectionManager, ConnectionState};
+
+pub use mux::channel::MuxChannel;
+pub use mux::{Direction, Mux};
+
+pub use bearer::tcp::TcpBearer;
+pub use bearer::unix::UnixBearer;
+
+pub use handshake::n2c::N2CVersionData;
+pub use handshake::n2n::N2NVersionData;
