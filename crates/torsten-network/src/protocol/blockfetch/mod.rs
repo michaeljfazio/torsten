@@ -22,6 +22,7 @@
 //! - `MsgBatchDone` = `[5]`
 
 pub mod client;
+pub mod decision;
 pub mod server;
 
 use crate::codec::{self, Point};
