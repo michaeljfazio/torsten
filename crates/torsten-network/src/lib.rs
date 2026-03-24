@@ -9,8 +9,9 @@
 pub mod codec;
 pub mod error;
 
+pub mod bearer;
+
 // Placeholder modules — uncomment as implemented:
-// pub mod bearer;
 // pub mod mux;
 // pub mod handshake;
 // pub mod protocol;
