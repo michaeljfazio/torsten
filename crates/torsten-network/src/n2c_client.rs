@@ -60,7 +60,7 @@ impl N2CClient {
         let handshake_result =
             crate::handshake::run_n2c_handshake_client(&mut handshake_channel, &our_data)
                 .await
-                .map_err(|e| NetworkError::Handshake(e))?;
+                .map_err(NetworkError::Handshake)?;
 
         Ok(Self {
             version: handshake_result.version,
