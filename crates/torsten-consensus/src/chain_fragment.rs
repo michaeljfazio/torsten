@@ -143,6 +143,27 @@ impl ChainFragment {
         &self.headers
     }
 
+    /// Return a reference to the oldest (front) header, or `None` if the
+    /// fragment is empty.
+    ///
+    /// Used by the copy-to-immutable background operation to determine which
+    /// block should be promoted to ImmutableDB when `fragment.len() > k`.
+    pub fn oldest_header(&self) -> Option<&BlockHeader> {
+        self.headers.front()
+    }
+
+    /// Remove and return the oldest (front) header from the fragment.
+    ///
+    /// Called after a block has been successfully copied to ImmutableDB to
+    /// advance the volatile window.  The anchor is NOT updated here — callers
+    /// that need to advance the anchor should update it separately via
+    /// [`ChainFragment::new`] or by reconstructing from the new immutable tip.
+    ///
+    /// Returns `None` if the fragment is already empty.
+    pub fn pop_oldest(&mut self) -> Option<BlockHeader> {
+        self.headers.pop_front()
+    }
+
     // -----------------------------------------------------------------------
     // Mutation
     // -----------------------------------------------------------------------

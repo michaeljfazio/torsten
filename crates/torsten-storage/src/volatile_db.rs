@@ -929,6 +929,22 @@ impl VolatileDB {
         self.blocks.is_empty()
     }
 
+    /// Return `(hash, slot, block_no, prev_hash)` tuples for every block on the
+    /// current selected chain, ordered oldest → newest.
+    ///
+    /// Used by `ChainDB::get_volatile_chain_headers` to build the initial
+    /// `ChainFragment` at node startup without decoding any CBOR.
+    pub fn selected_chain_entries(&self) -> Vec<(Hash32, u64, u64, Hash32)> {
+        self.selected_chain
+            .iter()
+            .filter_map(|hash| {
+                self.blocks
+                    .get(hash)
+                    .map(|blk| (*hash, blk.slot, blk.block_no, blk.prev_hash))
+            })
+            .collect()
+    }
+
     /// Get blocks in slot range [from, to] inclusive.
     pub fn get_blocks_in_slot_range(&self, from_slot: u64, to_slot: u64) -> Vec<(Hash32, &[u8])> {
         let mut result = Vec::new();

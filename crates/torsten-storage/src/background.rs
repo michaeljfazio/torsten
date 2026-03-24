@@ -470,6 +470,53 @@ impl SnapshotScheduler {
         }
     }
 
+    /// Check whether a snapshot *should* be taken at the current block without
+    /// actually triggering the save.
+    ///
+    /// This is a split version of [`maybe_snapshot`] for callers that need to
+    /// release the borrow on the scheduler before calling the (async) save
+    /// function, then call [`record_snapshot_taken`] afterwards.
+    ///
+    /// The block counter is incremented on every call, matching [`maybe_snapshot`].
+    ///
+    /// # Returns
+    ///
+    /// `true` when a snapshot is warranted (epoch boundary, interval reached,
+    /// or shutdown requested).
+    ///
+    /// [`maybe_snapshot`]: SnapshotScheduler::maybe_snapshot
+    /// [`record_snapshot_taken`]: SnapshotScheduler::record_snapshot_taken
+    pub fn maybe_snapshot_check(&mut self, current_epoch: EpochNo, _block_no: BlockNo) -> bool {
+        self.blocks_since_snapshot += 1;
+
+        let epoch_boundary = match self.last_snapshot_epoch {
+            None => true,
+            Some(last) => current_epoch > last,
+        };
+        let interval_reached = self.blocks_since_snapshot >= self.snapshot_interval;
+        let shutdown = self.shutdown_requested;
+
+        epoch_boundary || interval_reached || shutdown
+    }
+
+    /// Record that a snapshot was successfully taken.
+    ///
+    /// Resets the block counter and stores the epoch of the snapshot.
+    /// Call this immediately after the save completes successfully, paired
+    /// with a prior call to [`maybe_snapshot_check`] that returned `true`.
+    ///
+    /// [`maybe_snapshot_check`]: SnapshotScheduler::maybe_snapshot_check
+    pub fn record_snapshot_taken(&mut self, current_epoch: EpochNo) {
+        self.blocks_since_snapshot = 0;
+        self.last_snapshot_epoch = Some(current_epoch);
+        self.shutdown_requested = false;
+        self.snapshots_taken += 1;
+        debug!(
+            snapshots_taken = self.snapshots_taken,
+            "SnapshotScheduler: snapshot recorded (split API)"
+        );
+    }
+
     /// Force a snapshot on the next [`maybe_snapshot`] call regardless of
     /// counters.  Call this when initiating a graceful shutdown.
     ///

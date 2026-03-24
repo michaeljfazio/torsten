@@ -20,6 +20,7 @@ use tokio::signal;
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
+use torsten_consensus::chain_fragment::ChainFragment;
 use torsten_consensus::OuroborosPraos;
 use torsten_ledger::{BlockValidationMode, LedgerState};
 use torsten_mempool::{Mempool, MempoolConfig};
@@ -31,7 +32,8 @@ use torsten_network::{
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_storage::ChainDB;
+use torsten_storage::background::{CopyToImmutable, GcScheduler, SnapshotScheduler};
+use torsten_storage::{ChainDB, ChainSelHandle};
 
 use crate::config::NodeConfig;
 use crate::genesis::{AlonzoGenesis, ByronGenesis, ConwayGenesis, ShelleyGenesis};
@@ -147,6 +149,57 @@ pub struct Node {
     /// the background GSM evaluation task can write state transitions while
     /// the sync pipeline holds a read lock to query `loe_limit()`.
     pub(crate) gsm: Arc<RwLock<crate::gsm::GenesisStateMachine>>,
+    /// Anchored chain fragment representing the volatile portion of the
+    /// selected chain (the last k block headers not yet in ImmutableDB).
+    ///
+    /// Matches Haskell's `AnchoredFragment` — anchored at the immutable tip,
+    /// headers grow as new blocks are adopted.  Used for:
+    /// - ChainSync server: `find_intersect` for downstream peers
+    /// - Background copy-to-immutable: fragment length > k triggers copy
+    /// - Chain selection: comparing candidate chains against the current chain
+    ///
+    /// Protected by `RwLock` so both the sync loop (write) and N2N server
+    /// tasks (read, for intersection finding) can access it concurrently.
+    pub(crate) chain_fragment: Arc<RwLock<ChainFragment>>,
+    /// Chain-selection queue handle.
+    ///
+    /// All blocks (from peers and from the local forger) are submitted
+    /// through this handle.  The background `add_block_runner` task owns
+    /// the receiving end and writes blocks to VolatileDB sequentially,
+    /// avoiding concurrency hazards between storage writes and chain
+    /// selection.  This is Torsten's implementation of Haskell's
+    /// `addBlockAsync` / `addBlockRunner` pattern.
+    ///
+    /// `None` only during the constructor before the runner task is spawned.
+    pub(crate) chain_sel_handle: Option<ChainSelHandle>,
+
+    // ── Phase 5: Background maintenance operations ────────────────────────
+    //
+    // These match Haskell's Background.hs: copy-to-immutable, GC, and
+    // snapshot scheduling.  All three are synchronous value types — they
+    // are called from the main processing loop after each block is applied
+    // (or periodically from a dedicated tick).  Wrapping them in a Mutex
+    // allows the sync loop (`&mut self`) and future ticker tasks (`Arc`) to
+    // share them if needed, but for now only the sync loop touches them.
+    /// Copies the oldest volatile block to ImmutableDB when the fragment
+    /// grows beyond the security parameter k.
+    ///
+    /// Matches Haskell's `copyToImmutableDB` in Background.hs.
+    pub(crate) copy_to_immutable: CopyToImmutable,
+
+    /// Deferred GC for VolatileDB entries after copy-to-immutable.
+    ///
+    /// Entries are scheduled with a 60-second delay (matching Haskell's
+    /// `gcDelay`) and removed on the next `run_pending` call after expiry.
+    /// Matches Haskell's `garbageCollectBlocks` / `GcSchedule`.
+    pub(crate) gc_scheduler: GcScheduler,
+
+    /// Decides when to save LedgerSeq anchor snapshots to disk.
+    ///
+    /// Triggers at epoch boundaries, every N blocks, and on graceful
+    /// shutdown.  Matches Haskell's snapshot policy in Background.hs.
+    pub(crate) bg_snapshot_scheduler: SnapshotScheduler,
+
     /// Number of consecutive peers that returned Origin as the intersection
     /// point while we had a non-trivial ledger tip.
     ///
@@ -651,6 +704,8 @@ impl Node {
         } else {
             OuroborosPraos::new()
         };
+        // Capture security_param before consensus is moved into the Node struct.
+        let consensus_security_param = consensus.security_param;
         info!(
             epoch_len = consensus.epoch_length.0,
             k = consensus.security_param,
@@ -798,6 +853,49 @@ impl Node {
             Arc::new(m)
         };
 
+        // ── Phase 1: Initialize ChainFragment from ImmutableDB tip ──────────
+        //
+        // On startup, the chain fragment represents the volatile window of the
+        // selected chain.  We anchor it at the current ImmutableDB tip and
+        // populate it with any volatile block headers that form a chain from
+        // that tip.  This mirrors Haskell's `openDBInternal` startup step 5.
+        //
+        // For a fresh node (Origin), the fragment is empty with Origin as anchor.
+        // For a node restarted after syncing, we seed the fragment from the
+        // VolatileDB (via ChainDB) so the chain selection has correct context.
+        //
+        // We use `blocking_read()` here because `Node::new()` is not async;
+        // no concurrent tasks are running at this point so there is no risk
+        // of deadlock.
+        let chain_fragment = {
+            let db = chain_db.blocking_read();
+            let immutable_tip = db.get_immutable_tip();
+            let anchor = match &immutable_tip.point {
+                Point::Origin => Point::Origin,
+                Point::Specific(slot, hash) => Point::Specific(*slot, *hash),
+            };
+
+            // Collect volatile block headers to seed the fragment.
+            // We use the ChainDB volatile chain (selected_chain) which is already
+            // ordered from anchor to tip.  Convert to BlockHeader stubs — we only
+            // need slot + hash for the fragment invariant; full headers are available
+            // in VolatileDB if needed.
+            let volatile_headers = db.get_volatile_chain_headers();
+
+            ChainFragment::from_headers(anchor, volatile_headers)
+        };
+
+        // ── Phase 1: Initialize ChainSelHandle ──────────────────────────────
+        //
+        // Create the chain-selection queue.  The runner future is NOT yet
+        // spawned here — `Node::new()` is sync, so we store it and spawn in
+        // `run()` instead.  The handle is stored so the sync loop and forge
+        // path can submit blocks without holding any other locks.
+        let (chain_sel_handle, chain_sel_runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        // Spawn the runner.  `new()` is called from within a tokio runtime
+        // (from main() which is `#[tokio::main]`), so `tokio::spawn` is safe.
+        tokio::spawn(chain_sel_runner);
+
         Ok(Node {
             config: args.config,
             topology: args.topology,
@@ -845,6 +943,19 @@ impl Node {
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
             gsm,
+            chain_fragment: Arc::new(RwLock::new(chain_fragment)),
+            chain_sel_handle: Some(chain_sel_handle),
+
+            // ── Phase 5: Background operations ───────────────────────────────
+            //
+            // The security parameter k is taken from the consensus object,
+            // which was already initialised from the Shelley genesis above.
+            // For fresh nodes without genesis config, consensus defaults to
+            // 2160 (mainnet/preview/preprod all use k=2160).
+            copy_to_immutable: CopyToImmutable::new(consensus_security_param as usize),
+            gc_scheduler: GcScheduler::new(),
+            bg_snapshot_scheduler: SnapshotScheduler::new(),
+
             consecutive_origin_intersections: 0,
         })
     }
@@ -2679,19 +2790,70 @@ impl Node {
             transactions,
         ) {
             Ok((block, cbor)) => {
-                // Store the forged block in ChainDB
-                {
+                // ── Phase 2: Submit forged block via ChainSelQueue ────────────
+                //
+                // Per the Haskell architecture, all blocks — including locally
+                // forged ones — enter the node via the same `addBlock` path.
+                // This means the ChainSelQueue receives the forged block,
+                // writes it to VolatileDB, and (once chain selection is fully
+                // wired in Phase 3) will determine whether the chain should
+                // advance.  For now the runner returns `StoredNotAdopted` or
+                // `AdoptedAsTip`; we treat both as "block is in storage" and
+                // proceed with the ledger apply below.
+                //
+                // If no handle is available (should not happen in practice),
+                // fall back to the direct ChainDB write path.
+                let storage_succeeded = if let Some(ref handle) = self.chain_sel_handle {
+                    // Submit via queue — cbor is moved here.
+                    let result = handle
+                        .submit_block(
+                            *block.hash(),
+                            block.slot(),
+                            block.block_number(),
+                            *block.prev_hash(),
+                            cbor,
+                        )
+                        .await;
+                    match result {
+                        Some(torsten_storage::AddBlockResult::AdoptedAsTip)
+                        | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
+                        | Some(torsten_storage::AddBlockResult::AlreadyKnown) => true,
+                        Some(torsten_storage::AddBlockResult::Invalid(reason)) => {
+                            // The forged block itself was rejected by storage.
+                            // This is highly unusual and indicates a bug — log
+                            // and trace it as `TraceDidntAdoptBlock`.
+                            error!(
+                                slot = next_slot.0,
+                                block = block_number.0,
+                                reason,
+                                "TraceDidntAdoptBlock: forged block rejected by ChainSelQueue"
+                            );
+                            false
+                        }
+                        None => {
+                            // Runner exited — the block was lost. Log and fail.
+                            error!("ChainSelQueue runner exited unexpectedly — forged block not stored");
+                            false
+                        }
+                    }
+                } else {
+                    // No ChainSelHandle (should not happen after Node::new).
+                    // Fall back to direct ChainDB write to preserve correctness.
+                    warn!("No ChainSelHandle available — storing forged block directly (fallback)");
                     let mut db = self.chain_db.write().await;
-                    if let Err(e) = db.add_block(
+                    db.add_block(
                         *block.hash(),
                         block.slot(),
                         block.block_number(),
                         *block.prev_hash(),
                         cbor,
-                    ) {
-                        error!("Failed to store forged block: {e}");
-                        return;
-                    }
+                    )
+                    .is_ok()
+                };
+
+                if !storage_succeeded {
+                    error!("Failed to store forged block — NOT announcing");
+                    return;
                 }
 
                 // Apply to ledger with full validation.
@@ -2708,6 +2870,14 @@ impl Node {
                         );
                         return;
                     }
+                }
+
+                // Update chain fragment with the new forged block header.
+                // This keeps the fragment in sync with the selected chain so
+                // ChainSync servers can find intersects correctly.
+                {
+                    let mut fragment = self.chain_fragment.write().await;
+                    fragment.push(block.header.clone());
                 }
 
                 // Remove confirmed transactions from mempool

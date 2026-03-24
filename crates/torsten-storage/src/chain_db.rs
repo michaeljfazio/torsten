@@ -278,6 +278,73 @@ impl ChainDB {
         }
     }
 
+    /// Get the ImmutableDB tip as a `Tip`.
+    ///
+    /// Returns `Tip::origin()` when the ImmutableDB is empty (no blocks have
+    /// been finalised yet).  Used by the `ChainFragment` initialisation at
+    /// startup to establish the anchor point of the volatile chain window.
+    pub fn get_immutable_tip(&self) -> Tip {
+        match self.immutable_tip {
+            Some((slot, hash, block_no)) => Tip {
+                point: Point::Specific(slot, hash),
+                block_number: block_no,
+            },
+            None => Tip::origin(),
+        }
+    }
+
+    /// Return minimal `BlockHeader` stubs for the current volatile selected
+    /// chain, ordered oldest → newest (same order as the selected chain).
+    ///
+    /// Only the fields required by `ChainFragment` are populated:
+    /// - `header_hash` — the block hash
+    /// - `prev_hash`   — the predecessor hash
+    /// - `slot`        — absolute slot number
+    /// - `block_number`— height
+    ///
+    /// All other `BlockHeader` fields (keys, VRF output, KES sig, etc.) are
+    /// zeroed.  Callers that need the full header should fetch it from
+    /// VolatileDB via `get_block`.
+    pub fn get_volatile_chain_headers(&self) -> Vec<torsten_primitives::block::BlockHeader> {
+        // Walk the selected chain from oldest to newest, building header stubs
+        // from the VolatileBlock metadata (no CBOR decode needed).
+        self.volatile
+            .selected_chain_entries()
+            .into_iter()
+            .map(|(hash, slot, block_no, prev_hash)| {
+                torsten_primitives::block::BlockHeader {
+                    header_hash: hash,
+                    prev_hash,
+                    slot: torsten_primitives::time::SlotNo(slot),
+                    block_number: torsten_primitives::time::BlockNo(block_no),
+                    // Remaining fields are not needed for ChainFragment and
+                    // are zeroed / empty.
+                    issuer_vkey: Vec::new(),
+                    vrf_vkey: Vec::new(),
+                    vrf_result: torsten_primitives::block::VrfOutput {
+                        output: Vec::new(),
+                        proof: Vec::new(),
+                    },
+                    epoch_nonce: torsten_primitives::hash::Hash32::ZERO,
+                    body_size: 0,
+                    body_hash: torsten_primitives::hash::Hash32::ZERO,
+                    operational_cert: torsten_primitives::block::OperationalCert {
+                        hot_vkey: Vec::new(),
+                        sequence_number: 0,
+                        kes_period: 0,
+                        sigma: Vec::new(),
+                    },
+                    protocol_version: torsten_primitives::block::ProtocolVersion {
+                        major: 0,
+                        minor: 0,
+                    },
+                    kes_signature: Vec::new(),
+                    nonce_vrf_output: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
     /// Check if a block exists by hash.
     pub fn has_block(&self, hash: &BlockHeaderHash) -> bool {
         self.volatile.has_block(hash) || self.immutable.has_block(hash)

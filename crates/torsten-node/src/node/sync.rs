@@ -277,6 +277,20 @@ impl Node {
     /// Uses sequential chunk iteration (same as startup replay) for high
     /// throughput — `get_next_block_after_slot()` is too slow for millions
     /// of blocks because it scans chunk metadata on every call.
+    ///
+    /// # Deprecation
+    ///
+    /// This function represents the "genesis replay" path that the Haskell
+    /// architecture explicitly avoids.  In the new architecture (Subsystems
+    /// 1–6), rollback is handled by `LedgerSeq::rollback()` which is O(k)
+    /// and never requires replaying from genesis.  This function will be
+    /// removed once `startup::recover_ledger_seq()` is fully wired in as the
+    /// primary recovery path.
+    ///
+    /// TODO(subsystem-4): Replace callers with `LedgerSeq::rollback()` via
+    /// the new startup recovery sequence.  Track in the migration plan under
+    /// "Phase 5: Remove old fork recovery".
+    #[allow(deprecated)]
     async fn reset_ledger_and_replay(&self, target_slot: u64) {
         {
             let mut ls = self.ledger_state.write().await;
@@ -392,6 +406,16 @@ impl Node {
 
     /// Handle a chain rollback: roll back ChainDB and restore ledger UTxO state
     /// to the rollback point.
+    ///
+    /// # Future direction (Phase 4 migration)
+    ///
+    /// Once `LedgerSeq` is fully integrated as the authoritative ledger state
+    /// store, rollback will be delegated to `LedgerSeq::rollback(n)`.  That
+    /// path is O(k) by design and never triggers a genesis replay.  The
+    /// current DiffSeq fast path is the precursor to that design.
+    ///
+    /// TODO(subsystem-4): Delegate to `LedgerSeq::rollback()` once the seq is
+    /// maintained as the primary ledger state representation.
     ///
     /// # Fast path — diff-based rollback
     ///
@@ -694,6 +718,19 @@ impl Node {
             }
         }
 
+        // ── Phase 4: Update chain fragment on rollback ───────────────────────
+        //
+        // Roll back the chain fragment to the rollback point so that the
+        // fragment stays in sync with the ChainDB.  Downstream ChainSync peers
+        // that are following our chain will be sent a MsgRollBackward by the
+        // `notify_rollback` call below; the fragment must reflect the new tip
+        // before that happens so that subsequent `find_intersect` queries
+        // return correct results.
+        {
+            let mut fragment = self.chain_fragment.write().await;
+            fragment.rollback_to(rollback_point);
+        }
+
         // 4. Re-validate mempool transactions against the rolled-back ledger state.
         // Drain all pending txs, then re-validate each against the updated UTxO set.
         let pending_txs = self.mempool.drain_all();
@@ -906,10 +943,59 @@ impl Node {
             return 0;
         }
 
-        // Store blocks to ChainDB FIRST, then apply to ledger.
-        // This ordering ensures the ledger never advances past what's persisted in storage,
-        // preventing state divergence if storage fails.
-        {
+        // ── Phase 3: Store blocks to ChainDB FIRST, then apply to ledger ───
+        //
+        // At tip (strict mode), submit each block through the ChainSelQueue.
+        // The queue writes to VolatileDB sequentially, matching the Haskell
+        // `addBlockRunner` pattern.  For bulk sync (non-strict), keep the
+        // existing batch write path for performance — the queue would be too
+        // slow for 4M blocks during fast sync.
+        //
+        // In both cases, the ledger apply continues directly below (chain
+        // selection is not yet fully live in the queue runner), and the
+        // chain fragment is updated for each successfully stored block.
+        if strict {
+            // Live blocks at tip: route through ChainSelQueue for
+            // Haskell-compatible sequential processing.
+            if let Some(ref handle) = self.chain_sel_handle {
+                for (hash, slot, block_no, prev_hash, cbor) in db_batch {
+                    match handle
+                        .submit_block(hash, slot, block_no, prev_hash, cbor)
+                        .await
+                    {
+                        Some(torsten_storage::AddBlockResult::AdoptedAsTip)
+                        | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
+                        | Some(torsten_storage::AddBlockResult::AlreadyKnown) => {
+                            // Block stored — proceed to ledger apply below.
+                        }
+                        Some(torsten_storage::AddBlockResult::Invalid(reason)) => {
+                            error!(
+                                slot = slot.0,
+                                reason,
+                                "FATAL: ChainSelQueue rejected live block — halting to prevent divergence"
+                            );
+                            return 0;
+                        }
+                        None => {
+                            error!("FATAL: ChainSelQueue runner exited unexpectedly");
+                            return 0;
+                        }
+                    }
+                }
+            } else {
+                // Fallback: no handle, use batch write.
+                let mut db = self.chain_db.write().await;
+                if let Err(e) = db.add_blocks_batch(db_batch) {
+                    error!(
+                        "FATAL: Failed to store block batch: {e} — halting to prevent state divergence"
+                    );
+                    return 0;
+                }
+            }
+        } else {
+            // Bulk sync: keep the fast batch path.  ChainSelQueue overhead
+            // (one round-trip per block through an async channel) would
+            // reduce throughput from ~10K blk/s to ~1K blk/s or worse.
             let mut db = self.chain_db.write().await;
             if let Err(e) = db.add_blocks_batch(db_batch) {
                 error!(
@@ -1129,6 +1215,123 @@ impl Node {
                     break;
                 }
                 applied_count += 1;
+            }
+        }
+
+        // ── Phase 3: Update chain fragment for all applied blocks ────────────
+        //
+        // After the ledger apply loop, update the chain fragment with the
+        // headers of blocks that were successfully applied.  This keeps the
+        // fragment in sync with the selected chain so:
+        //   1. ChainSync servers can find correct intersection points for
+        //      downstream peers.
+        //   2. The background copy-to-immutable can compare fragment.length()
+        //      against k to decide when to flush to ImmutableDB.
+        //
+        // We use `applied_count` to only add headers for blocks that were
+        // actually applied to the ledger, not the full batch (some may have
+        // been skipped due to LoE or failed applies).
+        if applied_count > 0 {
+            let mut fragment = self.chain_fragment.write().await;
+            let skip = blocks.len().saturating_sub(applied_count as usize);
+            for block in blocks.iter().skip(skip) {
+                fragment.push(block.header.clone());
+            }
+        }
+
+        // ── Phase 5: Background maintenance operations ────────────────────────
+        //
+        // After updating the fragment, run the three background operations
+        // that keep storage healthy.  These mirror Haskell's Background.hs:
+        //
+        // 1. copy_to_immutable — if fragment.len() > k, copy the oldest
+        //    volatile block to ImmutableDB and advance the ledger anchor.
+        // 2. gc_scheduler — remove expired volatile entries (60s delay).
+        // 3. bg_snapshot_scheduler — take a ledger snapshot if warranted.
+        //
+        // We run these for EVERY batch (not just at tip) so the ImmutableDB
+        // advances steadily during bulk sync and the GC queue drains promptly.
+        // The copy-to-immutable check is O(1) (compare two integers) so the
+        // overhead is negligible even during 10K blk/s bulk sync.
+        if applied_count > 0 {
+            // --- copy-to-immutable & GC ---
+            // Get fragment metadata (oldest hash/slot/block_no) BEFORE
+            // acquiring the ChainDB write lock, to avoid holding two locks.
+            let fragment_info = {
+                let frag = self.chain_fragment.read().await;
+                if frag.length() > 0 {
+                    // Oldest header (front of the deque)
+                    frag.oldest_header()
+                        .map(|h| (frag.length(), h.header_hash, h.slot, h.block_number))
+                } else {
+                    None
+                }
+            };
+
+            if let Some((frag_len, oldest_hash, oldest_slot, oldest_block_no)) = fragment_info {
+                let now = std::time::Instant::now();
+
+                // Run copy-to-immutable + GC under a single ChainDB write lock.
+                let copied = {
+                    let mut db = self.chain_db.write().await;
+                    // copy_to_immutable: moves oldest block if frag_len > k.
+                    let copied = self
+                        .copy_to_immutable
+                        .run_once(
+                            &mut db,
+                            frag_len,
+                            oldest_hash,
+                            oldest_slot,
+                            oldest_block_no,
+                            &mut |_slot, _hash, _block_no| {
+                                // TODO(subsystem-4): advance LedgerSeq anchor here.
+                                // For now this is a no-op; the existing flush_to_immutable
+                                // path handles immutable promotion.
+                            },
+                        )
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "background: copy-to-immutable failed");
+                            None
+                        });
+
+                    // gc_scheduler: remove blocks past their 60s GC delay.
+                    self.gc_scheduler.run_pending(&mut db, now);
+
+                    copied
+                };
+
+                // If a block was copied, schedule it for GC after GC_DELAY.
+                if let Some((gc_slot, gc_hash)) = copied {
+                    self.gc_scheduler.schedule(gc_slot, gc_hash, now);
+                    // The fragment's oldest header was promoted — pop it.
+                    let mut frag = self.chain_fragment.write().await;
+                    frag.pop_oldest();
+                }
+            }
+
+            // --- snapshot scheduler ---
+            // Check whether a snapshot should be taken.  Use the last applied
+            // block's epoch number to detect epoch-boundary triggers.
+            let last_applied = blocks.iter().rev().take(applied_count as usize).next();
+            if let Some(last_block) = last_applied {
+                let current_epoch = {
+                    let ls = self.ledger_state.read().await;
+                    ls.epoch
+                };
+                let block_no = last_block.block_number();
+                // Clone self.bg_snapshot_scheduler to satisfy borrow checker
+                // (can't have mut borrow of self.bg_snapshot_scheduler while
+                //  also borrowing self.save_ledger_snapshot).  Use a flag
+                // pattern to avoid the double-borrow.
+                let should_snapshot = {
+                    self.bg_snapshot_scheduler
+                        .maybe_snapshot_check(current_epoch, block_no)
+                };
+                if should_snapshot {
+                    self.save_ledger_snapshot().await;
+                    self.bg_snapshot_scheduler
+                        .record_snapshot_taken(current_epoch);
+                }
             }
         }
 
