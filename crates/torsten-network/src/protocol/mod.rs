@@ -14,9 +14,10 @@ pub mod keepalive;
 pub mod peersharing;
 pub mod txsubmission;
 
+pub mod local_chainsync;
+pub mod local_tx_submission;
+
 // Future protocol modules:
-// pub mod local_chainsync;
-// pub mod local_tx_submission;
 // pub mod local_state_query;
 // pub mod local_tx_monitor;
 
