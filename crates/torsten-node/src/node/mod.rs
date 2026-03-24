@@ -11,6 +11,8 @@
 pub(crate) mod epoch;
 pub(crate) mod n2c_query;
 pub(crate) mod networking;
+#[allow(dead_code)] // Consumed by connection lifecycle manager (Task 2)
+pub(crate) mod peer_connection;
 pub(crate) mod query;
 pub(crate) mod serve;
 pub(crate) mod sync;
