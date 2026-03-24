@@ -3,7 +3,9 @@
 use tracing::debug;
 
 use super::parse_credential_set;
-use super::types::{LedgerPeerEntry, NodeStateSnapshot, PoolRewardInfo, QueryResult};
+use crate::node::n2c_query::types::{
+    LedgerPeerEntry, NodeStateSnapshot, PoolRewardInfo, QueryResult,
+};
 
 /// Handle GetFilteredDelegationsAndRewardAccounts (tag 10).
 ///
@@ -265,12 +267,14 @@ pub(crate) fn handle_reward_info_pools(state: &NodeStateSnapshot) -> QueryResult
     let distributable = total_rewards_pot.saturating_sub(treasury_tax);
 
     // Build pool params lookup for cost/margin
-    let pool_params_map: std::collections::HashMap<&[u8], &super::types::PoolParamsSnapshot> =
-        state
-            .pool_params_entries
-            .iter()
-            .map(|pp| (pp.pool_id.as_slice(), pp))
-            .collect();
+    let pool_params_map: std::collections::HashMap<
+        &[u8],
+        &crate::node::n2c_query::types::PoolParamsSnapshot,
+    > = state
+        .pool_params_entries
+        .iter()
+        .map(|pp| (pp.pool_id.as_slice(), pp))
+        .collect();
 
     let mut entries = Vec::new();
     for pool in &state.stake_pools {
@@ -415,10 +419,10 @@ fn parse_pool_id_set(decoder: &mut minicbor::Decoder<'_>) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::types::{
+    use super::*;
+    use crate::node::n2c_query::types::{
         NodeStateSnapshot, PoolParamsSnapshot, ProtocolParamsSnapshot, StakePoolSnapshot,
     };
-    use super::*;
 
     fn make_state_with_pools() -> NodeStateSnapshot {
         // total_active_stake must include ALL delegated stake (including orphaned
@@ -604,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_ledger_peer_snapshot_with_relays() {
-        use super::types::RelaySnapshot;
+        use crate::node::n2c_query::types::RelaySnapshot;
         let mut state = make_state_with_pools();
         state.pool_params_entries[0].relays = vec![RelaySnapshot::SingleHostName {
             port: Some(3001),
@@ -691,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_filtered_delegations_no_filter() {
-        use super::types::StakeAddressSnapshot;
+        use crate::node::n2c_query::types::StakeAddressSnapshot;
         let state = NodeStateSnapshot {
             stake_addresses: vec![
                 StakeAddressSnapshot {
@@ -718,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_filtered_delegations_filtered() {
-        use super::types::StakeAddressSnapshot;
+        use crate::node::n2c_query::types::StakeAddressSnapshot;
         let state = NodeStateSnapshot {
             stake_addresses: vec![
                 StakeAddressSnapshot {
@@ -861,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_stake_snapshots() {
-        use super::types::{PoolStakeSnapshotEntry, StakeSnapshotsResult};
+        use crate::node::n2c_query::types::{PoolStakeSnapshotEntry, StakeSnapshotsResult};
         let state = NodeStateSnapshot {
             stake_snapshots: StakeSnapshotsResult {
                 pools: vec![PoolStakeSnapshotEntry {
@@ -921,7 +925,7 @@ mod tests {
 
     #[test]
     fn test_stake_deleg_deposits_no_filter() {
-        use super::types::StakeDelegDepositEntry;
+        use crate::node::n2c_query::types::StakeDelegDepositEntry;
         let state = NodeStateSnapshot {
             stake_deleg_deposits: vec![
                 StakeDelegDepositEntry {
@@ -948,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_stake_deleg_deposits_filtered() {
-        use super::types::StakeDelegDepositEntry;
+        use crate::node::n2c_query::types::StakeDelegDepositEntry;
         let state = NodeStateSnapshot {
             stake_deleg_deposits: vec![
                 StakeDelegDepositEntry {
@@ -1050,7 +1054,7 @@ mod tests {
 
     #[test]
     fn test_pool_default_vote_with_delegations() {
-        use super::types::VoteDelegateeEntry;
+        use crate::node::n2c_query::types::VoteDelegateeEntry;
         let mut state = make_state_with_pools();
         state.pool_params_entries[0].owners = vec![vec![10u8; 28]];
         state.pool_params_entries[1].owners = vec![vec![20u8; 28]];

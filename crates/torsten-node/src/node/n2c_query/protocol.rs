@@ -3,7 +3,7 @@
 use num_bigint::BigInt;
 use tracing::debug;
 
-use super::types::{
+use crate::node::n2c_query::types::{
     GenesisConfigSnapshot, NodeStateSnapshot, NonMyopicRewardEntry, QueryResult,
     ShelleyPParamsSnapshot,
 };
@@ -234,12 +234,14 @@ pub fn handle_non_myopic_rewards(
     let n_opt = state.protocol_params.n_opt.max(1);
 
     // --- pool-params lookup: pool_id -> (pledge, cost, margin_num, margin_den) ---
-    let pool_params_map: std::collections::HashMap<&[u8], &super::types::PoolParamsSnapshot> =
-        state
-            .pool_params_entries
-            .iter()
-            .map(|pp| (pp.pool_id.as_slice(), pp))
-            .collect();
+    let pool_params_map: std::collections::HashMap<
+        &[u8],
+        &crate::node::n2c_query::types::PoolParamsSnapshot,
+    > = state
+        .pool_params_entries
+        .iter()
+        .map(|pp| (pp.pool_id.as_slice(), pp))
+        .collect();
 
     // --- compute per-amount results ---
     let mut result = Vec::new();
@@ -497,8 +499,10 @@ pub(crate) fn handle_reward_provenance(state: &NodeStateSnapshot) -> QueryResult
 
 #[cfg(test)]
 mod tests {
-    use super::types::{NodeStateSnapshot, ProtocolParamsSnapshot, StakePoolSnapshot};
     use super::*;
+    use crate::node::n2c_query::types::{
+        NodeStateSnapshot, ProtocolParamsSnapshot, StakePoolSnapshot,
+    };
 
     fn make_state() -> NodeStateSnapshot {
         NodeStateSnapshot {
@@ -666,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_genesis_config_from_snapshot() {
-        use super::types::GenesisConfigSnapshot;
+        use crate::node::n2c_query::types::GenesisConfigSnapshot;
         let state = NodeStateSnapshot {
             genesis_config: Some(GenesisConfigSnapshot {
                 system_start: "2022-04-01T00:00:00Z".to_string(),
@@ -681,7 +685,7 @@ mod tests {
                 slot_length_micros: 1_000_000,
                 update_quorum: 5,
                 max_lovelace_supply: 45_000_000_000_000_000,
-                protocol_params: super::types::ShelleyPParamsSnapshot {
+                protocol_params: crate::node::n2c_query::types::ShelleyPParamsSnapshot {
                     min_fee_a: 44,
                     min_fee_b: 155381,
                     max_block_body_size: 90112,
@@ -767,7 +771,7 @@ mod tests {
     /// treasury = floor(2/10 * 2_700_000_000) = 540_000_000
     /// reward_pot = 2_700_000_000 - 540_000_000 = 2_160_000_000
     fn make_nm_state() -> NodeStateSnapshot {
-        use super::types::PoolParamsSnapshot;
+        use crate::node::n2c_query::types::PoolParamsSnapshot;
         NodeStateSnapshot {
             max_lovelace_supply: 1_000_000_000_000,
             reserves: 900_000_000_000,
@@ -944,7 +948,7 @@ mod tests {
         //   member_reward = floor((210_000 - 1_000) * (1-0) * 10_000 / 210_000)
         //                 = floor(209_000 * 10_000 / 210_000)
         //                 = floor(9_952.38...) = 9_952
-        use super::types::PoolParamsSnapshot;
+        use crate::node::n2c_query::types::PoolParamsSnapshot;
         let state = NodeStateSnapshot {
             max_lovelace_supply: 1_000_000,
             reserves: 500_000,
@@ -1022,7 +1026,7 @@ mod tests {
     fn test_non_myopic_rewards_pool_without_params_excluded() {
         // A pool that has stake but no pool_params_entries entry should be
         // silently excluded from the result (we cannot compute its reward).
-        use super::types::PoolParamsSnapshot;
+        use crate::node::n2c_query::types::PoolParamsSnapshot;
         let state = NodeStateSnapshot {
             max_lovelace_supply: 1_000_000,
             reserves: 500_000,

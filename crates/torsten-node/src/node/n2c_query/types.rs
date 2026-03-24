@@ -955,30 +955,6 @@ pub type MultiAssetSnapshot = Vec<(Vec<u8>, Vec<(Vec<u8>, u64)>)>;
 /// Snapshot of a UTxO entry for query results.
 ///
 /// Encodes as Cardano wire format: Map<[tx_hash, index], output>
-/// where output = {0: address_bytes, 1: value, 2: datum_option, 3: script_ref}
-#[derive(Debug, Clone)]
-pub struct UtxoSnapshot {
-    pub tx_hash: Vec<u8>,
-    pub output_index: u32,
-    /// Raw address bytes for CBOR encoding
-    pub address_bytes: Vec<u8>,
-    pub lovelace: u64,
-    pub multi_asset: MultiAssetSnapshot,
-    /// Datum hash (32 bytes) if present
-    pub datum_hash: Option<Vec<u8>>,
-    /// Raw CBOR of the transaction output (for pass-through if available)
-    pub raw_cbor: Option<Vec<u8>>,
-}
-
-/// Trait for providing UTxO query access to the query handler.
-/// Implemented by the node to give the query handler on-demand access
-/// to the UTxO set without coupling to the ledger crate.
-pub trait UtxoQueryProvider: Send + Sync {
-    /// Look up UTxOs at a specific address (raw bytes)
-    fn utxos_at_address_bytes(&self, addr_bytes: &[u8]) -> Vec<UtxoSnapshot>;
-
-    /// Look up UTxOs by transaction input references (tx_hash, output_index pairs)
-    fn utxos_by_tx_inputs(&self, _inputs: &[(Vec<u8>, u32)]) -> Vec<UtxoSnapshot> {
-        vec![] // Default: no results
-    }
-}
+// Re-export UtxoSnapshot and UtxoQueryProvider from the network crate.
+// These are the canonical definitions — no duplication.
+pub use torsten_network::{UtxoQueryProvider, UtxoSnapshot};

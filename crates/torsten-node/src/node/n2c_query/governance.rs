@@ -3,7 +3,7 @@
 use tracing::debug;
 
 use super::parse_credential_set;
-use super::types::{GovStateSnapshot, NodeStateSnapshot, QueryResult};
+use crate::node::n2c_query::types::{GovStateSnapshot, NodeStateSnapshot, QueryResult};
 
 /// Handle GetConstitution (tag 23).
 pub(crate) fn handle_constitution(state: &NodeStateSnapshot) -> QueryResult {
@@ -86,7 +86,7 @@ fn parse_gov_action_id_set(decoder: &mut minicbor::Decoder<'_>) -> Vec<(Vec<u8>,
 pub(crate) fn handle_ratify_state(state: &NodeStateSnapshot) -> QueryResult {
     debug!("Query: GetRatifyState");
     // Build a GovStateSnapshot from NodeStateSnapshot fields for EnactState encoding.
-    let gov = super::types::GovStateSnapshot {
+    let gov = crate::node::n2c_query::types::GovStateSnapshot {
         proposals: state.governance_proposals.clone(),
         committee: state.committee.clone(),
         constitution_url: state.constitution_url.clone(),
@@ -202,8 +202,10 @@ pub(crate) fn handle_drep_delegations(
 
 #[cfg(test)]
 mod tests {
-    use super::types::{DRepDelegationEntry, GovActionId, NodeStateSnapshot, ProposalSnapshot};
     use super::*;
+    use crate::node::n2c_query::types::{
+        DRepDelegationEntry, GovActionId, NodeStateSnapshot, ProposalSnapshot,
+    };
 
     fn make_state_with_proposals() -> NodeStateSnapshot {
         NodeStateSnapshot {
@@ -444,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_drep_state_no_filter() {
-        use super::types::DRepSnapshot;
+        use crate::node::n2c_query::types::DRepSnapshot;
         let state = NodeStateSnapshot {
             drep_entries: vec![
                 DRepSnapshot {
@@ -488,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_drep_state_filtered() {
-        use super::types::DRepSnapshot;
+        use crate::node::n2c_query::types::DRepSnapshot;
         let state = NodeStateSnapshot {
             drep_entries: vec![
                 DRepSnapshot {
@@ -536,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_committee_state() {
-        use super::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
+        use crate::node::n2c_query::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
         let state = NodeStateSnapshot {
             committee: CommitteeSnapshot {
                 members: vec![CommitteeMemberSnapshot {
@@ -574,7 +576,7 @@ mod tests {
     /// `hot_credential_type` value the node placed in the snapshot.
     #[test]
     fn test_committee_state_script_hot_credential_type_propagated() {
-        use super::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
+        use crate::node::n2c_query::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
 
         // Member 1: key cold + script hot (the fix: hot_credential_type = 1)
         // Member 2: key cold + key hot (hot_credential_type = 0, unchanged)
@@ -636,7 +638,7 @@ mod tests {
     /// and hot_credential must be None (no hot key to report).
     #[test]
     fn test_committee_state_resigned_member_no_hot_type() {
-        use super::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
+        use crate::node::n2c_query::types::{CommitteeMemberSnapshot, CommitteeSnapshot};
 
         let state = NodeStateSnapshot {
             committee: CommitteeSnapshot {
@@ -669,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_drep_stake_distr() {
-        use super::types::DRepStakeEntry;
+        use crate::node::n2c_query::types::DRepStakeEntry;
         let state = NodeStateSnapshot {
             drep_stake_distr: vec![
                 DRepStakeEntry {
@@ -698,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_filtered_vote_delegatees_no_filter() {
-        use super::types::VoteDelegateeEntry;
+        use crate::node::n2c_query::types::VoteDelegateeEntry;
         let state = NodeStateSnapshot {
             vote_delegatees: vec![
                 VoteDelegateeEntry {
@@ -735,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_filtered_vote_delegatees_filtered() {
-        use super::types::VoteDelegateeEntry;
+        use crate::node::n2c_query::types::VoteDelegateeEntry;
         let state = NodeStateSnapshot {
             vote_delegatees: vec![
                 VoteDelegateeEntry {
