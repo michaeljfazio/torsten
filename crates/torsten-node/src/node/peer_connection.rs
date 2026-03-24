@@ -91,19 +91,23 @@ pub struct PeerConnection {
     // Created during mux setup, taken when protocol tasks start.
     // `None` means the channel is currently in use by a running task.
     /// ChainSync channel (protocol 2, InitiatorDir for outbound connections).
-    pub chainsync_channel: Option<MuxChannel>,
+    pub(crate) chainsync_channel: Option<MuxChannel>,
 
     /// BlockFetch channel (protocol 3, InitiatorDir for outbound connections).
-    pub blockfetch_channel: Option<MuxChannel>,
+    pub(crate) blockfetch_channel: Option<MuxChannel>,
 
     /// TxSubmission2 channel (protocol 4, InitiatorDir for outbound connections).
-    pub txsubmission_channel: Option<MuxChannel>,
+    pub(crate) txsubmission_channel: Option<MuxChannel>,
 
     /// KeepAlive channel (protocol 8, InitiatorDir for outbound connections).
-    pub keepalive_channel: Option<MuxChannel>,
+    pub(crate) keepalive_channel: Option<MuxChannel>,
 
-    /// PeerSharing channel (protocol 10, InitiatorDir for outbound connections).
-    pub peersharing_channel: Option<MuxChannel>,
+    /// PeerSharing channel (protocol 10). Reserved for future use.
+    /// In Haskell, PeerSharing responder starts on-demand when the remote peer
+    /// sends a MsgShareRequest. The initiator sends requests periodically from
+    /// the Governor. Currently subscribed but no task is spawned for it —
+    /// PeerSharing integration is tracked separately.
+    pub(crate) peersharing_channel: Option<MuxChannel>,
 
     // ── Mux lifecycle ──
     /// Handle to the spawned mux task. When this completes, the connection is dead.
@@ -448,8 +452,11 @@ impl PeerConnection {
         }
 
         // Wait for graceful shutdown with timeout.
+        // Get abort handles BEFORE moving JoinHandles into the timeout future,
+        // so we can forcibly abort tasks that don't stop within the timeout.
         let drain = std::mem::take(tasks);
         for (handle, _) in drain {
+            let abort_handle = handle.abort_handle();
             match tokio::time::timeout(PROTOCOL_SHUTDOWN_TIMEOUT, handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
@@ -457,13 +464,9 @@ impl PeerConnection {
                     warn!(%addr, label, error = %e, "protocol task join error");
                 }
                 Err(_) => {
-                    // Timeout expired — task did not stop gracefully. Already consumed by timeout.
+                    // Timeout expired — forcibly abort the task.
                     warn!(%addr, label, "protocol task did not stop within timeout, aborting");
-                    // The handle was moved into the timeout future. If the timeout fired,
-                    // the JoinHandle is dropped, which does NOT abort. We cannot abort here
-                    // since we consumed the handle. In practice, the task's cancellation
-                    // token is already signalled and the mux channel closure will cause
-                    // the task to exit shortly.
+                    abort_handle.abort();
                 }
             }
         }
