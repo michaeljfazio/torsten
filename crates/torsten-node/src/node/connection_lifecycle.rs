@@ -549,19 +549,23 @@ impl ConnectionLifecycleManager {
     /// In Haskell, KeepAlive uses a 90-second interval and the Governor
     /// monitors RTT measurements from responses.
     fn make_keepalive_task(&self) -> ProtocolTaskFn {
-        Box::new(move |_channel, cancel| {
+        Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // Placeholder: KeepAlive protocol logic will be implemented in
-                // the protocol integration phase. For now, just wait for cancellation
-                // to keep the task alive.
+                // KeepAlive client: sends periodic pings with RTT measurement.
+                // First ping goes out immediately — critical for keeping the
+                // connection alive. The Haskell peer's protocolIdleTimeout is
+                // 5 seconds, so we must show activity promptly.
                 //
-                // Real implementation will:
-                // 1. Send MsgKeepAlive with a random cookie every 90 seconds
-                // 2. Wait for MsgKeepAliveResponse with matching cookie
-                // 3. Measure RTT and report to peer manager
-                // 4. Detect timeout (no response within interval) as peer failure
-                cancel.cancelled().await;
-                debug!("keepalive task cancelled");
+                // Haskell uses a 97-second client timeout, 60-second server timeout.
+                // We use 30-second ping interval to stay well within limits.
+                let client = torsten_network::KeepAliveClient::new(
+                    std::time::Duration::from_secs(30),
+                    cancel,
+                );
+                match client.run(&mut channel).await {
+                    Ok(_rtt) => debug!("keepalive task completed"),
+                    Err(e) => debug!("keepalive error: {e}"),
+                }
             })
         })
     }
@@ -638,16 +642,31 @@ impl ConnectionLifecycleManager {
     ///
     /// Real implementation will be provided in a later task.
     fn make_txsubmission_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
-        Box::new(move |_channel, cancel| {
+        Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // Placeholder: TxSubmission2 protocol logic will be implemented later.
+                // TxSubmission2 protocol: MUST send MsgInit immediately.
                 //
-                // Real implementation will:
-                // 1. Send MsgInit to the server
-                // 2. Respond to MsgRequestTxIds with tx IDs from our mempool
-                // 3. Respond to MsgRequestTxs with full tx bodies
-                // 4. Handle MsgDone when the server is finished
-                info!(%addr, "txsubmission2 task started (placeholder)");
+                // The Haskell peer expects MsgInit (tag 6) as the first message
+                // on the TxSubmission2 channel. Without it, the peer's responder
+                // never starts and the connection may be closed for inactivity.
+                //
+                // After MsgInit, we enter a loop responding to server requests
+                // for tx IDs and tx bodies from our mempool.
+                use torsten_network::protocol::txsubmission::{
+                    encode_message, TxSubmissionMessage,
+                };
+
+                // Send MsgInit immediately
+                let init = encode_message(&TxSubmissionMessage::MsgInit);
+                if let Err(e) = channel.send(init).await {
+                    debug!(%addr, "txsubmission2: failed to send MsgInit: {e}");
+                    return;
+                }
+                debug!(%addr, "txsubmission2: MsgInit sent");
+
+                // Wait for cancellation — full tx relay logic will be implemented
+                // in a follow-up task. For now, keeping the channel open with
+                // MsgInit sent is sufficient to prevent peer disconnection.
                 cancel.cancelled().await;
                 debug!(%addr, "txsubmission2 task cancelled");
             })
