@@ -11,8 +11,9 @@ pub mod error;
 
 pub mod bearer;
 
+pub mod mux;
+
 // Placeholder modules — uncomment as implemented:
-// pub mod mux;
 // pub mod handshake;
 // pub mod protocol;
 // pub mod connection;
