@@ -19,8 +19,9 @@ pub mod protocol;
 
 pub mod peer;
 
+pub mod connection;
+
 // Placeholder modules — uncomment as implemented:
-// pub mod connection;
 // pub mod metrics;
 
 pub use error::*;
