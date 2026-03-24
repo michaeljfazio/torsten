@@ -1747,7 +1747,7 @@ impl Node {
     pub async fn chain_sync_loop(
         &mut self,
         chainsync_channel: &mut torsten_network::MuxChannel,
-        blockfetch_channel: &mut torsten_network::MuxChannel,
+        blockfetch_channel: torsten_network::MuxChannel,
         shutdown_rx: watch::Receiver<bool>,
         peer_addr: std::net::SocketAddr,
     ) -> Result<()> {
@@ -2099,41 +2099,158 @@ impl Node {
         let byron_epoch_length = self.byron_epoch_length;
         let mut shutdown_watch = shutdown_rx.clone();
 
+        // ── Spawn concurrent BlockFetch worker task ─────────────────────
+        //
+        // BlockFetch runs on a separate tokio task with its own MuxChannel.
+        // The sync loop sends (from_point, to_point) range requests through
+        // fetch_request_tx, and the worker sends decoded blocks back through
+        // fetch_result_tx. This allows ChainSync to keep pipelining
+        // MsgRequestNext while BlockFetch downloads full block bodies,
+        // preventing the peer's ChainSync server from timing out.
+        let (fetch_request_tx, mut fetch_request_rx) =
+            tokio::sync::mpsc::channel::<Vec<(CodecPoint, CodecPoint)>>(32);
+        let (fetch_result_tx, mut fetch_result_rx) =
+            tokio::sync::mpsc::channel::<Result<Vec<torsten_primitives::block::Block>, String>>(32);
+
+        let bel = self.byron_epoch_length;
+        let mut bf_channel = blockfetch_channel;
+        let fetch_task = tokio::spawn(async move {
+            while let Some(ranges) = fetch_request_rx.recv().await {
+                let mut fetched_blocks = Vec::new();
+                let mut fetch_error = false;
+                for (from, to) in ranges {
+                    let result = BlockFetchClient::fetch_range(
+                        &mut bf_channel,
+                        from,
+                        to,
+                        |block_cbor| {
+                            match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                                &block_cbor, bel,
+                            ) {
+                                Ok(block) => {
+                                    fetched_blocks.push(block);
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    tracing::warn!("BlockFetch: failed to decode block: {e}");
+                                    Ok(()) // skip bad block
+                                }
+                            }
+                        },
+                    ).await;
+                    if let Err(e) = result {
+                        tracing::error!("BlockFetch range request failed: {e}");
+                        let _ = fetch_result_tx.send(Err(format!("{e}"))).await;
+                        fetch_error = true;
+                        break;
+                    }
+                }
+                if !fetch_error {
+                    if fetch_result_tx.send(Ok(fetched_blocks)).await.is_err() {
+                        // Receiver dropped — sync loop exited.
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Whether we are currently waiting for a BlockFetch result.
+        let mut blockfetch_inflight = false;
+
         // Helper closure: process accumulated batch.
         // (factored as a macro to avoid borrow-checker issues with &mut self)
         macro_rules! process_batch {
             () => {{
-                // If we have pending fetch points, use BlockFetch to download
-                // full block bodies.
+                // If we have pending fetch points, send them to the BlockFetch
+                // worker task for concurrent download (non-blocking).
                 if !pending_fetch_points.is_empty() {
                     let ranges = std::mem::take(&mut pending_fetch_points);
-                    for (from, to) in ranges {
-                        let bel = byron_epoch_length;
-                        let fetch_result = BlockFetchClient::fetch_range(
-                            blockfetch_channel,
-                            from,
-                            to,
-                            |block_cbor| {
-                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
-                                    &block_cbor, bel,
-                                ) {
-                                    Ok(block) => {
-                                        block_batch.push(block);
-                                        Ok(())
-                                    }
-                                    Err(e) => {
-                                        warn!("BlockFetch: failed to decode block: {e}");
-                                        Ok(()) // skip bad block
-                                    }
-                                }
-                            },
-                        ).await;
-                        if let Err(e) = fetch_result {
-                            error!("BlockFetch range request failed: {e}");
-                            break;
+                    if fetch_request_tx.send(ranges).await.is_err() {
+                        error!("BlockFetch worker died — cannot fetch blocks");
+                        break;
+                    }
+                    blockfetch_inflight = true;
+                    // Don't process blocks yet — they'll arrive via fetch_result_rx.
+                    // Return 0 to indicate no blocks processed in this call.
+                    0u64
+                } else if block_batch.is_empty() {
+                    0u64
+                } else {
+                    let tip = torsten_primitives::block::Tip {
+                        point: Point::Specific(
+                            torsten_primitives::time::SlotNo(batch_tip_slot),
+                            torsten_primitives::hash::Hash32::from_bytes(batch_tip_hash),
+                        ),
+                        block_number: torsten_primitives::time::BlockNo(batch_tip_block_number),
+                    };
+
+                    let batch_slots: Vec<u64> = block_batch
+                        .iter()
+                        .map(|b| b.slot().0)
+                        .collect();
+                    let remote_tip_slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+                    let blocks = std::mem::take(&mut block_batch);
+                    let header_count = blocks.len() as u64;
+
+                    let applied = self.process_forward_blocks(
+                        blocks,
+                        &tip,
+                        &[], // EBB hashes handled internally by decode
+                        &mut blocks_received,
+                        &mut blocks_since_last_log,
+                        &mut last_snapshot_epoch,
+                        &mut last_log_time,
+                        &mut last_query_update,
+                    ).await;
+
+                    // Update GSM per-peer density and run GDD evaluation.
+                    if applied > 0 {
+                        consecutive_apply_failures = 0;
+                        let to_disconnect = {
+                            let mut gsm = self.gsm.write().await;
+                            for slot in &batch_slots {
+                                gsm.record_block(&peer_addr, *slot);
+                            }
+                            gsm.update_peer_tip(&peer_addr, remote_tip_slot);
+                            gsm.gdd_evaluate()
+                        };
+                        if !to_disconnect.is_empty() {
+                            let mut pm = self.peer_manager.write().await;
+                            for addr in &to_disconnect {
+                                warn!(
+                                    %addr,
+                                    "GDD: disconnecting peer with insufficient chain density"
+                                );
+                                pm.peer_failed(addr);
+                            }
+                        }
+                    } else if header_count > 0 {
+                        consecutive_apply_failures += 1;
+                        if consecutive_apply_failures >= 5 {
+                            error!(
+                                consecutive_apply_failures,
+                                "Ledger state diverged from chain — \
+                                 clearing contaminated volatile DB and reconnecting."
+                            );
+                            {
+                                let mut db = self.chain_db.write().await;
+                                db.clear_volatile();
+                            }
+                            self.mempool.clear();
                         }
                     }
+                    applied
                 }
+            }};
+        }
+
+        // Helper macro: process blocks received from the BlockFetch worker.
+        // Merges fetched blocks into the block_batch and then processes.
+        macro_rules! process_fetched_blocks {
+            ($fetched:expr) => {{
+                block_batch.extend($fetched);
+                blockfetch_inflight = false;
 
                 if block_batch.is_empty() {
                     0u64
@@ -2234,7 +2351,10 @@ impl Node {
                 outstanding = 1;
             }
 
-            // Receive next response, interleaved with forge ticker and shutdown.
+            // Receive next response, interleaved with BlockFetch results,
+            // forge ticker, and shutdown. When a BlockFetch request is in
+            // flight, we also select on fetch_result_rx to process downloaded
+            // blocks as soon as they arrive — without blocking ChainSync.
             let response_bytes = tokio::select! {
                 result = chainsync_channel.recv() => {
                     match result {
@@ -2244,6 +2364,23 @@ impl Node {
                             break;
                         }
                     }
+                }
+                Some(fetch_result) = fetch_result_rx.recv(), if blockfetch_inflight => {
+                    match fetch_result {
+                        Ok(fetched_blocks) => {
+                            process_fetched_blocks!(fetched_blocks);
+
+                            if consecutive_apply_failures >= 5 {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("BlockFetch worker error: {e}");
+                            blockfetch_inflight = false;
+                            break;
+                        }
+                    }
+                    continue;
                 }
                 _ = forge_ticker.tick(), if self.block_producer.is_some() => {
                     if let Some(wc) = self.current_wall_clock_slot() {
@@ -2319,17 +2456,10 @@ impl Node {
                         }
                     }
 
-                    // Process batch when we've accumulated enough blocks.
-                    let batch_count = block_batch.len() + pending_fetch_points.len();
-                    if batch_count >= header_batch_size {
-                        process_batch!();
-
-                        if consecutive_apply_failures >= 5 {
-                            break;
-                        }
-                    }
-
-                    // Refill pipeline if we've dropped below low_mark.
+                    // CRITICAL: Refill the ChainSync pipeline BEFORE processing
+                    // the batch. BlockFetch (in process_batch!) blocks on network I/O,
+                    // and the peer's ChainSync server will timeout if we stop sending
+                    // MsgRequestNext. By refilling first, we keep the pipeline alive.
                     if !at_tip && outstanding <= low_mark {
                         let to_send = high_mark - outstanding;
                         for _ in 0..to_send {
@@ -2339,6 +2469,16 @@ impl Node {
                                 break;
                             }
                             outstanding += 1;
+                        }
+                    }
+
+                    // Process batch when we've accumulated enough blocks.
+                    let batch_count = block_batch.len() + pending_fetch_points.len();
+                    if batch_count >= header_batch_size {
+                        process_batch!();
+
+                        if consecutive_apply_failures >= 5 {
+                            break;
                         }
                     }
                 }
@@ -2355,6 +2495,23 @@ impl Node {
                         process_batch!();
                     }
 
+                    // Wait for any in-flight BlockFetch result before rolling back.
+                    if blockfetch_inflight {
+                        if let Some(fetch_result) = fetch_result_rx.recv().await {
+                            match fetch_result {
+                                Ok(fetched_blocks) => {
+                                    process_fetched_blocks!(fetched_blocks);
+                                }
+                                Err(e) => {
+                                    error!("BlockFetch worker error during rollback drain: {e}");
+                                    blockfetch_inflight = false;
+                                }
+                            }
+                        } else {
+                            blockfetch_inflight = false;
+                        }
+                    }
+
                     let prim_point = from_codec_point(&point);
                     warn!("Rollback to {prim_point}");
                     self.handle_rollback(&prim_point).await;
@@ -2366,6 +2523,23 @@ impl Node {
                     // Flush any remaining blocks.
                     if !block_batch.is_empty() || !pending_fetch_points.is_empty() {
                         process_batch!();
+                    }
+
+                    // Wait for any in-flight BlockFetch result before declaring at-tip.
+                    if blockfetch_inflight {
+                        if let Some(fetch_result) = fetch_result_rx.recv().await {
+                            match fetch_result {
+                                Ok(fetched_blocks) => {
+                                    process_fetched_blocks!(fetched_blocks);
+                                }
+                                Err(e) => {
+                                    error!("BlockFetch worker error at tip: {e}");
+                                    blockfetch_inflight = false;
+                                }
+                            }
+                        } else {
+                            blockfetch_inflight = false;
+                        }
                     }
 
                     if !self.consensus.strict_verification() {
@@ -2389,6 +2563,10 @@ impl Node {
         // ═══════════════════════════════════════════════════════════════════
         // Phase 5: Cleanup
         // ═══════════════════════════════════════════════════════════════════
+
+        // Abort the BlockFetch worker task and drain any in-flight results.
+        fetch_task.abort();
+        drop(fetch_request_tx);
 
         // Send MsgDone to cleanly terminate the ChainSync protocol.
         let done_msg = cs_encode(&ChainSyncMessage::MsgDone);

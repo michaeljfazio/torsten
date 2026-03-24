@@ -2354,32 +2354,31 @@ impl Node {
                 }
             }
 
-            let (peer_addr, mut chainsync_ch, mut blockfetch_ch, _hs_ch, mux_handle) =
-                match connected {
-                    Some(c) => {
-                        retry_count = 0;
-                        // Register this peer as sync-managed so the governor
-                        // doesn't create a duplicate connection.
-                        sync_managed_peers.write().await.insert(c.0);
-                        c
+            let (peer_addr, mut chainsync_ch, blockfetch_ch, _hs_ch, mux_handle) = match connected {
+                Some(c) => {
+                    retry_count = 0;
+                    // Register this peer as sync-managed so the governor
+                    // doesn't create a duplicate connection.
+                    sync_managed_peers.write().await.insert(c.0);
+                    c
+                }
+                None => {
+                    retry_count += 1;
+                    let delay = base_delay_secs
+                        .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
+                        .min(max_delay_secs);
+                    warn!(
+                        retry_count,
+                        delay_secs = delay,
+                        "Could not connect to any peer, retrying..."
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+                        _ = shutdown_rx.changed() => { break; }
                     }
-                    None => {
-                        retry_count += 1;
-                        let delay = base_delay_secs
-                            .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
-                            .min(max_delay_secs);
-                        warn!(
-                            retry_count,
-                            delay_secs = delay,
-                            "Could not connect to any peer, retrying..."
-                        );
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
-                            _ = shutdown_rx.changed() => { break; }
-                        }
-                        continue;
-                    }
-                };
+                    continue;
+                }
+            };
 
             // Log peer manager state
             {
@@ -2391,7 +2390,7 @@ impl Node {
             let sync_result = self
                 .chain_sync_loop(
                     &mut chainsync_ch,
-                    &mut blockfetch_ch,
+                    blockfetch_ch,
                     shutdown_rx.clone(),
                     peer_addr,
                 )
