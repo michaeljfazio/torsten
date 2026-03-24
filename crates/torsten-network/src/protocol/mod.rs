@@ -17,9 +17,10 @@ pub mod txsubmission;
 pub mod local_chainsync;
 pub mod local_tx_submission;
 
+pub mod local_tx_monitor;
+
 // Future protocol modules:
 // pub mod local_state_query;
-// pub mod local_tx_monitor;
 
 // ─── N2N Protocol IDs ───
 
