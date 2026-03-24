@@ -571,49 +571,34 @@ impl ConnectionLifecycleManager {
     /// The ChainSync client streams block headers from the peer, finds
     /// the intersection point with our chain, then pipelines header downloads.
     /// Headers are stored in `candidate_chains` for the BlockFetch decision
-    /// task to consume.
+    /// task to consume. Does NOT fetch blocks — that's the BlockFetch
+    /// decision task's responsibility.
     ///
-    /// Real implementation will be provided by Task 4.
+    /// Delegates to [`super::sync::chainsync_client_task()`] which implements
+    /// the full pipelined ChainSync protocol loop.
     fn make_chainsync_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let candidate_chains = self.candidate_chains.clone();
-        let _chain_db = self.chain_db.clone();
-        let _ledger_state = self.ledger_state.clone();
-        let _byron_epoch_length = self.byron_epoch_length;
+        let chain_db = self.chain_db.clone();
+        let ledger_state = self.ledger_state.clone();
+        let byron_epoch_length = self.byron_epoch_length;
 
-        Box::new(move |_channel, cancel| {
+        Box::new(move |channel, cancel| {
             Box::pin(async move {
-                // Placeholder: ChainSync protocol logic will be implemented in Task 4.
-                //
-                // Real implementation will:
-                // 1. Find intersection with peer using chain_db/ledger_state tips
-                // 2. Pipeline MsgRequestNext to stream headers
-                // 3. For each header, update candidate_chains with the new pending header
-                // 4. Handle MsgRollBackward by trimming candidate_chains
-                // 5. At tip, switch to await mode (MsgAwaitReply)
-                info!(%addr, "chainsync task started (placeholder)");
-
-                // Initialize empty candidate state for this peer.
+                info!(%addr, "chainsync task started");
+                if let Err(e) = super::sync::chainsync_client_task(
+                    channel,
+                    addr,
+                    candidate_chains,
+                    chain_db,
+                    ledger_state,
+                    byron_epoch_length,
+                    cancel,
+                )
+                .await
                 {
-                    let mut chains = candidate_chains.write().await;
-                    chains.insert(
-                        addr,
-                        CandidateChainState {
-                            tip_slot: 0,
-                            tip_hash: [0u8; 32],
-                            tip_block_number: 0,
-                            pending_headers: Vec::new(),
-                        },
-                    );
+                    warn!(%addr, error = %e, "chainsync task failed");
                 }
-
-                cancel.cancelled().await;
-
-                // Clean up candidate state on exit.
-                {
-                    let mut chains = candidate_chains.write().await;
-                    chains.remove(&addr);
-                }
-                debug!(%addr, "chainsync task cancelled");
+                debug!(%addr, "chainsync task exiting");
             })
         })
     }
