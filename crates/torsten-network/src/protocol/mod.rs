@@ -19,8 +19,9 @@ pub mod local_tx_submission;
 
 pub mod local_tx_monitor;
 
-// Future protocol modules:
-// pub mod local_state_query;
+pub mod local_state_query;
+
+// All protocol modules are now implemented.
 
 // ─── N2N Protocol IDs ───
 
