@@ -7,11 +7,11 @@
 //! These match the Haskell `MiniProtocolNum` assignments from
 //! `ouroboros-network/network-mux/src/Network/Mux/Types.hs`.
 
+pub mod blockfetch;
 pub mod chainsync;
 pub mod keepalive;
 
 // Future protocol modules:
-// pub mod blockfetch;
 // pub mod txsubmission;
 // pub mod peersharing;
 // pub mod local_chainsync;
