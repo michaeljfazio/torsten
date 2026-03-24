@@ -1934,6 +1934,17 @@ impl Node {
                             for action in actions {
                                 lifecycle.handle_governor_action(action, &mut pm).await;
                             }
+
+                            // CRITICAL: Re-evaluate immediately after completing actions.
+                            // Peers promoted Cold→Warm need to be promoted Warm→Hot
+                            // in the SAME cycle. The Haskell peer's protocolIdleTimeout
+                            // is only 5 seconds — if we wait for the next Governor tick
+                            // (2s later), the peer might close the connection.
+                            let follow_up = governor.compute_actions(&pm.inner);
+                            for action in follow_up {
+                                lifecycle.handle_governor_action(action, &mut pm).await;
+                            }
+
                             pm.recompute_reputations();
                         }
                     }
