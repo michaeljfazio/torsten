@@ -17,9 +17,6 @@ byteorder = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 minicbor = { workspace = true }
-pallas-network = { workspace = true }
-pallas-crypto = { workspace = true }
-pallas-traverse = { workspace = true }
 hickory-resolver = { workspace = true }
 socket2 = { workspace = true }
 num-bigint = { workspace = true }
@@ -30,7 +27,3 @@ parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
-
-[[test]]
-name = "cddl_conformance"
-path = "tests/cddl_conformance.rs"
