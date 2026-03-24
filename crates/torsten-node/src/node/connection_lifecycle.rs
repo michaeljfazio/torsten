@@ -551,13 +551,20 @@ impl ConnectionLifecycleManager {
     fn make_keepalive_task(&self) -> ProtocolTaskFn {
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // KeepAlive client: sends periodic pings with RTT measurement.
-                // First ping goes out immediately — critical for keeping the
-                // connection alive. The Haskell peer's protocolIdleTimeout is
-                // 5 seconds, so we must show activity promptly.
+                // CRITICAL: Delay the first KeepAlive ping until AFTER Hot protocols
+                // have started and sent their first messages. The Haskell peer uses
+                // StartOnDemandAny for the KeepAlive responder — it only starts when
+                // ANY on-demand protocol receives data. If we send KeepAlive before
+                // ChainSync/TxSubmission2 send their first messages, the peer has no
+                // responder registered and RSTs the connection.
                 //
-                // Haskell uses a 97-second client timeout, 60-second server timeout.
-                // We use 30-second ping interval to stay well within limits.
+                // In Haskell, this works because KeepAlive is in the Established
+                // bundle and Hot protocols start at the same time with StartEagerly,
+                // so ChainSync/TxSubmission data arrives before the first KeepAlive.
+                //
+                // We delay 2 seconds to ensure Hot protocols are active first.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
                 let client = torsten_network::KeepAliveClient::new(
                     std::time::Duration::from_secs(30),
                     cancel,
