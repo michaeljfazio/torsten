@@ -1896,8 +1896,7 @@ impl Node {
         // After intersection, we run the protocol loop inline (not via
         // `client.run()`) so we can interleave async block processing.
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut cs_client =
-            PipelinedChainSyncClient::new(cancel);
+        let mut cs_client = PipelinedChainSyncClient::new(cancel);
 
         let intersect_result = cs_client
             .find_intersection(chainsync_channel, codec_points)
@@ -2034,10 +2033,7 @@ impl Node {
                 .unwrap_or(0);
             // We don't have the remote tip from find_intersection in the new API,
             // so estimate from wall clock or use 0.
-            let remote_tip_slot = self
-                .current_wall_clock_slot()
-                .map(|s| s.0)
-                .unwrap_or(0);
+            let remote_tip_slot = self.current_wall_clock_slot().map(|s| s.0).unwrap_or(0);
             self.gsm
                 .write()
                 .await
@@ -2309,8 +2305,8 @@ impl Node {
                             hash_arr.copy_from_slice(hash.as_ref());
 
                             // Extract slot from wrapped header CBOR.
-                            let slot = Self::extract_slot_from_wrapped_header(&header)
-                                .unwrap_or(tip_slot);
+                            let slot =
+                                Self::extract_slot_from_wrapped_header(&header).unwrap_or(tip_slot);
 
                             let point = CodecPoint::Specific(slot, hash_arr);
 
@@ -2446,7 +2442,7 @@ impl Node {
             inner.skip().ok()?; // proto_magic
             inner.skip().ok()?; // prev_hash
             inner.skip().ok()?; // proof
-            // consensus_data
+                                // consensus_data
             let cd_len = inner.array().ok()?;
             if cd_len == Some(4) {
                 // Main block consensus_data: [slot_id, pk, difficulty, signature]
