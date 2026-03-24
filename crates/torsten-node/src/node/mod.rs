@@ -908,7 +908,9 @@ impl Node {
             mempool,
             _server_tasks: Vec::new(),
             query_handler,
-            peer_manager: Arc::new(RwLock::new(NodePeerManager::new(PeerManagerConfig::default()))),
+            peer_manager: Arc::new(RwLock::new(NodePeerManager::new(
+                PeerManagerConfig::default(),
+            ))),
             socket_path,
             database_path: args.database_path,
             listen_addr,
@@ -1382,7 +1384,8 @@ impl Node {
         //
         // For now, create broadcast channels directly so the rest of the code
         // (block announcement, rollback announcement) can still compile.
-        let (block_ann_tx, _) = tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
+        let (block_ann_tx, _) =
+            tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
         let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
         self.block_announcement_tx = Some(block_ann_tx);
         self.rollback_announcement_tx = Some(rollback_ann_tx);
@@ -1782,7 +1785,9 @@ impl Node {
                                 GovernorAction::DiscoverMore => {
                                     // TODO: trigger peer sharing requests once
                                     // PeerSharingClient is wired into the node.
-                                    debug!("Governor: DiscoverMore — peer sharing not yet integrated");
+                                    debug!(
+                                        "Governor: DiscoverMore — peer sharing not yet integrated"
+                                    );
                                 }
                             }
                         }
@@ -1838,10 +1843,7 @@ impl Node {
                                         let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                                         task_metrics.record_handshake_rtt(rtt_ms);
                                         let mut pm = task_pm.write().await;
-                                        pm.peer_connected(
-                                            &addr,
-                                            ConnectionDirection::Outbound,
-                                        );
+                                        pm.peer_connected(&addr, ConnectionDirection::Outbound);
                                         pm.record_handshake_rtt(&addr, rtt_ms);
                                         drop(pm);
                                         info!(
@@ -1912,8 +1914,7 @@ impl Node {
                 if gsm_state != crate::gsm::GenesisSyncState::CaughtUp {
                     // Sort BLPs first for Genesis-mode sync
                     peers.sort_by_key(|addr| {
-                        if pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer)
-                        {
+                        if pm.peer_category(addr) == Some(PeerCategory::BigLedgerPeer) {
                             0 // BLPs first
                         } else {
                             1
@@ -1946,10 +1947,7 @@ impl Node {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
                             let mut pm = peer_manager.write().await;
-                            pm.peer_connected(
-                                addr,
-                                ConnectionDirection::Outbound,
-                            );
+                            pm.peer_connected(addr, ConnectionDirection::Outbound);
                             pm.record_handshake_rtt(addr, rtt_ms);
                             drop(pm);
                             info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected (warm, dwell pending)");
@@ -1962,7 +1960,10 @@ impl Node {
                         }
                         Err(_) => {
                             peer_manager.write().await.peer_failed(addr);
-                            debug!("Connection to {target} timed out after {}s", connect_timeout.as_secs());
+                            debug!(
+                                "Connection to {target} timed out after {}s",
+                                connect_timeout.as_secs()
+                            );
                         }
                     }
                 }
@@ -1991,7 +1992,10 @@ impl Node {
                             debug!("Failed to connect to {target}: {e}");
                         }
                         Err(_) => {
-                            debug!("Connection to {target} timed out after {}s", connect_timeout.as_secs());
+                            debug!(
+                                "Connection to {target} timed out after {}s",
+                                connect_timeout.as_secs()
+                            );
                         }
                     }
                 }

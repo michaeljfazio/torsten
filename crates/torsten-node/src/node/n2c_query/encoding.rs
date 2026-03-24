@@ -5,7 +5,7 @@
 //! / QueryAnytime / QueryHardFork) lives here so that the dispatch layer in
 //! `mod.rs` stays thin.
 
-use super::types::{
+use crate::node::n2c_query::types::{
     DRepDelegationEntry, GovActionId, ProposalSnapshot, ProtocolParamsSnapshot, QueryResult,
     RelaySnapshot, ShelleyPParamsSnapshot, SnapshotStakeData, UtxoSnapshot,
 };
@@ -653,7 +653,7 @@ pub(crate) fn encode_tagged_rational(
 /// Encode a `Map<pool_hash(28), PoolParams>` for pool state queries.
 pub(crate) fn encode_pool_params_map(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    params: &[super::types::PoolParamsSnapshot],
+    params: &[crate::node::n2c_query::types::PoolParamsSnapshot],
 ) {
     enc.map(params.len() as u64).ok();
     for pool in params {
@@ -695,8 +695,8 @@ pub(crate) fn encode_pool_params_map(
 
 fn encode_pool_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    pool_params: &[super::types::PoolParamsSnapshot],
-    future_pool_params: &[super::types::PoolParamsSnapshot],
+    pool_params: &[crate::node::n2c_query::types::PoolParamsSnapshot],
+    future_pool_params: &[crate::node::n2c_query::types::PoolParamsSnapshot],
     retiring: &[(Vec<u8>, u64)],
     deposits: &[(Vec<u8>, u64)],
 ) {
@@ -722,7 +722,7 @@ fn encode_pool_state(
 
 fn encode_pool_distr2(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    pools: &[super::types::StakePoolSnapshot],
+    pools: &[crate::node::n2c_query::types::StakePoolSnapshot],
     total_active_stake: u64,
 ) {
     // SL.PoolDistr: array(2)[pool_map, total_active_stake]
@@ -752,7 +752,7 @@ fn encode_pool_distr2(
 
 fn encode_stake_address_info(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    addrs: &[super::types::StakeAddressSnapshot],
+    addrs: &[crate::node::n2c_query::types::StakeAddressSnapshot],
 ) {
     // Wire format: array(2) [delegations_map, rewards_map]
     // delegations_map: Map<Credential, pool_hash(28)>
@@ -791,7 +791,7 @@ fn encode_stake_address_info(
 
 fn encode_stake_snapshots(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    snapshots: &super::types::StakeSnapshotsResult,
+    snapshots: &crate::node::n2c_query::types::StakeSnapshotsResult,
 ) {
     // Wire format: array(4) [pool_map, mark_total, set_total, go_total]
     // pool_map: Map<pool_hash(28), array(3) [mark_stake, set_stake, go_stake]>
@@ -824,7 +824,7 @@ fn encode_stake_pools(enc: &mut minicbor::Encoder<&mut Vec<u8>>, pool_ids: &[Vec
 
 fn encode_drep_stake_distr(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    entries: &[super::types::DRepStakeEntry],
+    entries: &[crate::node::n2c_query::types::DRepStakeEntry],
 ) {
     // Wire format: Map<DRep, Coin>
     // DRep: [0, keyhash(28)] | [1, scripthash(28)] | [2] | [3]
@@ -849,7 +849,7 @@ fn encode_drep_stake_distr(
 
 fn encode_filtered_vote_delegatees(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    delegatees: &[super::types::VoteDelegateeEntry],
+    delegatees: &[crate::node::n2c_query::types::VoteDelegateeEntry],
 ) {
     // Wire format: Map<Credential, DRep>
     // Credential: [0|1, hash(28)]
@@ -920,7 +920,7 @@ fn encode_drep_delegations(
 
 fn encode_gov_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    gov: &super::types::GovStateSnapshot,
+    gov: &crate::node::n2c_query::types::GovStateSnapshot,
 ) {
     // ConwayGovState = array(7):
     //   [0] Proposals, [1] Committee, [2] Constitution,
@@ -1113,7 +1113,7 @@ fn encode_gov_state(
 
 fn encode_drep_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    dreps: &[super::types::DRepSnapshot],
+    dreps: &[crate::node::n2c_query::types::DRepSnapshot],
 ) {
     // Wire format: Map<Credential, DRepState>
     //   Credential: [0|1, hash(28)]
@@ -1154,7 +1154,7 @@ fn encode_drep_state(
 
 fn encode_committee_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    committee: &super::types::CommitteeSnapshot,
+    committee: &crate::node::n2c_query::types::CommitteeSnapshot,
 ) {
     // Wire format: array(3) [map_members, maybe_threshold, epoch]
     enc.array(3).ok();
@@ -1354,7 +1354,7 @@ fn encode_gov_action_tag(enc: &mut minicbor::Encoder<&mut Vec<u8>>, action_type:
 
 fn encode_ratify_state(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    gov: &super::types::GovStateSnapshot,
+    gov: &crate::node::n2c_query::types::GovStateSnapshot,
     enacted: &[(ProposalSnapshot, GovActionId)],
     expired: &[GovActionId],
     delayed: bool,
@@ -1703,7 +1703,7 @@ fn encode_debug_new_epoch_state(
     snap_go: &SnapshotStakeData,
     snap_fee: u64,
     total_active_stake: u64,
-    pool_distr: &[super::types::StakePoolSnapshot],
+    pool_distr: &[crate::node::n2c_query::types::StakePoolSnapshot],
 ) {
     // Full Haskell-compatible NewEpochState (array(7)):
     //
@@ -1890,7 +1890,7 @@ fn encode_debug_chain_dep_state(
 
 fn encode_reward_info_pools(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    pools: &[super::types::PoolRewardInfo],
+    pools: &[crate::node::n2c_query::types::PoolRewardInfo],
 ) {
     // Map<pool_hash(28), PoolRewardInfo>
     // PoolRewardInfo: array(7) [stake, owner_stake, pool_reward, leader_reward,
@@ -2023,7 +2023,7 @@ fn encode_shelley_pparams_common(
 
 fn encode_era_history(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    summaries: &[super::types::EraSummary],
+    summaries: &[crate::node::n2c_query::types::EraSummary],
 ) {
     // Wire format matching Haskell ouroboros-consensus Serialise instances:
     // Indefinite-length array of EraSummary entries.
@@ -2075,7 +2075,7 @@ fn encode_era_history(
 
 fn encode_genesis_config(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    gc: &super::types::GenesisConfigSnapshot,
+    gc: &crate::node::n2c_query::types::GenesisConfigSnapshot,
     n2c_version: u16,
 ) {
     // CompactGenesis: array(15) matching ShelleyGenesis CBOR wire format
@@ -2151,7 +2151,7 @@ fn encode_genesis_config(
 
 fn encode_ledger_peer_snapshot(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
-    peers: &[super::types::LedgerPeerEntry],
+    peers: &[crate::node::n2c_query::types::LedgerPeerEntry],
 ) {
     // LedgerPeerSnapshotV2 (version 1): array(2) [1, array(2)[WithOrigin, pools_indef]]
     // Haskell: (WithOrigin SlotNo, [(AccPoolStake, (PoolStake, NonEmpty relay))])
@@ -2218,12 +2218,12 @@ fn encode_ledger_peer_snapshot(
 // See GitHub issue #97.
 #[cfg(test)]
 mod tests {
-    use super::types::{
+    use super::*;
+    use crate::node::n2c_query::types::{
         CommitteeMemberSnapshot, CommitteeSnapshot, DRepDelegationEntry, DRepSnapshot,
         DRepStakeEntry, PoolParamsSnapshot, PoolStakeSnapshotEntry, StakeAddressSnapshot,
         StakeDelegDepositEntry, StakePoolSnapshot, StakeSnapshotsResult, VoteDelegateeEntry,
     };
-    use super::*;
     use minicbor::Decoder;
 
     // ── Helper: strip the MsgResult [4, [result]] wrappers from a full
