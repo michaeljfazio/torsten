@@ -134,7 +134,7 @@ pub trait Bearer: Send + 'static {
 
 | Bearer | SDU Size | Batch Size | Notes |
 |---|---|---|---|
-| TCP | 12,288 | 131,072 | `TCP_NODELAY=false`, `SO_KEEPALIVE=true` (60s), 131KB read buffer |
+| TCP | 12,288 | 131,072 | `TCP_NODELAY=false` (Nagle enabled — mux egress batching handles coalescing, so Nagle cooperates rather than conflicts), `SO_KEEPALIVE=true` (60s), 131KB read buffer. Values confirmed from `ouroboros-network/network-mux/src/Network/Mux/Bearer.hs` |
 | Unix | 32,768 | 32,768 | For N2C connections |
 | Mock | configurable | configurable | For testing — replay captured wire traces |
 
@@ -187,9 +187,31 @@ impl MuxChannel {
 }
 ```
 
-### Message Reassembly
+### Message Framing
 
-The ingress task accumulates payload bytes per `(protocol_id, direction)` pair and detects message completeness by attempting CBOR decode after each segment.
+The mux operates **below** the CBOR layer — it provides a reliable byte stream per `(protocol_id, direction)` pair. The mux itself does NOT know about CBOR message boundaries.
+
+**Egress:** Each protocol `send()` call writes exactly one complete CBOR message. The egress task segments this into SDU-sized chunks, interleaving with other protocols.
+
+**Ingress:** The ingress task appends incoming SDU payloads to a per-`(protocol_id, direction)` byte buffer (bounded by the ingress queue byte limit). The protocol codec layer reads from this buffer and performs incremental CBOR decoding to find message boundaries. This matches the Haskell architecture where `Network.Mux.Ingress` provides a byte stream and the `typed-protocols` codec layer handles CBOR framing.
+
+The `MuxChannel::recv()` method performs the CBOR boundary detection: it accumulates bytes from the ingress buffer and attempts to decode a complete CBOR value. The decode must verify **exact consumption** — if trailing bytes remain after a successful decode, they belong to the next message and are retained in the buffer. This is equivalent to Haskell's `cborg` incremental decoder (`runGetOrThrow`).
+
+### Reserved Protocol IDs
+
+Protocol ID 1 is reserved (historically for DeltaQ, never implemented). The ingress task must silently discard any data received on protocol ID 1 rather than treating it as an error.
+
+### Egress Backpressure
+
+Each protocol's egress `mpsc::Sender` has a bounded capacity (default 32 messages). When the channel is full (bearer write is slower than protocol output), `send()` blocks the protocol task, providing natural backpressure. This prevents unbounded memory growth when the network is slow.
+
+### Channel Lifecycle
+
+When a protocol task exits (sends MsgDone and drops its `MuxChannel`):
+1. The egress task detects the closed sender via `recv()` returning `None`
+2. It drains any remaining queued messages for that protocol (ensuring MsgDone is sent on the wire)
+3. It removes the protocol from the round-robin schedule
+4. The ingress task detects the closed receiver and discards any further data for that protocol
 
 ### Ingress Queue Byte Limits
 
@@ -236,7 +258,16 @@ refuse_reason = [0, [*version_number]]           // VersionMismatch
 **N2C version data:** `[network_magic: u32, query: bool]`
 N2C version numbers have bit 15 set: V16=32784, V17=32785, ..., V23=32791.
 
-**Simultaneous open:** When outbound handshake receives tag 0 instead of tag 1/2/3, treat as simultaneous open. Compute version intersection locally. Resolve which connection survives by lexicographic comparison of `(IP, port)` — lower address initiator wins. Surviving connection becomes duplex.
+**Concurrent connection deduplication:** The connection manager maintains a `HashMap<SocketAddr, ConnectionState>` protected by a `tokio::sync::Mutex`. Before initiating an outbound connection, it checks for an existing entry for that peer. If one exists (inbound in progress, or already connected), the outbound request either waits for the inbound handshake (simultaneous open) or reuses the existing connection. This prevents duplicate connections to the same peer when multiple promotion requests arrive concurrently.
+
+**Simultaneous open:** Handled at the connection manager level (not the handshake layer). When `acquireOutboundConnection` discovers that an inbound connection from the same peer already exists in `UnnegotiatedState(Inbound)`, it does NOT open a second TCP connection. Instead, the outbound thread blocks and waits for the inbound connection's handshake to complete. Once the inbound handshake finishes:
+- If the inbound negotiated **Duplex** (`InitiatorAndResponder`): the existing inbound TCP connection is reused bidirectionally. The outbound request succeeds without opening a new socket.
+- If the inbound negotiated **Unidirectional** (`InitiatorOnly`): the outbound request fails with `ForbiddenConnection` — cannot reuse a unidirectional connection.
+- If the inbound has terminated: the outbound proceeds to open a new connection normally.
+
+This matches the Haskell `ConnectionManager` algorithm from `ouroboros-network/framework/lib/Ouroboros/Network/ConnectionManager/Core.hs`. There is no address-comparison tiebreaker — the protocol simply reuses the existing inbound connection when possible.
+
+**Query mode:** When `query: true` is negotiated in the handshake, the connection exists only for version discovery. After `MsgAcceptVersion` (or `MsgQueryReply` for the responder), no protocols are started and the connection is closed immediately. This is used by tools like cardano-cli that want to discover a peer's supported protocol versions.
 
 ### N2N ChainSync (Protocol ID 2)
 
@@ -273,7 +304,8 @@ N2N sends **headers only** in MsgRollForward, wrapped as `[era_id, CBOR_tag_24(h
 **Server:**
 - Per-peer cursor (slot + hash)
 - MsgFindIntersect: walk peer's point list, find best intersection via BlockProvider
-- MsgRequestNext: serve next header after cursor, or enter StMustReply waiting for block announcement
+- MsgRequestNext: serve next header after cursor, or enter StMustReply waiting for block announcement via broadcast channel
+- StMustReply timeout: randomized between 135-911 seconds (matching Haskell). On timeout, the peer is considered stale and the connection may be demoted.
 - Rollback: send MsgRollBackward when chain rolled back past cursor
 
 ### N2N BlockFetch (Protocol ID 3)
@@ -299,7 +331,7 @@ MsgBatchDone    = [5]
 
 Blocks are sent as `[era_id, CBOR_tag_24(block_bytes)]`. Server streams blocks sequentially within a batch. Client supports batch-level pipelining.
 
-Server enforces configurable max slot range AND max block count per range (fixing the Byron-era density issue from the review).
+Server enforces configurable max slot range (default 2160, matching k) AND max block count per range (default 100, matching `blockFetchPipeliningMax`). The block count cap prevents Byron-era slot density from overwhelming the server.
 
 ### N2N TxSubmission2 (Protocol ID 4)
 
@@ -344,7 +376,7 @@ MsgKeepAliveResponse = [1, cookie: u16]
 MsgDone              = [2]
 ```
 
-Cookie must be echoed exactly; mismatch = disconnect. Used for RTT measurement (EWMA latency). Default interval 30s. Runs when peer is warm or hot.
+Cookie must be echoed exactly; mismatch = disconnect. Used for RTT measurement (EWMA latency). Default interval 30s. Runs when peer is warm or hot. KeepAlive is N2N only — there is no local keepalive for N2C connections.
 
 ### N2N PeerSharing (Protocol ID 10)
 
@@ -356,9 +388,11 @@ MsgShareRequest = [0, amount: u8]
 MsgSharePeers   = [1, [*peer_address]]
 MsgDone          = [2]
 
-peer_address = [0, ipv4: u32, port: u16]
-             / [1, w0: u32, w1: u32, w2: u32, w3: u32, port: u16]
+peer_address = [0, ipv4: u32, port: u16]                           // IPv4, list of 3
+             / [1, w0: u32, w1: u32, w2: u32, w3: u32, port: u16] // IPv6, list of 6
 ```
+
+No hostname variant exists — DNS resolution happens at a higher layer (peer selection governor). The encoder only produces IPv4/IPv6 variants; the decoder should reject unknown tags.
 
 Max request 255 peers. Server must not return more than requested. Only active when both sides negotiated `peer_sharing: Enabled` and connection is `InitiatorAndResponder`.
 
@@ -665,7 +699,7 @@ pallas-crypto = { workspace = true }
 
 **Add:**
 ```toml
-minicbor = { version = "0.25", features = ["std"] }
+minicbor = { workspace = true }  # Already in workspace Cargo.toml
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 ```
