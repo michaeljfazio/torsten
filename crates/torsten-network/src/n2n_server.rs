@@ -648,15 +648,23 @@ async fn handle_n2n_connection(
                             if let Some(cursor_slot) = peer_state.chainsync_cursor_slot {
                                 if cursor_slot < ann.slot {
                                     // Peer is behind the announced block — serve the next block
-                                    if let Some((_next_slot, next_hash, block_cbor)) =
+                                    // after the peer's cursor, NOT the announced block.
+                                    // The peer must receive blocks sequentially.
+                                    if let Some((next_slot, next_hash, block_cbor)) =
                                         block_provider.get_next_block_after_slot(cursor_slot)
                                     {
-                                        peer_state.chainsync_cursor_slot = Some(ann.slot);
+                                        // Advance cursor to the served block's slot (NOT ann.slot).
+                                        // If the peer is many blocks behind, they'll catch up
+                                        // one block per MsgRequestNext, each advancing the cursor
+                                        // to the served block's slot until they reach the tip.
+                                        peer_state.chainsync_cursor_slot = Some(next_slot);
                                         peer_state.chainsync_cursor_hash = Some(next_hash);
                                         // Clear the must-reply flag: we are fulfilling
                                         // the outstanding MsgRequestNext obligation.
                                         peer_state.chainsync_must_reply = false;
 
+                                        // Use the announced tip for the Tip field (current chain head),
+                                        // but the block CBOR is from the served block (not the tip).
                                         let payload = build_chainsync_roll_forward(
                                             &block_cbor, ann.slot, &ann.hash, ann.block_number,
                                         )?;
