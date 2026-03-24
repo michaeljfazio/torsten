@@ -13,8 +13,9 @@ pub mod bearer;
 
 pub mod mux;
 
+pub mod handshake;
+
 // Placeholder modules — uncomment as implemented:
-// pub mod handshake;
 // pub mod protocol;
 // pub mod connection;
 // pub mod peer;
