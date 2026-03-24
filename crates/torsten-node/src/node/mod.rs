@@ -8,6 +8,8 @@
 //! - [`query`]  — N2C LocalStateQuery response building (`update_query_state`)
 //! - [`sync`]   — Pipelined ChainSync loop, block processing, rollback, replay
 
+#[allow(dead_code)] // Decision task + worker consumed by run loop (Task 5)
+pub(crate) mod block_fetch_logic;
 #[allow(dead_code)] // Lifecycle manager + protocols consume PeerConnection (Tasks 3-5)
 pub(crate) mod connection_lifecycle;
 pub(crate) mod epoch;
