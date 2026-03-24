@@ -94,8 +94,9 @@ pub struct Node {
     pub(crate) consensus: OuroborosPraos,
     pub(crate) mempool: Arc<Mempool>,
     /// Held to keep the N2N/N2C server tasks alive for the node's lifetime.
-    /// TODO: Replace with new server infrastructure once networking rewrite
-    /// provides equivalent TCP/Unix listener orchestration.
+    /// Currently unused — server tasks are spawned in `run()` and live for the
+    /// duration of the listener accept loops. Kept for future use when
+    /// connection handles need to be tracked for graceful shutdown.
     _server_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
     pub(crate) peer_manager: Arc<RwLock<NodePeerManager>>,
@@ -729,10 +730,8 @@ impl Node {
         let socket_path = args.socket_path.clone();
         let listen_addr: std::net::SocketAddr =
             format!("{}:{}", args.host_addr, args.port).parse()?;
-        // network_magic computed earlier (before ledger snapshot loading)
-        // TODO: Replace with new server infrastructure once networking rewrite
-        // provides equivalent TCP/Unix listener orchestration. For now, server
-        // tasks are spawned in run() and their JoinHandles are not tracked here.
+        // network_magic computed earlier (before ledger snapshot loading).
+        // Server tasks are spawned in run() and live for the node's lifetime.
 
         // Wire up live UTxO provider before wrapping in lock
         let mut qh = QueryHandler::new();
@@ -1179,22 +1178,130 @@ impl Node {
             });
         }
 
-        // TODO: Start N2C server on Unix socket using new networking API.
-        // The old N2CServer type was removed from torsten-network. The new
-        // ConnectionManager + LocalStateQuery server protocol will be wired
-        // up here once the networking rewrite is complete.
+        // Start N2C server on Unix socket.
         //
-        // The N2C server needs:
-        //   - Unix socket listener (from new bearer::unix module)
-        //   - Mux per connection
-        //   - LocalStateQuery server protocol (QueryHandler trait impl)
-        //   - LocalTxSubmission server protocol
-        //   - LocalTxMonitor server protocol
-        //   - LocalChainSync server protocol
-        debug!("N2C server: TODO — awaiting new networking API integration");
-        let _n2c_socket_path = self.socket_path.clone();
-        let _n2c_shutdown_rx = shutdown_rx.clone();
-        let _n2c_shutdown_tx = shutdown_tx.clone();
+        // Each accepted connection gets its own Mux and set of protocol tasks:
+        //   - Handshake (protocol 0, responder)
+        //   - LocalChainSync (protocol 5, responder)
+        //   - LocalTxSubmission (protocol 6, responder)
+        //   - LocalStateQuery (protocol 7, responder)
+        //   - LocalTxMonitor (protocol 9, responder)
+        {
+            let n2c_socket_path = self.socket_path.clone();
+            let n2c_shutdown_rx = shutdown_rx.clone();
+            let n2c_network_magic = self.network_magic;
+            let n2c_query_handler = self.query_handler.clone();
+            let n2c_mempool = self.mempool.clone();
+            let n2c_ledger = self.ledger_state.clone();
+            let n2c_metrics = self.metrics.clone();
+            // Build the block provider for LocalChainSync
+            let n2c_block_provider = Arc::new(serve::ChainDBBlockProvider {
+                chain_db: self.chain_db.clone(),
+            });
+            // Build the tx validator for LocalTxSubmission
+            let n2c_slot_config = self
+                .shelley_genesis
+                .as_ref()
+                .map(|g| g.slot_config())
+                .unwrap_or(torsten_ledger::plutus::SlotConfig {
+                    zero_time: 0,
+                    zero_slot: 0,
+                    slot_length: 1000,
+                });
+            let n2c_tx_validator = Arc::new(serve::LedgerTxValidator {
+                ledger: self.ledger_state.clone(),
+                slot_config: n2c_slot_config,
+                metrics: self.metrics.clone(),
+                mempool: Some(self.mempool.clone()),
+            });
+
+            // Remove stale socket file if it exists (e.g., from a previous unclean shutdown).
+            if n2c_socket_path.exists() {
+                if let Err(e) = std::fs::remove_file(&n2c_socket_path) {
+                    warn!(
+                        "Failed to remove stale socket {}: {e}",
+                        n2c_socket_path.display()
+                    );
+                }
+            }
+
+            let listener = match tokio::net::UnixListener::bind(&n2c_socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(
+                        "Failed to bind N2C Unix socket at {}: {e}",
+                        n2c_socket_path.display()
+                    );
+                    return Err(e.into());
+                }
+            };
+            info!(
+                socket = %n2c_socket_path.display(),
+                "N2C server listening"
+            );
+
+            // We need a block_announcement_tx for LocalChainSync server.
+            // It will be set below when the N2N server creates the broadcast channels.
+            // For now, create a placeholder that will be replaced.
+            // Actually, we share the same broadcast channel — create it here and use
+            // it for both N2C LocalChainSync and N2N ChainSync server.
+            let (block_ann_tx, _) =
+                tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
+            let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
+            self.block_announcement_tx = Some(block_ann_tx.clone());
+            self.rollback_announcement_tx = Some(rollback_ann_tx);
+            let n2c_block_ann_tx = block_ann_tx;
+
+            tokio::spawn(async move {
+                let mut shutdown = n2c_shutdown_rx;
+                loop {
+                    tokio::select! {
+                        accept_result = listener.accept() => {
+                            match accept_result {
+                                Ok((stream, _addr)) => {
+                                    let conn_metrics = n2c_metrics.clone();
+                                    conn_metrics
+                                        .n2c_connections_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    conn_metrics
+                                        .n2c_connections_active
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                    let qh = n2c_query_handler.clone();
+                                    let bp = n2c_block_provider.clone();
+                                    let mp = n2c_mempool.clone();
+                                    let tv = n2c_tx_validator.clone();
+                                    let ledger = n2c_ledger.clone();
+                                    let metrics = conn_metrics.clone();
+                                    let ann_rx = n2c_block_ann_tx.subscribe();
+                                    let magic = n2c_network_magic;
+
+                                    tokio::spawn(async move {
+                                        if let Err(e) = Self::handle_n2c_connection(
+                                            stream, magic, qh, bp, mp, tv, ledger, ann_rx,
+                                        )
+                                        .await
+                                        {
+                                            debug!("N2C connection ended: {e}");
+                                        }
+                                        metrics
+                                            .n2c_connections_active
+                                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("N2C accept error: {e}");
+                                }
+                            }
+                        }
+                        _ = shutdown.changed() => {
+                            info!("N2C server shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Initialize peer manager
         {
@@ -1367,34 +1474,119 @@ impl Node {
             });
         }
 
-        // TODO: Start N2N server for inbound peer connections using new networking API.
-        // The old N2NServer type was removed from torsten-network. The new
-        // ConnectionManager + N2N protocol handlers will be wired up here once
-        // the networking rewrite is complete.
+        // Start N2N server for inbound peer connections.
         //
-        // The N2N server needs:
-        //   - TCP listener (from new bearer::tcp module)
-        //   - Mux per connection
-        //   - Handshake responder
-        //   - ChainSync server protocol
-        //   - BlockFetch server protocol
-        //   - TxSubmission2 server protocol
-        //   - KeepAlive server protocol
-        //   - PeerSharing server protocol
+        // Each accepted TCP connection gets its own Mux and set of protocol tasks:
+        //   - Handshake (protocol 0, responder)
+        //   - ChainSync (protocol 2, responder)
+        //   - BlockFetch (protocol 3, responder)
+        //   - TxSubmission2 (protocol 4, responder)
+        //   - KeepAlive (protocol 8, responder)
+        //   - PeerSharing (protocol 10, responder)
         //
-        // For now, create broadcast channels directly so the rest of the code
-        // (block announcement, rollback announcement) can still compile.
-        let (block_ann_tx, _) =
-            tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
-        let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
-        self.block_announcement_tx = Some(block_ann_tx);
-        self.rollback_announcement_tx = Some(rollback_ann_tx);
-        debug!(
-            "N2N server: TODO — awaiting new networking API integration, diffusion_mode={:?}",
-            self.peer_manager.read().await.diffusion_mode()
-        );
-        let _n2n_shutdown_rx = shutdown_rx.clone();
-        let _n2n_shutdown_tx = shutdown_tx.clone();
+        // The broadcast channels were already created by the N2C server above.
+        // If block_announcement_tx is None (N2C server was skipped for some reason),
+        // create the channels here as a fallback.
+        if self.block_announcement_tx.is_none() {
+            let (block_ann_tx, _) =
+                tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
+            let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
+            self.block_announcement_tx = Some(block_ann_tx);
+            self.rollback_announcement_tx = Some(rollback_ann_tx);
+        }
+        {
+            let n2n_listen_addr = self.listen_addr;
+            let n2n_shutdown_rx = shutdown_rx.clone();
+            let n2n_network_magic = self.network_magic;
+            let n2n_metrics = self.metrics.clone();
+            let n2n_peer_manager = peer_manager.clone();
+            let n2n_block_provider = Arc::new(serve::ChainDBBlockProvider {
+                chain_db: self.chain_db.clone(),
+            });
+            let n2n_mempool = self.mempool.clone();
+            let n2n_block_ann_tx = self
+                .block_announcement_tx
+                .as_ref()
+                .expect("block_announcement_tx was just set")
+                .clone();
+
+            let diffusion_mode = self.peer_manager.read().await.diffusion_mode();
+            info!(
+                listen = %n2n_listen_addr,
+                diffusion_mode = ?diffusion_mode,
+                "N2N server listening"
+            );
+
+            let tcp_listener = match tokio::net::TcpListener::bind(n2n_listen_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("Failed to bind N2N TCP listener on {n2n_listen_addr}: {e}");
+                    return Err(e.into());
+                }
+            };
+
+            tokio::spawn(async move {
+                let mut shutdown = n2n_shutdown_rx;
+                loop {
+                    tokio::select! {
+                        accept_result = tcp_listener.accept() => {
+                            match accept_result {
+                                Ok((stream, peer_addr)) => {
+                                    let conn_metrics = n2n_metrics.clone();
+                                    conn_metrics
+                                        .n2n_connections_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    conn_metrics
+                                        .n2n_connections_active
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                    let bp = n2n_block_provider.clone();
+                                    let mp = n2n_mempool.clone();
+                                    let metrics = conn_metrics.clone();
+                                    let pm = n2n_peer_manager.clone();
+                                    let ann_rx = n2n_block_ann_tx.subscribe();
+                                    let magic = n2n_network_magic;
+
+                                    // Record inbound connection in peer manager
+                                    {
+                                        let mut pm_w = pm.write().await;
+                                        pm_w.peer_connected(
+                                            &peer_addr,
+                                            ConnectionDirection::Inbound,
+                                        );
+                                    }
+
+                                    tokio::spawn(async move {
+                                        if let Err(e) = Self::handle_n2n_connection(
+                                            stream, magic, bp, mp, pm.clone(),
+                                            peer_addr, ann_rx,
+                                        )
+                                        .await
+                                        {
+                                            debug!(
+                                                %peer_addr,
+                                                "N2N inbound connection ended: {e}"
+                                            );
+                                        }
+                                        metrics
+                                            .n2n_connections_active
+                                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                        pm.write().await.peer_disconnected(&peer_addr);
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!("N2N accept error: {e}");
+                                }
+                            }
+                        }
+                        _ = shutdown.changed() => {
+                            info!("N2N server shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Start ledger-based peer discovery task
         {
@@ -1556,7 +1748,6 @@ impl Node {
             });
         }
 
-        // TODO: network_magic will be needed by new sync client for handshake.
         let _network_magic = self.network_magic;
 
         // The GSM is initialized in Node::new() and stored as self.gsm.
@@ -1637,18 +1828,8 @@ impl Node {
             let governor_pm = peer_manager.clone();
             let governor_shutdown = shutdown_rx.clone();
             // Capture fields needed by governor-initiated connect tasks.
-            let _gov_network_magic = self.network_magic;
-            let _gov_listen_port = self.listen_addr.port();
+            let gov_network_magic = self.network_magic;
             let gov_metrics = self.metrics.clone();
-            let _gov_byron_epoch_length = self.byron_epoch_length;
-            // TODO: Mempool and block provider will be needed once the new
-            // networking API provides connection lifecycle management.
-            let _gov_mempool: Arc<dyn torsten_primitives::mempool::MempoolProvider> =
-                self.mempool.clone();
-            let _gov_block_provider: Arc<dyn torsten_network::BlockProvider> =
-                Arc::new(serve::ChainDBBlockProvider {
-                    chain_db: self.chain_db.clone(),
-                });
             let gov_config = {
                 let cfg = &self.config;
                 GovernorConfig {
@@ -1806,16 +1987,15 @@ impl Node {
                             }
                         }
 
-                        // TODO: Spawn connect tasks using new networking API.
-                        // The old DuplexPeerConnection type was removed. The new
-                        // ConnectionManager will handle TCP connect + handshake +
-                        // protocol mux. For now, stub out with direct TCP connects.
+                        // Spawn connect tasks using the new networking API.
+                        // Each task: TCP connect -> TcpBearer -> Mux -> N2N handshake -> KeepAlive.
                         for addr in addrs_to_connect {
                             let task_pm = governor_pm.clone();
                             let task_metrics = gov_metrics.clone();
                             let task_done_tx = connect_done_tx.clone();
                             let task_conn_handles = gov_conn_handles.clone();
                             let task_sync_managed = gov_sync_managed.clone();
+                            let task_magic = gov_network_magic;
                             tokio::spawn(async move {
                                 // Re-check sync-managed right before connecting to avoid races.
                                 if task_sync_managed.read().await.contains(&addr) {
@@ -1826,35 +2006,88 @@ impl Node {
                                     let _ = task_done_tx.send(addr);
                                     return;
                                 }
-                                let target = addr.to_string();
                                 debug!(%addr, "Governor: initiating outbound connection");
                                 let connect_start = std::time::Instant::now();
 
-                                // TODO: Replace with new networking API connection.
-                                // For now, just attempt a TCP connect to verify reachability.
+                                // TCP connect with timeout, then handshake via Mux.
                                 let connect_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(GOV_CONNECT_TIMEOUT_SECS),
-                                    tokio::net::TcpStream::connect(&target),
+                                    torsten_network::TcpBearer::connect(addr),
                                 )
                                 .await;
 
                                 match connect_result {
-                                    Ok(Ok(_tcp_stream)) => {
+                                    Ok(Ok(bearer)) => {
                                         let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                                         task_metrics.record_handshake_rtt(rtt_ms);
-                                        let mut pm = task_pm.write().await;
-                                        pm.peer_connected(&addr, ConnectionDirection::Outbound);
-                                        pm.record_handshake_rtt(&addr, rtt_ms);
-                                        drop(pm);
-                                        info!(
-                                            peer = %target,
-                                            rtt_ms = format_args!("{rtt_ms:.0}"),
-                                            "Governor: peer connected (warm)"
+
+                                        // Set up Mux (we are initiator) and run handshake
+                                        let mut mux = torsten_network::Mux::new(bearer, true);
+                                        let mut hs_ch = mux.subscribe(
+                                            torsten_network::protocol::PROTOCOL_HANDSHAKE,
+                                            torsten_network::Direction::InitiatorDir,
+                                            65536,
                                         );
-                                        // TODO: Store proper connection handle once
-                                        // new networking API provides one.
-                                        let handle = tokio::spawn(async {});
-                                        task_conn_handles.lock().await.insert(addr, handle);
+                                        let mut ka_ch = mux.subscribe(
+                                            torsten_network::protocol::PROTOCOL_N2N_KEEPALIVE,
+                                            torsten_network::Direction::InitiatorDir,
+                                            65536,
+                                        );
+
+                                        let mux_handle =
+                                            tokio::spawn(async move { mux.run().await });
+
+                                        let our_data =
+                                            torsten_network::N2NVersionData::new(task_magic, true);
+                                        match torsten_network::handshake::run_n2n_handshake_client(
+                                            &mut hs_ch, &our_data,
+                                        )
+                                        .await
+                                        {
+                                            Ok(hs_result) => {
+                                                let mut pm = task_pm.write().await;
+                                                pm.peer_connected(
+                                                    &addr,
+                                                    ConnectionDirection::Outbound,
+                                                );
+                                                pm.record_handshake_rtt(&addr, rtt_ms);
+                                                drop(pm);
+                                                info!(
+                                                    peer = %addr,
+                                                    version = hs_result.version,
+                                                    rtt_ms = format_args!("{rtt_ms:.0}"),
+                                                    "Governor: peer connected (warm, handshake OK)"
+                                                );
+
+                                                // Run KeepAlive client to hold the connection
+                                                // alive until the governor demotes the peer.
+                                                let handle = tokio::spawn(async move {
+                                                    let cancel =
+                                                        tokio_util::sync::CancellationToken::new();
+                                                    let client =
+                                                        torsten_network::KeepAliveClient::new(
+                                                            std::time::Duration::from_secs(90),
+                                                            cancel,
+                                                        );
+                                                    if let Err(e) = client.run(&mut ka_ch).await {
+                                                        debug!(
+                                                            %addr,
+                                                            "Governor KeepAlive ended: {e}"
+                                                        );
+                                                    }
+                                                    mux_handle.abort();
+                                                });
+                                                task_conn_handles.lock().await.insert(addr, handle);
+                                            }
+                                            Err(e) => {
+                                                task_pm.write().await.peer_failed(&addr);
+                                                debug!(
+                                                    %addr,
+                                                    "Governor: handshake failed — {e}"
+                                                );
+                                                mux_handle.abort();
+                                            }
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         task_pm.write().await.peer_failed(&addr);
@@ -1881,16 +2114,10 @@ impl Node {
             });
         }
 
-        // Main connection loop — connect to peers and sync
+        // Main connection loop — connect to peers and sync.
         //
-        // TODO: This entire section needs to be reimplemented using the new
-        // networking API. The old types (NodeToNodeClient, PipelinedPeerClient,
-        // BlockFetchPool, DuplexPeerConnection) were removed from torsten-network.
-        // The new implementation should use:
-        //   - TcpBearer + Mux for connection establishment
-        //   - PipelinedChainSyncClient for header sync
-        //   - BlockFetchClient for block download
-        //   - ConnectionManager for lifecycle management
+        // Uses TcpBearer + Mux + N2N handshake for connection setup, then runs
+        // ChainSync + BlockFetch via chain_sync_loop().
         //
         // Backoff parameters are intentionally short so that after a network
         // outage (e.g., sleep/hibernate, router restart) the node reconnects
@@ -1924,69 +2151,195 @@ impl Node {
                 peers
             };
 
-            // TODO: Replace with new networking API connection establishment.
-            // The old NodeToNodeClient type was removed. The new implementation
-            // should use TcpBearer + Mux + handshake for connection setup.
-            let mut peer_addr_connected: Option<std::net::SocketAddr> = None;
+            // Connect to peer using TcpBearer + Mux + N2N handshake.
+            #[allow(clippy::type_complexity)]
+            let mut connected: Option<(
+                std::net::SocketAddr,
+                torsten_network::MuxChannel,
+                torsten_network::MuxChannel,
+                torsten_network::MuxChannel,
+                tokio::task::JoinHandle<Result<(), torsten_network::error::MuxError>>,
+            )> = None;
 
             if !targets.is_empty() {
                 for addr in &targets {
                     if *shutdown_rx.borrow() {
                         break;
                     }
-                    let target = addr.to_string();
-                    debug!("Connecting to peer {target}...");
+                    debug!("Connecting to peer {addr}...");
                     let connect_start = std::time::Instant::now();
                     let connect_result = tokio::time::timeout(
                         connect_timeout,
-                        tokio::net::TcpStream::connect(&target),
+                        torsten_network::TcpBearer::connect(*addr),
                     )
                     .await;
                     match connect_result {
-                        Ok(Ok(_stream)) => {
+                        Ok(Ok(bearer)) => {
                             let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
                             self.metrics.record_handshake_rtt(rtt_ms);
-                            let mut pm = peer_manager.write().await;
-                            pm.peer_connected(addr, ConnectionDirection::Outbound);
-                            pm.record_handshake_rtt(addr, rtt_ms);
-                            drop(pm);
-                            info!(peer = %target, rtt_ms = format_args!("{rtt_ms:.0}"), "Peer connected (warm, dwell pending)");
-                            peer_addr_connected = Some(*addr);
-                            break;
+
+                            // Set up Mux as initiator and subscribe sync protocols
+                            let mut mux = torsten_network::Mux::new(bearer, true);
+                            let mut hs_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_HANDSHAKE,
+                                torsten_network::Direction::InitiatorDir,
+                                65536,
+                            );
+                            let cs_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_N2N_CHAINSYNC,
+                                torsten_network::Direction::InitiatorDir,
+                                1_048_576,
+                            );
+                            let bf_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_N2N_BLOCKFETCH,
+                                torsten_network::Direction::InitiatorDir,
+                                4_194_304,
+                            );
+                            let mut ps_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_N2N_PEERSHARING,
+                                torsten_network::Direction::InitiatorDir,
+                                65536,
+                            );
+                            let mux_handle = tokio::spawn(async move { mux.run().await });
+
+                            // Run N2N handshake
+                            let our_data =
+                                torsten_network::N2NVersionData::new(self.network_magic, true);
+                            match torsten_network::handshake::run_n2n_handshake_client(
+                                &mut hs_ch, &our_data,
+                            )
+                            .await
+                            {
+                                Ok(hs_result) => {
+                                    let mut pm = peer_manager.write().await;
+                                    pm.peer_connected(addr, ConnectionDirection::Outbound);
+                                    pm.record_handshake_rtt(addr, rtt_ms);
+                                    drop(pm);
+                                    info!(
+                                        peer = %addr,
+                                        version = hs_result.version,
+                                        rtt_ms = format_args!("{rtt_ms:.0}"),
+                                        "Peer connected (warm, dwell pending)"
+                                    );
+
+                                    // Request peers via PeerSharing protocol (best-effort)
+                                    let ps_pm = peer_manager.clone();
+                                    tokio::spawn(async move {
+                                        match torsten_network::PeerSharingClient::request_peers(
+                                            &mut ps_ch, 10,
+                                        )
+                                        .await
+                                        {
+                                            Ok(addrs) if !addrs.is_empty() => {
+                                                let mut pm_w = ps_pm.write().await;
+                                                for shared_addr in &addrs {
+                                                    pm_w.add_ledger_peer(*shared_addr);
+                                                }
+                                                debug!(
+                                                    count = addrs.len(),
+                                                    "PeerSharing: received peers"
+                                                );
+                                            }
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                debug!("PeerSharing request failed: {e}");
+                                            }
+                                        }
+                                        // Send MsgDone to cleanly terminate
+                                        let _ =
+                                            torsten_network::PeerSharingClient::done(&mut ps_ch)
+                                                .await;
+                                    });
+
+                                    connected = Some((*addr, cs_ch, bf_ch, hs_ch, mux_handle));
+                                    break;
+                                }
+                                Err(e) => {
+                                    peer_manager.write().await.peer_failed(addr);
+                                    debug!("Handshake failed with {addr}: {e}");
+                                    mux_handle.abort();
+                                }
+                            }
                         }
                         Ok(Err(e)) => {
                             peer_manager.write().await.peer_failed(addr);
-                            debug!("Failed to connect to {target}: {e}");
+                            debug!("Failed to connect to {addr}: {e}");
                         }
                         Err(_) => {
                             peer_manager.write().await.peer_failed(addr);
                             debug!(
-                                "Connection to {target} timed out after {}s",
+                                "Connection to {addr} timed out after {}s",
                                 connect_timeout.as_secs()
                             );
                         }
                     }
                 }
             } else {
-                // Fallback: try topology peers directly
+                // Fallback: try topology peers directly (no peer manager entries)
                 for (addr, port) in &peers {
                     if *shutdown_rx.borrow() {
                         break;
                     }
                     let target = format!("{addr}:{port}");
                     debug!("Connecting to peer {target}...");
+                    let sock_addr: std::net::SocketAddr = match target.parse() {
+                        Ok(a) => a,
+                        Err(_) => {
+                            // Try DNS resolution for hostname-based addresses
+                            match tokio::net::lookup_host(&target).await {
+                                Ok(mut addrs) => match addrs.next() {
+                                    Some(a) => a,
+                                    None => continue,
+                                },
+                                Err(e) => {
+                                    debug!("Failed to resolve {target}: {e}");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
                     let connect_result = tokio::time::timeout(
                         connect_timeout,
-                        tokio::net::TcpStream::connect(&target),
+                        torsten_network::TcpBearer::connect(sock_addr),
                     )
                     .await;
                     match connect_result {
-                        Ok(Ok(_stream)) => {
-                            info!(peer = %target, "Peer connected");
-                            if let Ok(sock_addr) = target.parse::<std::net::SocketAddr>() {
-                                peer_addr_connected = Some(sock_addr);
+                        Ok(Ok(bearer)) => {
+                            let mut mux = torsten_network::Mux::new(bearer, true);
+                            let mut hs_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_HANDSHAKE,
+                                torsten_network::Direction::InitiatorDir,
+                                65536,
+                            );
+                            let cs_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_N2N_CHAINSYNC,
+                                torsten_network::Direction::InitiatorDir,
+                                1_048_576,
+                            );
+                            let bf_ch = mux.subscribe(
+                                torsten_network::protocol::PROTOCOL_N2N_BLOCKFETCH,
+                                torsten_network::Direction::InitiatorDir,
+                                4_194_304,
+                            );
+                            let mux_handle = tokio::spawn(async move { mux.run().await });
+
+                            let our_data =
+                                torsten_network::N2NVersionData::new(self.network_magic, true);
+                            match torsten_network::handshake::run_n2n_handshake_client(
+                                &mut hs_ch, &our_data,
+                            )
+                            .await
+                            {
+                                Ok(_hs_result) => {
+                                    info!(peer = %target, "Peer connected");
+                                    connected = Some((sock_addr, cs_ch, bf_ch, hs_ch, mux_handle));
+                                    break;
+                                }
+                                Err(e) => {
+                                    debug!("Handshake failed with {target}: {e}");
+                                    mux_handle.abort();
+                                }
                             }
-                            break;
                         }
                         Ok(Err(e)) => {
                             debug!("Failed to connect to {target}: {e}");
@@ -2001,31 +2354,32 @@ impl Node {
                 }
             }
 
-            let peer_addr = match peer_addr_connected {
-                Some(addr) => {
-                    retry_count = 0;
-                    // Register this peer as sync-managed so the governor
-                    // doesn't create a duplicate connection.
-                    sync_managed_peers.write().await.insert(addr);
-                    addr
-                }
-                None => {
-                    retry_count += 1;
-                    let delay = base_delay_secs
-                        .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
-                        .min(max_delay_secs);
-                    warn!(
-                        retry_count,
-                        delay_secs = delay,
-                        "Could not connect to any peer, retrying..."
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
-                        _ = shutdown_rx.changed() => { break; }
+            let (peer_addr, mut chainsync_ch, mut blockfetch_ch, _hs_ch, mux_handle) =
+                match connected {
+                    Some(c) => {
+                        retry_count = 0;
+                        // Register this peer as sync-managed so the governor
+                        // doesn't create a duplicate connection.
+                        sync_managed_peers.write().await.insert(c.0);
+                        c
                     }
-                    continue;
-                }
-            };
+                    None => {
+                        retry_count += 1;
+                        let delay = base_delay_secs
+                            .saturating_mul(2u64.saturating_pow(retry_count.min(4)))
+                            .min(max_delay_secs);
+                        warn!(
+                            retry_count,
+                            delay_secs = delay,
+                            "Could not connect to any peer, retrying..."
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+                            _ = shutdown_rx.changed() => { break; }
+                        }
+                        continue;
+                    }
+                };
 
             // Log peer manager state
             {
@@ -2033,41 +2387,30 @@ impl Node {
                 debug!("P2P: {}", pm.stats());
             }
 
-            // TODO: Spawn PeerSharing client using new PeerSharingClient.
-            // The old request_peers_from() was removed. The new implementation
-            // should use PeerSharingClient::request_peers() directly.
+            // Run the ChainSync + BlockFetch loop over the established mux channels.
+            let sync_result = self
+                .chain_sync_loop(
+                    &mut chainsync_ch,
+                    &mut blockfetch_ch,
+                    shutdown_rx.clone(),
+                    peer_addr,
+                )
+                .await;
 
-            // TODO: Replace with new networking API for sync.
-            // The old types (NodeToNodeClient, PipelinedPeerClient, BlockFetchPool,
-            // DuplexPeerConnection) were removed. The new implementation should use:
-            //   - PipelinedChainSyncClient for header sync
-            //   - BlockFetchClient for block download
-            //   - TxSubmissionClient/Server for mempool propagation
-            //
-            // For now, stub out the chain sync loop. The node will connect to
-            // peers (TCP only) but cannot yet perform ChainSync/BlockFetch.
-            warn!(
-                peer = %peer_addr,
-                "TODO: chain sync not yet implemented with new networking API — \
-                 waiting for shutdown or reconnect"
-            );
-
-            // Wait until shutdown is requested, then disconnect.
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                    // Periodic reconnect attempt
-                    peer_manager.write().await.peer_disconnected(&peer_addr);
+            match sync_result {
+                Ok(()) => {
+                    info!(peer = %peer_addr, "ChainSync loop completed normally");
                 }
-                _ = shutdown_rx.changed() => {
-                    peer_manager.write().await.peer_disconnected(&peer_addr);
-                    sync_managed_peers.write().await.remove(&peer_addr);
-                    break;
+                Err(e) => {
+                    warn!(peer = %peer_addr, "ChainSync loop error: {e}");
                 }
             }
 
-            // Unregister from sync-managed so governor can connect.
+            // Clean up: abort mux, disconnect peer, unregister
+            mux_handle.abort();
+            peer_manager.write().await.peer_disconnected(&peer_addr);
             sync_managed_peers.write().await.remove(&peer_addr);
-            info!("Peer disconnected, reconnecting...");
+            info!(peer = %peer_addr, "Peer disconnected, reconnecting...");
 
             // Brief delay before reconnecting.
             tokio::select! {
@@ -2103,6 +2446,345 @@ impl Node {
                 std::process::exit(1);
             }
         }
+        Ok(())
+    }
+
+    // ─── handle_n2c_connection() ─────────────────────────────────────────────
+
+    /// Handle a single N2C (Unix socket) connection.
+    ///
+    /// Sets up a Mux over the bearer, runs the N2C handshake, then spawns
+    /// protocol tasks for LocalChainSync, LocalTxSubmission, LocalStateQuery,
+    /// and LocalTxMonitor.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_n2c_connection(
+        stream: tokio::net::UnixStream,
+        network_magic: u64,
+        query_handler: Arc<RwLock<QueryHandler>>,
+        block_provider: Arc<serve::ChainDBBlockProvider>,
+        mempool: Arc<Mempool>,
+        tx_validator: Arc<serve::LedgerTxValidator>,
+        ledger: Arc<RwLock<LedgerState>>,
+        announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
+    ) -> Result<()> {
+        use torsten_network::protocol;
+
+        let bearer = torsten_network::UnixBearer::new(stream);
+        let mut mux = torsten_network::Mux::new(bearer, false); // we are responder
+
+        // Subscribe protocol channels (responder direction for all)
+        let mut hs_ch = mux.subscribe(
+            protocol::PROTOCOL_HANDSHAKE,
+            torsten_network::Direction::ResponderDir,
+            65536,
+        );
+        let mut cs_ch = mux.subscribe(
+            protocol::PROTOCOL_N2C_CHAINSYNC,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+        let mut tx_ch = mux.subscribe(
+            protocol::PROTOCOL_N2C_TXSUBMISSION,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+        let mut sq_ch = mux.subscribe(
+            protocol::PROTOCOL_N2C_STATEQUERY,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+        let mut tm_ch = mux.subscribe(
+            protocol::PROTOCOL_N2C_TXMONITOR,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+
+        // Start the mux tasks (egress/ingress)
+        let mux_handle = tokio::spawn(async move { mux.run().await });
+
+        // Run N2C handshake as server
+        let our_data = torsten_network::N2CVersionData::new(network_magic);
+        let hs_result =
+            torsten_network::handshake::run_n2c_handshake_server(&mut hs_ch, &our_data).await;
+        match hs_result {
+            Ok(r) => {
+                debug!(version = r.version, "N2C handshake accepted");
+            }
+            Err(e) => {
+                debug!("N2C handshake failed: {e}");
+                mux_handle.abort();
+                return Ok(());
+            }
+        }
+
+        // Spawn protocol tasks — each runs until the client disconnects
+        // or an error occurs. The mux handle keeps the transport alive.
+
+        // LocalChainSync server
+        let lcs_bp = block_provider.clone();
+        let lcs_ann_rx = announcement_rx;
+        let lcs_task = tokio::spawn(async move {
+            let mut server = protocol::local_chainsync::server::LocalChainSyncServer::new();
+            if let Err(e) = server.run(&mut cs_ch, lcs_bp.as_ref(), lcs_ann_rx).await {
+                debug!("N2C LocalChainSync ended: {e}");
+            }
+        });
+
+        // LocalTxSubmission server
+        let lts_validator = tx_validator;
+        let lts_mempool = mempool.clone();
+        let lts_task = tokio::spawn(async move {
+            let on_accepted = |era_id: u16, tx_bytes: Vec<u8>| {
+                // Decode the transaction and add it to the mempool.
+                let size_bytes = tx_bytes.len();
+                match torsten_serialization::decode_transaction(era_id, &tx_bytes) {
+                    Ok(tx) => {
+                        let tx_hash = tx.hash;
+                        if let Err(e) = lts_mempool.add_tx(tx_hash, tx, size_bytes) {
+                            debug!("N2C tx accepted but mempool add failed: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        debug!("N2C tx decode for mempool failed: {e}");
+                    }
+                }
+            };
+            match protocol::local_tx_submission::server::LocalTxSubmissionServer::run(
+                &mut tx_ch,
+                lts_validator.as_ref(),
+                on_accepted,
+            )
+            .await
+            {
+                Ok(stats) => {
+                    debug!(
+                        submitted = stats.submitted,
+                        accepted = stats.accepted,
+                        rejected = stats.rejected,
+                        "N2C LocalTxSubmission ended"
+                    );
+                }
+                Err(e) => {
+                    debug!("N2C LocalTxSubmission error: {e}");
+                }
+            }
+        });
+
+        // LocalStateQuery server
+        let lsq_handler = query_handler;
+        let lsq_task = tokio::spawn(async move {
+            let handler = lsq_handler.read().await;
+            if let Err(e) = protocol::local_state_query::server::LocalStateQueryServer::run(
+                &mut sq_ch, &*handler,
+            )
+            .await
+            {
+                debug!("N2C LocalStateQuery ended: {e}");
+            }
+        });
+
+        // LocalTxMonitor server
+        let ltm_mempool = mempool;
+        let ltm_ledger = ledger;
+        let ltm_task = tokio::spawn(async move {
+            let current_slot = || {
+                // Use try_read to avoid blocking — return 0 if lock is contended
+                ltm_ledger
+                    .try_read()
+                    .map(|ls| ls.tip.point.slot().map(|s| s.0).unwrap_or(0))
+                    .unwrap_or(0)
+            };
+            if let Err(e) = protocol::local_tx_monitor::server::LocalTxMonitorServer::run(
+                &mut tm_ch,
+                ltm_mempool.as_ref(),
+                current_slot,
+            )
+            .await
+            {
+                debug!("N2C LocalTxMonitor ended: {e}");
+            }
+        });
+
+        // Wait for any protocol task to complete (usually means client disconnected),
+        // then abort all others and clean up.
+        tokio::select! {
+            _ = lcs_task => {}
+            _ = lts_task => {}
+            _ = lsq_task => {}
+            _ = ltm_task => {}
+            r = mux_handle => {
+                if let Ok(Err(e)) = r {
+                    debug!("N2C mux error: {e}");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ─── handle_n2n_connection() ─────────────────────────────────────────────
+
+    /// Handle a single inbound N2N (TCP) connection.
+    ///
+    /// Sets up a Mux over the bearer, runs the N2N handshake as server, then
+    /// spawns protocol tasks for ChainSync, BlockFetch, TxSubmission2,
+    /// KeepAlive, and PeerSharing.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_n2n_connection(
+        stream: tokio::net::TcpStream,
+        network_magic: u64,
+        block_provider: Arc<serve::ChainDBBlockProvider>,
+        mempool: Arc<Mempool>,
+        peer_manager: Arc<RwLock<NodePeerManager>>,
+        peer_addr: std::net::SocketAddr,
+        announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
+    ) -> Result<()> {
+        use torsten_network::protocol;
+
+        let bearer = torsten_network::TcpBearer::new(stream)?;
+        let mut mux = torsten_network::Mux::new(bearer, false); // we are responder
+
+        // Subscribe protocol channels (responder direction for all)
+        let mut hs_ch = mux.subscribe(
+            protocol::PROTOCOL_HANDSHAKE,
+            torsten_network::Direction::ResponderDir,
+            65536,
+        );
+        let mut cs_ch = mux.subscribe(
+            protocol::PROTOCOL_N2N_CHAINSYNC,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+        let mut bf_ch = mux.subscribe(
+            protocol::PROTOCOL_N2N_BLOCKFETCH,
+            torsten_network::Direction::ResponderDir,
+            4_194_304,
+        );
+        let mut tx_ch = mux.subscribe(
+            protocol::PROTOCOL_N2N_TXSUBMISSION,
+            torsten_network::Direction::ResponderDir,
+            1_048_576,
+        );
+        let mut ka_ch = mux.subscribe(
+            protocol::PROTOCOL_N2N_KEEPALIVE,
+            torsten_network::Direction::ResponderDir,
+            65536,
+        );
+        let mut ps_ch = mux.subscribe(
+            protocol::PROTOCOL_N2N_PEERSHARING,
+            torsten_network::Direction::ResponderDir,
+            65536,
+        );
+
+        // Start the mux tasks
+        let mux_handle = tokio::spawn(async move { mux.run().await });
+
+        // Run N2N handshake as server
+        let our_data = torsten_network::N2NVersionData::new(network_magic, true);
+        let hs_result =
+            torsten_network::handshake::run_n2n_handshake_server(&mut hs_ch, &our_data).await;
+        match hs_result {
+            Ok(r) => {
+                debug!(
+                    %peer_addr,
+                    version = r.version,
+                    "N2N handshake accepted"
+                );
+            }
+            Err(e) => {
+                debug!(%peer_addr, "N2N handshake failed: {e}");
+                mux_handle.abort();
+                return Ok(());
+            }
+        }
+
+        // ChainSync server
+        let cs_bp = block_provider.clone();
+        let cs_ann_rx = announcement_rx;
+        let cs_task = tokio::spawn(async move {
+            let mut server = protocol::chainsync::server::ChainSyncServer::new();
+            if let Err(e) = server.run(&mut cs_ch, cs_bp.as_ref(), cs_ann_rx).await {
+                debug!("N2N ChainSync server ended: {e}");
+            }
+        });
+
+        // BlockFetch server
+        let bf_bp = block_provider.clone();
+        let bf_task = tokio::spawn(async move {
+            if let Err(e) =
+                protocol::blockfetch::server::BlockFetchServer::run(&mut bf_ch, bf_bp.as_ref())
+                    .await
+            {
+                debug!("N2N BlockFetch server ended: {e}");
+            }
+        });
+
+        // TxSubmission2 server
+        let tx_mempool = mempool;
+        let tx_task = tokio::spawn(async move {
+            let on_tx = |tx_hash: [u8; 32], tx_bytes: Vec<u8>| -> bool {
+                // Best-effort mempool admission for peer-submitted txs.
+                // Try all supported eras for decoding (Conway=6, Babbage=5, Alonzo=4, etc.)
+                let size_bytes = tx_bytes.len();
+                for era_id in [6u16, 5, 4, 3, 2] {
+                    if let Ok(tx) = torsten_serialization::decode_transaction(era_id, &tx_bytes) {
+                        let hash = torsten_primitives::hash::Hash32::from_bytes(tx_hash);
+                        return tx_mempool.add_tx(hash, tx, size_bytes).is_ok();
+                    }
+                }
+                false
+            };
+            match torsten_network::TxSubmissionServer::run(&mut tx_ch, on_tx).await {
+                Ok(stats) => {
+                    debug!(
+                        tx_ids = stats.tx_ids_received,
+                        txs_received = stats.txs_received,
+                        accepted = stats.txs_accepted,
+                        rejected = stats.txs_rejected,
+                        "N2N TxSubmission2 server ended"
+                    );
+                }
+                Err(e) => {
+                    debug!("N2N TxSubmission2 server error: {e}");
+                }
+            }
+        });
+
+        // KeepAlive server
+        let ka_task = tokio::spawn(async move {
+            if let Err(e) = torsten_network::KeepAliveServer::run(&mut ka_ch).await {
+                debug!("N2N KeepAlive server ended: {e}");
+            }
+        });
+
+        // PeerSharing server — share routable peer addresses
+        let ps_pm = peer_manager;
+        let ps_task = tokio::spawn(async move {
+            let peers: Vec<std::net::SocketAddr> = {
+                let pm = ps_pm.read().await;
+                pm.connected_peer_addrs()
+            };
+            if let Err(e) =
+                protocol::peersharing::server::PeerSharingServer::run(&mut ps_ch, &peers).await
+            {
+                debug!("N2N PeerSharing server ended: {e}");
+            }
+        });
+
+        // Wait for any protocol task to complete, then clean up.
+        tokio::select! {
+            _ = cs_task => {}
+            _ = bf_task => {}
+            _ = tx_task => {}
+            _ = ka_task => {}
+            _ = ps_task => {}
+            r = mux_handle => {
+                if let Ok(Err(e)) = r {
+                    debug!(%peer_addr, "N2N mux error: {e}");
+                }
+            }
+        }
+
         Ok(())
     }
 
