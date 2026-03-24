@@ -300,4 +300,4 @@ pub use bearer::unix::UnixBearer;
 
 pub use handshake::n2c::N2CVersionData;
 pub use handshake::n2n::N2NVersionData;
-pub use n2c_client::N2CClient;
+pub use n2c_client::{N2CClient, TipResult};
