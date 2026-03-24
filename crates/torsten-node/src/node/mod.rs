@@ -1971,6 +1971,7 @@ impl Node {
                     // Cleanup dead connections (mux terminated).
                     if let Some(ref mut lifecycle) = self.connection_lifecycle {
                         let mut pm = peer_manager.write().await;
+                        // NOTE: cleanup to debug connection deaths
                         lifecycle.cleanup_dead_connections(&mut pm).await;
                     }
                 }
