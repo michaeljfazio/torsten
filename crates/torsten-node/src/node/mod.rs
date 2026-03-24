@@ -867,7 +867,9 @@ impl Node {
         // Use `try_read()` to avoid blocking in the async runtime.
         // At this point in startup, no other tasks hold the lock.
         let chain_fragment = {
-            let db = chain_db.try_read().expect("ChainDB lock available during startup");
+            let db = chain_db
+                .try_read()
+                .expect("ChainDB lock available during startup");
             let immutable_tip = db.get_immutable_tip();
             let anchor = match &immutable_tip.point {
                 Point::Origin => Point::Origin,

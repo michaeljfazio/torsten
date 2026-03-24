@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::miniprotocols::peersharing::{self, PeerAddress, PeerSharingMessage};
 use crate::multiplexer::Segment;
@@ -767,33 +767,16 @@ async fn process_n2n_segment(
                 initiator_and_responder,
                 peer_sharing_mode,
             )?;
-            let mut segments: Vec<Segment> = resp.into_iter().collect();
+            let segments: Vec<Segment> = resp.into_iter().collect();
 
-            // After a successful handshake with InitiatorAndResponder mode,
-            // proactively send MsgRequestTxIds on TxSubmission2.  In the
-            // Ouroboros TxSubmission2 protocol, the Server has initial agency
-            // and must send MsgRequestTxIds first — the Haskell Client waits
-            // for this before sending anything.  Without this, the Haskell
-            // peer sees a deadlocked connection and tears it down in <2ms,
-            // preventing ChainSync from starting.
-            if initiator_and_responder && !segments.is_empty() {
-                let mut txsub_buf = Vec::new();
-                let mut enc = minicbor::Encoder::new(&mut txsub_buf);
-                // MsgRequestTxIds: [0, blocking, ack_count, req_count]
-                enc.array(4).expect("encode array");
-                enc.u32(0).expect("encode tag"); // tag 0 = MsgRequestTxIds
-                enc.bool(true).expect("encode blocking"); // blocking = true
-                enc.u16(0).expect("encode ack"); // ack_count = 0
-                enc.u16(3).expect("encode req"); // req_count = 3 (within maxUnacknowledgedTxIds=10)
-                segments.push(Segment {
-                    transmission_time: 0,
-                    protocol_id: MINI_PROTOCOL_TXSUBMISSION,
-                    is_responder: true,
-                    payload: txsub_buf,
-                });
-                peer_state.tx_submission_init_sent = true;
-                info!("N2N: proactive TxSubmission2 MsgRequestTxIds sent after handshake");
-            }
+            // NOTE: Do NOT proactively send MsgRequestTxIds here after handshake.
+            // The TxSubmission2 protocol requires the Client to send MsgInit first,
+            // and only then does the Server respond with MsgRequestTxIds.
+            // Sending MsgRequestTxIds before MsgInit is a protocol violation that
+            // causes double-send when MsgInit arrives (the MsgInit handler also
+            // sends MsgRequestTxIds), leading to ProtocolErrorRequestBlocking
+            // because the second request has ack=0 but the peer has unacked IDs
+            // from the first reply.
 
             Ok(segments)
         }
@@ -1669,8 +1652,14 @@ fn handle_n2n_txsubmission(
         6 => {
             peer_state.tx_submission_init_sent = true;
             info!(peer = %peer_addr, "TxSubmission2: received MsgInit from client");
-            // Server has agency now — send MsgRequestTxIds (blocking, ack=0, req=3)
+            // Server has agency now — send MsgRequestTxIds (non-blocking, ack=0, req=3)
             // to begin pulling tx IDs from the remote Client.
+            //
+            // IMPORTANT: The first MsgRequestTxIds MUST be non-blocking.
+            // The Ouroboros TxSubmission2 spec requires blocking=false when
+            // ack_count=0 (no previously received tx IDs to acknowledge).
+            // Sending blocking=true here causes the Haskell peer to throw
+            // ProtocolErrorRequestBlocking and kill the connection.
             let mut buf = Vec::new();
             let mut enc = minicbor::Encoder::new(&mut buf);
             enc.array(4)
@@ -1678,7 +1667,7 @@ fn handle_n2n_txsubmission(
             enc.u32(0)
                 .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // tag 0 = MsgRequestTxIds
             enc.bool(true)
-                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // blocking = true
+                .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // blocking = true (spec requires blocking when peer has 0 unacked IDs)
             enc.u16(0)
                 .map_err(|e| N2NServerError::Protocol(e.to_string()))?; // ack_count = 0
             enc.u16(3)
@@ -2560,7 +2549,7 @@ mod tests {
         let arr_len = dec.array().unwrap().unwrap();
         assert_eq!(arr_len, 4); // MsgRequestTxIds = [0, blocking, ack, req]
         assert_eq!(dec.u32().unwrap(), 0); // tag 0 = MsgRequestTxIds
-        assert!(dec.bool().unwrap()); // blocking = true
+        assert!(dec.bool().unwrap()); // blocking = true (spec requires blocking when peer has 0 unacked IDs)
         assert_eq!(dec.u16().unwrap(), 0); // ack_count = 0
         assert_eq!(dec.u16().unwrap(), 3); // req_count = 3
 

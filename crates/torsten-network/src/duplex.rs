@@ -903,23 +903,27 @@ async fn pull_tx_submission_inner(
     // Track tx IDs received from this peer but not yet acknowledged.
     // pending_ack is sent as ack_count in the next MsgRequestTxIds.
     let mut pending_ack: u16 = 0;
+    // Track the peer's total unacknowledged tx IDs (IDs sent to us minus IDs we've acked).
+    // This determines blocking vs non-blocking per the Ouroboros TxSubmission2 spec:
+    //   blocking=true  MUST be used when peer_total_unacked == 0 after acking
+    //   blocking=false MUST be used when peer_total_unacked > 0 after acking
+    // Violating this causes ProtocolErrorRequestBlocking or ProtocolErrorRequestNonBlocking.
+    let mut peer_total_unacked: u16 = 0;
     // Set of tx IDs already seen from this peer (dedup filter).
     let mut known_tx_ids: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     loop {
         // Step 2: Send MsgRequestTxIds.
-        // Per Haskell protocol rules:
-        //   blocking MUST be used when unacknowledged count is 0 (after acking)
-        //   non-blocking MUST be used when unacknowledged count > 0
-        // After acking, pending_ack resets to 0, meaning all previous IDs were acked
-        // and we have zero unacknowledged — use blocking.
-        let ack = pending_ack;
-        let use_blocking = ack > 0 || known_tx_ids.is_empty();
+        let ack = pending_ack.min(peer_total_unacked);
+        let unacked_after = peer_total_unacked.saturating_sub(ack);
+        let use_blocking = unacked_after == 0;
         let req_msg = encode_request_tx_ids(use_blocking, ack, SERVER_REQ_TX_IDS);
-        info!(%peer_addr, ack, "TxSubmission2 server: sending MsgRequestTxIds [{}]",
+        info!(%peer_addr, ack, use_blocking, peer_total_unacked, unacked_after,
+            "TxSubmission2 server: sending MsgRequestTxIds [{}]",
             hex_prefix(&req_msg));
         send_msg(&mut channel, &req_msg).await?;
-        pending_ack = 0;
+        pending_ack -= ack;
+        peer_total_unacked = unacked_after;
 
         // Step 3: Receive MsgReplyTxIds or MsgDone.
         let reply = tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(&mut channel))
@@ -938,66 +942,18 @@ async fn pull_tx_submission_inner(
                 let ids = decode_reply_tx_ids(&reply)?;
 
                 if ids.is_empty() {
-                    // Non-blocking returned empty — switch to blocking.
-                    debug!(%peer_addr, "TxSubmission2 server: no txs available, sending blocking request");
-                    let blocking_req = encode_request_tx_ids(true, 0, SERVER_REQ_TX_IDS);
-                    info!(%peer_addr, "TxSubmission2 server: sending blocking MsgRequestTxIds [{}]",
-                        hex_prefix(&blocking_req));
-                    send_msg(&mut channel, &blocking_req).await?;
-
-                    // Receive the blocking reply.
-                    let blocking_reply =
-                        tokio::time::timeout(TXSUB_BLOCKING_TIMEOUT, recv_msg(&mut channel))
-                            .await
-                            .map_err(|_| {
-                                DuplexError::Timeout(
-                                    "TxSubmission2 server: blocking MsgReplyTxIds timeout".into(),
-                                )
-                            })??;
-
-                    let blocking_tag = decode_first_tag(&blocking_reply)?;
-                    info!(%peer_addr, tag = blocking_tag,
-                        "TxSubmission2 server: received blocking reply [{}]",
-                        hex_prefix(&blocking_reply));
-
-                    match blocking_tag {
-                        1 => {
-                            let blocking_ids = decode_reply_tx_ids(&blocking_reply)?;
-                            if blocking_ids.is_empty() {
-                                // Empty blocking reply = peer is ending the session.
-                                info!(%peer_addr,
-                                    "TxSubmission2 server: empty blocking reply, closing");
-                                break;
-                            }
-                            if let Err(e) = process_tx_ids_server(
-                                &mut channel,
-                                &blocking_ids,
-                                &mempool,
-                                &mut pending_ack,
-                                &mut known_tx_ids,
-                                peer_addr,
-                            )
-                            .await
-                            {
-                                warn!(%peer_addr, "TxSubmission2 server: process_tx_ids: {e}");
-                            }
-                        }
-                        4 => {
-                            info!(%peer_addr,
-                                "TxSubmission2 server: peer sent MsgDone during blocking wait");
-                            break;
-                        }
-                        other => {
-                            warn!(%peer_addr, tag = other,
-                                "TxSubmission2 server: unexpected tag in blocking reply");
-                            break;
-                        }
-                    }
+                    // Empty reply — continue the loop which will compute the
+                    // correct blocking flag based on peer_total_unacked.
+                    // If peer_total_unacked == 0, the next request will be
+                    // blocking (allowing the peer to send MsgDone to close).
+                    debug!(%peer_addr, peer_total_unacked,
+                        "TxSubmission2 server: empty reply, continuing loop");
                 } else if let Err(e) = process_tx_ids_server(
                     &mut channel,
                     &ids,
                     &mempool,
                     &mut pending_ack,
+                    &mut peer_total_unacked,
                     &mut known_tx_ids,
                     peer_addr,
                 )
@@ -1030,18 +986,20 @@ async fn pull_tx_submission_inner(
 /// Process a batch of tx IDs from a MsgReplyTxIds: fetch bodies via MsgRequestTxs,
 /// then add new transactions to the local mempool.
 ///
-/// Updates `pending_ack` with the number of IDs just received (to be sent in
-/// the next MsgRequestTxIds).  Deduplicates via `known_tx_ids`.
+/// Updates `pending_ack` and `peer_total_unacked` with the number of IDs just
+/// received (to be sent in the next MsgRequestTxIds).  Deduplicates via `known_tx_ids`.
 async fn process_tx_ids_server(
     channel: &mut AgentChannel,
     ids: &[([u8; 32], u32)],
     mempool: &Arc<dyn MempoolProvider>,
     pending_ack: &mut u16,
+    peer_total_unacked: &mut u16,
     known_tx_ids: &mut std::collections::HashSet<[u8; 32]>,
     peer_addr: SocketAddr,
 ) -> Result<(), DuplexError> {
-    // Accumulate pending acks for this batch.
+    // Accumulate pending acks and peer unacked count for this batch.
     *pending_ack = pending_ack.saturating_add(ids.len() as u16);
+    *peer_total_unacked = peer_total_unacked.saturating_add(ids.len() as u16);
 
     // Filter out already-known tx IDs.
     let new_ids: Vec<[u8; 32]> = ids
