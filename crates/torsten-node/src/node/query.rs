@@ -86,8 +86,8 @@ fn hash32_padded_to_28_bytes(h: &torsten_primitives::hash::Hash32) -> Vec<u8> {
 fn build_snapshot_stake_data(
     snap: &torsten_ledger::state::StakeSnapshot,
     script_creds: &std::collections::HashSet<torsten_primitives::hash::Hash32>,
-) -> torsten_network::query_handler::SnapshotStakeData {
-    use torsten_network::query_handler::{PoolParamsSnapshot, RelaySnapshot, SnapshotStakeData};
+) -> super::n2c_query::SnapshotStakeData {
+    use super::n2c_query::{PoolParamsSnapshot, RelaySnapshot, SnapshotStakeData};
 
     // stake_entries: one entry per delegated credential
     let mut stake_entries = Vec::with_capacity(snap.stake_distribution.len());
@@ -167,7 +167,7 @@ impl Node {
     /// (every 30 seconds) so that N2C `LocalStateQuery` requests reflect recent
     /// on-chain state.
     pub async fn update_query_state(&self) {
-        use torsten_network::query_handler::{
+        use super::n2c_query::{
             CommitteeMemberSnapshot, CommitteeSnapshot, DRepDelegationEntry, DRepSnapshot,
             DRepStakeEntry, GenesisConfigSnapshot, PoolParamsSnapshot, PoolStakeSnapshotEntry,
             ProposalSnapshot, ShelleyPParamsSnapshot, StakeAddressSnapshot, StakeDelegDepositEntry,
@@ -453,7 +453,7 @@ impl Node {
             .pool_params
             .iter()
             .map(|(pool_id, reg)| {
-                use torsten_network::query_handler::RelaySnapshot;
+                use super::n2c_query::RelaySnapshot;
                 let relays: Vec<RelaySnapshot> = reg
                     .relays
                     .iter()
@@ -499,7 +499,7 @@ impl Node {
 
         // Build protocol params snapshot for CBOR encoding
         let pp = &ls.protocol_params;
-        let protocol_params = torsten_network::query_handler::ProtocolParamsSnapshot {
+        let protocol_params = super::n2c_query::ProtocolParamsSnapshot {
             min_fee_a: pp.min_fee_a,
             min_fee_b: pp.min_fee_b,
             max_block_body_size: pp.max_block_body_size,
@@ -707,7 +707,7 @@ impl Node {
                     drep_votes,
                     spo_votes,
                 };
-                let gov_id = torsten_network::query_handler::GovActionId {
+                let gov_id = super::n2c_query::GovActionId {
                     tx_id: action_id.transaction_id.as_ref().to_vec(),
                     action_index: action_id.action_index,
                 };
@@ -715,7 +715,7 @@ impl Node {
             })
             .collect();
 
-        let snapshot = torsten_network::NodeStateSnapshot {
+        let snapshot = super::n2c_query::NodeStateSnapshot {
             tip: ls.tip.clone(),
             epoch: ls.epoch,
             era: ls.era.to_era_index(),
@@ -829,7 +829,7 @@ impl Node {
                 .governance
                 .last_expired
                 .iter()
-                .map(|id| torsten_network::query_handler::GovActionId {
+                .map(|id| super::n2c_query::GovActionId {
                     tx_id: id.transaction_id.as_ref().to_vec(),
                     action_index: id.action_index,
                 })
@@ -917,8 +917,8 @@ impl Node {
     pub fn build_era_summaries(
         &self,
         ls: &torsten_ledger::LedgerState,
-    ) -> Vec<torsten_network::query_handler::EraSummary> {
-        use torsten_network::query_handler::{EraBound, EraSummary};
+    ) -> Vec<super::n2c_query::EraSummary> {
+        use super::n2c_query::{EraBound, EraSummary};
 
         let shelley_epoch_length = self
             .shelley_genesis
