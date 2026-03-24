@@ -6,8 +6,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use torsten_ledger::LedgerState;
-use torsten_network::query_handler::{UtxoQueryProvider, UtxoSnapshot};
-use torsten_network::{BlockProvider, TipInfo, TxValidationError, TxValidator};
+use torsten_network::{
+    BlockProvider, TipInfo, TxValidationError, TxValidator, UtxoQueryProvider, UtxoSnapshot,
+};
 use torsten_storage::ChainDB;
 
 // ─── ChainDBBlockProvider ────────────────────────────────────────────────────
@@ -289,7 +290,7 @@ pub(crate) fn convert_validation_error(
         VE::MissingSlotConfig => TxValidationError::MissingSlotConfig,
         VE::MissingSpendRedeemer { index } => TxValidationError::MissingSpendRedeemer { index },
         VE::RedeemerIndexOutOfRange { tag, index, max } => {
-            TxValidationError::RedeemerIndexOutOfRange { tag, index, max }
+            TxValidationError::RedeemerIndexOutOfRange { tag, index, max: max as u32 }
         }
         VE::MissingInputWitness(credential) => {
             TxValidationError::MissingInputWitness { credential }
@@ -428,7 +429,7 @@ pub(crate) fn utxo_to_snapshot(
     input: &torsten_primitives::transaction::TransactionInput,
     output: &torsten_primitives::transaction::TransactionOutput,
 ) -> UtxoSnapshot {
-    let multi_asset: torsten_network::query_handler::MultiAssetSnapshot = output
+    let multi_asset: torsten_network::MultiAssetSnapshot = output
         .value
         .multi_asset
         .iter()
