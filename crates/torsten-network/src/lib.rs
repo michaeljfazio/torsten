@@ -72,50 +72,146 @@ pub trait TxValidator: Send + Sync + 'static {
 
 /// Transaction validation errors returned to N2C/N2N clients.
 ///
-/// Each variant maps to a specific failure reason that can be encoded
-/// in the protocol response to inform the submitting peer.
+/// Each variant maps to a specific failure reason from the ledger validation
+/// pipeline, encoded in protocol responses to inform the submitting peer.
+/// This enum mirrors the full set of `torsten_ledger::validation::ValidationError`
+/// variants to enable lossless error propagation from ledger → network → client.
 #[derive(Debug, Clone)]
 pub enum TxValidationError {
-    /// Transaction CBOR could not be deserialized.
-    DeserializationFailed {
-        /// Human-readable description of the deserialization failure.
+    DecodeFailed {
         reason: String,
     },
-    /// A referenced UTxO input was not found in the current ledger state.
+    LedgerStateUnavailable,
+    NoInputs,
     InputNotFound {
-        /// Hex-encoded hash of the transaction containing the missing input.
-        tx_hash: String,
-        /// Output index within that transaction.
-        index: u32,
+        input: String,
     },
-    /// Transaction inputs do not cover the required outputs + fees.
-    InsufficientFunds {
-        /// Total lovelace required (outputs + fee).
-        required: u64,
-        /// Total lovelace available from inputs.
-        available: u64,
+    ValueNotConserved {
+        inputs: u64,
+        outputs: u64,
+        fee: u64,
     },
-    /// Transaction fee is below the minimum required by protocol parameters.
     FeeTooSmall {
-        /// Minimum fee required.
         minimum: u64,
-        /// Fee actually specified in the transaction.
         actual: u64,
     },
-    /// A Plutus script evaluation failed.
+    OutputTooSmall {
+        minimum: u64,
+        actual: u64,
+    },
+    TxTooLarge {
+        maximum: u64,
+        actual: u64,
+    },
+    MissingRequiredSigner {
+        signer: String,
+    },
+    MissingWitness {
+        input: String,
+    },
+    TtlExpired {
+        current_slot: u64,
+        ttl: u64,
+    },
+    NotYetValid {
+        current_slot: u64,
+        valid_from: u64,
+    },
     ScriptFailed {
-        /// Human-readable description of the script failure.
         reason: String,
     },
-    /// Transaction is tagged with an unsupported era identifier.
-    InvalidEra(u16),
-    /// Mempool is full; cannot accept more transactions.
-    MempoolFull,
-    /// Ledger state is not available (e.g. during initial sync).
-    LedgerStateUnavailable,
+    InsufficientCollateral,
+    TooManyCollateralInputs {
+        max: u64,
+        actual: u64,
+    },
+    CollateralNotFound {
+        input: String,
+    },
+    CollateralHasTokens {
+        input: String,
+    },
+    CollateralMismatch {
+        declared: u64,
+        computed: u64,
+    },
+    ReferenceInputNotFound {
+        input: String,
+    },
+    ReferenceInputOverlapsInput {
+        input: String,
+    },
+    MultiAssetNotConserved {
+        policy: String,
+        input_side: i128,
+        output_side: i128,
+    },
+    InvalidMint,
+    ExUnitsExceeded,
+    ScriptDataHashMismatch {
+        expected: String,
+        actual: String,
+    },
+    UnexpectedScriptDataHash,
+    MissingScriptDataHash,
+    DuplicateInput {
+        input: String,
+    },
+    NativeScriptFailed,
+    InvalidWitnessSignature {
+        vkey: String,
+    },
+    NetworkMismatch {
+        expected: String,
+        actual: String,
+    },
+    AuxiliaryDataHashWithoutData,
+    AuxiliaryDataWithoutHash,
+    BlockExUnitsExceeded {
+        resource: String,
+        limit: u64,
+        total: u64,
+    },
+    OutputValueTooLarge {
+        maximum: u64,
+        actual: u64,
+    },
+    MissingRawCbor,
+    MissingSlotConfig,
+    MissingSpendRedeemer {
+        index: u32,
+    },
+    RedeemerIndexOutOfRange {
+        tag: String,
+        index: u32,
+        max: u32,
+    },
+    MissingInputWitness {
+        credential: String,
+    },
+    MissingScriptWitness {
+        credential: String,
+    },
+    MissingWithdrawalWitness {
+        credential: String,
+    },
+    MissingWithdrawalScriptWitness {
+        credential: String,
+    },
+    ValueOverflow,
+    /// Multiple validation errors collected.
+    Multiple(Vec<TxValidationError>),
     /// Catch-all for other validation failures.
     Other(String),
 }
+
+impl std::fmt::Display for TxValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for TxValidationError {}
 
 /// Provides UTxO lookups for LocalStateQuery protocol responses.
 ///
@@ -138,7 +234,12 @@ pub type AssetEntry = (Vec<u8>, u64);
 /// A policy group within a multi-asset value: `(policy_id, assets)`.
 pub type PolicyAssets = (Vec<u8>, Vec<AssetEntry>);
 
+/// Multi-asset snapshot: `[(policy_id, [(asset_name, quantity)])]`.
+pub type MultiAssetSnapshot = Vec<PolicyAssets>;
+
 /// UTxO snapshot for query responses, containing all fields needed for CBOR encoding.
+///
+/// Field names match the old API to minimize node integration churn.
 #[derive(Debug, Clone)]
 pub struct UtxoSnapshot {
     /// Transaction hash (raw bytes, typically 32 bytes).
@@ -146,15 +247,15 @@ pub struct UtxoSnapshot {
     /// Output index within the transaction.
     pub output_index: u32,
     /// Address bytes (raw Cardano address encoding).
-    pub address: Vec<u8>,
+    pub address_bytes: Vec<u8>,
     /// Lovelace value at this output.
-    pub value: u64,
-    /// Optional datum hash or inline datum (CBOR-encoded).
-    pub datum: Option<Vec<u8>>,
-    /// Optional reference script (CBOR-encoded).
-    pub script_ref: Option<Vec<u8>>,
+    pub lovelace: u64,
     /// Multi-asset values: `[(policy_id, [(asset_name, quantity)])]`.
-    pub multi_assets: Vec<PolicyAssets>,
+    pub multi_asset: MultiAssetSnapshot,
+    /// Optional datum hash (32 bytes).
+    pub datum_hash: Option<Vec<u8>>,
+    /// Optional raw CBOR of the entire output (for script reference, inline datum, etc.).
+    pub raw_cbor: Option<Vec<u8>>,
 }
 
 /// Metrics bridge for connection events.
