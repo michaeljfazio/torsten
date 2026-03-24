@@ -2106,24 +2106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pallas-network"
-version = "1.0.0-alpha.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c902b84184fa16800eecea5f30f1d710ba0e7d6a8e6a16b108a00d6d67b510f4"
-dependencies = [
- "byteorder",
- "hex",
- "itertools 0.13.0",
- "pallas-codec 1.0.0-alpha.5",
- "pallas-crypto 1.0.0-alpha.5",
- "rand 0.8.5",
- "socket2 0.5.10",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "pallas-primitives"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3659,9 +3641,6 @@ dependencies = [
  "hickory-resolver",
  "minicbor 0.25.1",
  "num-bigint",
- "pallas-crypto 1.0.0-alpha.5",
- "pallas-network",
- "pallas-traverse 1.0.0-alpha.5",
  "parking_lot",
  "proptest",
  "socket2 0.5.10",
@@ -3693,6 +3672,7 @@ dependencies = [
  "libc",
  "memmap2",
  "minicbor 0.25.1",
+ "num-bigint",
  "pallas-addresses 1.0.0-alpha.5",
  "pallas-crypto 1.0.0-alpha.5",
  "pallas-traverse 1.0.0-alpha.5",
@@ -3706,6 +3686,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml",
  "torsten-consensus",
  "torsten-crypto",

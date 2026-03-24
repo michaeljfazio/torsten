@@ -59,6 +59,7 @@ fs2 = { workspace = true }
 rayon = { workspace = true }
 libc.workspace = true
 num-bigint = { workspace = true }
+tokio-util = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

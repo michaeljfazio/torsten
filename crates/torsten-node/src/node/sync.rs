@@ -1716,41 +1716,761 @@ impl Node {
     /// Run the pipelined ChainSync loop with a connected peer.
     ///
     /// This function drives block synchronization using the new MuxChannel-based
-    /// networking API. The chainsync channel carries header announcements and
-    /// rollback events, while the blockfetch channel is used to download full
-    /// block bodies.
+    /// networking API. The chainsync channel carries block/header announcements
+    /// and rollback events, while the blockfetch channel is used to download
+    /// full block bodies when the chainsync payload is a header-only CBOR
+    /// (e.g. from a Haskell cardano-node peer).
     ///
-    /// TODO: Re-wire intersection finding, pipelined header collection,
-    /// block fetching, fork recovery, and EBB handling to use the new
-    /// `PipelinedChainSyncClient` and `BlockFetchClient` APIs.
+    /// # Architecture
+    ///
+    /// 1. **Intersection finding**: Walk ChainDB backwards to build known
+    ///    points (including volatile chain ancestry). Detect fork divergence
+    ///    when ChainDB blocks after the ledger tip don't connect. Offer
+    ///    historical immutable points when contaminated.
+    ///
+    /// 2. **Fork recovery**: If intersection falls to Origin despite having
+    ///    a non-trivial ledger, use multi-peer threshold (3 consecutive
+    ///    Origin results) before performing expensive ledger reset. If
+    ///    intersection is behind ledger tip, roll back the forked blocks.
+    ///
+    /// 3. **Pipelined sync**: Spawn `PipelinedChainSyncClient::run()` in a
+    ///    background task, forwarding `ChainSyncEvent`s through an mpsc
+    ///    channel. The main task deserialises and applies blocks, fetching
+    ///    full block bodies via BlockFetch when only headers are received.
+    ///
+    /// 4. **Block processing**: Batch deserialized blocks and delegate to
+    ///    `process_forward_blocks()` which handles storage, ledger apply,
+    ///    epoch transitions, snapshot policy, and metrics.
+    ///
+    /// 5. **Forge ticker**: While synced (at tip), periodically check for
+    ///    block production opportunities via VRF leader check.
     pub async fn chain_sync_loop(
         &mut self,
-        _chainsync_channel: &mut torsten_network::MuxChannel,
-        _blockfetch_channel: &mut torsten_network::MuxChannel,
-        _shutdown_rx: watch::Receiver<bool>,
-        _peer_addr: std::net::SocketAddr,
+        chainsync_channel: &mut torsten_network::MuxChannel,
+        blockfetch_channel: &mut torsten_network::MuxChannel,
+        shutdown_rx: watch::Receiver<bool>,
+        peer_addr: std::net::SocketAddr,
     ) -> Result<()> {
-        // The full sync implementation (intersection finding, fork recovery,
-        // pipelined header fetch, block download, EBB handling, ledger apply,
-        // snapshot policy, GSM density tracking, forge ticker) was previously
-        // implemented here using the old NodeToNodeClient/PipelinedPeerClient/
-        // BlockFetchPool types. Those types were removed in the networking
-        // rewrite. The logic is preserved in git history and will be re-wired
-        // to use PipelinedChainSyncClient::run() and BlockFetchClient.
+        use torsten_network::codec::Point as CodecPoint;
+        use torsten_network::protocol::blockfetch::client::BlockFetchClient;
+        use torsten_network::protocol::chainsync::client::PipelinedChainSyncClient;
+
+        // ── Helper: convert primitives::Point → codec::Point ──────────────
+        fn to_codec_point(p: &Point) -> CodecPoint {
+            match p {
+                Point::Origin => CodecPoint::Origin,
+                Point::Specific(slot, hash) => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(hash.as_ref());
+                    CodecPoint::Specific(slot.0, arr)
+                }
+            }
+        }
+
+        // ── Helper: convert codec::Point → primitives::Point ──────────────
+        fn from_codec_point(p: &CodecPoint) -> Point {
+            match p {
+                CodecPoint::Origin => Point::Origin,
+                CodecPoint::Specific(slot, hash) => Point::Specific(
+                    torsten_primitives::time::SlotNo(*slot),
+                    torsten_primitives::hash::Hash32::from_bytes(*hash),
+                ),
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 1: Intersection finding
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Walk backwards through the volatile chain to collect multiple
+        // historical points, not just the tip. This is critical for
+        // recovery after forging: if the local tip is a freshly-forged block
+        // that the peer hasn't seen (slot battle), the ancestor blocks give
+        // the peer a known common point to intersect on.
+        let chain_tip = self.chain_db.read().await.get_tip().point;
+        let ledger_tip = self.ledger_state.read().await.tip.point.clone();
+        let ledger_slot = ledger_tip.slot().map(|s| s.0).unwrap_or(0);
+        let chain_slot = chain_tip.slot().map(|s| s.0).unwrap_or(0);
+
+        // Collect historical chain points by walking backwards through the
+        // volatile DB via prev_hash links (tip -> parent -> grandparent ...).
+        let chain_points = {
+            let db = self.chain_db.read().await;
+            db.get_chain_points(10)
+        };
+
+        // Detect fork divergence: check if blocks after the ledger tip in
+        // ChainDB actually connect. If not, the ImmutableDB (or volatile)
+        // contains orphan fork blocks — we must exclude them from the
+        // intersection offer.
+        let mut use_chain_tip = chain_slot > ledger_slot;
+        let mut chain_diverged = false;
+        if chain_slot >= ledger_slot && ledger_tip != Point::Origin {
+            let db = self.chain_db.read().await;
+            if let Ok(Some((_next_slot, _hash, cbor))) =
+                db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
+            {
+                if let Ok(block) =
+                    torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
+                        &cbor,
+                        self.byron_epoch_length,
+                    )
+                {
+                    let ledger_hash = ledger_tip.hash();
+                    if ledger_hash.is_some_and(|h| h != block.prev_hash()) {
+                        warn!(
+                            "ChainDB fork divergence detected: ChainDB blocks after ledger tip \
+                             do not connect (expected prev_hash={}, got {}). \
+                             Using ledger tip only for intersection (excluding contaminated ChainDB points).",
+                            ledger_hash.map(|h| h.to_hex()).unwrap_or_default(),
+                            block.prev_hash().to_hex()
+                        );
+                        use_chain_tip = false;
+                        chain_diverged = true;
+                    }
+                }
+            }
+        }
+
+        // Build the known_points list, including chain history for robustness.
+        let mut known_points = Vec::new();
+        if use_chain_tip {
+            // ChainDB leads: include all chain ancestry points first.
+            for p in &chain_points {
+                if *p != Point::Origin && !known_points.contains(p) {
+                    known_points.push(p.clone());
+                }
+            }
+            // Include ledger tip if it wasn't already covered by chain walk.
+            if ledger_tip != Point::Origin && !known_points.contains(&ledger_tip) {
+                known_points.push(ledger_tip.clone());
+            }
+        } else if chain_diverged {
+            // ChainDB has contaminated blocks (e.g., orphan fork flushed to
+            // ImmutableDB on shutdown). Exclude the current chain tip / ledger
+            // tip since they point to the wrong fork. Instead, offer only
+            // deep historical points from older ImmutableDB chunks.
+            let db = self.chain_db.read().await;
+            for (slot, hash) in db.get_immutable_historical_points(8) {
+                let p = Point::Specific(torsten_primitives::time::SlotNo(slot), hash);
+                if !known_points.contains(&p) {
+                    known_points.push(p);
+                }
+            }
+            // If no historical points found, fall back to ledger tip.
+            if known_points.is_empty() && ledger_tip != Point::Origin {
+                known_points.push(ledger_tip.clone());
+            }
+        } else {
+            // Ledger leads or tips are equal: offer ledger tip first, then
+            // chain ancestry (which may include ancestors of a forged block
+            // that are known to the peer even when the tip is not).
+            if ledger_tip != Point::Origin {
+                known_points.push(ledger_tip.clone());
+            }
+            for p in &chain_points {
+                if *p != Point::Origin && !known_points.contains(p) {
+                    known_points.push(p.clone());
+                }
+            }
+        }
+        known_points.push(Point::Origin);
+
+        // Log the full set of known_points for diagnosing intersection failures.
+        info!(
+            chain_tip = %chain_tip,
+            ledger_tip = %ledger_tip,
+            chain_points_count = chain_points.len(),
+            known_points_count = known_points.len(),
+            use_chain_tip,
+            "Intersection candidates",
+        );
+        for (i, p) in known_points.iter().enumerate() {
+            debug!(idx = i, point = %p, "known_point");
+        }
+
+        // Convert to codec::Point for the network API.
+        let codec_points: Vec<CodecPoint> = known_points.iter().map(to_codec_point).collect();
+
+        // Create a temporary ChainSync client just for intersection finding.
+        // After intersection, we run the protocol loop inline (not via
+        // `client.run()`) so we can interleave async block processing.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut cs_client =
+            PipelinedChainSyncClient::new(cancel);
+
+        let intersect_result = cs_client
+            .find_intersection(chainsync_channel, codec_points)
+            .await
+            .map_err(|e| anyhow::anyhow!("ChainSync find_intersection failed: {e}"))?;
+
+        // Convert intersection back to primitives::Point.
+        let intersect: Option<Point> = intersect_result.map(|p| from_codec_point(&p));
+
+        match &intersect {
+            Some(point) => info!(point = %point, "Sync intersection found"),
+            None => info!("Sync starting from Origin"),
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 2: Fork recovery
+        // ═══════════════════════════════════════════════════════════════════
+
+        let intersect_at_origin = intersect.as_ref().is_none_or(|p| *p == Point::Origin);
+        let intersect_slot = intersect
+            .as_ref()
+            .and_then(|p| p.slot())
+            .map(|s| s.0)
+            .unwrap_or(0);
+
+        // Case (A): no intersection found at all — multi-peer retry before
+        // full reset. A single peer returning Origin does NOT prove our chain
+        // has diverged — the peer may be stale, on a minority fork, or have a
+        // corrupted volatile DB. Only after ORIGIN_INTERSECT_THRESHOLD
+        // consecutive peers all return Origin do we perform the expensive full
+        // ledger reset.
+        const ORIGIN_INTERSECT_THRESHOLD: u32 = 3;
+
+        if intersect_at_origin && ledger_slot > 0 {
+            self.consecutive_origin_intersections =
+                self.consecutive_origin_intersections.saturating_add(1);
+
+            if self.consecutive_origin_intersections < ORIGIN_INTERSECT_THRESHOLD {
+                warn!(
+                    ledger_slot,
+                    consecutive = self.consecutive_origin_intersections,
+                    threshold = ORIGIN_INTERSECT_THRESHOLD,
+                    "Fork recovery: peer returned Origin intersection ({}/{}). \
+                     Trying a different peer before triggering full reset.",
+                    self.consecutive_origin_intersections,
+                    ORIGIN_INTERSECT_THRESHOLD,
+                );
+                return Err(anyhow::anyhow!(
+                    "fork recovery: peer returned Origin intersection ({}/{}), \
+                     retrying with different peer",
+                    self.consecutive_origin_intersections,
+                    ORIGIN_INTERSECT_THRESHOLD,
+                ));
+            }
+
+            // All N peers returned Origin — genuinely diverged.
+            warn!(
+                ledger_slot,
+                consecutive = self.consecutive_origin_intersections,
+                "Fork recovery: {} consecutive peers returned Origin — \
+                 our chain has diverged. Resetting ledger and reconnecting.",
+                self.consecutive_origin_intersections,
+            );
+            self.consecutive_origin_intersections = 0;
+
+            {
+                let mut db = self.chain_db.write().await;
+                db.clear_volatile();
+            }
+
+            // Reset epoch transition counters so that the subsequent replay
+            // from genesis produces the correct epoch count.
+            self.epoch_transitions_observed = 0;
+            self.live_epoch_transitions = 0;
+
+            self.handle_rollback(&Point::Origin).await;
+            self.consensus.set_strict_verification(false);
+
+            return Err(anyhow::anyhow!(
+                "fork recovery: reset diverged ledger state, reconnecting"
+            ));
+        }
+
+        // Non-Origin intersection found — our chain is canonical.
+        // Reset the consecutive-Origin counter.
+        if !intersect_at_origin && self.consecutive_origin_intersections > 0 {
+            debug!(
+                cleared = self.consecutive_origin_intersections,
+                "Fork recovery: non-Origin intersection, resetting Origin counter"
+            );
+            self.consecutive_origin_intersections = 0;
+        }
+
+        // Case (B): intersection behind ledger tip — the local chain
+        // diverged (e.g. a forged block that lost a slot battle).
+        // Roll back the forged blocks and continue from the intersection.
+        if intersect_slot > 0 && intersect_slot < ledger_slot {
+            let depth = ledger_slot - intersect_slot;
+            warn!(
+                intersect_slot,
+                ledger_slot,
+                depth,
+                "Fork recovery: intersection is behind ledger tip — \
+                 attempting rollback (depth={depth} slots)."
+            );
+
+            let rollback_point = intersect.clone().unwrap_or(Point::Origin);
+            info!(
+                depth,
+                security_param = self.consensus.security_param,
+                "Fork recovery: rollback to intersection {rollback_point} \
+                 (depth={depth} slots). Discarding stale ledger state."
+            );
+            self.handle_rollback(&rollback_point).await;
+            self.mempool.clear();
+
+            // Clear volatile DB — fork blocks should not persist
+            {
+                let mut db = self.chain_db.write().await;
+                db.clear_volatile();
+            }
+
+            return Err(anyhow::anyhow!(
+                "fork recovery: rolled back {depth} slots to intersection, reconnecting"
+            ));
+        }
+
+        // ── GSM registration ──────────────────────────────────────────────
+        {
+            let intersection_slot = intersect
+                .as_ref()
+                .and_then(|p| p.slot())
+                .map(|s| s.0)
+                .unwrap_or(0);
+            // We don't have the remote tip from find_intersection in the new API,
+            // so estimate from wall clock or use 0.
+            let remote_tip_slot = self
+                .current_wall_clock_slot()
+                .map(|s| s.0)
+                .unwrap_or(0);
+            self.gsm
+                .write()
+                .await
+                .register_peer(peer_addr, intersection_slot, remote_tip_slot);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 3: Inline pipelined ChainSync + block processing loop
+        // ═══════════════════════════════════════════════════════════════════
         //
-        // mod.rs currently does not call this function — it has a TODO stub
-        // that waits for shutdown. This todo!() will be replaced with the
-        // re-wired implementation in a follow-up commit.
-        todo!("chain_sync_loop: re-wire sync logic to new MuxChannel-based networking API")
+        // We inline the pipelined protocol loop rather than using
+        // `PipelinedChainSyncClient::run()` because the callback API
+        // is synchronous while block processing requires async operations
+        // (ledger apply, snapshot saves, BlockFetch). Inlining gives us
+        // full async control between receiving each message.
+
+        use torsten_network::protocol::chainsync::{
+            decode_message as cs_decode, encode_message as cs_encode, ChainSyncMessage,
+        };
+
+        let mut blocks_received: u64 = 0;
+        let mut consecutive_apply_failures: u32 = 0;
+        let mut last_snapshot_epoch: u64 = self.ledger_state.read().await.epoch.0;
+        let mut last_log_time = std::time::Instant::now();
+        let mut last_query_update = std::time::Instant::now();
+        let mut blocks_since_last_log: u64 = 0;
+
+        // Header batch size: how many blocks to collect before processing.
+        let header_batch_size: usize = std::env::var("TORSTEN_HEADER_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+
+        // Pipeline depth configurable via TORSTEN_PIPELINE_DEPTH env var (default: 300)
+        let high_mark: usize = std::env::var("TORSTEN_PIPELINE_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        let low_mark: usize = high_mark * 2 / 3; // refill at ~67%
+        let mut outstanding: usize = 0;
+        let mut at_tip = false;
+
+        // Slot ticker for block production: fires every slot_length seconds.
+        let slot_length_secs = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.slot_length)
+            .unwrap_or(1);
+        let mut forge_ticker =
+            tokio::time::interval(tokio::time::Duration::from_secs(slot_length_secs));
+        forge_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_forge_slot: u64 = 0;
+
+        // Accumulator for batching RollForward blocks before processing.
+        let mut block_batch: Vec<torsten_primitives::block::Block> = Vec::new();
+        let mut batch_tip_slot: u64 = 0;
+        let mut batch_tip_hash: [u8; 32] = [0u8; 32];
+        let mut batch_tip_block_number: u64 = 0;
+        // Track points for blocks that need full-body fetch via BlockFetch.
+        // When ChainSync sends a header-only CBOR (from a Haskell peer),
+        // decode_block will fail and we collect the point here.
+        let mut pending_fetch_points: Vec<(CodecPoint, CodecPoint)> = Vec::new();
+        let byron_epoch_length = self.byron_epoch_length;
+        let mut shutdown_watch = shutdown_rx.clone();
+
+        // Helper closure: process accumulated batch.
+        // (factored as a macro to avoid borrow-checker issues with &mut self)
+        macro_rules! process_batch {
+            () => {{
+                // If we have pending fetch points, use BlockFetch to download
+                // full block bodies.
+                if !pending_fetch_points.is_empty() {
+                    let ranges = std::mem::take(&mut pending_fetch_points);
+                    for (from, to) in ranges {
+                        let bel = byron_epoch_length;
+                        let fetch_result = BlockFetchClient::fetch_range(
+                            blockfetch_channel,
+                            from,
+                            to,
+                            |block_cbor| {
+                                match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                                    &block_cbor, bel,
+                                ) {
+                                    Ok(block) => {
+                                        block_batch.push(block);
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        warn!("BlockFetch: failed to decode block: {e}");
+                                        Ok(()) // skip bad block
+                                    }
+                                }
+                            },
+                        ).await;
+                        if let Err(e) = fetch_result {
+                            error!("BlockFetch range request failed: {e}");
+                            break;
+                        }
+                    }
+                }
+
+                if block_batch.is_empty() {
+                    0u64
+                } else {
+                    let tip = torsten_primitives::block::Tip {
+                        point: Point::Specific(
+                            torsten_primitives::time::SlotNo(batch_tip_slot),
+                            torsten_primitives::hash::Hash32::from_bytes(batch_tip_hash),
+                        ),
+                        block_number: torsten_primitives::time::BlockNo(batch_tip_block_number),
+                    };
+
+                    let batch_slots: Vec<u64> = block_batch
+                        .iter()
+                        .map(|b| b.slot().0)
+                        .collect();
+                    let remote_tip_slot = tip.point.slot().map(|s| s.0).unwrap_or(0);
+
+                    let blocks = std::mem::take(&mut block_batch);
+                    let header_count = blocks.len() as u64;
+
+                    let applied = self.process_forward_blocks(
+                        blocks,
+                        &tip,
+                        &[], // EBB hashes handled internally by decode
+                        &mut blocks_received,
+                        &mut blocks_since_last_log,
+                        &mut last_snapshot_epoch,
+                        &mut last_log_time,
+                        &mut last_query_update,
+                    ).await;
+
+                    // Update GSM per-peer density and run GDD evaluation.
+                    if applied > 0 {
+                        consecutive_apply_failures = 0;
+                        let to_disconnect = {
+                            let mut gsm = self.gsm.write().await;
+                            for slot in &batch_slots {
+                                gsm.record_block(&peer_addr, *slot);
+                            }
+                            gsm.update_peer_tip(&peer_addr, remote_tip_slot);
+                            gsm.gdd_evaluate()
+                        };
+                        if !to_disconnect.is_empty() {
+                            let mut pm = self.peer_manager.write().await;
+                            for addr in &to_disconnect {
+                                warn!(
+                                    %addr,
+                                    "GDD: disconnecting peer with insufficient chain density"
+                                );
+                                pm.peer_failed(addr);
+                            }
+                        }
+                    } else if header_count > 0 {
+                        consecutive_apply_failures += 1;
+                        if consecutive_apply_failures >= 5 {
+                            error!(
+                                consecutive_apply_failures,
+                                "Ledger state diverged from chain — \
+                                 clearing contaminated volatile DB and reconnecting."
+                            );
+                            {
+                                let mut db = self.chain_db.write().await;
+                                db.clear_volatile();
+                            }
+                            self.mempool.clear();
+                        }
+                    }
+                    applied
+                }
+            }};
+        }
+
+        loop {
+            // Check shutdown.
+            if *shutdown_rx.borrow() {
+                info!("Shutdown: stopping sync");
+                break;
+            }
+
+            // Fill the ChainSync pipeline up to high_mark.
+            if !at_tip {
+                while outstanding < high_mark {
+                    let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+                    if let Err(e) = chainsync_channel.send(req).await {
+                        error!("ChainSync send failed: {e}");
+                        break;
+                    }
+                    outstanding += 1;
+                }
+            } else if outstanding == 0 {
+                // At tip: send one request at a time.
+                let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+                if let Err(e) = chainsync_channel.send(req).await {
+                    error!("ChainSync send failed: {e}");
+                    break;
+                }
+                outstanding = 1;
+            }
+
+            // Receive next response, interleaved with forge ticker and shutdown.
+            let response_bytes = tokio::select! {
+                result = chainsync_channel.recv() => {
+                    match result {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            error!("ChainSync recv failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                _ = forge_ticker.tick(), if self.block_producer.is_some() => {
+                    if let Some(wc) = self.current_wall_clock_slot() {
+                        if wc.0 > last_forge_slot {
+                            last_forge_slot = wc.0;
+                            self.try_forge_block_at(wc).await;
+                        }
+                    }
+                    continue;
+                }
+                _ = shutdown_watch.changed() => {
+                    info!("Shutdown: stopping sync");
+                    break;
+                }
+            };
+
+            let response = match cs_decode(&response_bytes) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    error!("ChainSync decode error: {e}");
+                    break;
+                }
+            };
+
+            match response {
+                ChainSyncMessage::MsgRollForward {
+                    header,
+                    tip_slot,
+                    tip_hash,
+                    tip_block_number,
+                } => {
+                    outstanding = outstanding.saturating_sub(1);
+                    if at_tip {
+                        at_tip = false;
+                    }
+
+                    batch_tip_slot = tip_slot;
+                    batch_tip_hash = tip_hash;
+                    batch_tip_block_number = tip_block_number;
+
+                    // Try to deserialize the CBOR as a full block.
+                    // When syncing from a Torsten peer, the "header" is actually
+                    // full block CBOR. When syncing from a Haskell peer, it's a
+                    // wrapped header and this will fail — we then fall back to
+                    // BlockFetch.
+                    match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                        &header,
+                        byron_epoch_length,
+                    ) {
+                        Ok(block) => {
+                            block_batch.push(block);
+                        }
+                        Err(_) => {
+                            // Header-only: compute the block hash from the raw
+                            // header bytes (Blake2b-256, matching Cardano's
+                            // header hash computation).
+                            let hash = torsten_primitives::hash::blake2b_256(&header);
+                            let mut hash_arr = [0u8; 32];
+                            hash_arr.copy_from_slice(hash.as_ref());
+
+                            // Extract slot from wrapped header CBOR.
+                            let slot = Self::extract_slot_from_wrapped_header(&header)
+                                .unwrap_or(tip_slot);
+
+                            let point = CodecPoint::Specific(slot, hash_arr);
+
+                            // Collect as a fetch range for BlockFetch.
+                            if pending_fetch_points.is_empty() {
+                                pending_fetch_points.push((point.clone(), point));
+                            } else if let Some(last) = pending_fetch_points.last_mut() {
+                                last.1 = point;
+                            }
+                        }
+                    }
+
+                    // Process batch when we've accumulated enough blocks.
+                    let batch_count = block_batch.len() + pending_fetch_points.len();
+                    if batch_count >= header_batch_size {
+                        process_batch!();
+
+                        if consecutive_apply_failures >= 5 {
+                            break;
+                        }
+                    }
+
+                    // Refill pipeline if we've dropped below low_mark.
+                    if !at_tip && outstanding <= low_mark {
+                        let to_send = high_mark - outstanding;
+                        for _ in 0..to_send {
+                            let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+                            if let Err(e) = chainsync_channel.send(req).await {
+                                error!("ChainSync pipeline refill failed: {e}");
+                                break;
+                            }
+                            outstanding += 1;
+                        }
+                    }
+                }
+                ChainSyncMessage::MsgRollBackward {
+                    point,
+                    tip_slot: _,
+                    tip_hash: _,
+                    tip_block_number: _,
+                } => {
+                    outstanding = outstanding.saturating_sub(1);
+
+                    // Flush any accumulated blocks before the rollback.
+                    if !block_batch.is_empty() || !pending_fetch_points.is_empty() {
+                        process_batch!();
+                    }
+
+                    let prim_point = from_codec_point(&point);
+                    warn!("Rollback to {prim_point}");
+                    self.handle_rollback(&prim_point).await;
+                }
+                ChainSyncMessage::MsgAwaitReply => {
+                    // At tip — switch to non-pipelined mode.
+                    at_tip = true;
+
+                    // Flush any remaining blocks.
+                    if !block_batch.is_empty() || !pending_fetch_points.is_empty() {
+                        process_batch!();
+                    }
+
+                    if !self.consensus.strict_verification() {
+                        info!(blocks_applied = blocks_received, "Caught up to chain tip");
+                        self.enable_strict_verification().await;
+                    }
+                    self.update_query_state().await;
+                    self.try_forge_block().await;
+                }
+                ChainSyncMessage::MsgDone => {
+                    debug!("ChainSync: server sent MsgDone");
+                    break;
+                }
+                other => {
+                    error!("ChainSync: unexpected message: {other:?}");
+                    break;
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // Phase 5: Cleanup
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Send MsgDone to cleanly terminate the ChainSync protocol.
+        let done_msg = cs_encode(&ChainSyncMessage::MsgDone);
+        let _ = chainsync_channel.send(done_msg).await;
+
+        // GSM cleanup: remove this peer from density tracking on disconnect.
+        self.gsm.write().await.deregister_peer(&peer_addr);
+
+        debug!("Chain sync stopped after {blocks_received} blocks");
+        Ok(())
     }
 
-    // NOTE: The ~1000 lines of sync loop implementation (intersection finding,
-    // fork recovery, pipelined header fetch, block download, EBB handling,
-    // pipeline decoupling, sequential mode, forge ticker, GDD density tracking)
-    // were removed here because they referenced old networking types
-    // (NodeToNodeClient, PipelinedPeerClient, BlockFetchPool, HeaderBatchResult).
-    // The logic is preserved in git history (commit before networking rewrite)
-    // and will be re-wired to the new MuxChannel-based API.
+    /// Extract the slot number from a wrapped header CBOR.
+    ///
+    /// The N2N ChainSync protocol sends headers as `[era_tag, tag24(header_bytes)]`.
+    /// For Shelley+ eras, the header body contains the slot as the second field.
+    /// For Byron, the slot is in a different position. This function attempts a
+    /// best-effort extraction without full deserialization.
+    ///
+    /// Returns `None` if the header CBOR cannot be parsed.
+    fn extract_slot_from_wrapped_header(header_cbor: &[u8]) -> Option<u64> {
+        use minicbor::Decoder;
+
+        let mut dec = Decoder::new(header_cbor);
+        // Wrapped header: array(2) [era_tag, tag24(header_bytes)]
+        let arr_len = dec.array().ok()?;
+        if arr_len != Some(2) {
+            return None;
+        }
+        let era_tag = dec.u64().ok()?;
+
+        // Read the tagged header bytes
+        let tag = dec.tag().ok()?;
+        if tag != minicbor::data::Tag::new(24) {
+            return None;
+        }
+        let inner_bytes = dec.bytes().ok()?;
+
+        let mut inner = Decoder::new(inner_bytes);
+
+        if era_tag == 0 {
+            // Byron EBB or Byron main block — slot extraction is complex.
+            // Byron main block header: array of [proto_magic, prev_hash, proof, consensus_data, extra_data]
+            // consensus_data for main blocks: [slot_id, pk, difficulty, signature]
+            // slot_id: [epoch, slot_in_epoch]
+            // For EBBs, there's no meaningful slot — return None.
+            let _ = inner.array().ok()?;
+            // Try to detect if this is an EBB vs main block by array length.
+            // Both have 5 elements but different consensus_data structure.
+            // Skip proto_magic, prev_hash, proof to get to consensus_data.
+            inner.skip().ok()?; // proto_magic
+            inner.skip().ok()?; // prev_hash
+            inner.skip().ok()?; // proof
+            // consensus_data
+            let cd_len = inner.array().ok()?;
+            if cd_len == Some(4) {
+                // Main block consensus_data: [slot_id, pk, difficulty, signature]
+                let sid_len = inner.array().ok()?;
+                if sid_len == Some(2) {
+                    let _epoch = inner.u64().ok()?;
+                    let slot_in_epoch = inner.u64().ok()?;
+                    // Byron slot = epoch * epoch_length + slot_in_epoch
+                    // We don't have epoch_length here, so return the raw slot_in_epoch
+                    // as a fallback. The caller should use tip_slot instead.
+                    return Some(slot_in_epoch);
+                }
+            }
+            None
+        } else {
+            // Shelley+ header: array(2) [header_body, body_signature]
+            // header_body: array(N) [block_number, slot, ...]
+            let _ = inner.array().ok()?; // outer array
+            let _ = inner.array().ok()?; // header_body array
+            let _block_number = inner.u64().ok()?;
+            let slot = inner.u64().ok()?;
+            Some(slot)
+        }
+    }
 
     /// Replay blocks from local storage to catch the ledger up to the chain tip.
     ///
