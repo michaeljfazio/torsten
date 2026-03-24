@@ -11,8 +11,9 @@ pub mod blockfetch;
 pub mod chainsync;
 pub mod keepalive;
 
+pub mod txsubmission;
+
 // Future protocol modules:
-// pub mod txsubmission;
 // pub mod peersharing;
 // pub mod local_chainsync;
 // pub mod local_tx_submission;
