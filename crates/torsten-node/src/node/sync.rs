@@ -11,10 +11,9 @@ use tracing::{debug, error, info, warn};
 use torsten_consensus::praos::BlockIssuerInfo;
 use torsten_consensus::ValidationMode;
 use torsten_ledger::BlockValidationMode;
-use torsten_network::{
-    BlockFetchPool, ChainSyncEvent, EbbInfo, HeaderBatchResult, NodeToNodeClient,
-    PipelinedPeerClient,
-};
+use torsten_network::ChainSyncEvent;
+
+use super::networking::{EbbInfo, RollbackAnnouncement};
 use torsten_primitives::block::Point;
 
 use super::epoch::SnapshotPolicy;
@@ -2318,7 +2317,7 @@ impl Node {
                                     self.metrics.record_block_fetch_latency(fetch_ms / header_count as f64);
                                 }
                                 self.peer_manager.write().await.record_block_fetch(
-                                    &peer_addr, fetch_ms, header_count, 0,
+                                    &peer_addr, header_count as usize,
                                 );
 
                                 // GDD density tracking: record every block slot for this
@@ -2495,7 +2494,7 @@ impl Node {
                                                         self.metrics.record_block_fetch_latency(fetch_ms / header_count as f64);
                                                     }
                                                     self.peer_manager.write().await.record_block_fetch(
-                                                        &peer_addr, fetch_ms, header_count, 0,
+                                                        &peer_addr, header_count as usize,
                                                     );
                                                     // GDD: collect slots before moving blocks
                                                     let batch_slots: Vec<u64> = blocks
@@ -2654,8 +2653,16 @@ impl Node {
 
                             for event in events {
                                 match event {
-                                    ChainSyncEvent::RollForward(block, tip) => {
-                                        forward_blocks.push((*block, tip));
+                                    ChainSyncEvent::RollForward {
+                                        header,
+                                        tip_slot,
+                                        tip_hash,
+                                        tip_block_number,
+                                    } => {
+                                        // Create a tip-like tuple for compatibility with process_forward_blocks
+                                        let tip_info =
+                                            format!("slot={tip_slot} block={tip_block_number}");
+                                        forward_blocks.push((header, tip_info));
                                     }
                                     other => other_events.push(other),
                                 }
@@ -2669,23 +2676,48 @@ impl Node {
                                     .clone();
                                 let blocks: Vec<_> =
                                     forward_blocks.into_iter().map(|(b, _)| b).collect();
-                                self.process_forward_blocks(blocks, &tip, &[], &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                                self.process_forward_blocks(
+                                    blocks,
+                                    &tip,
+                                    &[],
+                                    &mut blocks_received,
+                                    &mut blocks_since_last_log,
+                                    &mut last_snapshot_epoch,
+                                    &mut last_log_time,
+                                    &mut last_query_update,
+                                )
+                                .await;
                             }
 
                             for event in other_events {
                                 match event {
-                                    ChainSyncEvent::RollBackward(point, tip) => {
-                                        warn!("Rollback to {point}, tip: {tip}");
-                                        self.handle_rollback(&point).await;
+                                    ChainSyncEvent::RollBackward { point, tip_slot } => {
+                                        warn!("Rollback to {point:?}, tip_slot: {tip_slot}");
+                                        // Convert Point to block::Point for handle_rollback
+                                        let block_point = match &point {
+                                            torsten_network::codec::Point::Origin => Point::Origin,
+                                            torsten_network::codec::Point::Specific(slot, hash) => {
+                                                Point::Specific(
+                                                    torsten_primitives::time::SlotNo(*slot),
+                                                    torsten_primitives::hash::Hash32::from_bytes(
+                                                        *hash,
+                                                    ),
+                                                )
+                                            }
+                                        };
+                                        self.handle_rollback(&block_point).await;
                                     }
-                                    ChainSyncEvent::Await => {
+                                    ChainSyncEvent::AtTip => {
                                         if !self.consensus.strict_verification() {
-                                            info!(blocks_applied = blocks_received, "Caught up to chain tip");
+                                            info!(
+                                                blocks_applied = blocks_received,
+                                                "Caught up to chain tip"
+                                            );
                                             self.enable_strict_verification().await;
                                         }
                                         self.update_query_state().await;
                                     }
-                                    ChainSyncEvent::RollForward(..) => {
+                                    ChainSyncEvent::RollForward { .. } => {
                                         warn!("Unexpected RollForward in other_events, skipping");
                                         continue;
                                     }
@@ -2703,7 +2735,10 @@ impl Node {
                                 }
                             }
                         }
-                        Err(e) => { error!("Chain sync error: {e}"); break; }
+                        Err(e) => {
+                            error!("Chain sync error: {e}");
+                            break;
+                        }
                     }
 
                     // Check shutdown between batches
