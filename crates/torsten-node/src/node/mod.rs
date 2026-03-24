@@ -9,7 +9,6 @@
 //! - [`sync`]   — Pipelined ChainSync loop, block processing, rollback, replay
 
 pub(crate) mod epoch;
-pub(crate) mod n2c_query;
 pub(crate) mod query;
 pub(crate) mod serve;
 pub(crate) mod sync;
