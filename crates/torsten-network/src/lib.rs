@@ -17,9 +17,10 @@ pub mod handshake;
 
 pub mod protocol;
 
+pub mod peer;
+
 // Placeholder modules — uncomment as implemented:
 // pub mod connection;
-// pub mod peer;
 // pub mod metrics;
 
 pub use error::*;
