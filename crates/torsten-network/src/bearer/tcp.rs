@@ -37,10 +37,24 @@ impl TcpBearer {
     /// - `TCP_NODELAY=false` (Nagle enabled — mux batching handles coalescing)
     /// - `SO_KEEPALIVE=true` with 60s interval
     pub fn new(stream: TcpStream) -> Result<Self, BearerError> {
-        // Configure TCP options directly on the tokio stream.
-        // NOTE: Do NOT convert to std/socket2 and back — this deregisters
-        // the stream from the tokio runtime and can cause connection issues.
-        stream.set_nodelay(true).map_err(BearerError::Io)?;
+        // Match Haskell cardano-node bearer configuration:
+        // TCP_NODELAY=false (Nagle enabled — mux egress batching handles coalescing)
+        // SO_KEEPALIVE with 60s interval
+        //
+        // Use socket2 for keepalive configuration, then convert back to tokio.
+        let std_stream = stream.into_std().map_err(BearerError::Io)?;
+        let socket = Socket::from(std_stream);
+
+        socket.set_nodelay(false).map_err(BearerError::Io)?;
+
+        let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_INTERVAL);
+        socket
+            .set_tcp_keepalive(&keepalive)
+            .map_err(BearerError::Io)?;
+
+        let std_stream: std::net::TcpStream = socket.into();
+        std_stream.set_nonblocking(true).map_err(BearerError::Io)?;
+        let stream = TcpStream::from_std(std_stream).map_err(BearerError::Io)?;
 
         Ok(Self { stream })
     }
@@ -85,5 +99,42 @@ impl Bearer for TcpBearer {
 
     fn batch_size(&self) -> usize {
         TCP_BATCH_SIZE
+    }
+
+    fn split(
+        self,
+    ) -> (
+        Box<dyn super::BearerReader + Send>,
+        Box<dyn super::BearerWriter + Send>,
+    ) {
+        let (read_half, write_half) = self.stream.into_split();
+        (
+            Box::new(TcpBearerReader(read_half)),
+            Box::new(TcpBearerWriter(write_half)),
+        )
+    }
+}
+
+/// Read half of a split TCP bearer.
+struct TcpBearerReader(tokio::net::tcp::OwnedReadHalf);
+
+#[async_trait::async_trait]
+impl super::BearerReader for TcpBearerReader {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), BearerError> {
+        self.0.read_exact(buf).await.map_err(BearerError::from)?;
+        Ok(())
+    }
+}
+
+/// Write half of a split TCP bearer.
+struct TcpBearerWriter(tokio::net::tcp::OwnedWriteHalf);
+
+#[async_trait::async_trait]
+impl super::BearerWriter for TcpBearerWriter {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), BearerError> {
+        self.0.write_all(buf).await.map_err(BearerError::from)
+    }
+    async fn flush(&mut self) -> Result<(), BearerError> {
+        self.0.flush().await.map_err(BearerError::from)
     }
 }

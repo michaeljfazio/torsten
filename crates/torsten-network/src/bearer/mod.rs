@@ -41,6 +41,28 @@ pub trait Bearer: Send + 'static {
     /// Maximum bytes per write batch. The egress task accumulates up to this
     /// many bytes before calling `write_all` + `flush`.
     fn batch_size(&self) -> usize;
+
+    /// Split the bearer into independent read and write halves.
+    ///
+    /// This is CRITICAL for the mux: the Ouroboros protocol requires
+    /// full-duplex I/O where reads and writes happen concurrently.
+    /// Returns (reader, writer) that can be used from separate tasks.
+    fn split(self) -> (Box<dyn BearerReader + Send>, Box<dyn BearerWriter + Send>)
+    where
+        Self: Sized;
+}
+
+/// Read half of a split bearer.
+#[async_trait::async_trait]
+pub trait BearerReader: Send {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), BearerError>;
+}
+
+/// Write half of a split bearer.
+#[async_trait::async_trait]
+pub trait BearerWriter: Send {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), BearerError>;
+    async fn flush(&mut self) -> Result<(), BearerError>;
 }
 
 /// Mock bearer for testing. Feeds pre-recorded data on reads and captures writes.
@@ -109,6 +131,11 @@ impl Bearer for MockBearer {
 
     fn batch_size(&self) -> usize {
         self.batch_size
+    }
+
+    fn split(self) -> (Box<dyn BearerReader + Send>, Box<dyn BearerWriter + Send>) {
+        // MockBearer can't truly split — return dummy halves for testing
+        panic!("MockBearer::split() not supported — use real bearer for mux tests")
     }
 }
 

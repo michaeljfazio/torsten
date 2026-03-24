@@ -61,4 +61,44 @@ impl Bearer for UnixBearer {
     fn batch_size(&self) -> usize {
         UNIX_BATCH_SIZE
     }
+
+    fn split(
+        self,
+    ) -> (
+        Box<dyn super::BearerReader + Send>,
+        Box<dyn super::BearerWriter + Send>,
+    ) {
+        let (read_half, write_half) = self.stream.into_split();
+        (
+            Box::new(UnixBearerReader(read_half)),
+            Box::new(UnixBearerWriter(write_half)),
+        )
+    }
+}
+
+/// Read half of a split Unix bearer.
+struct UnixBearerReader(tokio::net::unix::OwnedReadHalf);
+
+#[async_trait::async_trait]
+impl super::BearerReader for UnixBearerReader {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), BearerError> {
+        use tokio::io::AsyncReadExt;
+        self.0.read_exact(buf).await.map_err(BearerError::from)?;
+        Ok(())
+    }
+}
+
+/// Write half of a split Unix bearer.
+struct UnixBearerWriter(tokio::net::unix::OwnedWriteHalf);
+
+#[async_trait::async_trait]
+impl super::BearerWriter for UnixBearerWriter {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), BearerError> {
+        use tokio::io::AsyncWriteExt;
+        self.0.write_all(buf).await.map_err(BearerError::from)
+    }
+    async fn flush(&mut self) -> Result<(), BearerError> {
+        use tokio::io::AsyncWriteExt;
+        self.0.flush().await.map_err(BearerError::from)
+    }
 }
