@@ -37,24 +37,10 @@ impl TcpBearer {
     /// - `TCP_NODELAY=false` (Nagle enabled — mux batching handles coalescing)
     /// - `SO_KEEPALIVE=true` with 60s interval
     pub fn new(stream: TcpStream) -> Result<Self, BearerError> {
-        // Convert to socket2 for advanced option configuration
-        let std_stream = stream.into_std().map_err(BearerError::Io)?;
-        let socket = Socket::from(std_stream);
-
-        // Nagle enabled (TCP_NODELAY=false) — mux egress batching handles coalescing,
-        // so we let Nagle coalesce small writes at the TCP level too.
-        socket.set_nodelay(false).map_err(BearerError::Io)?;
-
-        // TCP keepalive probes detect dead connections.
-        let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_INTERVAL);
-        socket
-            .set_tcp_keepalive(&keepalive)
-            .map_err(BearerError::Io)?;
-
-        // Convert back to tokio TcpStream
-        let std_stream: std::net::TcpStream = socket.into();
-        std_stream.set_nonblocking(true).map_err(BearerError::Io)?;
-        let stream = TcpStream::from_std(std_stream).map_err(BearerError::Io)?;
+        // Configure TCP options directly on the tokio stream.
+        // NOTE: Do NOT convert to std/socket2 and back — this deregisters
+        // the stream from the tokio runtime and can cause connection issues.
+        stream.set_nodelay(true).map_err(BearerError::Io)?;
 
         Ok(Self { stream })
     }

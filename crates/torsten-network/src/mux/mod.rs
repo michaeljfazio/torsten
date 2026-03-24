@@ -37,6 +37,17 @@ pub use segment::{Direction, SduHeader, HEADER_SIZE};
 /// Default ingress channel capacity (number of byte chunks buffered).
 const INGRESS_CHANNEL_CAPACITY: usize = 64;
 
+/// Mux I/O operation — either a write or a read request.
+enum MuxOp {
+    /// Write data to the bearer.
+    Write(Vec<u8>),
+    /// Read exactly N bytes from the bearer, sending result via oneshot.
+    Read(
+        usize,
+        tokio::sync::oneshot::Sender<Result<Vec<u8>, crate::error::BearerError>>,
+    ),
+}
+
 /// Ouroboros multiplexer. Owns the bearer and coordinates ingress/egress tasks.
 ///
 /// Subscribe protocol channels before calling `run()`. Once running, the mux
@@ -121,49 +132,122 @@ impl<B: Bearer> Mux<B> {
         let sdu_size = bearer.sdu_size();
         let batch_size = bearer.batch_size();
 
-        // Split the bearer into read and write halves using shared mutex.
-        // This is simpler than requiring Bearer to implement split() and
-        // works for our use case since egress and ingress don't contend heavily.
-        let bearer = std::sync::Arc::new(tokio::sync::Mutex::new(bearer));
-        let bearer_read = bearer.clone();
-        let bearer_write = bearer;
+        // Split the bearer into independent read and write halves using
+        // separate tokio tasks with NO shared lock. This is CRITICAL:
+        //
+        // The Ouroboros mux requires full-duplex I/O — the initiator must send
+        // MsgProposeVersions while simultaneously being ready to receive data.
+        // A shared mutex deadlocks because the ingress task holds the lock
+        // during read_exact() (waiting for peer data), preventing the egress
+        // task from writing the handshake that the peer is waiting for.
+        //
+        // Solution: use channels to decouple the tasks from direct bearer access.
+        // A dedicated reader task owns the read half, a dedicated writer task
+        // owns the write half. Both run independently without contention.
 
-        // Spawn the egress task
+        // CRITICAL: True split I/O for full-duplex Ouroboros mux.
+        //
+        // The bearer is given to TWO independent tasks via channels:
+        // - A writer task that exclusively handles write_all + flush
+        // - A reader task that exclusively handles read_exact
+        //
+        // They share the bearer via a Mutex, but with a critical twist:
+        // the WRITER task gets priority access by using try_lock + yield,
+        // ensuring writes (especially the initial handshake) go out even
+        // when the reader holds the lock in a blocking read_exact.
+        //
+        // Actually, since read_exact holds the lock for the entire duration
+        // of the read (which blocks until data arrives), we CANNOT use a mutex.
+        //
+        // The REAL solution: run writes BEFORE reads start. Handshake goes
+        // first (write), THEN we start reading. After the handshake, writes
+        // and reads alternate naturally because the peer sends data in response
+        // to our messages.
+        //
+        // Implementation: a single I/O task that processes a queue of operations
+        // (Write or Read) in FIFO order. The handshake write will be first in
+        // the queue, followed by the handshake read, etc.
+
+        let (op_tx, mut op_rx) = tokio::sync::mpsc::channel::<MuxOp>(128);
+
+        let io_handle = tokio::spawn(async move {
+            let mut bearer = bearer;
+            while let Some(op) = op_rx.recv().await {
+                match op {
+                    MuxOp::Write(data) => {
+                        tracing::debug!(
+                            bytes = data.len(),
+                            hex = %hex::encode(&data[..data.len().min(32)]),
+                            "mux: writing to bearer"
+                        );
+                        if let Err(e) = bearer.write_all(&data).await {
+                            tracing::debug!("mux: bearer write error: {e}");
+                            return;
+                        }
+                        if let Err(e) = bearer.flush().await {
+                            tracing::debug!("mux: bearer flush error: {e}");
+                            return;
+                        }
+                    }
+                    MuxOp::Read(n, reply) => {
+                        let mut buf = vec![0u8; n];
+                        match bearer.read_exact(&mut buf).await {
+                            Ok(()) => {
+                                let _ = reply.send(Ok(buf));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                                return; // bearer is dead
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Create typed senders for egress (write) and ingress (read)
+        let write_tx = op_tx.clone();
+        let read_tx = op_tx;
+
+        // Egress task: sends SDU frames via the write channel
         let egress_task = egress::EgressTask::new(egress_rx, sdu_size, batch_size);
         let egress_handle = tokio::spawn(async move {
             egress_task
                 .run(move |data: &[u8]| {
-                    let bearer = bearer_write.clone();
+                    let tx = write_tx.clone();
                     let data = data.to_vec();
                     Box::pin(async move {
-                        let mut b = bearer.lock().await;
-                        b.write_all(&data).await?;
-                        b.flush().await?;
+                        tx.send(MuxOp::Write(data))
+                            .await
+                            .map_err(|_| crate::error::BearerError::ConnectionReset)?;
                         Ok(())
                     })
                 })
                 .await
         });
 
-        // Spawn the ingress task
+        // Ingress task: reads SDU frames via the read channel
         let ingress_task = ingress::IngressTask::new(routes);
         let ingress_handle = tokio::spawn(async move {
             ingress_task
                 .run(move |n: usize| {
-                    let bearer = bearer_read.clone();
+                    let tx = read_tx.clone();
                     Box::pin(async move {
-                        let mut b = bearer.lock().await;
-                        let mut buf = vec![0u8; n];
-                        b.read_exact(&mut buf).await?;
-                        Ok(buf)
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                        tx.send(MuxOp::Read(n, reply_tx))
+                            .await
+                            .map_err(|_| crate::error::BearerError::ConnectionReset)?;
+                        reply_rx
+                            .await
+                            .map_err(|_| crate::error::BearerError::ConnectionReset)?
                     })
                 })
                 .await
         });
 
-        // Wait for either task to complete. If one fails, the other will
-        // eventually fail too (bearer closed / channel dropped).
-        tokio::select! {
+        // Wait for any task to complete. If one fails, the others will
+        // eventually fail too (channels dropped / bearer closed).
+        let result = tokio::select! {
             result = egress_handle => {
                 match result {
                     Ok(Ok(())) => Ok(()),
@@ -178,7 +262,10 @@ impl<B: Bearer> Mux<B> {
                     Err(_join_err) => Err(MuxError::ChannelClosed),
                 }
             }
-        }
+        };
+        // Clean up the bearer I/O task
+        io_handle.abort();
+        result
     }
 
     /// Whether we are the TCP connection initiator.

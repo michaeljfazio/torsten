@@ -180,28 +180,38 @@ pub async fn run_n2c_handshake_server(
 // ─── Encoding helpers ───
 
 /// Encode MsgProposeVersions for N2N: `[0, {version: version_data, ...}]`.
+///
+/// Map keys MUST be sorted in ascending order — the Haskell node requires
+/// canonical CBOR encoding (RFC 7049 §3.9) for the handshake map.
 fn encode_propose_versions_n2n(versions: &[u16], data: &N2NVersionData) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     enc.array(2).expect("infallible");
     enc.u64(MSG_PROPOSE_VERSIONS).expect("infallible");
-    enc.map(versions.len() as u64).expect("infallible");
-    for &v in versions {
-        enc.u16(v).expect("infallible");
+    // Sort versions ascending for canonical CBOR map key ordering
+    let mut sorted_versions: Vec<u16> = versions.to_vec();
+    sorted_versions.sort();
+    enc.map(sorted_versions.len() as u64).expect("infallible");
+    for v in &sorted_versions {
+        enc.u16(*v).expect("infallible");
         data.encode(&mut enc);
     }
     buf
 }
 
 /// Encode MsgProposeVersions for N2C with bit-15 wire encoding.
+///
+/// Map keys MUST be sorted ascending (canonical CBOR).
 fn encode_propose_versions_n2c(versions: &[u16], data: &N2CVersionData) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     enc.array(2).expect("infallible");
     enc.u64(MSG_PROPOSE_VERSIONS).expect("infallible");
-    enc.map(versions.len() as u64).expect("infallible");
-    for &v in versions {
-        enc.u16(n2c::encode_n2c_version(v)).expect("infallible");
+    let mut sorted_versions: Vec<u16> = versions.to_vec();
+    sorted_versions.sort();
+    enc.map(sorted_versions.len() as u64).expect("infallible");
+    for v in &sorted_versions {
+        enc.u16(n2c::encode_n2c_version(*v)).expect("infallible");
         data.encode(&mut enc);
     }
     buf
