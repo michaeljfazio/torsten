@@ -711,7 +711,7 @@ fn parse_u64_result(payload: &[u8]) -> Result<u64, NetworkError> {
 
 /// Convert a UTCTime triple `(year, day_of_year, pico_of_day)` to ISO-8601 UTC.
 fn utctime_to_iso8601(year: u32, day_of_year: u32, pico_of_day: u64) -> String {
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     let days_in_months: [u32; 12] = if is_leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
