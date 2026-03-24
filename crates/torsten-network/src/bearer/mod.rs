@@ -134,8 +134,49 @@ impl Bearer for MockBearer {
     }
 
     fn split(self) -> (Box<dyn BearerReader + Send>, Box<dyn BearerWriter + Send>) {
-        // MockBearer can't truly split — return dummy halves for testing
-        panic!("MockBearer::split() not supported — use real bearer for mux tests")
+        let read_data = std::sync::Arc::new(std::sync::Mutex::new(self.read_data));
+        let write_data = std::sync::Arc::new(std::sync::Mutex::new(self.write_data));
+        (
+            Box::new(MockBearerReader { data: read_data }),
+            Box::new(MockBearerWriter { data: write_data }),
+        )
+    }
+}
+
+#[cfg(test)]
+struct MockBearerReader {
+    data: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl BearerReader for MockBearerReader {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), BearerError> {
+        let mut data = self.data.lock().unwrap();
+        if data.len() < buf.len() {
+            return Err(BearerError::ConnectionReset);
+        }
+        for byte in buf.iter_mut() {
+            *byte = data.pop_front().expect("checked length");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+struct MockBearerWriter {
+    data: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl BearerWriter for MockBearerWriter {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), BearerError> {
+        self.data.lock().unwrap().extend_from_slice(buf);
+        Ok(())
+    }
+    async fn flush(&mut self) -> Result<(), BearerError> {
+        Ok(())
     }
 }
 
