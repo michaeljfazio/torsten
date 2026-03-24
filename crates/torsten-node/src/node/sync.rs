@@ -2628,73 +2628,88 @@ impl Node {
                         }
                     }
                 } else {
-                    // Single-peer mode: use request_next_batch (headers + blocks from same peer)
-                    tokio::select! {
-                        result = client.request_next_batch(header_batch_size) => {
-                            match result {
-                                Ok(events) => {
-                                    let mut forward_blocks = Vec::new();
-                                    let mut other_events = Vec::new();
+                    // Single-peer mode: use request_next_batch (headers + blocks from same peer).
+                    //
+                    // CRITICAL: pallas's serial ChainSync client is NOT cancel-safe.
+                    // Its internal ChannelBuffer holds partial read state; if a
+                    // tokio::select! cancels recv_full_msg mid-read, the buffer is
+                    // left in a corrupt state and subsequent reads decode garbage,
+                    // causing "inbound message is not valid for current state".
+                    //
+                    // Fix: run the chainsync future to completion without cancellation.
+                    // Use a separate spawn for the forge ticker so the chainsync read
+                    // is never dropped mid-flight.
+                    //
+                    // We check for forging BETWEEN chainsync batches (after each
+                    // request_next_batch completes), not during. This is safe because
+                    // request_next_batch returns promptly (either with blocks during
+                    // bulk sync, or with Await at tip which returns immediately).
+                    // At tip, pallas blocks on MustReply for ~20s max (one slot),
+                    // which is acceptable latency for forge checks.
+                    let result = client.request_next_batch(header_batch_size).await;
+                    match result {
+                        Ok(events) => {
+                            let mut forward_blocks = Vec::new();
+                            let mut other_events = Vec::new();
 
-                                    for event in events {
-                                        match event {
-                                            ChainSyncEvent::RollForward(block, tip) => {
-                                                forward_blocks.push((*block, tip));
-                                            }
-                                            other => other_events.push(other),
-                                        }
+                            for event in events {
+                                match event {
+                                    ChainSyncEvent::RollForward(block, tip) => {
+                                        forward_blocks.push((*block, tip));
                                     }
-
-                                    if !forward_blocks.is_empty() {
-                                        let tip = forward_blocks
-                                            .last()
-                                            .expect("forward_blocks is non-empty (checked above)")
-                                            .1
-                                            .clone();
-                                        let blocks: Vec<_> =
-                                            forward_blocks.into_iter().map(|(b, _)| b).collect();
-                                        // Single-peer serial mode does not use ChainSync header
-                                        // batching, so no EBBs are tracked separately — the
-                                        // serial client fetches full blocks which already handle
-                                        // EBBs via the gap-bridge mechanism.
-                                        self.process_forward_blocks(blocks, &tip, &[], &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
-                                    }
-
-                                    for event in other_events {
-                                        match event {
-                                            ChainSyncEvent::RollBackward(point, tip) => {
-                                                warn!("Rollback to {point}, tip: {tip}");
-                                                self.handle_rollback(&point).await;
-                                            }
-                                            ChainSyncEvent::Await => {
-                                                if !self.consensus.strict_verification() {
-                                                    info!(blocks_applied = blocks_received, "Caught up to chain tip");
-                                                    self.enable_strict_verification().await;
-                                                }
-                                                self.update_query_state().await;
-                                            }
-                                            ChainSyncEvent::RollForward(..) => {
-                                                warn!("Unexpected RollForward in other_events, skipping");
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => { error!("Chain sync error: {e}"); break; }
-                            }
-                        }
-                        _ = forge_ticker.tick(), if self.block_producer.is_some() => {
-                            if let Some(wc) = self.current_wall_clock_slot() {
-                                if wc.0 > last_forge_slot {
-                                    last_forge_slot = wc.0;
-                                    self.try_forge_block().await;
+                                    other => other_events.push(other),
                                 }
                             }
+
+                            if !forward_blocks.is_empty() {
+                                let tip = forward_blocks
+                                    .last()
+                                    .expect("forward_blocks is non-empty (checked above)")
+                                    .1
+                                    .clone();
+                                let blocks: Vec<_> =
+                                    forward_blocks.into_iter().map(|(b, _)| b).collect();
+                                self.process_forward_blocks(blocks, &tip, &[], &mut blocks_received, &mut blocks_since_last_log, &mut last_snapshot_epoch, &mut last_log_time, &mut last_query_update).await;
+                            }
+
+                            for event in other_events {
+                                match event {
+                                    ChainSyncEvent::RollBackward(point, tip) => {
+                                        warn!("Rollback to {point}, tip: {tip}");
+                                        self.handle_rollback(&point).await;
+                                    }
+                                    ChainSyncEvent::Await => {
+                                        if !self.consensus.strict_verification() {
+                                            info!(blocks_applied = blocks_received, "Caught up to chain tip");
+                                            self.enable_strict_verification().await;
+                                        }
+                                        self.update_query_state().await;
+                                    }
+                                    ChainSyncEvent::RollForward(..) => {
+                                        warn!("Unexpected RollForward in other_events, skipping");
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Check forging after each chainsync batch completes
+                            // (safe point — no in-flight pallas reads)
+                            if self.block_producer.is_some() {
+                                if let Some(wc) = self.current_wall_clock_slot() {
+                                    if wc.0 > last_forge_slot {
+                                        last_forge_slot = wc.0;
+                                        self.try_forge_block().await;
+                                    }
+                                }
+                            }
                         }
-                        _ = shutdown_rx.changed() => {
-                            info!("Shutdown: stopping sync");
-                            break;
-                        }
+                        Err(e) => { error!("Chain sync error: {e}"); break; }
+                    }
+
+                    // Check shutdown between batches
+                    if *shutdown_rx.borrow() {
+                        info!("Shutdown: stopping sync");
+                        break;
                     }
                 }
             }
