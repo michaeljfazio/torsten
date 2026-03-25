@@ -24,6 +24,8 @@ pub mod ingress;
 pub mod segment;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -96,7 +98,7 @@ impl<B: Bearer> Mux<B> {
             ingress::IngressRoute {
                 tx: ingress_tx,
                 limit: ingress_limit,
-                buffered: 0,
+                bytes_in_flight: Arc::new(AtomicUsize::new(0)),
             },
         );
 
