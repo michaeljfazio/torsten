@@ -509,7 +509,7 @@ impl OuroborosPraos {
         }
 
         // 4. Opcert counter monotonicity check
-        self.check_opcert_counter(header)?;
+        self.check_opcert_counter(header, issuer_info)?;
 
         // 5. KES period validation (always fatal — cheap structural check)
         self.validate_kes_period(header)?;
@@ -566,12 +566,22 @@ impl OuroborosPraos {
 
     /// Check and update the operational certificate sequence number for the block issuer.
     ///
-    /// Per the Haskell reference implementation, the opcert counter must satisfy:
+    /// Per the Haskell reference implementation (`doValidateKESSignature`), the opcert
+    /// counter must satisfy:
     ///   m <= n <= m + 1
     /// where m is the last seen counter and n is the new counter.
     /// This means the counter can stay the same or increment by exactly 1.
     /// Regression (n < m) and over-increment (n > m+1) are both rejected.
-    fn check_opcert_counter(&mut self, header: &BlockHeader) -> Result<(), ConsensusError> {
+    ///
+    /// For a pool's **first ever block** (no entry in `opcert_counters`), the Haskell node
+    /// initializes `currentIssueNo = Just 0`, meaning the first block must have counter 0
+    /// or 1. This only applies to pools that ARE in the stake distribution (`issuer_info`
+    /// is `Some`). Unknown pools during sync (no `issuer_info`) are handled leniently.
+    fn check_opcert_counter(
+        &mut self,
+        header: &BlockHeader,
+        issuer_info: Option<&BlockIssuerInfo>,
+    ) -> Result<(), ConsensusError> {
         if header.issuer_vkey.is_empty() {
             return Ok(());
         }
@@ -626,7 +636,37 @@ impl OuroborosPraos {
                     "Praos: opcert counter over-incremented (non-fatal during sync)"
                 );
             }
+        } else if issuer_info.is_some() {
+            // Pool is in the stake distribution but this is its first-ever block seen.
+            // Haskell initializes `currentIssueNo = Just 0` for pools in the stake
+            // distribution with no prior counter entry, so the first block must satisfy:
+            //   0 <= n <= 0 + 1  →  n ∈ {0, 1}
+            //
+            // This prevents a pool from starting with an arbitrarily large counter,
+            // which would allow replaying future opcerts without ever having them on-chain.
+            let m: u64 = 0;
+            if m.checked_add(1).is_none_or(|m1| n > m1) {
+                if self.strict_verification {
+                    warn!(
+                        slot = header.slot.0,
+                        pool = %pool_id,
+                        got = n,
+                        "Praos: opcert counter too large for first-seen pool (expected 0 or 1)"
+                    );
+                    return Err(ConsensusError::OpcertCounterOverIncremented {
+                        got: n,
+                        last_seen: m,
+                    });
+                }
+                debug!(
+                    slot = header.slot.0,
+                    pool = %pool_id,
+                    got = n,
+                    "Praos: first-seen pool has counter > 1 (non-fatal during sync)"
+                );
+            }
         }
+        // else: pool is unknown (no issuer_info) and not yet tracked — lenient during sync.
 
         // Update tracked counter (always update, even during sync, for tracking).
         // Hard cap prevents unbounded growth between epoch-boundary pruning cycles.
@@ -1798,6 +1838,235 @@ mod tests {
 
         let pool_id = torsten_primitives::hash::blake2b_224(&header1.issuer_vkey);
         assert_eq!(praos.opcert_counters[&pool_id], 6);
+    }
+
+    // --- Tests for first-seen pool opcert counter initialization (Haskell conformance) ---
+    //
+    // These tests use ValidationMode::Replay to bypass cryptographic verification
+    // (VRF proof, KES signature, opcert Ed25519) so we can isolate the counter logic.
+    // This mirrors Haskell's `reupdateChainDepState` path which only updates state.
+    // The counter enforcement logic is identical in both Full and Replay modes.
+
+    #[test]
+    fn test_first_seen_pool_counter_zero_accepted() {
+        // Pool in stake distribution, first block with counter=0 → accepted.
+        // Haskell initializes currentIssueNo = Just 0, so 0 <= 0 <= 0+1 passes.
+        // Use Replay mode to bypass dummy-data crypto failures and isolate counter logic.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        let mut header = make_valid_header(100);
+        header.operational_cert.sequence_number = 0;
+        let info = make_issuer_info(&header);
+
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Replay);
+        assert!(
+            result.is_ok(),
+            "First-seen pool with counter=0 should be accepted, got: {result:?}"
+        );
+
+        let pool_id = torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
+        assert_eq!(
+            praos.opcert_counters[&pool_id], 0,
+            "Counter should be recorded as 0"
+        );
+    }
+
+    #[test]
+    fn test_first_seen_pool_counter_one_accepted() {
+        // Pool in stake distribution, first block with counter=1 → accepted.
+        // Haskell: 0 <= 1 <= 0+1 passes (rotate on first appearance is valid).
+        // Use Replay mode to bypass dummy-data crypto failures and isolate counter logic.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        let mut header = make_valid_header(100);
+        header.operational_cert.sequence_number = 1;
+        let info = make_issuer_info(&header);
+
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Replay);
+        assert!(
+            result.is_ok(),
+            "First-seen pool with counter=1 should be accepted, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_first_seen_pool_counter_large_rejected_strict() {
+        // Pool in stake distribution, first block with counter=50 → rejected in strict mode.
+        // Haskell: currentIssueNo initialized to Just 0, so 50 > 0+1 is an over-increment.
+        // Use Replay mode to bypass dummy-data crypto failures and isolate counter logic.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        let mut header = make_valid_header(100);
+        header.operational_cert.sequence_number = 50;
+        let info = make_issuer_info(&header);
+
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Replay);
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::OpcertCounterOverIncremented {
+                    got: 50,
+                    last_seen: 0
+                })
+            ),
+            "First-seen pool with counter=50 should be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_first_seen_pool_counter_large_nonfatal_sync() {
+        // Pool in stake distribution, first block with counter=50 → non-fatal during sync.
+        // During bulk sync (strict_verification=false), over-increment is only logged.
+        let mut praos = OuroborosPraos::new();
+        // Default: strict_verification=false
+
+        let mut header = make_valid_header(100);
+        header.operational_cert.sequence_number = 50;
+        let info = make_issuer_info(&header);
+
+        let result =
+            praos.validate_header_full(&header, SlotNo(200), Some(&info), ValidationMode::Full);
+        assert!(
+            result.is_ok(),
+            "First-seen pool with counter=50 should be non-fatal during sync, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_pool_counter_unconstrained_during_sync() {
+        // Pool NOT in stake distribution (issuer_info=None), any counter → accepted during sync.
+        // During bulk sync, we do not yet have the stake distribution so we cannot enforce
+        // the Haskell first-seen initialization rule.
+        let mut praos = OuroborosPraos::new();
+        // Default: strict_verification=false
+
+        let mut header = make_valid_header(100);
+        header.operational_cert.sequence_number = 99;
+        // No issuer_info → unknown pool
+
+        let result = praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full);
+        assert!(
+            result.is_ok(),
+            "Unknown pool during sync should be non-fatal regardless of counter, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_existing_pool_counter_progression_unaffected() {
+        // Pool already has a tracked counter; new block with counter+1 → accepted.
+        // The new first-seen logic must not regress existing well-formed counter sequences.
+        // Use Replay mode to bypass dummy-data crypto and isolate counter logic.
+        //
+        // We build the counter up from 0 (valid first-seen value) to 5 by accepting
+        // a sequence of +1 increments, then verify that 5→6 still works.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        // Establish counter=0 as the first-seen block (valid: 0 <= 0 <= 0+1).
+        let mut header0 = make_valid_header(100);
+        header0.operational_cert.sequence_number = 0;
+        let info0 = make_issuer_info(&header0);
+        assert!(
+            praos
+                .validate_header_full(&header0, SlotNo(200), Some(&info0), ValidationMode::Replay)
+                .is_ok(),
+            "Establishing counter=0 (first-seen) should succeed"
+        );
+
+        // Advance counter 0→1→2→3→4→5 via the same pool key.
+        for seq in 1u64..=5 {
+            let mut h = make_valid_header(100 + seq * 100);
+            h.operational_cert.sequence_number = seq;
+            let info = make_issuer_info(&h);
+            assert!(
+                praos
+                    .validate_header_full(
+                        &h,
+                        SlotNo(200 + seq * 100),
+                        Some(&info),
+                        ValidationMode::Replay
+                    )
+                    .is_ok(),
+                "Counter increment to {seq} should succeed"
+            );
+        }
+
+        // counter=6 (+1 from 5) → accepted
+        let mut header6 = make_valid_header(700);
+        header6.operational_cert.sequence_number = 6;
+        let info6 = make_issuer_info(&header6);
+        let result =
+            praos.validate_header_full(&header6, SlotNo(800), Some(&info6), ValidationMode::Replay);
+        assert!(
+            result.is_ok(),
+            "Existing pool with counter 5→6 (+1) should be accepted, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_existing_pool_counter_regression_rejected() {
+        // Pool already has a tracked counter; new block with a regressed counter → rejected.
+        // Use Replay mode to bypass dummy-data crypto and isolate counter logic.
+        //
+        // Build up counter to 5 via valid increments, then verify regression is rejected.
+        let mut praos = OuroborosPraos::new();
+        praos.set_strict_verification(true);
+
+        // First-seen block: counter=0.
+        let mut header0 = make_valid_header(100);
+        header0.operational_cert.sequence_number = 0;
+        let info0 = make_issuer_info(&header0);
+        assert!(
+            praos
+                .validate_header_full(&header0, SlotNo(200), Some(&info0), ValidationMode::Replay)
+                .is_ok(),
+            "Establishing counter=0 (first-seen) should succeed"
+        );
+
+        // Advance 0→1→2→3→4→5.
+        for seq in 1u64..=5 {
+            let mut h = make_valid_header(100 + seq * 100);
+            h.operational_cert.sequence_number = seq;
+            let info = make_issuer_info(&h);
+            assert!(
+                praos
+                    .validate_header_full(
+                        &h,
+                        SlotNo(200 + seq * 100),
+                        Some(&info),
+                        ValidationMode::Replay
+                    )
+                    .is_ok(),
+                "Counter increment to {seq} should succeed"
+            );
+        }
+
+        // counter=3 (regression from 5) → rejected
+        let mut header_regress = make_valid_header(700);
+        header_regress.operational_cert.sequence_number = 3;
+        let info_regress = make_issuer_info(&header_regress);
+        let result = praos.validate_header_full(
+            &header_regress,
+            SlotNo(800),
+            Some(&info_regress),
+            ValidationMode::Replay,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::OpcertSequenceRegression {
+                    got: 3,
+                    expected: 5
+                })
+            ),
+            "Existing pool with regression from 5 to 3 should be rejected, got: {result:?}"
+        );
     }
 
     #[test]
