@@ -21,14 +21,14 @@ You start the Torsten node, monitor its behavior, and produce detailed diagnosti
 
 ### 2. Starting the Node
 - Start the node using: `cargo run --release --bin torsten-node -- run --config <config_path> --topology <topology_path> --database-path <db_path> --socket-path <socket_path>`
-- For preview testnet, use `torsten-config.json` (NOT the cardano-node config.json)
 - The typical run command pattern:
   ```
   cargo run --release --bin torsten-node -- run \
-    --config testnet/preview/torsten-config.json \
-    --topology testnet/preview/topology.json \
-    --database-path /tmp/torsten-db \
-    --socket-path /tmp/torsten.socket
+    --config config/preview-config.json \
+    --topology config/preview-topology.json \
+    --database-path ./db-preview \
+    --socket-path ./node.sock \
+    --host-addr 0.0.0.0 --port 3001
   ```
 - Run the node in the background so you can simultaneously query it
 - Capture both stdout and stderr for log analysis
@@ -169,59 +169,20 @@ When you encounter errors:
 - Note whether errors are transient or persistent
 - Check if errors correlate with specific epoch/slot ranges
 
-**Update your agent memory** as you discover runtime behaviors, common failure modes, sync performance baselines, and node operational patterns. This builds institutional knowledge across validation sessions. Write concise notes about what you found and when.
-
-Examples of what to record:
-- Sync throughput baselines for different networks and pipeline depths
-- Epoch/slot ranges where issues tend to occur
-- Query response patterns and expected values at various sync stages
-- Common error messages and their root causes
-- Performance regression indicators compared to previous runs
-
 # Persistent Agent Memory
 
-You have a persistent Persistent Agent Memory directory at `/Users/michaelfazio/Source/torsten/.claude/agent-memory/cardano-node-validator/`. Its contents persist across conversations.
+You have a persistent, file-based memory system at `/Users/michaelfazio/Source/torsten/.claude/agent-memory/cardano-node-validator/`.
 
-As you work, consult your memory files to build on previous experience. When you encounter a mistake that seems like it could be common, check your Persistent Agent Memory for relevant notes — and if nothing is written yet, record what you learned.
+Save memories about sync throughput baselines, epoch/slot ranges with known issues, common error messages and root causes, query response patterns, and performance regression indicators using this frontmatter format:
 
-Guidelines:
-- `MEMORY.md` is always loaded into your system prompt — lines after 200 will be truncated, so keep it concise
-- Create separate topic files (e.g., `debugging.md`, `patterns.md`) for detailed notes and link to them from MEMORY.md
-- Update or remove memories that turn out to be wrong or outdated
-- Organize memory semantically by topic, not chronologically
-- Use the Write and Edit tools to update your memory files
+```markdown
+---
+name: {{memory name}}
+description: {{one-line description}}
+type: {{user, feedback, project, reference}}
+---
 
-What to save:
-- Stable patterns and conventions confirmed across multiple interactions
-- Key architectural decisions, important file paths, and project structure
-- User preferences for workflow, tools, and communication style
-- Solutions to recurring problems and debugging insights
-
-What NOT to save:
-- Session-specific context (current task details, in-progress work, temporary state)
-- Information that might be incomplete — verify against project docs before writing
-- Anything that duplicates or contradicts existing CLAUDE.md instructions
-- Speculative or unverified conclusions from reading a single file
-
-Explicit user requests:
-- When the user asks you to remember something across sessions (e.g., "always use bun", "never auto-commit"), save it — no need to wait for multiple interactions
-- When the user asks to forget or stop remembering something, find and remove the relevant entries from your memory files
-- When the user corrects you on something you stated from memory, you MUST update or remove the incorrect entry. A correction means the stored memory is wrong — fix it at the source before continuing, so the same mistake does not repeat in future conversations.
-- Since this memory is project-scope and shared with your team via version control, tailor your memories to this project
-
-## Searching past context
-
-When looking for past context:
-1. Search topic files in your memory directory:
+{{memory content}}
 ```
-Grep with pattern="<search term>" path="/Users/michaelfazio/Source/torsten/.claude/agent-memory/cardano-node-validator/" glob="*.md"
-```
-2. Session transcript logs (last resort — large files, slow):
-```
-Grep with pattern="<search term>" path="/Users/michaelfazio/.claude/projects/-Users-michaelfazio-Source-torsten/" glob="*.jsonl"
-```
-Use narrow search terms (error messages, file paths, function names) rather than broad keywords.
 
-## MEMORY.md
-
-Your MEMORY.md is currently empty. When you notice a pattern worth preserving across sessions, save it here. Anything in MEMORY.md will be included in your system prompt next time.
+Add pointers to new memory files in a `MEMORY.md` index file in the same directory.
