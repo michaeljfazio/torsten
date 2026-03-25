@@ -20,14 +20,17 @@ Follow the Ralph autonomous development loop:
 # Build everything
 cargo build --all-targets
 
-# Run all tests
-cargo test --all
+# Run all tests (nextest — parallel, matches CI)
+cargo nextest run --workspace
 
 # Run tests for a single crate
-cargo test -p torsten-ledger
+cargo nextest run -p torsten-ledger
 
 # Run a single test by name
-cargo test -p torsten-ledger -- test_name
+cargo nextest run -p torsten-ledger -E 'test(test_name)'
+
+# Run doc tests (nextest doesn't support these yet)
+cargo test --doc
 
 # Lint
 cargo clippy --all-targets -- -D warnings

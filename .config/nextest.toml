@@ -1,4 +1,13 @@
+[profile.default]
+# Fail fast: stop on first failure during iteration
+fail-fast = true
+# Status output level
+status-level = "pass"
+
 [profile.ci]
+# CI runs all tests even if some fail
+fail-fast = false
+
 # Produce JUnit XML for Codecov Test Analytics
 [profile.ci.junit]
 path = "junit.xml"
