@@ -8187,4 +8187,386 @@ mod tests {
             "Expected no TreasuryValueMismatch when current_treasury is None; got: {result:?}"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Stake deregistration: non-zero reward account balance check
+    //
+    // Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` — both pre-Conway
+    // `StakeDeregistration` and Conway `ConwayStakeDeregistration` must be
+    // rejected when the reward account has a non-zero balance.
+    //
+    // Four sub-cases:
+    //   1. StakeDeregistration  + zero balance   → accepted
+    //   2. StakeDeregistration  + non-zero balance → StakeKeyHasNonZeroBalance
+    //   3. ConwayStakeDeregistration + zero balance + correct refund → accepted
+    //   4. ConwayStakeDeregistration + non-zero balance + correct refund → rejected
+    //
+    // Conway-only refund mismatch:
+    //   5. ConwayStakeDeregistration + wrong refund → StakeDeregistrationRefundMismatch
+    //   6. ConwayStakeDeregistration + correct refund → accepted
+    //
+    // Reference: Haskell predicate `StakeKeyHasNonZeroAccountBalanceDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`; Conway
+    // `conwayStakeDeregDeposit` check in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a reward_accounts map with a single entry for the given
+    /// credential bytes (28-byte Hash28 zero-padded to Hash32) and balance.
+    fn make_reward_accounts(
+        cred_bytes: [u8; 28],
+        balance: u64,
+    ) -> std::collections::HashMap<Hash32, torsten_primitives::value::Lovelace> {
+        use torsten_primitives::hash::Hash28;
+        let h28 = Hash28::from_bytes(cred_bytes);
+        let key = h28.to_hash32_padded();
+        let mut map = std::collections::HashMap::new();
+        map.insert(key, torsten_primitives::value::Lovelace(balance));
+        map
+    }
+
+    /// Helper: build a transaction with a single certificate and a value-balanced body.
+    ///
+    /// The input UTxO is inserted into `utxo_set` and the output + fee = 10_000_000.
+    /// The `refund_delta` is added to the output to balance the deregistration refund.
+    fn make_dereg_tx(utxo_set: &mut UtxoSet, cert: Certificate, refund_delta: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xDEu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        // Output = inputs + refund - fee = 10_000_000 + refund_delta - 200_000
+        let output_value = 10_000_000 + refund_delta - 200_000;
+        let mut tx = make_simple_tx(input, output_value, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_dereg_zero_balance_accepted() {
+        // StakeDeregistration with zero reward account balance must succeed.
+        let cred_bytes = [0x01u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        // There should be no StakeKeyHasNonZeroBalance error.
+        let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyHasNonZeroBalance { .. })
+        }));
+        assert!(
+            !has_balance_err,
+            "Expected no StakeKeyHasNonZeroBalance for zero balance; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_dereg_nonzero_balance_rejected() {
+        // StakeDeregistration with a non-zero reward balance must produce
+        // StakeKeyHasNonZeroBalance.
+        let cred_bytes = [0x02u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+        // Reward account has 500_000 lovelace — must be withdrawn first.
+        let reward_accounts = make_reward_accounts(cred_bytes, 500_000);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for deregistration with non-zero balance; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyHasNonZeroBalance { balance, .. } if *balance == 500_000)),
+            "Expected StakeKeyHasNonZeroBalance {{balance: 500_000}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_dereg_no_reward_accounts_skips_balance_check() {
+        // When reward_accounts is None (e.g. simple mempool structural check),
+        // the balance guard must be skipped — only structural rules apply.
+        let cred_bytes = [0x03u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None,
+            None, // reward_accounts = None → balance check skipped
+            None,
+        );
+
+        let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyHasNonZeroBalance { .. })
+        }));
+        assert!(
+            !has_balance_err,
+            "Expected no StakeKeyHasNonZeroBalance when reward_accounts is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_zero_balance_correct_refund_accepted() {
+        // Conway ConwayStakeDeregistration with zero balance and correct refund
+        // must not produce StakeKeyHasNonZeroBalance or StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x04u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::StakeKeyHasNonZeroBalance { .. }
+                    | ValidationError::StakeDeregistrationRefundMismatch { .. }
+            )
+        }));
+        assert!(
+            !has_target_err,
+            "Expected no balance/refund errors for Conway dereg with zero balance + correct refund; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_nonzero_balance_rejected() {
+        // Conway ConwayStakeDeregistration with a non-zero reward balance must
+        // produce StakeKeyHasNonZeroBalance even in Conway era.
+        let cred_bytes = [0x05u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        // Non-zero balance: delegator must withdraw rewards first.
+        let reward_accounts = make_reward_accounts(cred_bytes, 1_500_000);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for Conway deregistration with non-zero balance; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::StakeKeyHasNonZeroBalance { balance, .. } if *balance == 1_500_000
+            )),
+            "Expected StakeKeyHasNonZeroBalance {{balance: 1_500_000}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_wrong_refund_rejected() {
+        // Conway ConwayStakeDeregistration with a refund that differs from
+        // key_deposit must produce StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x06u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+        let wrong_refund = key_deposit + 1; // deliberately wrong
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(wrong_refund),
+            },
+            wrong_refund,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for wrong Conway deregistration refund; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::StakeDeregistrationRefundMismatch { declared, expected }
+                    if *declared == wrong_refund && *expected == key_deposit
+            )),
+            "Expected StakeDeregistrationRefundMismatch {{declared: {wrong_refund}, expected: {key_deposit}}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_correct_refund_no_refund_error() {
+        // Exact-match refund must not produce StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x07u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+        );
+
+        let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeDeregistrationRefundMismatch { .. })
+        }));
+        assert!(
+            !has_refund_err,
+            "Expected no StakeDeregistrationRefundMismatch for correct refund; got: {result:?}"
+        );
+    }
 }

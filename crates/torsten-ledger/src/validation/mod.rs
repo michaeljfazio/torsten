@@ -246,6 +246,38 @@ pub enum ValidationError {
         declared: u64,
         actual: u64,
     },
+    /// Haskell `StakeKeyHasNonZeroAccountBalanceDELEG`: a stake deregistration
+    /// is rejected when the reward account holds a non-zero balance.
+    ///
+    /// Per the Cardano ledger spec (Shelley DELEG rule and Conway DELEG rule),
+    /// deregistering a stake credential with a non-empty reward account is
+    /// invalid — the delegator must first withdraw all rewards before
+    /// deregistering. This prevents silent loss of on-chain rewards.
+    ///
+    /// Reference: Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake deregistration rejected: reward account {credential_hash} has non-zero balance \
+         ({balance} lovelace) — withdraw rewards before deregistering"
+    )]
+    StakeKeyHasNonZeroBalance {
+        /// Hex-encoded credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+        /// Current reward balance in lovelace.
+        balance: u64,
+    },
+    /// Conway `UnRegCert` (tag 8) declared refund does not match the current
+    /// `key_deposit` protocol parameter.
+    ///
+    /// Per Haskell's Conway DELEG rule: the deposit amount carried in
+    /// `ConwayStakeDeregistration` must equal the `keyDeposit` currently in
+    /// effect. A mismatch means the transaction was constructed with stale
+    /// protocol parameters and must be rejected.
+    #[error(
+        "Conway stake deregistration refund mismatch: declared={declared}, \
+         expected key_deposit={expected}"
+    )]
+    StakeDeregistrationRefundMismatch { declared: u64, expected: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +369,52 @@ pub fn validate_transaction_with_pools(
         current_epoch,
         &mut errors,
     );
+
+    // ------------------------------------------------------------------
+    // Stake deregistration: non-zero reward account balance check
+    //
+    // Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` (Shelley DELEG rule and
+    // Conway DELEG rule): a stake credential may not be deregistered while its
+    // reward account holds any lovelace. The delegator must withdraw rewards
+    // before deregistering.
+    //
+    // This check is only enforced when `reward_accounts` is provided (i.e.,
+    // during block validation or mempool admission with ledger context). During
+    // simple structural validation where the caller supplies `None`, the balance
+    // check is skipped to match the withdrawal-amount check pattern above.
+    //
+    // Both legacy `StakeDeregistration` (tag 1) and Conway
+    // `ConwayStakeDeregistration` (tag 8) are covered — Haskell enforces the
+    // same predicate for both certificate variants.
+    // ------------------------------------------------------------------
+    if let Some(accounts) = reward_accounts {
+        for cert in &tx.body.certificates {
+            let opt_credential: Option<&torsten_primitives::credentials::Credential> = match cert {
+                torsten_primitives::transaction::Certificate::StakeDeregistration(cred) => {
+                    Some(cred)
+                }
+                torsten_primitives::transaction::Certificate::ConwayStakeDeregistration {
+                    credential,
+                    ..
+                } => Some(credential),
+                _ => None,
+            };
+            if let Some(credential) = opt_credential {
+                // Replicate the Hash28 → Hash32 zero-padding used in
+                // state/certificates.rs `credential_to_hash()` so the lookup
+                // key matches the key stored in `self.reward_accounts`.
+                let key = credential.to_hash().to_hash32_padded();
+                if let Some(balance) = accounts.get(&key) {
+                    if balance.0 > 0 {
+                        errors.push(ValidationError::StakeKeyHasNonZeroBalance {
+                            credential_hash: key.to_hex(),
+                            balance: balance.0,
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Withdrawal validation (Haskell `wdrlNotZero` + balance check)

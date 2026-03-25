@@ -285,6 +285,33 @@ pub(super) fn run_phase1_rules(
     }
 
     // ------------------------------------------------------------------
+    // Rule 1g: Conway stake deregistration refund must match key_deposit
+    //
+    // Per Haskell's Conway DELEG rule (`conwayStakeDeregDeposit`):
+    // `ConwayStakeDeregistration` (UnRegCert, certificate tag 8) carries an
+    // explicit refund amount that must equal the current `keyDeposit`
+    // protocol parameter. The refund field exists so that a transaction
+    // built against old parameters is rejected if `keyDeposit` has since
+    // changed via a governance update — preventing silent under-refunds.
+    //
+    // This check applies only in Conway (protocol >= 9) where the new
+    // certificate tag is used.  Pre-Conway `StakeDeregistration` (tag 1)
+    // implicitly refunds `key_deposit` without carrying an explicit amount.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for cert in &body.certificates {
+            if let Certificate::ConwayStakeDeregistration { refund, .. } = cert {
+                if refund.0 != params.key_deposit.0 {
+                    errors.push(ValidationError::StakeDeregistrationRefundMismatch {
+                        declared: refund.0,
+                        expected: params.key_deposit.0,
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Rule 2: All inputs must exist in the UTxO set
     // ------------------------------------------------------------------
     let mut input_value: u128 = 0;
