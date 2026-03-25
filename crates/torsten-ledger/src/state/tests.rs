@@ -1228,6 +1228,49 @@ fn test_drep_activity_tracking() {
     params.drep_activity = 5; // DReps inactive after 5 epochs
     let mut state = LedgerState::new(params);
 
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (9).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
+
     let cred = Credential::VerificationKey(Hash28::from_bytes([50u8; 28]));
     let key = credential_to_hash(&cred);
 
@@ -1328,6 +1371,49 @@ fn test_drep_marked_inactive_on_expiry() {
     let mut params = ProtocolParameters::mainnet_defaults();
     params.drep_activity = 2;
     let mut state = LedgerState::new(params);
+
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (3).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([50u8; 28]));
     let key = credential_to_hash(&cred);
@@ -11441,6 +11527,49 @@ fn test_epoch_transition_marks_inactive_drep() {
     params.protocol_version_major = 10; // Conway
     params.drep_activity = 3; // expire after 3 epochs of inactivity
     let mut state = LedgerState::new(params);
+
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (4).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
 
     // Register 2 DReps at epoch 0
     let cred_a = Credential::VerificationKey(Hash28::from_bytes([0xA0u8; 28]));
