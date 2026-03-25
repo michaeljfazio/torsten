@@ -492,7 +492,11 @@ pub struct VolatileDB {
     /// Block-number index for the SELECTED chain only.
     block_no_index: BTreeMap<u64, Hash32>,
     /// Successor relationships for all blocks (all forks).
-    successors: HashMap<Hash32, Vec<Hash32>>,
+    ///
+    /// Maps each block hash to the set of its immediate successors (children).
+    /// Using HashSet rather than Vec prevents duplicate entries and provides
+    /// O(1) membership tests needed for fork enumeration.
+    successors: HashMap<Hash32, HashSet<Hash32>>,
     /// Tip of the selected chain: (slot, hash, block_no).
     tip: Option<(u64, Hash32, u64)>,
     wal: Option<WalWriter>,
@@ -617,7 +621,7 @@ impl VolatileDB {
         cbor: Vec<u8>,
     ) {
         // Track successor relationship (all forks)
-        self.successors.entry(prev_hash).or_default().push(hash);
+        self.successors.entry(prev_hash).or_default().insert(hash);
         // Slot index (all forks)
         self.slot_index.entry(slot).or_default().push(hash);
 
@@ -657,6 +661,17 @@ impl VolatileDB {
     /// Check if a block exists.
     pub fn has_block(&self, hash: &Hash32) -> bool {
         self.blocks.contains_key(hash)
+    }
+
+    /// Return the set of immediate successors for the given block hash.
+    ///
+    /// Returns `None` when the block has no known successors (i.e. it is a
+    /// current tip on some fork).  Returns `Some(&set)` with all children
+    /// when one or more successor blocks have been added to the store.
+    ///
+    /// O(1) — the successor map is maintained on every `add_block` / `remove_block`.
+    pub fn get_successors(&self, hash: &Hash32) -> Option<&HashSet<Hash32>> {
+        self.successors.get(hash)
     }
 
     /// Get the first block on the selected chain strictly after a given slot.
@@ -699,7 +714,7 @@ impl VolatileDB {
                 self.block_no_index.remove(&block.block_no);
             }
             if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                succs.retain(|h| h != hash);
+                succs.remove(hash);
                 if succs.is_empty() {
                     self.successors.remove(&block.prev_hash);
                 }
@@ -737,7 +752,7 @@ impl VolatileDB {
                 }
                 // Remove from successors map
                 if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                    succs.retain(|h| h != hash);
+                    succs.remove(hash);
                     if succs.is_empty() {
                         self.successors.remove(&block.prev_hash);
                     }
@@ -781,7 +796,7 @@ impl VolatileDB {
                             self.block_no_index.remove(&block.block_no);
                         }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                            succs.retain(|h| *h != hash);
+                            succs.remove(&hash);
                             if succs.is_empty() {
                                 self.successors.remove(&block.prev_hash);
                             }
@@ -922,7 +937,10 @@ impl VolatileDB {
                             self.block_no_index.remove(&block.block_no);
                         }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                            succs.retain(|h| *h != hash);
+                            succs.remove(&hash);
+                            if succs.is_empty() {
+                                self.successors.remove(&block.prev_hash);
+                            }
                         }
                     }
                     self.gc_schedule.remove(&hash);
@@ -1174,7 +1192,7 @@ impl VolatileDB {
                         }
                     }
                     if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                        succs.retain(|h| h != hash);
+                        succs.remove(hash);
                         if succs.is_empty() {
                             self.successors.remove(&block.prev_hash);
                         }
