@@ -375,6 +375,7 @@ pub(crate) fn convert_validation_error(
 // ─── Connection metrics bridges ──────────────────────────────────────────────
 
 /// Bridges N2N server connection events to the node metrics system.
+#[allow(dead_code)] // used by networking rewrite
 pub(crate) struct N2NConnectionMetrics {
     pub metrics: Arc<crate::metrics::NodeMetrics>,
 }
@@ -399,6 +400,7 @@ impl torsten_network::ConnectionMetrics for N2NConnectionMetrics {
 }
 
 /// Bridges N2C server connection events to the node metrics system.
+#[allow(dead_code)] // used by networking rewrite
 pub(crate) struct N2CConnectionMetrics {
     pub metrics: Arc<crate::metrics::NodeMetrics>,
 }

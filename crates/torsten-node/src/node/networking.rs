@@ -31,6 +31,7 @@ use torsten_network::{PeerManager, PeerSource, PeerState};
 
 /// Diffusion mode — whether the node accepts inbound connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // InitiatorOnly variant for networking rewrite
 pub enum DiffusionMode {
     /// Only initiate outbound connections (relay behind NAT).
     InitiatorOnly,
@@ -40,6 +41,7 @@ pub enum DiffusionMode {
 
 /// Network timeout configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // used by networking rewrite
 pub struct TimeoutConfig {
     /// Timeout for TCP connection establishment.
     pub connect_timeout: Duration,
@@ -64,6 +66,7 @@ impl Default for TimeoutConfig {
 
 /// Configuration for the node's peer management.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used by networking rewrite
 pub struct PeerManagerConfig {
     /// Diffusion mode (InitiatorOnly or InitiatorAndResponder).
     pub diffusion_mode: DiffusionMode,
@@ -101,6 +104,7 @@ pub enum ConnectionDirection {
 
 /// Category of a peer for big ledger peer tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // used by networking rewrite
 pub enum PeerCategory {
     Normal,
     BigLedgerPeer,
@@ -109,6 +113,7 @@ pub enum PeerCategory {
 
 /// A local root peer group from the topology configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used by networking rewrite
 pub struct LocalRootGroupInfo {
     /// Name of the group (for logging/display).
     pub name: String,
@@ -124,6 +129,7 @@ pub struct LocalRootGroupInfo {
 
 /// Rollback announcement sent via broadcast channel when the chain rolls back.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used by networking rewrite
 pub struct RollbackAnnouncement {
     /// The point to roll back to.
     pub slot: u64,
@@ -137,6 +143,7 @@ pub struct RollbackAnnouncement {
 /// Byron EBBs share a slot with the first block of the epoch and need
 /// special handling during sync.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // used by networking rewrite
 pub struct EbbInfo {
     /// Slot of the EBB (same as the first block of the epoch).
     pub slot: u64,
@@ -148,6 +155,7 @@ pub struct EbbInfo {
 
 /// Result from a pipelined header batch request.
 #[derive(Debug)]
+#[allow(dead_code)] // used by networking rewrite
 pub enum HeaderBatchResult {
     /// A batch of headers was received.
     Headers(Vec<HeaderInfo>),
@@ -159,6 +167,7 @@ pub enum HeaderBatchResult {
 
 /// Information about a received block header.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // used by networking rewrite
 pub struct HeaderInfo {
     /// Raw header CBOR bytes.
     pub header: Vec<u8>,
@@ -176,6 +185,7 @@ pub struct HeaderInfo {
 
 /// Errors from N2N client operations.
 #[derive(Debug)]
+#[allow(dead_code)] // used by networking rewrite
 pub enum ClientError {
     /// TCP connection failed.
     Connection(String),
@@ -205,6 +215,7 @@ impl std::error::Error for ClientError {}
 
 /// Errors from duplex peer connection operations.
 #[derive(Debug)]
+#[allow(dead_code)] // used by networking rewrite
 pub enum DuplexError {
     /// The underlying client connection failed.
     Connection(ClientError),
@@ -304,6 +315,7 @@ impl NodePeerManager {
     }
 
     /// Add a peer received via PeerSharing.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn add_shared_peer(&mut self, addr: SocketAddr) {
         if self.local_addr == Some(addr) {
             return;
@@ -352,11 +364,13 @@ impl NodePeerManager {
     }
 
     /// Mark a connection as duplex.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn mark_peer_duplex(&mut self, addr: &SocketAddr) {
         self.duplex.insert(*addr, true);
     }
 
     /// Record a handshake RTT measurement.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn record_handshake_rtt(&mut self, addr: &SocketAddr, rtt_ms: f64) {
         if let Some(peer) = self.inner.get_peer_mut(addr) {
             peer.update_latency(rtt_ms);
@@ -364,6 +378,7 @@ impl NodePeerManager {
     }
 
     /// Record blocks fetched from a peer.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn record_block_fetch(&mut self, addr: &SocketAddr, blocks: usize) {
         if let Some(peer) = self.inner.get_peer_mut(addr) {
             peer.record_success();
@@ -419,6 +434,7 @@ impl NodePeerManager {
     }
 
     /// Get the category of a peer.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn peer_category(&self, addr: &SocketAddr) -> Option<PeerCategory> {
         if !self.inner.get_peer(addr).is_some() {
             return None;
@@ -435,6 +451,7 @@ impl NodePeerManager {
     }
 
     /// Find an inbound duplex connection from the same IP.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn find_inbound_duplex_by_ip(&self, ip: std::net::IpAddr) -> Option<SocketAddr> {
         self.connections
             .iter()
@@ -447,6 +464,7 @@ impl NodePeerManager {
     }
 
     /// Check whether a connection attempt should be made to this peer.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn should_attempt_connection(&self, addr: &SocketAddr) -> bool {
         if let Some(last) = self.last_attempt.get(addr) {
             if last.elapsed() < Duration::from_secs(30) {
@@ -457,6 +475,7 @@ impl NodePeerManager {
     }
 
     /// Get peers eligible for new outbound connections.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn peers_to_connect(&self, count: usize) -> Vec<SocketAddr> {
         self.inner
             .peers_in_state(PeerState::Cold)

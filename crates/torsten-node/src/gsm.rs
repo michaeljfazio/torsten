@@ -66,6 +66,7 @@ impl std::fmt::Display for GenesisSyncState {
 
 /// Configuration for the Genesis State Machine.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used by networking rewrite
 pub struct GsmConfig {
     /// Minimum active big ledger peers to transition PreSyncing → Syncing
     pub min_active_blp: usize,
@@ -102,6 +103,7 @@ impl Default for GsmConfig {
 /// struct combines the sliding `DensityWindow` (which records block slots) with
 /// the peer's reported tip slot for staleness detection.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // used by networking rewrite (GDD)
 pub struct PeerChainInfo {
     /// Density window tracking blocks in the genesis window for this peer.
     pub density_window: DensityWindow,
@@ -109,6 +111,7 @@ pub struct PeerChainInfo {
     pub tip_slot: u64,
 }
 
+#[allow(dead_code)] // used by networking rewrite (GDD)
 impl PeerChainInfo {
     /// Create a new info record with a fresh density window.
     pub fn new(intersection_slot: u64, window_size: u64, tip_slot: u64) -> Self {
@@ -144,6 +147,7 @@ impl PeerChainInfo {
 /// and tip freshness. The GSM also manages:
 /// - **LoE (Limit on Eagerness)**: constrains block application during sync
 /// - **GDD (Genesis Density Disconnector)**: disconnects sparse-chain peers
+#[allow(dead_code)] // fields used by networking rewrite
 pub struct GenesisStateMachine {
     config: GsmConfig,
     state: GenesisSyncState,
@@ -162,6 +166,7 @@ pub struct GenesisStateMachine {
     pub intersection_slot: u64,
 }
 
+#[allow(dead_code)] // methods used by networking rewrite
 impl GenesisStateMachine {
     /// Create a new GSM. If not enabled, it immediately enters CaughtUp
     /// and all constraints are disabled.

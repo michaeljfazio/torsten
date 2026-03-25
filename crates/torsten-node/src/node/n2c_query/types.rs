@@ -3,6 +3,7 @@ use torsten_primitives::time::{BlockNo, EpochNo};
 
 /// Results from local state queries
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // variants constructed in trait impl methods (dynamic dispatch)
 pub enum QueryResult {
     EpochNo(u64),
     ChainTip {
@@ -673,6 +674,7 @@ pub type VoteEntry = (Vec<u8>, u8, u8);
 
 /// Snapshot of a governance proposal (GovActionState)
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used in encoding (dynamic dispatch through QueryHandler trait)
 pub struct ProposalSnapshot {
     pub tx_id: Vec<u8>,
     pub action_index: u32,
@@ -712,6 +714,7 @@ pub struct ProposalSnapshot {
 
 /// Ledger peer entry for GetLedgerPeerSnapshot (tag 34)
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used in encoding (dynamic dispatch)
 pub struct LedgerPeerEntry {
     /// Pool ID (28 bytes)
     pub pool_id: Vec<u8>,
@@ -770,6 +773,7 @@ pub struct CommitteeMemberSnapshot {
 /// Snapshot of the node state used for answering queries.
 /// This is updated from the node when the ledger state changes.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used in encoding (dynamic dispatch through QueryHandler trait)
 pub struct NodeStateSnapshot {
     pub tip: Tip,
     pub epoch: EpochNo,
@@ -950,6 +954,7 @@ impl Default for NodeStateSnapshot {
 }
 
 /// Multi-asset snapshot: Vec<(policy_id_bytes, Vec<(asset_name_bytes, quantity)>)>
+#[allow(dead_code)] // used in encoding (dynamic dispatch)
 pub type MultiAssetSnapshot = Vec<(Vec<u8>, Vec<(Vec<u8>, u64)>)>;
 
 /// Snapshot of a UTxO entry for query results.

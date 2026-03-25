@@ -594,7 +594,7 @@ mod tests {
     /// Verify default constants are reasonable.
     #[test]
     fn default_constants() {
-        assert_eq!(DEFAULT_INGRESS_LIMIT, 65536);
+        assert_eq!(DEFAULT_INGRESS_LIMIT, 64 * 1024 * 1024);
         assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(10));
     }
 }

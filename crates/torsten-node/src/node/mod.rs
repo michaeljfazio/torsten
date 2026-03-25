@@ -8,11 +8,14 @@
 //! - [`query`]  — N2C LocalStateQuery response building (`update_query_state`)
 //! - [`sync`]   — Pipelined ChainSync loop, block processing, rollback, replay
 
+#[allow(dead_code)] // networking rewrite module, wired in soon
 pub(crate) mod block_fetch_logic;
+#[allow(dead_code)] // networking rewrite module, wired in soon
 pub(crate) mod connection_lifecycle;
 pub(crate) mod epoch;
 pub(crate) mod n2c_query;
 pub(crate) mod networking;
+#[allow(dead_code)] // networking rewrite module, wired in soon
 pub(crate) mod peer_connection;
 pub(crate) mod query;
 pub(crate) mod serve;
@@ -42,7 +45,6 @@ use torsten_network::{Governor, GovernorConfig, PeerTargets};
 use crate::node::n2c_query::QueryHandler;
 use crate::node::networking::{
     ConnectionDirection, DiffusionMode, NodePeerManager, PeerManagerConfig, RollbackAnnouncement,
-    TimeoutConfig,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -153,8 +155,6 @@ pub struct Node {
     /// loop, not during chunk replay.  Used for `snapshots_established` since
     /// replay-built snapshots may have approximate stake values.
     pub(crate) live_epoch_transitions: u32,
-    /// Network timeout configuration (keepalive, await-reply, connection).
-    pub(crate) timeout_config: TimeoutConfig,
     /// Snapshot policy controlling when ledger snapshots are taken.
     pub(crate) snapshot_policy: epoch::SnapshotPolicy,
     /// Consensus mode: "praos" (default) or "genesis"
@@ -222,15 +222,6 @@ pub struct Node {
     /// shutdown.  Matches Haskell's snapshot policy in Background.hs.
     pub(crate) bg_snapshot_scheduler: SnapshotScheduler,
 
-    /// Number of consecutive peers that returned Origin as the intersection
-    /// point while we had a non-trivial ledger tip.
-    ///
-    /// A single peer returning Origin can mean it is on a different fork, is
-    /// momentarily stale, or has a corrupted chain.  Only after this counter
-    /// exceeds `ORIGIN_INTERSECT_THRESHOLD` do we conclude that *we* are the
-    /// divergent party and trigger a full ledger reset.  The counter is
-    /// reset whenever any peer returns a non-Origin intersection.
-    pub(crate) consecutive_origin_intersections: u32,
 }
 
 // ─── Node impl: new() ────────────────────────────────────────────────────────
@@ -962,7 +953,6 @@ impl Node {
             // be observed before nonce_established becomes true.
             epoch_transitions_observed: snapshot_epoch_transitions,
             live_epoch_transitions: 0,
-            timeout_config: Default::default(),
             consensus_mode: args.consensus_mode,
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
@@ -980,7 +970,6 @@ impl Node {
             gc_scheduler: GcScheduler::new(),
             bg_snapshot_scheduler: SnapshotScheduler::new(),
 
-            consecutive_origin_intersections: 0,
         })
     }
 
@@ -1912,58 +1901,16 @@ impl Node {
         let mut forge_ticker = tokio::time::interval(Duration::from_secs(1));
         forge_ticker.tick().await; // skip first immediate tick
 
-        // Buffer for out-of-order blocks. Blocks may arrive from multiple
-        // peers in parallel. We buffer them and apply in slot order, checking
-        // that each block connects to the current tip (prev_hash match).
-        let mut block_buffer: std::collections::BTreeMap<u64, FetchedBlock> =
-            std::collections::BTreeMap::new();
-
         loop {
             tokio::select! {
                 // ── Process fetched blocks from BlockFetch workers ───────
+                //
+                // With bfcMaxConcurrencyBulkSync = 1 (single active fetcher),
+                // blocks arrive in chain order from one peer. We apply each
+                // block directly via ChainDB's chain selection queue, which
+                // handles the VolatileDB insertion and chain selection.
                 Some(fetched) = fetched_blocks_rx.recv() => {
-                    let slot = fetched.block.slot().0;
-                    block_buffer.insert(slot, fetched);
-
-                    // Try to apply blocks in order from the buffer.
-                    let current_tip = self.ledger_state.read().await.tip.point.clone();
-                    let current_tip_hash = current_tip.hash().map(|h| *h);
-
-                    let mut applied_count = 0;
-                    loop {
-                        // Get the lowest-slot block from the buffer.
-                        let next_slot = match block_buffer.keys().next() {
-                            Some(s) => *s,
-                            None => break,
-                        };
-                        let fetched = block_buffer.get(&next_slot).unwrap();
-                        let prev_hash = *fetched.block.prev_hash();
-
-                        // Check if this block connects to the current tip.
-                        let connects = match &current_tip_hash {
-                            Some(tip_hash) => prev_hash == *tip_hash,
-                            None => true, // Origin — any block connects
-                        };
-
-                        if connects || applied_count == 0 {
-                            // Apply this block (it connects, or it's the first one).
-                            let fetched = block_buffer.remove(&next_slot).unwrap();
-                            self.apply_fetched_block(fetched).await;
-                            applied_count += 1;
-                            // Update tip for next iteration
-                            // (re-read from ledger would be correct but expensive;
-                            // for now just break and re-check on next recv)
-                            break;
-                        } else {
-                            // Doesn't connect yet — wait for more blocks.
-                            break;
-                        }
-                    }
-
-                    // Prune old entries from buffer (blocks below ledger tip).
-                    let tip_slot = self.ledger_state.read().await.tip.point
-                        .slot().map(|s| s.0).unwrap_or(0);
-                    block_buffer.retain(|slot, _| *slot > tip_slot);
+                    self.apply_fetched_block(fetched).await;
                 }
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
@@ -2042,7 +1989,7 @@ impl Node {
             let mut pm = peer_manager.write().await;
             let addrs: Vec<_> = lifecycle.connected_addrs();
             for addr in addrs {
-                lifecycle.demote_to_cold(addr, &mut pm).await;
+                let _ = lifecycle.demote_to_cold(addr, &mut pm).await;
             }
             drop(pm);
         }

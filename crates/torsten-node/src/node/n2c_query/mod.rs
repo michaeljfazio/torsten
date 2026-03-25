@@ -73,6 +73,7 @@ impl QueryHandler {
     }
 
     /// Get a reference to the current node state snapshot
+    #[allow(dead_code)] // used in tests
     pub fn state(&self) -> &NodeStateSnapshot {
         &self.state
     }
@@ -83,6 +84,7 @@ impl QueryHandler {
     /// where query is a nested structure depending on the query type.
     /// For Shelley-based eras, it's typically: [era_tag, [query_tag, ...]]
     /// Handle a CBOR-encoded query without version gating (backward compat).
+    #[allow(dead_code)] // used in tests
     pub fn handle_query_cbor(&self, payload: &[u8]) -> QueryResult {
         self.handle_query_cbor_versioned(payload, 0)
     }

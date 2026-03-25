@@ -19,6 +19,7 @@ use crate::node::n2c_query::types::{
 /// [4, result]                          -- QueryAnytime / QueryHardFork / top-level
 /// [4, [result]]                        -- BlockQuery (EitherMismatch Right wrapper)
 /// ```
+#[allow(dead_code)] // used in tests
 pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);

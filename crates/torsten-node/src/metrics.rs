@@ -222,6 +222,7 @@ impl Histogram {
 
     /// Record an observation (value in milliseconds).
     /// Increments the first bucket whose upper bound >= value_ms.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn observe(&self, value_ms: f64) {
         for (i, &bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
             if value_ms <= bound {
@@ -524,6 +525,7 @@ impl NodeMetrics {
     }
 
     /// Record a protocol-level error by label (e.g. "n2n_handshake_failed").
+    #[allow(dead_code)] // used by networking rewrite
     pub fn record_protocol_error(&self, label: &str) {
         if let Ok(mut map) = self.protocol_errors.lock() {
             *map.entry(label.to_string()).or_insert(0) += 1;
@@ -531,11 +533,13 @@ impl NodeMetrics {
     }
 
     /// Record a peer handshake latency observation.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn record_handshake_rtt(&self, rtt_ms: f64) {
         self.peer_handshake_rtt_ms.observe(rtt_ms);
     }
 
     /// Record a per-block fetch latency observation.
+    #[allow(dead_code)] // used by networking rewrite
     pub fn record_block_fetch_latency(&self, ms_per_block: f64) {
         self.peer_block_fetch_ms.observe(ms_per_block);
     }

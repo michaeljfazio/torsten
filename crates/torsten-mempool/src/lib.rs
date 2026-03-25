@@ -445,6 +445,10 @@ impl Mempool {
         self.fee_index.write().insert(key);
 
         self.txs.insert(tx_hash, entry);
+        // If this hash was previously removed (tombstoned), clear the tombstone.
+        // The old order entry becomes a harmless duplicate — deduplication in
+        // get_txs_for_block handles it.
+        self.order_tombstones.write().remove(&tx_hash);
         self.order.write().push_back(tx_hash);
         *self.total_bytes.write() += size_bytes;
         self.total_ex_mem.fetch_add(ex_units_mem, Ordering::Relaxed);
@@ -743,15 +747,22 @@ impl Mempool {
         max_block_ex_steps: u64,
     ) -> Vec<Transaction> {
         let order = self.order.read();
+        let tombstones = self.order_tombstones.read();
         let mut result = Vec::new();
         let mut total_size = 0;
         let mut total_ex_mem: u64 = 0;
         let mut total_ex_steps: u64 = 0;
+        let mut seen = std::collections::HashSet::new();
 
         // Take FIFO prefix (oldest first) that fits within block capacity.
+        // Skip tombstoned entries and deduplicate (a hash can appear twice
+        // in the order list if it was removed and re-added).
         for tx_hash in order.iter() {
             if result.len() >= max_count {
                 break;
+            }
+            if tombstones.contains(tx_hash) || !seen.insert(*tx_hash) {
+                continue;
             }
             if let Some(entry) = self.txs.get(tx_hash) {
                 if total_size + entry.size_bytes > max_size {

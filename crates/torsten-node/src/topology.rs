@@ -141,6 +141,7 @@ impl LocalRootGroup {
 
 /// Detailed peer info extracted from topology for the peer manager
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used by networking rewrite (peer management)
 pub struct TopologyPeer {
     pub address: String,
     pub port: u16,

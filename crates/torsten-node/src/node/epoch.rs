@@ -32,6 +32,7 @@ pub fn shelley_transition_epoch_for_magic(network_magic: u64) -> u64 {
 /// Two modes:
 /// - **Normal operation:** snapshot every `k * 2` seconds (~72 minutes for k=2160)
 /// - **Bulk sync (replay):** snapshot every `bulk_min_blocks` blocks AND `bulk_min_interval` elapsed
+#[allow(dead_code)] // normal_interval used by should_snapshot_normal (networking rewrite)
 pub struct SnapshotPolicy {
     /// Time between snapshots during normal operation (k * 2 seconds)
     pub normal_interval: std::time::Duration,
@@ -83,6 +84,7 @@ impl SnapshotPolicy {
     }
 
     /// Check if a snapshot should be taken during normal (at-tip) operation.
+    #[allow(dead_code)] // used by networking rewrite (and tests)
     pub fn should_snapshot_normal(&self) -> bool {
         self.last_snapshot_time.elapsed() >= self.normal_interval
     }
@@ -173,6 +175,7 @@ impl Node {
     /// Returns the path to the most recent snapshot whose ledger tip is at or
     /// before `rollback_slot`.  Falls back to `ledger-snapshot.bin` if no
     /// epoch snapshot qualifies.
+    #[allow(dead_code)] // used by networking rewrite (handle_rollback)
     pub fn find_best_snapshot_for_rollback(
         &self,
         rollback_slot: u64,

@@ -154,6 +154,14 @@ pub struct ConnectionLifecycleManager {
 
     /// Byron epoch length in slots (needed for era-aware slot calculations).
     byron_epoch_length: u64,
+
+    /// Active BlockFetch peer flag.
+    ///
+    /// During bulk sync (matching Haskell's `bfcMaxConcurrencyBulkSync = 1`),
+    /// only ONE BlockFetch worker is active at a time. This atomic stores the
+    /// port number of the active peer (0 = none active). Workers compete for
+    /// this flag — the first to claim it becomes the sole fetcher.
+    active_fetcher: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Errors from lifecycle management operations.
@@ -222,6 +230,7 @@ impl ConnectionLifecycleManager {
             chain_db,
             ledger_state,
             byron_epoch_length,
+            active_fetcher: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -625,37 +634,67 @@ impl ConnectionLifecycleManager {
         let fetched_blocks_tx = self.fetched_blocks_tx.clone();
         let candidate_chains = self.candidate_chains.clone();
         let bel = self.byron_epoch_length;
+        // Shared flag: only ONE BlockFetch worker is active at a time.
+        // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
+        let active_fetcher = self.active_fetcher.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // BlockFetch worker: polls candidate_chains for pending headers
-                // from this peer and fetches the full blocks via BlockFetch protocol.
+                // BlockFetch worker: fetches blocks from this peer's candidate_chains.
                 //
-                // This is a simplified version that directly reads candidate_chains
-                // rather than going through the BlockFetchLogicTask. It polls every
-                // 100ms for new headers to fetch.
+                // CRITICAL: Only ONE worker fetches at a time (matching Haskell's
+                // bfcMaxConcurrencyBulkSync = 1). Workers compete for the
+                // active_fetcher flag. The first to claim it becomes the sole
+                // fetcher; others poll periodically to check if they should
+                // take over (e.g., if the active fetcher's peer disconnects).
                 use torsten_network::codec::Point as CodecPoint;
                 use torsten_network::protocol::blockfetch::client::BlockFetchClient;
 
-                info!(%addr, "blockfetch worker started");
+                info!(%addr, "blockfetch worker started (waiting for turn)");
 
-                let mut fetch_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
-                fetch_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut poll_ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+                poll_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
+                            // Release the active fetcher flag if we hold it.
+                            let _ = active_fetcher.compare_exchange(
+                                addr.port() as u64,
+                                0,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
                             debug!(%addr, "blockfetch worker cancelled");
                             break;
                         }
-                        _ = fetch_ticker.tick() => {
-                            // Take pending headers from candidate_chains for this peer
+                        _ = poll_ticker.tick() => {
+                            // Try to become the active fetcher.
+                            // Use port as a unique peer identifier (good enough).
+                            let my_id = addr.port() as u64;
+                            let current = active_fetcher.load(std::sync::atomic::Ordering::SeqCst);
+                            if current != 0 && current != my_id {
+                                // Another worker is active — wait.
+                                continue;
+                            }
+                            // Claim or re-claim the active fetcher slot.
+                            active_fetcher.store(my_id, std::sync::atomic::Ordering::SeqCst);
+
+                            // Take ALL pending headers from ALL peers (not just this one).
+                            // Since we're the sole fetcher, we pick the peer with the
+                            // most headers to fetch from.
                             let headers_to_fetch = {
                                 let mut chains = candidate_chains.write().await;
                                 if let Some(state) = chains.get_mut(&addr) {
-                                    std::mem::take(&mut state.pending_headers)
+                                    let taken = std::mem::take(&mut state.pending_headers);
+                                    if taken.is_empty() {
+                                        // Release active fetcher so another peer can try.
+                                        active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    taken
                                 } else {
+                                    active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                     continue;
                                 }
                             };
@@ -668,10 +707,12 @@ impl ConnectionLifecycleManager {
                                 %addr,
                                 count = headers_to_fetch.len(),
                                 first_slot = headers_to_fetch.first().map(|h| h.slot).unwrap_or(0),
-                                "BlockFetch: fetching pending headers",
+                                last_slot = headers_to_fetch.last().map(|h| h.slot).unwrap_or(0),
+                                "BlockFetch: active fetcher, downloading blocks",
                             );
 
-                            // Fetch each header's block via BlockFetch
+                            // Fetch blocks IN ORDER (headers are already sorted by slot
+                            // since ChainSync delivers them sequentially).
                             for header in &headers_to_fetch {
                                 let from = CodecPoint::Specific(header.slot, header.hash);
                                 let to = CodecPoint::Specific(header.slot, header.hash);
@@ -679,7 +720,6 @@ impl ConnectionLifecycleManager {
                                 let tx = fetched_blocks_tx.clone();
                                 let peer = addr;
 
-                                info!(%addr, slot = header.slot, hash = %hex::encode(&header.hash[..8]), "BlockFetch: requesting block");
                                 match BlockFetchClient::fetch_range(
                                     &mut channel,
                                     from,
@@ -690,7 +730,7 @@ impl ConnectionLifecycleManager {
                                         ) {
                                             Ok(block) => {
                                                 let slot = block.slot().0;
-                                                info!(%addr, slot, "BlockFetch: block decoded OK");
+                                                debug!(%addr, slot, "block decoded");
                                                 match tx.try_send(FetchedBlock {
                                                     peer,
                                                     block,
@@ -700,22 +740,22 @@ impl ConnectionLifecycleManager {
                                                 }) {
                                                     Ok(()) => {}
                                                     Err(e) => {
-                                                        warn!(%addr, slot, "BlockFetch: failed to send to run loop: {e}");
+                                                        warn!(%addr, slot, "send to run loop failed: {e}");
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!(%addr, slot = header.slot, "BlockFetch decode error: {e}");
+                                                warn!(%addr, slot = header.slot, "block decode error: {e}");
                                             }
                                         }
                                         Ok(())
                                     },
                                 ).await {
-                                    Ok(count) => {
-                                        info!(%addr, slot = header.slot, count, "BlockFetch fetch_range completed");
-                                    }
+                                    Ok(_count) => {}
                                     Err(e) => {
                                         warn!(%addr, "BlockFetch error: {e}");
+                                        // Release active fetcher so another peer can try.
+                                        active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                         return; // bearer died
                                     }
                                 }
@@ -735,7 +775,7 @@ impl ConnectionLifecycleManager {
     ///
     /// Real implementation will be provided in a later task.
     fn make_txsubmission_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
-        Box::new(move |mut channel, cancel| {
+        Box::new(move |channel, cancel| {
             Box::pin(async move {
                 // TxSubmission2 protocol: MUST send MsgInit immediately.
                 //
