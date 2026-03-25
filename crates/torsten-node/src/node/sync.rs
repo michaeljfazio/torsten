@@ -4,14 +4,25 @@
 //! block ingestion from upstream peers, as well as the ledger replay path used
 //! after a Mithril snapshot import.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use anyhow::Result;
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use super::connection_lifecycle::{CandidateChainState, PendingHeader};
 use super::networking::{EbbInfo, RollbackAnnouncement};
 use torsten_consensus::praos::BlockIssuerInfo;
 use torsten_consensus::ValidationMode;
 use torsten_ledger::BlockValidationMode;
+use torsten_network::codec::Point as CodecPoint;
+use torsten_network::protocol::chainsync::{
+    decode_message as cs_decode, encode_message as cs_encode, ChainSyncMessage,
+};
+use torsten_network::MuxChannel;
 use torsten_primitives::block::Point;
 
 use super::epoch::SnapshotPolicy;
@@ -3144,5 +3155,625 @@ impl Node {
                 error!("Failed to save ledger snapshot after replay: {e}");
             }
         }
+    }
+}
+
+// ─── Per-Peer ChainSync Client Task ──────────────────────────────────────────
+
+/// Extract the block header hash (Blake2b-256) from a raw header CBOR.
+///
+/// The ChainSync MsgRollForward delivers header CBOR that may be either:
+/// 1. HFC-wrapped: `[era_tag, tag24(header_bytes)]` — from Haskell peers
+/// 2. Full block CBOR — from Torsten peers
+///
+/// In both cases, the block header hash is `blake2b_256(header_cbor)`.
+/// For HFC-wrapped headers, the hash is computed over the entire wrapped
+/// envelope, matching how Haskell computes it.
+fn extract_hash_from_header(header_cbor: &[u8]) -> [u8; 32] {
+    let hash = torsten_primitives::hash::blake2b_256(header_cbor);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(hash.as_ref());
+    arr
+}
+
+/// Extract the slot number from a wrapped header CBOR.
+///
+/// The N2N ChainSync protocol sends headers as `[era_tag, tag24(header_bytes)]`.
+/// For Shelley+ eras, the header body contains the slot as the second field.
+/// For Byron, the slot is in a different position. This function attempts a
+/// best-effort extraction without full deserialization.
+///
+/// Returns `None` if the header CBOR cannot be parsed.
+fn extract_slot_from_wrapped_header(header_cbor: &[u8]) -> Option<u64> {
+    use minicbor::Decoder;
+
+    let mut dec = Decoder::new(header_cbor);
+    // Wrapped header: array(2) [era_tag, tag24(header_bytes)]
+    let arr_len = dec.array().ok()?;
+    if arr_len != Some(2) {
+        return None;
+    }
+    let era_tag = dec.u64().ok()?;
+
+    // Read the tagged header bytes.
+    let tag = dec.tag().ok()?;
+    if tag != minicbor::data::Tag::new(24) {
+        return None;
+    }
+    let inner_bytes = dec.bytes().ok()?;
+
+    let mut inner = Decoder::new(inner_bytes);
+
+    if era_tag == 0 {
+        // Byron EBB or Byron main block — slot extraction is complex.
+        // Byron main block header: array of [proto_magic, prev_hash, proof,
+        // consensus_data, extra_data].
+        // consensus_data for main blocks: [slot_id, pk, difficulty, signature]
+        // slot_id: [epoch, slot_in_epoch]
+        // For EBBs, there's no meaningful slot — return None.
+        let _ = inner.array().ok()?;
+        inner.skip().ok()?; // proto_magic
+        inner.skip().ok()?; // prev_hash
+        inner.skip().ok()?; // proof
+                            // consensus_data
+        let cd_len = inner.array().ok()?;
+        if cd_len == Some(4) {
+            // Main block consensus_data: [slot_id, pk, difficulty, signature]
+            let sid_len = inner.array().ok()?;
+            if sid_len == Some(2) {
+                let _epoch = inner.u64().ok()?;
+                let slot_in_epoch = inner.u64().ok()?;
+                // Byron slot = epoch * epoch_length + slot_in_epoch
+                // Without epoch_length we return the raw slot_in_epoch as a fallback.
+                // The caller should use tip_slot instead.
+                return Some(slot_in_epoch);
+            }
+        }
+        None
+    } else {
+        // Shelley+ header: array(2) [header_body, body_signature]
+        // header_body: array(N) [block_number, slot, ...]
+        let _ = inner.array().ok()?; // outer array
+        let _ = inner.array().ok()?; // header_body array
+        let _block_number = inner.u64().ok()?;
+        let slot = inner.u64().ok()?;
+        Some(slot)
+    }
+}
+
+/// Convert a `torsten_primitives::block::Point` to a network `codec::Point`.
+fn to_codec_point(p: &Point) -> CodecPoint {
+    match p {
+        Point::Origin => CodecPoint::Origin,
+        Point::Specific(slot, hash) => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(hash.as_ref());
+            CodecPoint::Specific(slot.0, arr)
+        }
+    }
+}
+
+/// Convert a network `codec::Point` to a `torsten_primitives::block::Point`.
+fn from_codec_point(p: &CodecPoint) -> Point {
+    match p {
+        CodecPoint::Origin => Point::Origin,
+        CodecPoint::Specific(slot, hash) => Point::Specific(
+            torsten_primitives::time::SlotNo(*slot),
+            torsten_primitives::hash::Hash32::from_bytes(*hash),
+        ),
+    }
+}
+
+/// Per-peer ChainSync client task.
+///
+/// Runs on a single MuxChannel, receives headers, and updates shared
+/// candidate chain state. Does NOT fetch blocks — that's the
+/// BlockFetch decision task's responsibility.
+///
+/// This matches the Haskell architecture where ChainSync and BlockFetch
+/// run as independent threads sharing state via STM.
+///
+/// # Lifecycle
+///
+/// Called by `ConnectionLifecycleManager::make_chainsync_task()` when a peer
+/// is promoted to Hot. Runs until the cancellation token is triggered (peer
+/// demotion/disconnect), a protocol error occurs, or the bearer closes.
+///
+/// On exit (regardless of reason), the peer's candidate chain entry is
+/// removed from the shared map.
+///
+/// # Protocol Flow
+///
+/// 1. **Build known points** — Walk backwards through volatile chain and
+///    ledger state to build intersection candidates.
+/// 2. **Find intersection** — Send `MsgFindIntersect` with the known points.
+/// 3. **Pipeline headers** — Send a burst of `MsgRequestNext` up to `high_mark`,
+///    then refill when outstanding drops to `low_mark`.
+/// 4. **Update state** — For each `MsgRollForward`, add a `PendingHeader` to
+///    the shared `candidate_chains` map. For `MsgRollBackward`, trim headers
+///    after the rollback point.
+#[allow(clippy::too_many_arguments)]
+pub async fn chainsync_client_task(
+    mut channel: MuxChannel,
+    peer_addr: SocketAddr,
+    candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>>,
+    chain_db: Arc<RwLock<torsten_storage::ChainDB>>,
+    ledger_state: Arc<RwLock<torsten_ledger::LedgerState>>,
+    byron_epoch_length: u64,
+    cancel: CancellationToken,
+) -> Result<()> {
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 1: Build known points for intersection
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Walk backwards through the volatile chain and ledger state to collect
+    // historical points. This gives the peer multiple candidates for finding
+    // a common chain prefix, which is critical for recovery after forging
+    // (our local tip may be a freshly-forged block the peer hasn't seen).
+
+    let (chain_tip, chain_points) = {
+        let db = chain_db.read().await;
+        let tip = db.get_tip().point;
+        let points = db.get_chain_points(10);
+        (tip, points)
+    };
+
+    let ledger_tip = ledger_state.read().await.tip.point.clone();
+    let ledger_slot = ledger_tip.slot().map(|s| s.0).unwrap_or(0);
+    let chain_slot = chain_tip.slot().map(|s| s.0).unwrap_or(0);
+
+    // Detect fork divergence: check if blocks after the ledger tip in
+    // ChainDB actually connect. If not, the ImmutableDB (or volatile)
+    // contains orphan fork blocks — we must exclude them from the
+    // intersection offer.
+    let mut use_chain_tip = chain_slot > ledger_slot;
+    let mut chain_diverged = false;
+    if chain_slot >= ledger_slot && ledger_tip != Point::Origin {
+        let db = chain_db.read().await;
+        if let Ok(Some((_next_slot, _hash, cbor))) =
+            db.get_next_block_after_slot(torsten_primitives::time::SlotNo(ledger_slot))
+        {
+            if let Ok(block) =
+                torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
+                    &cbor,
+                    byron_epoch_length,
+                )
+            {
+                let ledger_hash = ledger_tip.hash();
+                if ledger_hash.is_some_and(|h| h != block.prev_hash()) {
+                    warn!(
+                        %peer_addr,
+                        "ChainDB fork divergence detected: blocks after ledger tip \
+                         do not connect. Using ledger tip only for intersection.",
+                    );
+                    use_chain_tip = false;
+                    chain_diverged = true;
+                }
+            }
+        }
+    }
+
+    // Build the known_points list, including chain history for robustness.
+    let mut known_points = Vec::new();
+    if use_chain_tip {
+        // ChainDB leads: include all chain ancestry points first.
+        for p in &chain_points {
+            if *p != Point::Origin && !known_points.contains(p) {
+                known_points.push(p.clone());
+            }
+        }
+        // Include ledger tip if it wasn't already covered by chain walk.
+        if ledger_tip != Point::Origin && !known_points.contains(&ledger_tip) {
+            known_points.push(ledger_tip.clone());
+        }
+    } else if chain_diverged {
+        // ChainDB has contaminated blocks — offer only deep historical
+        // points from older ImmutableDB chunks.
+        let db = chain_db.read().await;
+        for (slot, hash) in db.get_immutable_historical_points(8) {
+            let p = Point::Specific(torsten_primitives::time::SlotNo(slot), hash);
+            if !known_points.contains(&p) {
+                known_points.push(p);
+            }
+        }
+        // If no historical points found, fall back to ledger tip.
+        if known_points.is_empty() && ledger_tip != Point::Origin {
+            known_points.push(ledger_tip.clone());
+        }
+    } else {
+        // Ledger leads or tips are equal: offer ledger tip first, then
+        // chain ancestry.
+        if ledger_tip != Point::Origin {
+            known_points.push(ledger_tip.clone());
+        }
+        for p in &chain_points {
+            if *p != Point::Origin && !known_points.contains(p) {
+                known_points.push(p.clone());
+            }
+        }
+    }
+    known_points.push(Point::Origin);
+
+    info!(
+        %peer_addr,
+        chain_tip = %chain_tip,
+        ledger_tip = %ledger_tip,
+        known_points_count = known_points.len(),
+        use_chain_tip,
+        "ChainSync intersection candidates",
+    );
+    for (i, p) in known_points.iter().enumerate() {
+        debug!(%peer_addr, idx = i, point = %p, "known_point");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 2: Find intersection with MsgFindIntersect
+    // ═══════════════════════════════════════════════════════════════════════
+
+    let codec_points: Vec<CodecPoint> = known_points.iter().map(to_codec_point).collect();
+
+    // Send MsgFindIntersect.
+    let find_msg = cs_encode(&ChainSyncMessage::MsgFindIntersect(
+        codec_points
+            .iter()
+            .map(|p| match p {
+                CodecPoint::Origin => torsten_network::codec::Point::Origin,
+                CodecPoint::Specific(s, h) => torsten_network::codec::Point::Specific(*s, *h),
+            })
+            .collect(),
+    ));
+    channel
+        .send(find_msg)
+        .await
+        .map_err(|e| anyhow::anyhow!("ChainSync MsgFindIntersect send failed: {e}"))?;
+
+    // Receive MsgIntersectFound or MsgIntersectNotFound.
+    let response = channel
+        .recv()
+        .await
+        .map_err(|e| anyhow::anyhow!("ChainSync intersection response recv failed: {e}"))?;
+    let intersect_msg = cs_decode(&response)
+        .map_err(|e| anyhow::anyhow!("ChainSync intersection decode failed: {e}"))?;
+
+    let intersection = match intersect_msg {
+        ChainSyncMessage::MsgIntersectFound {
+            point,
+            tip_slot,
+            tip_block_number,
+            ..
+        } => {
+            let prim_point = from_codec_point(&point);
+            info!(
+                %peer_addr,
+                point = %prim_point,
+                tip_slot,
+                tip_block_number,
+                "ChainSync intersection found",
+            );
+            Some(point)
+        }
+        ChainSyncMessage::MsgIntersectNotFound {
+            tip_slot,
+            tip_block_number,
+            ..
+        } => {
+            info!(
+                %peer_addr,
+                tip_slot,
+                tip_block_number,
+                "ChainSync no intersection — syncing from Origin",
+            );
+            None
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "ChainSync unexpected response to MsgFindIntersect: {other:?}"
+            ));
+        }
+    };
+
+    // Initialize candidate chain state for this peer.
+    {
+        let mut chains = candidate_chains.write().await;
+        chains.insert(
+            peer_addr,
+            CandidateChainState {
+                tip_slot: intersection
+                    .as_ref()
+                    .map(|p| match p {
+                        CodecPoint::Specific(s, _) => *s,
+                        CodecPoint::Origin => 0,
+                    })
+                    .unwrap_or(0),
+                tip_hash: intersection
+                    .as_ref()
+                    .map(|p| match p {
+                        CodecPoint::Specific(_, h) => *h,
+                        CodecPoint::Origin => [0u8; 32],
+                    })
+                    .unwrap_or([0u8; 32]),
+                tip_block_number: 0,
+                pending_headers: Vec::new(),
+            },
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 3: Pipeline headers with MsgRequestNext
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Send a burst of MsgRequestNext up to high_mark, then refill when
+    // outstanding drops to low_mark. This matches the Haskell pipelined
+    // ChainSync client behavior.
+
+    // Pipeline depth: configurable via TORSTEN_PIPELINE_DEPTH env var (default: 300).
+    let high_mark: usize = std::env::var("TORSTEN_PIPELINE_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let low_mark: usize = high_mark * 2 / 3; // refill at ~67%
+    let mut outstanding: usize = 0;
+    let mut at_tip = false;
+    let mut headers_received: u64 = 0;
+
+    // Send initial pipeline burst.
+    for _ in 0..high_mark {
+        let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+        channel
+            .send(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("ChainSync initial pipeline send failed: {e}"))?;
+        outstanding += 1;
+    }
+
+    debug!(
+        %peer_addr,
+        high_mark,
+        low_mark,
+        "ChainSync pipeline started",
+    );
+
+    // Main loop: receive responses and update candidate_chains.
+    loop {
+        // Check for cancellation before each recv.
+        tokio::select! {
+            biased;
+
+            _ = cancel.cancelled() => {
+                debug!(%peer_addr, "ChainSync task cancelled");
+                break;
+            }
+
+            result = channel.recv() => {
+                let data = result.map_err(|e| {
+                    anyhow::anyhow!("ChainSync recv failed: {e}")
+                })?;
+
+                let msg = cs_decode(&data).map_err(|e| {
+                    anyhow::anyhow!("ChainSync decode failed: {e}")
+                })?;
+
+                match msg {
+                    ChainSyncMessage::MsgRollForward {
+                        header,
+                        tip_slot,
+                        tip_hash,
+                        tip_block_number,
+                    } => {
+                        outstanding = outstanding.saturating_sub(1);
+                        if at_tip {
+                            at_tip = false;
+                        }
+                        headers_received += 1;
+
+                        // Extract slot and hash from the header CBOR.
+                        // The hash is blake2b_256 of the raw header bytes.
+                        let hash = extract_hash_from_header(&header);
+                        let slot = extract_slot_from_wrapped_header(&header)
+                            .unwrap_or(tip_slot);
+
+                        // Update candidate chain state.
+                        {
+                            let mut chains = candidate_chains.write().await;
+                            let entry = chains.entry(peer_addr).or_insert_with(|| {
+                                CandidateChainState {
+                                    tip_slot: 0,
+                                    tip_hash: [0u8; 32],
+                                    tip_block_number: 0,
+                                    pending_headers: Vec::new(),
+                                }
+                            });
+                            entry.tip_slot = tip_slot;
+                            entry.tip_hash = tip_hash;
+                            entry.tip_block_number = tip_block_number;
+                            entry.pending_headers.push(PendingHeader {
+                                slot,
+                                hash,
+                                header_cbor: header,
+                            });
+                        }
+
+                        // Log progress periodically.
+                        if headers_received % 10_000 == 0 {
+                            debug!(
+                                %peer_addr,
+                                headers_received,
+                                slot,
+                                tip_slot,
+                                tip_block_number,
+                                outstanding,
+                                "ChainSync header progress",
+                            );
+                        }
+
+                        // Refill pipeline when outstanding drops below low_mark.
+                        if !at_tip && outstanding <= low_mark {
+                            let to_send = high_mark - outstanding;
+                            for _ in 0..to_send {
+                                let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+                                channel.send(req).await.map_err(|e| {
+                                    anyhow::anyhow!("ChainSync pipeline refill failed: {e}")
+                                })?;
+                                outstanding += 1;
+                            }
+                        }
+                    }
+
+                    ChainSyncMessage::MsgRollBackward {
+                        point,
+                        tip_slot,
+                        tip_hash,
+                        tip_block_number,
+                    } => {
+                        outstanding = outstanding.saturating_sub(1);
+
+                        let rollback_slot = match &point {
+                            CodecPoint::Origin => 0,
+                            CodecPoint::Specific(s, _) => *s,
+                        };
+                        let prim_point = from_codec_point(&point);
+
+                        info!(
+                            %peer_addr,
+                            rollback_point = %prim_point,
+                            tip_slot,
+                            tip_block_number,
+                            "ChainSync rollback",
+                        );
+
+                        // Remove headers after the rollback point.
+                        {
+                            let mut chains = candidate_chains.write().await;
+                            if let Some(entry) = chains.get_mut(&peer_addr) {
+                                entry.pending_headers.retain(|h| h.slot <= rollback_slot);
+                                entry.tip_slot = tip_slot;
+                                entry.tip_hash = tip_hash;
+                                entry.tip_block_number = tip_block_number;
+                            }
+                        }
+
+                        // Refill pipeline after rollback.
+                        if !at_tip && outstanding <= low_mark {
+                            let to_send = high_mark - outstanding;
+                            for _ in 0..to_send {
+                                let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
+                                channel.send(req).await.map_err(|e| {
+                                    anyhow::anyhow!("ChainSync pipeline refill failed: {e}")
+                                })?;
+                                outstanding += 1;
+                            }
+                        }
+                    }
+
+                    ChainSyncMessage::MsgAwaitReply => {
+                        // At tip: the server has no new blocks right now.
+                        // Do NOT decrement outstanding — MsgAwaitReply doesn't
+                        // consume a request. The server will eventually respond
+                        // with MsgRollForward or MsgRollBackward.
+                        if !at_tip {
+                            at_tip = true;
+                            info!(
+                                %peer_addr,
+                                headers_received,
+                                "ChainSync at tip — awaiting new blocks",
+                            );
+                        }
+                    }
+
+                    ChainSyncMessage::MsgDone => {
+                        info!(%peer_addr, "ChainSync server sent MsgDone");
+                        break;
+                    }
+
+                    other => {
+                        warn!(
+                            %peer_addr,
+                            "ChainSync unexpected message: {other:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 4: Cleanup — remove this peer's candidate chain on exit
+    // ═══════════════════════════════════════════════════════════════════════
+
+    {
+        let mut chains = candidate_chains.write().await;
+        chains.remove(&peer_addr);
+    }
+
+    info!(
+        %peer_addr,
+        headers_received,
+        "ChainSync task exiting",
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod chainsync_task_tests {
+    use super::*;
+
+    /// Verify extract_hash_from_header produces a 32-byte array.
+    #[test]
+    fn test_extract_hash_from_header() {
+        let header = vec![0x82, 0x01, 0x02]; // arbitrary CBOR
+        let hash = extract_hash_from_header(&header);
+        // Should be a valid 32-byte blake2b-256 hash.
+        assert_eq!(hash.len(), 32);
+        // Same input should produce the same hash (deterministic).
+        assert_eq!(hash, extract_hash_from_header(&header));
+    }
+
+    /// Verify extract_slot_from_wrapped_header returns None for invalid CBOR.
+    #[test]
+    fn test_extract_slot_invalid_cbor() {
+        assert_eq!(extract_slot_from_wrapped_header(&[]), None);
+        assert_eq!(extract_slot_from_wrapped_header(&[0x00]), None);
+    }
+
+    /// Verify to_codec_point / from_codec_point round-trip.
+    #[test]
+    fn test_point_roundtrip() {
+        let origin = Point::Origin;
+        assert_eq!(from_codec_point(&to_codec_point(&origin)), origin);
+
+        let specific = Point::Specific(
+            torsten_primitives::time::SlotNo(42),
+            torsten_primitives::hash::Hash32::from_bytes([0xAB; 32]),
+        );
+        assert_eq!(from_codec_point(&to_codec_point(&specific)), specific);
+    }
+
+    /// Verify that extract_slot_from_wrapped_header correctly parses a
+    /// Shelley+ wrapped header: [era_tag, tag24(header_bytes)].
+    #[test]
+    fn test_extract_slot_shelley_header() {
+        use minicbor::Encoder;
+
+        // Build a fake Shelley wrapped header:
+        // Outer: array(2) [era_tag=1, tag24(inner_bytes)]
+        // Inner: array(2) [array(N) [block_number=100, slot=12345, ...], signature]
+        let mut inner_buf = Vec::new();
+        let mut inner_enc = Encoder::new(&mut inner_buf);
+        inner_enc.array(2).unwrap(); // outer: [header_body, signature]
+        inner_enc.array(3).unwrap(); // header_body: [block_number, slot, prev_hash]
+        inner_enc.u64(100).unwrap(); // block_number
+        inner_enc.u64(12345).unwrap(); // slot
+        inner_enc.bytes(&[0u8; 32]).unwrap(); // prev_hash (placeholder)
+        inner_enc.bytes(&[0u8; 64]).unwrap(); // signature (placeholder)
+
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(2).unwrap(); // [era_tag, tag24(inner)]
+        enc.u64(1).unwrap(); // Shelley era tag
+        enc.tag(minicbor::data::Tag::new(24)).unwrap();
+        enc.bytes(&inner_buf).unwrap();
+
+        assert_eq!(extract_slot_from_wrapped_header(&buf), Some(12345));
     }
 }
