@@ -9,11 +9,17 @@
 //! protocol is silently discarded.
 //!
 //! ## Byte tracking
-//! The ingress task tracks how many bytes are buffered per `(protocol_id, direction)`
-//! channel. If a channel exceeds its configured limit, `IngressQueueOverrun` is returned.
+//! The ingress task tracks how many bytes are currently buffered per
+//! `(protocol_id, direction)` channel using an `Arc<AtomicUsize>` counter shared
+//! with the corresponding [`MuxChannel`] receiver. The receiver decrements the
+//! counter as it consumes data, giving the ingress task an accurate view of queue
+//! pressure. If the counter exceeds the configured per-channel limit, the ingress
+//! task returns `IngressQueueOverrun` to disconnect the peer.
 
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::error::{BearerError, MuxError};
@@ -28,9 +34,11 @@ pub(crate) struct IngressRoute {
     pub tx: mpsc::Sender<Bytes>,
     /// Maximum bytes allowed in this channel's queue before overrun.
     pub limit: usize,
-    /// Current estimated bytes buffered (incremented on send, never decremented
-    /// since we can't observe the receiver draining — this is a conservative estimate).
-    pub buffered: usize,
+    /// Shared byte counter between this ingress route and the corresponding
+    /// MuxChannel receiver. Incremented here when data is enqueued; decremented
+    /// by MuxChannel::recv() as data is consumed. This gives an accurate measure
+    /// of queue pressure without requiring channel introspection.
+    pub bytes_in_flight: Arc<AtomicUsize>,
 }
 
 /// Ingress task state. Created by the [`Mux`] and run as a spawned tokio task.
@@ -96,22 +104,47 @@ impl IngressTask {
 
             match self.routes.get_mut(&key) {
                 Some(route) => {
-                    // Check byte limit before sending
-                    let new_buffered = route.buffered + payload.len();
-                    if new_buffered > route.limit {
+                    let payload_len = payload.len();
+
+                    // Atomically add the incoming payload size and check whether
+                    // we have exceeded the per-channel byte budget.
+                    //
+                    // `fetch_add` returns the value *before* addition, so the new
+                    // total is `prev + payload_len`.
+                    let prev = route
+                        .bytes_in_flight
+                        .fetch_add(payload_len, Ordering::Relaxed);
+                    let new_total = prev + payload_len;
+
+                    if new_total > route.limit {
+                        // Revert the addition before returning the error so that
+                        // the counter stays consistent if this route is somehow
+                        // reused (though in practice the connection is torn down).
+                        route
+                            .bytes_in_flight
+                            .fetch_sub(payload_len, Ordering::Relaxed);
                         return Err(MuxError::IngressQueueOverrun {
                             protocol_id: header.protocol_id,
-                            bytes: new_buffered,
+                            bytes: new_total,
                             limit: route.limit,
                         });
                     }
 
-                    route.buffered = new_buffered;
-
                     if !payload.is_empty() {
-                        // Send to protocol channel — if the receiver is dropped, the
-                        // protocol has shut down; we just ignore the error and continue.
-                        let _ = route.tx.send(Bytes::from(payload)).await;
+                        // Send to protocol channel. MuxChannel::recv() will decrement
+                        // bytes_in_flight after consuming the chunk. If the receiver
+                        // has already been dropped (protocol shut down), undo the
+                        // counter increment and silently discard the payload.
+                        if route.tx.send(Bytes::from(payload)).await.is_err() {
+                            route
+                                .bytes_in_flight
+                                .fetch_sub(payload_len, Ordering::Relaxed);
+                        }
+                    } else {
+                        // Zero-length payload — undo the no-op counter increment.
+                        route
+                            .bytes_in_flight
+                            .fetch_sub(payload_len, Ordering::Relaxed);
                     }
                 }
                 None => {
@@ -160,7 +193,7 @@ mod tests {
             IngressRoute {
                 tx: tx2,
                 limit: 65536,
-                buffered: 0,
+                bytes_in_flight: Arc::new(AtomicUsize::new(0)),
             },
         );
         // Protocol 3, ResponderDir
@@ -169,7 +202,7 @@ mod tests {
             IngressRoute {
                 tx: tx3,
                 limit: 65536,
-                buffered: 0,
+                bytes_in_flight: Arc::new(AtomicUsize::new(0)),
             },
         );
 
@@ -226,7 +259,7 @@ mod tests {
             IngressRoute {
                 tx: tx2,
                 limit: 65536,
-                buffered: 0,
+                bytes_in_flight: Arc::new(AtomicUsize::new(0)),
             },
         );
 

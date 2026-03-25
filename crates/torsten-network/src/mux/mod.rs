@@ -90,6 +90,11 @@ impl<B: Bearer> Mux<B> {
     ) -> MuxChannel {
         let (ingress_tx, ingress_rx) = mpsc::channel(INGRESS_CHANNEL_CAPACITY);
 
+        // Shared byte-in-flight counter between the IngressRoute (producer side)
+        // and the MuxChannel (consumer side). IngressTask increments it when
+        // enqueuing a chunk; MuxChannel::recv() decrements it when consuming.
+        let bytes_in_flight = Arc::new(AtomicUsize::new(0));
+
         // Register the ingress route for the ingress task to dispatch to.
         // The direction here is the LOCAL direction — what we'll see after
         // the ingress task flips the remote's direction bit.
@@ -98,7 +103,7 @@ impl<B: Bearer> Mux<B> {
             ingress::IngressRoute {
                 tx: ingress_tx,
                 limit: ingress_limit,
-                bytes_in_flight: Arc::new(AtomicUsize::new(0)),
+                bytes_in_flight: Arc::clone(&bytes_in_flight),
             },
         );
 
@@ -108,6 +113,7 @@ impl<B: Bearer> Mux<B> {
             self.egress_tx.clone(),
             ingress_rx,
             ingress_limit,
+            bytes_in_flight,
         )
     }
 
