@@ -3184,61 +3184,56 @@ fn extract_hash_from_header(header_cbor: &[u8]) -> [u8; 32] {
 /// best-effort extraction without full deserialization.
 ///
 /// Returns `None` if the header CBOR cannot be parsed.
+/// Extract slot from a raw (unwrapped) header CBOR.
+///
+/// The `header_cbor` is the raw Shelley+ header bytes AFTER HFC unwrapping
+/// (i.e., the bytes inside `tag24` from `[era_id, tag24(bytes)]`).
+///
+/// For Shelley+ headers: `[header_body, body_signature]` where
+/// `header_body = [block_number, slot, ...]`.
 fn extract_slot_from_wrapped_header(header_cbor: &[u8]) -> Option<u64> {
     use minicbor::Decoder;
 
     let mut dec = Decoder::new(header_cbor);
-    // Wrapped header: array(2) [era_tag, tag24(header_bytes)]
+
+    // First, try to parse as a raw Shelley+ header (already unwrapped).
+    // Structure: array(2+) [header_body, body_signature, ...]
+    // header_body: array(N) [block_number, slot, ...]
+    if let Ok(Some(_outer_len)) = dec.array() {
+        // Try header_body array
+        if let Ok(Some(_body_len)) = dec.array() {
+            let _block_number = dec.u64().ok()?;
+            let slot = dec.u64().ok()?;
+            return Some(slot);
+        }
+    }
+
+    // If that fails, try the HFC-wrapped format [era_tag, tag24(inner)]
+    // (for compatibility with the old chain_sync_loop code path).
+    let mut dec = Decoder::new(header_cbor);
     let arr_len = dec.array().ok()?;
-    if arr_len != Some(2) {
-        return None;
-    }
-    let era_tag = dec.u64().ok()?;
+    if arr_len == Some(2) {
+        let era_tag = dec.u64().ok()?;
+        let tag = dec.tag().ok()?;
+        if tag == minicbor::data::Tag::new(24) {
+            let inner_bytes = dec.bytes().ok()?;
+            let mut inner = Decoder::new(inner_bytes);
 
-    // Read the tagged header bytes.
-    let tag = dec.tag().ok()?;
-    if tag != minicbor::data::Tag::new(24) {
-        return None;
-    }
-    let inner_bytes = dec.bytes().ok()?;
-
-    let mut inner = Decoder::new(inner_bytes);
-
-    if era_tag == 0 {
-        // Byron EBB or Byron main block — slot extraction is complex.
-        // Byron main block header: array of [proto_magic, prev_hash, proof,
-        // consensus_data, extra_data].
-        // consensus_data for main blocks: [slot_id, pk, difficulty, signature]
-        // slot_id: [epoch, slot_in_epoch]
-        // For EBBs, there's no meaningful slot — return None.
-        let _ = inner.array().ok()?;
-        inner.skip().ok()?; // proto_magic
-        inner.skip().ok()?; // prev_hash
-        inner.skip().ok()?; // proof
-                            // consensus_data
-        let cd_len = inner.array().ok()?;
-        if cd_len == Some(4) {
-            // Main block consensus_data: [slot_id, pk, difficulty, signature]
-            let sid_len = inner.array().ok()?;
-            if sid_len == Some(2) {
-                let _epoch = inner.u64().ok()?;
-                let slot_in_epoch = inner.u64().ok()?;
-                // Byron slot = epoch * epoch_length + slot_in_epoch
-                // Without epoch_length we return the raw slot_in_epoch as a fallback.
-                // The caller should use tip_slot instead.
-                return Some(slot_in_epoch);
+            if era_tag == 0 {
+                // Byron — complex, return None for now
+                return None;
+            } else {
+                // Shelley+ inner
+                let _ = inner.array().ok()?;
+                let _ = inner.array().ok()?;
+                let _block_number = inner.u64().ok()?;
+                let slot = inner.u64().ok()?;
+                return Some(slot);
             }
         }
-        None
-    } else {
-        // Shelley+ header: array(2) [header_body, body_signature]
-        // header_body: array(N) [block_number, slot, ...]
-        let _ = inner.array().ok()?; // outer array
-        let _ = inner.array().ok()?; // header_body array
-        let _block_number = inner.u64().ok()?;
-        let slot = inner.u64().ok()?;
-        Some(slot)
     }
+
+    None
 }
 
 /// Convert a `torsten_primitives::block::Point` to a network `codec::Point`.

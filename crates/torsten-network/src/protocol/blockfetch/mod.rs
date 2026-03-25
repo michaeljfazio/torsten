@@ -118,7 +118,43 @@ pub fn decode_message(data: &[u8]) -> Result<BlockFetchMessage, String> {
         TAG_START_BATCH => Ok(BlockFetchMessage::MsgStartBatch),
         TAG_NO_BLOCKS => Ok(BlockFetchMessage::MsgNoBlocks),
         TAG_BLOCK => {
-            let block = dec.bytes().map_err(|e| e.to_string())?.to_vec();
+            // The block body from Haskell is HFC-wrapped. Multiple formats:
+            //
+            // 1. Raw bytes: `block_cbor` (Torsten-to-Torsten)
+            // 2. HFC array: `[era_id, tag24(block_cbor)]`
+            // 3. Direct tag24: `tag24(block_cbor)` (most common from Haskell)
+            //
+            // We handle all three by checking the CBOR type.
+            let block = match dec.datatype().map_err(|e| e.to_string())? {
+                minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
+                    dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                }
+                minicbor::data::Type::Tag => {
+                    // tag24(block_bytes) — extract inner bytes
+                    let tag = dec.tag().map_err(|e| e.to_string())?;
+                    if tag.as_u64() == 24 {
+                        dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                    } else {
+                        // Unknown tag — try reading as bytes
+                        dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                    }
+                }
+                minicbor::data::Type::Array => {
+                    // HFC array: [era_id, tag24(block_bytes)]
+                    let _arr = dec.array().map_err(|e| e.to_string())?;
+                    let _era_id = dec.u64().map_err(|e| e.to_string())?;
+                    match dec.datatype().map_err(|e| e.to_string())? {
+                        minicbor::data::Type::Tag => {
+                            dec.tag().map_err(|e| e.to_string())?;
+                            dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                        }
+                        _ => dec.bytes().map_err(|e| e.to_string())?.to_vec(),
+                    }
+                }
+                other => {
+                    return Err(format!("BlockFetch MsgBlock: unexpected type {other:?}"));
+                }
+            };
             Ok(BlockFetchMessage::MsgBlock(block))
         }
         TAG_BATCH_DONE => Ok(BlockFetchMessage::MsgBatchDone),

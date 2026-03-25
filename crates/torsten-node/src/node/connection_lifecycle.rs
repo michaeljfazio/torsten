@@ -679,6 +679,7 @@ impl ConnectionLifecycleManager {
                                 let tx = fetched_blocks_tx.clone();
                                 let peer = addr;
 
+                                info!(%addr, slot = header.slot, hash = %hex::encode(&header.hash[..8]), "BlockFetch: requesting block");
                                 match BlockFetchClient::fetch_range(
                                     &mut channel,
                                     from,
@@ -688,13 +689,20 @@ impl ConnectionLifecycleManager {
                                             &block_cbor, bel,
                                         ) {
                                             Ok(block) => {
-                                                let _ = tx.try_send(FetchedBlock {
+                                                let slot = block.slot().0;
+                                                info!(%addr, slot, "BlockFetch: block decoded OK");
+                                                match tx.try_send(FetchedBlock {
                                                     peer,
                                                     block,
                                                     tip_slot: header.slot,
                                                     tip_hash: header.hash,
                                                     tip_block_number: 0,
-                                                });
+                                                }) {
+                                                    Ok(()) => {}
+                                                    Err(e) => {
+                                                        warn!(%addr, slot, "BlockFetch: failed to send to run loop: {e}");
+                                                    }
+                                                }
                                             }
                                             Err(e) => {
                                                 warn!(%addr, slot = header.slot, "BlockFetch decode error: {e}");
@@ -704,9 +712,7 @@ impl ConnectionLifecycleManager {
                                     },
                                 ).await {
                                     Ok(count) => {
-                                        if count > 0 {
-                                            debug!(%addr, slot = header.slot, count, "BlockFetch downloaded blocks");
-                                        }
+                                        info!(%addr, slot = header.slot, count, "BlockFetch fetch_range completed");
                                     }
                                     Err(e) => {
                                         warn!(%addr, "BlockFetch error: {e}");
