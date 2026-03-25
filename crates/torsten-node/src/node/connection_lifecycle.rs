@@ -622,21 +622,101 @@ impl ConnectionLifecycleManager {
     ///
     /// Real implementation will be provided by Task 3.
     fn make_blockfetch_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
-        let _fetched_blocks_tx = self.fetched_blocks_tx.clone();
+        let fetched_blocks_tx = self.fetched_blocks_tx.clone();
+        let candidate_chains = self.candidate_chains.clone();
+        let bel = self.byron_epoch_length;
 
-        Box::new(move |_channel, cancel| {
+        Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // Placeholder: BlockFetch protocol logic will be implemented in Task 3.
+                // BlockFetch worker: polls candidate_chains for pending headers
+                // from this peer and fetches the full blocks via BlockFetch protocol.
                 //
-                // Real implementation will:
-                // 1. Wait for fetch range requests from the BlockFetch decision task
-                // 2. Send MsgRequestRange to the peer
-                // 3. Receive MsgBlock responses, deserialize blocks
-                // 4. Send FetchedBlock to fetched_blocks_tx for ledger application
-                // 5. Handle MsgBatchDone / MsgNoBlocks responses
-                info!(%addr, "blockfetch task started (placeholder)");
-                cancel.cancelled().await;
-                debug!(%addr, "blockfetch task cancelled");
+                // This is a simplified version that directly reads candidate_chains
+                // rather than going through the BlockFetchLogicTask. It polls every
+                // 100ms for new headers to fetch.
+                use torsten_network::codec::Point as CodecPoint;
+                use torsten_network::protocol::blockfetch::client::BlockFetchClient;
+
+                info!(%addr, "blockfetch worker started");
+
+                let mut fetch_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+                fetch_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            debug!(%addr, "blockfetch worker cancelled");
+                            break;
+                        }
+                        _ = fetch_ticker.tick() => {
+                            // Take pending headers from candidate_chains for this peer
+                            let headers_to_fetch = {
+                                let mut chains = candidate_chains.write().await;
+                                if let Some(state) = chains.get_mut(&addr) {
+                                    std::mem::take(&mut state.pending_headers)
+                                } else {
+                                    continue;
+                                }
+                            };
+
+                            if headers_to_fetch.is_empty() {
+                                continue;
+                            }
+
+                            info!(
+                                %addr,
+                                count = headers_to_fetch.len(),
+                                first_slot = headers_to_fetch.first().map(|h| h.slot).unwrap_or(0),
+                                "BlockFetch: fetching pending headers",
+                            );
+
+                            // Fetch each header's block via BlockFetch
+                            for header in &headers_to_fetch {
+                                let from = CodecPoint::Specific(header.slot, header.hash);
+                                let to = CodecPoint::Specific(header.slot, header.hash);
+
+                                let tx = fetched_blocks_tx.clone();
+                                let peer = addr;
+
+                                match BlockFetchClient::fetch_range(
+                                    &mut channel,
+                                    from,
+                                    to,
+                                    |block_cbor| {
+                                        match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                                            &block_cbor, bel,
+                                        ) {
+                                            Ok(block) => {
+                                                let _ = tx.try_send(FetchedBlock {
+                                                    peer,
+                                                    block,
+                                                    tip_slot: header.slot,
+                                                    tip_hash: header.hash,
+                                                    tip_block_number: 0,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                warn!(%addr, slot = header.slot, "BlockFetch decode error: {e}");
+                                            }
+                                        }
+                                        Ok(())
+                                    },
+                                ).await {
+                                    Ok(count) => {
+                                        if count > 0 {
+                                            debug!(%addr, slot = header.slot, count, "BlockFetch downloaded blocks");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(%addr, "BlockFetch error: {e}");
+                                        return; // bearer died
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             })
         })
     }

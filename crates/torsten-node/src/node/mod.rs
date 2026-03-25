@@ -1989,6 +1989,22 @@ impl Node {
             }
         }
 
+        // Shut down all peer connections and protocol tasks.
+        if let Some(ref mut lifecycle) = self.connection_lifecycle {
+            info!("Shutting down peer connections...");
+            let mut pm = peer_manager.write().await;
+            let addrs: Vec<_> = lifecycle.connected_addrs();
+            for addr in addrs {
+                lifecycle.demote_to_cold(addr, &mut pm).await;
+            }
+            drop(pm);
+        }
+
+        // Abort the BlockFetch decision task.
+        if let Some(handle) = self.block_fetch_task.take() {
+            handle.abort();
+        }
+
         // Flush volatile blocks, persist ChainDB, and save ledger snapshot,
         // with a timeout to prevent hanging on shutdown.
         let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
