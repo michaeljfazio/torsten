@@ -260,12 +260,39 @@ impl LedgerState {
                 .floor_u64()
         } else {
             // expectedBlocks = floor((1 - d) * f * epochLength)
-            let one_minus_d = 1.0 - d;
-            let f = pp.active_slot_coeff();
-            let raw_expected_blocks = (one_minus_d * f * self.epoch_length as f64).floor() as u64;
+            //
+            // Use exact rational arithmetic to avoid f64 rounding errors.
+            // `d` is stored as f64 for legacy reasons; we convert it to a
+            // rational (1 - d_num/d_den) before multiplying.
+            //
+            // In practice, d=0 in Conway so the formula simplifies to:
+            //   floor(f * epochLength) = floor(f_num * epochLength / f_den)
+            //
+            // For d != 0 (Alonzo/early Babbage), we compute:
+            //   one_minus_d = (d_den - d_num) / d_den
+            //   expectedBlocks = floor(one_minus_d * f_num / f_den * epochLength)
+            //                  = (d_den - d_num) * f_num * epochLength / (d_den * f_den)
+            //
+            // All values fit in u128 for realistic epoch lengths (<=432000).
+            let (f_num, f_den) = pp.active_slot_coeff_rational();
+
+            // Convert d (f64) to an exact rational.
+            // d is one of: 0.0, or a value representable as a simple fraction.
+            // We use 1_000_000_000 as denominator to handle arbitrary d values.
+            let d_den = 1_000_000_000u128;
+            let d_num = (d * d_den as f64).round() as u128;
+            let one_minus_d_num = d_den.saturating_sub(d_num); // (1 - d) numerator
+
+            // expectedBlocks = floor(one_minus_d_num * f_num * epochLength / (d_den * f_den))
+            let numerator =
+                one_minus_d_num * f_num as u128 * self.epoch_length as u128;
+            let denominator = d_den * f_den as u128;
+
+            let raw_expected_blocks = (numerator / denominator) as u64;
             if raw_expected_blocks == 0 {
                 warn!(
-                    "expected_blocks rounded to 0 (d={d}, f={f}, epoch_length={}), clamping to 1",
+                    "expected_blocks rounded to 0 (d={d}, f_num={f_num}, f_den={f_den}, \
+                     epoch_length={}), clamping to 1",
                     self.epoch_length
                 );
             }
