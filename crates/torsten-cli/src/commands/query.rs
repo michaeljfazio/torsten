@@ -202,6 +202,37 @@ enum QuerySubcommand {
     },
 }
 
+/// Convert an f64 active-slot coefficient to the nearest exact rational p/q.
+///
+/// Tries common denominators first (1, 2, 4, 5, 10, 20, …) before falling
+/// back to 1 000 000.  The result is in lowest terms.  This matches the
+/// f64_to_rational helper inside torsten-crypto's leader_check module, so
+/// callers that pass `f = 0.05` will always get `(1, 20)` rather than some
+/// floating-point approximation.
+fn f64_to_rational_approx(value: f64) -> (u64, u64) {
+    for den in [1u64, 2, 4, 5, 10, 20, 25, 50, 100, 200, 1000, 10000] {
+        let num = (value * den as f64).round() as u64;
+        let reconstructed = num as f64 / den as f64;
+        if (reconstructed - value).abs() < 1e-15 {
+            let g = gcd_u64(num, den);
+            return (num / g, den / g);
+        }
+    }
+    let den = 1_000_000u64;
+    let num = (value * den as f64).round() as u64;
+    let g = gcd_u64(num, den);
+    (num / g, den / g)
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 /// Map era index to era name
 /// Parse a simple ISO-8601 UTC timestamp to Unix seconds.
 /// Supports "YYYY-MM-DDThh:mm:ssZ" format.
@@ -1733,13 +1764,29 @@ impl QueryCmd {
                 println!("Active slot coefficient: {active_slot_coeff}");
                 println!();
 
+                // Convert the f64 inputs to exact rationals so that
+                // compute_leader_schedule can use fully precise fixed-point
+                // arithmetic, matching Haskell's checkLeaderNatValue.
+                //
+                // For the active-slot coefficient we prefer the canonical
+                // fraction (e.g. 0.05 → 1/20).  For relative stake we scale
+                // by a large denominator so that sub-percent precision is
+                // preserved (e.g. 0.003456 → 3456/1_000_000).
+                let (f_num, f_den) = f64_to_rational_approx(active_slot_coeff);
+                // sigma = relative_stake expressed as a rational with
+                // denominator 1_000_000 (gives 6 decimal places of precision).
+                let sigma_den = 1_000_000u64;
+                let sigma_num = (relative_stake * sigma_den as f64).round() as u64;
+
                 let schedule = torsten_consensus::compute_leader_schedule(
                     &vrf_skey,
                     &nonce,
                     epoch_start_slot,
                     epoch_length,
-                    relative_stake,
-                    active_slot_coeff,
+                    sigma_num,
+                    sigma_den,
+                    f_num,
+                    f_den,
                 );
 
                 if schedule.is_empty() {
