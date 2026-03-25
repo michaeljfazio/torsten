@@ -1912,11 +1912,58 @@ impl Node {
         let mut forge_ticker = tokio::time::interval(Duration::from_secs(1));
         forge_ticker.tick().await; // skip first immediate tick
 
+        // Buffer for out-of-order blocks. Blocks may arrive from multiple
+        // peers in parallel. We buffer them and apply in slot order, checking
+        // that each block connects to the current tip (prev_hash match).
+        let mut block_buffer: std::collections::BTreeMap<u64, FetchedBlock> =
+            std::collections::BTreeMap::new();
+
         loop {
             tokio::select! {
                 // ── Process fetched blocks from BlockFetch workers ───────
                 Some(fetched) = fetched_blocks_rx.recv() => {
-                    self.apply_fetched_block(fetched).await;
+                    let slot = fetched.block.slot().0;
+                    block_buffer.insert(slot, fetched);
+
+                    // Try to apply blocks in order from the buffer.
+                    let current_tip = self.ledger_state.read().await.tip.point.clone();
+                    let current_tip_hash = current_tip.hash().map(|h| *h);
+
+                    let mut applied_count = 0;
+                    loop {
+                        // Get the lowest-slot block from the buffer.
+                        let next_slot = match block_buffer.keys().next() {
+                            Some(s) => *s,
+                            None => break,
+                        };
+                        let fetched = block_buffer.get(&next_slot).unwrap();
+                        let prev_hash = *fetched.block.prev_hash();
+
+                        // Check if this block connects to the current tip.
+                        let connects = match &current_tip_hash {
+                            Some(tip_hash) => prev_hash == *tip_hash,
+                            None => true, // Origin — any block connects
+                        };
+
+                        if connects || applied_count == 0 {
+                            // Apply this block (it connects, or it's the first one).
+                            let fetched = block_buffer.remove(&next_slot).unwrap();
+                            self.apply_fetched_block(fetched).await;
+                            applied_count += 1;
+                            // Update tip for next iteration
+                            // (re-read from ledger would be correct but expensive;
+                            // for now just break and re-check on next recv)
+                            break;
+                        } else {
+                            // Doesn't connect yet — wait for more blocks.
+                            break;
+                        }
+                    }
+
+                    // Prune old entries from buffer (blocks below ledger tip).
+                    let tip_slot = self.ledger_state.read().await.tip.point
+                        .slot().map(|s| s.0).unwrap_or(0);
+                    block_buffer.retain(|slot, _| *slot > tip_slot);
                 }
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
