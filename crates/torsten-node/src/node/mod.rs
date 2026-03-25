@@ -1901,16 +1901,54 @@ impl Node {
         let mut forge_ticker = tokio::time::interval(Duration::from_secs(1));
         forge_ticker.tick().await; // skip first immediate tick
 
+        // Buffer for out-of-order blocks, keyed by prev_hash.
+        // When a block is applied, we check the buffer for the next block
+        // that connects to the new tip.
+        let mut pending_blocks: std::collections::HashMap<
+            torsten_primitives::hash::Hash32,
+            FetchedBlock,
+        > = std::collections::HashMap::new();
+
         loop {
             tokio::select! {
                 // ── Process fetched blocks from BlockFetch workers ───────
                 //
-                // With bfcMaxConcurrencyBulkSync = 1 (single active fetcher),
-                // blocks arrive in chain order from one peer. We apply each
-                // block directly via ChainDB's chain selection queue, which
-                // handles the VolatileDB insertion and chain selection.
+                // Blocks may arrive out of order from multiple peers.
+                // We attempt to apply each block directly; if it doesn't
+                // connect to the ledger tip, we buffer it. After each
+                // successful apply, we drain buffered blocks that now connect.
                 Some(fetched) = fetched_blocks_rx.recv() => {
-                    self.apply_fetched_block(fetched).await;
+                    let prev_hash = *fetched.block.prev_hash();
+                    let block_hash = *fetched.block.hash();
+                    let connects = {
+                        let ls = self.ledger_state.read().await;
+                        match ls.tip.point.hash() {
+                            Some(tip_hash) => prev_hash == *tip_hash,
+                            None => true,
+                        }
+                    };
+
+                    if connects {
+                        self.apply_fetched_block(fetched).await;
+                        // Drain buffered blocks that now connect.
+                        let mut current_hash = block_hash;
+                        while let Some(next) = pending_blocks.remove(&current_hash) {
+                            let next_hash = *next.block.hash();
+                            self.apply_fetched_block(next).await;
+                            current_hash = next_hash;
+                        }
+                    } else {
+                        // Buffer for later — store keyed by prev_hash
+                        // so we can find the next block when the tip advances.
+                        pending_blocks.insert(prev_hash, fetched);
+                    }
+
+                    // Prune stale entries (blocks far behind ledger tip).
+                    if pending_blocks.len() > 10_000 {
+                        let tip_slot = self.ledger_state.read().await
+                            .tip.point.slot().map(|s| s.0).unwrap_or(0);
+                        pending_blocks.retain(|_, fb| fb.block.slot().0 > tip_slot.saturating_sub(1000));
+                    }
                 }
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
@@ -2104,6 +2142,31 @@ impl Node {
             warn!(
                 slot = block_slot.0,
                 "Failed to store fetched block — skipping ledger apply"
+            );
+            return;
+        }
+
+        // Check if this block connects to the current ledger tip.
+        // Blocks may arrive out of order from multiple peers. Only apply
+        // blocks that extend the current chain; others are stored in ChainDB
+        // (via ChainSelQueue above) and will be applied when the chain catches up.
+        let prev_hash = *block.prev_hash();
+        let connects_to_tip = {
+            let ls = self.ledger_state.read().await;
+            match ls.tip.point.hash() {
+                Some(tip_hash) => prev_hash == *tip_hash,
+                None => true, // Origin — any block connects
+            }
+        };
+
+        if !connects_to_tip {
+            // Block stored in ChainDB but doesn't connect to ledger tip yet.
+            // This is normal during sync — blocks arrive out of order.
+            // ChainDB chain selection handles eventual ordering.
+            debug!(
+                slot = block_slot.0,
+                block = block_number.0,
+                "Block stored in ChainDB but skipping ledger apply (out of order)"
             );
             return;
         }

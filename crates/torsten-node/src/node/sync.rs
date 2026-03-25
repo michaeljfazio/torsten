@@ -1765,7 +1765,10 @@ impl Node {
                         "Replay epoch transitions counted"
                     );
                 }
-                return;
+                // Don't return — fall through to LSM replay check below.
+                // Chunk files from Mithril may not cover blocks that were
+                // previously synced by Torsten and flushed to ImmutableDB.
+                // The LSM replay path handles those remaining blocks.
             }
         }
 
