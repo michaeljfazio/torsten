@@ -2305,3 +2305,120 @@ fn test_compute_transaction_hash_is_32_bytes() {
     // Hash32 is always exactly 32 bytes
     assert_eq!(hash.as_bytes().len(), 32);
 }
+
+// ===========================================================================
+// required_signers — must encode as 28-byte addr_keyhash per CDDL
+// ===========================================================================
+
+/// The CDDL spec defines:
+///   required_signers = nonempty_set<addr_keyhash>
+///   addr_keyhash      = hash28
+///
+/// Internally required_signers are stored as Hash32 (zero-padded from the
+/// 28-byte pallas key hashes).  The encoder must strip the trailing 4 zero
+/// bytes and emit exactly 28 bytes on the wire so that cardano-node and
+/// cardano-cli can round-trip the transaction body without error.
+#[test]
+fn test_required_signers_encoded_as_28_bytes() {
+    let mut body = minimal_body();
+    // Build a padded Hash32 the same way pallas does: 28 real bytes followed
+    // by 4 zero bytes.
+    let mut raw = [0u8; 32];
+    raw[..28].copy_from_slice(&[0xDE; 28]);
+    // last 4 bytes remain 0x00 (zero-padding)
+    body.required_signers = vec![Hash32::from_bytes(raw)];
+
+    let enc = encode_transaction_body(&body);
+
+    // Locate key 14 in the encoded map by scanning for the uint 14 (0x0E).
+    // The map is definite-length, so navigate entry by entry.
+    let mut dec = minicbor::Decoder::new(&enc);
+    let map_len = dec.map().unwrap().unwrap() as usize;
+
+    let mut found_key14 = false;
+    for _ in 0..map_len {
+        let key = dec.u64().unwrap();
+        if key == 14 {
+            found_key14 = true;
+            // required_signers is encoded as an array of bstr values
+            let arr_len = dec.array().unwrap().unwrap();
+            assert_eq!(arr_len, 1, "expected exactly one required signer");
+            let bytes = dec.bytes().unwrap();
+            // Must be exactly 28 bytes — not 32
+            assert_eq!(
+                bytes.len(),
+                28,
+                "required_signer must be 28-byte addr_keyhash; got {} bytes",
+                bytes.len()
+            );
+            // The first byte should be 0xDE (our sentinel value)
+            assert_eq!(bytes[0], 0xDE);
+            // The 28th byte (index 27) should also be 0xDE
+            assert_eq!(bytes[27], 0xDE);
+            break;
+        } else {
+            dec.skip().unwrap();
+        }
+    }
+    assert!(
+        found_key14,
+        "key 14 (required_signers) not found in encoded body"
+    );
+}
+
+/// Verify the raw CBOR header bytes for a required_signer entry: must be
+/// `0x58 0x1C` (major type 2 / additional info 24 / length = 28 = 0x1C),
+/// NOT `0x58 0x20` (length = 32) which was the previous incorrect encoding.
+#[test]
+fn test_required_signers_cbor_header_bytes() {
+    let mut body = minimal_body();
+    let mut raw = [0u8; 32];
+    raw[..28].fill(0xAB);
+    body.required_signers = vec![Hash32::from_bytes(raw)];
+
+    let enc = encode_transaction_body(&body);
+
+    // Scan the raw bytes for the CBOR bstr header of the required signer.
+    // The sequence we're looking for is: 0x58 0x1C followed by 28 bytes of 0xAB.
+    // The incorrect sequence would be: 0x58 0x20 followed by 28 bytes 0xAB + 4 bytes 0x00.
+    let target_header: &[u8] = &[0x58, 28]; // 0x1C = 28
+    let wrong_header: &[u8] = &[0x58, 32]; // 0x20 = 32
+
+    let has_correct = enc.windows(target_header.len()).any(|w| w == target_header);
+
+    assert!(
+        has_correct,
+        "encoded body must contain 0x58 0x1C header for 28-byte addr_keyhash"
+    );
+    // The 32-byte header (0x58 0x20) must NOT appear as a required_signer encoding.
+    // Note: other fields (like tx hashes) legitimately use 0x58 0x20, so we check
+    // that the 28-byte payload following our specific sentinel bytes is present.
+    let _ = wrong_header; // documented for clarity; checked via sentinel pattern below
+    let sentinel_with_correct: Vec<u8> = {
+        let mut v = vec![0x58, 28];
+        v.extend_from_slice(&[0xAB; 28]);
+        v
+    };
+    let sentinel_with_wrong: Vec<u8> = {
+        let mut v = vec![0x58, 32];
+        v.extend_from_slice(&[0xAB; 28]);
+        v.extend_from_slice(&[0x00; 4]);
+        v
+    };
+
+    let correct_present = enc
+        .windows(sentinel_with_correct.len())
+        .any(|w| w == sentinel_with_correct.as_slice());
+    let wrong_present = enc
+        .windows(sentinel_with_wrong.len())
+        .any(|w| w == sentinel_with_wrong.as_slice());
+
+    assert!(
+        correct_present,
+        "28-byte addr_keyhash sentinel pattern not found in encoded body"
+    );
+    assert!(
+        !wrong_present,
+        "32-byte encoding of required_signer found — hash truncation to 28 bytes is broken"
+    );
+}

@@ -424,11 +424,14 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
     }
 
     // 14: required_signers
+    // CDDL: required_signers = nonempty_set<addr_keyhash> where addr_keyhash = hash28.
+    // required_signers is stored internally as Hash32 (zero-padded from 28-byte pallas hashes),
+    // so we emit only the first 28 bytes on the wire to match the CDDL spec.
     if !body.required_signers.is_empty() {
         buf.extend(encode_uint(14));
         buf.extend(encode_array_header(body.required_signers.len()));
         for hash in &body.required_signers {
-            buf.extend(encode_hash32(hash));
+            buf.extend(encode_bytes(&hash.as_bytes()[..28]));
         }
     }
 
