@@ -589,6 +589,11 @@ impl LedgerState {
                     let registered_pool_ids: std::collections::HashSet<
                         torsten_primitives::hash::Hash28,
                     > = self.pool_params.keys().copied().collect();
+                    // Build the registered DRep credential set so that duplicate
+                    // RegDRep certificates are rejected (Haskell `ConwayDRepAlreadyRegistered`).
+                    let registered_drep_ids: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self.governance.dreps.keys().copied().collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
@@ -600,6 +605,7 @@ impl LedgerState {
                         Some(self.treasury.0),
                         Some(&self.reward_accounts),
                         Some(self.epoch.0),
+                        Some(&registered_drep_ids),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

@@ -2227,6 +2227,7 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
         );
         assert!(
             result.is_ok(),
@@ -2275,6 +2276,7 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
         );
         assert!(
             result.is_ok(),
@@ -2320,6 +2322,7 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -8070,6 +8073,7 @@ mod tests {
             Some(500), // current_treasury — mismatches declared 999
             None,      // reward_accounts
             None,      // current_epoch
+            None,      // registered_dreps
         );
 
         assert!(
@@ -8129,6 +8133,7 @@ mod tests {
             Some(500), // current_treasury matches declared
             None,      // reward_accounts
             None,      // current_epoch
+            None,      // registered_dreps
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8176,6 +8181,7 @@ mod tests {
             None, // current_treasury = None → check must be skipped
             None, // reward_accounts
             None, // current_epoch
+            None, // registered_dreps
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8283,6 +8289,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8326,6 +8333,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         assert!(
@@ -8362,7 +8370,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None,
             None, // reward_accounts = None → balance check skipped
-            None,
+            None, None, // registered_dreps
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8408,6 +8416,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8458,6 +8467,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         assert!(
@@ -8509,6 +8519,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         assert!(
@@ -8559,6 +8570,7 @@ mod tests {
             None,
             Some(&reward_accounts),
             None,
+            None, // registered_dreps
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8567,6 +8579,606 @@ mod tests {
         assert!(
             !has_refund_err,
             "Expected no StakeDeregistrationRefundMismatch for correct refund; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Duplicate stake registration: StakeKeyAlreadyRegistered
+    //
+    // Haskell `StakeKeyRegisteredDELEG` — both pre-Conway `StakeRegistration`
+    // (tag 0) and Conway `ConwayStakeRegistration` (tag 7) must be rejected when
+    // the credential is already present in the reward_accounts map.
+    //
+    // Reference: Haskell `StakeKeyRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a stake-registration transaction balanced with a deposit.
+    fn make_reg_tx(utxo_set: &mut UtxoSet, cert: Certificate, deposit: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        // Output + fee + deposit = 10_000_000
+        let output_value = 10_000_000 - 200_000 - deposit;
+        let mut tx = make_simple_tx(input, output_value, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_reg_already_registered_rejected() {
+        // Pre-Conway StakeRegistration for an already-registered credential
+        // must produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x10u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // Simulate an already-registered credential in reward_accounts.
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None, // slot_config
+            None, // registered_pools
+            None, // current_treasury
+            Some(&reward_accounts),
+            None, // current_epoch
+            None, // registered_dreps
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_reg_not_registered_accepted() {
+        // StakeRegistration for a fresh (unregistered) credential must not
+        // produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x11u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // reward_accounts has a DIFFERENT credential — ours is not present.
+        let reward_accounts = make_reward_accounts([0xFFu8; 28], 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+        );
+
+        let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_dup_err,
+            "Expected no StakeKeyAlreadyRegistered for fresh credential; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_reg_no_reward_accounts_skips_dup_check() {
+        // When reward_accounts is None, the duplicate registration check must be
+        // skipped — structural validation only.
+        let cred_bytes = [0x12u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // reward_accounts = None → check must be skipped entirely
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None,
+            None, // reward_accounts = None
+            None, None, // registered_dreps
+        );
+
+        let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_dup_err,
+            "Expected no StakeKeyAlreadyRegistered when reward_accounts is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_reg_already_registered_rejected() {
+        // Conway ConwayStakeRegistration for an already-registered credential
+        // must also produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x13u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeRegistration {
+                credential,
+                deposit: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate Conway registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered for Conway dup reg; got: {errors:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Delegation to unregistered pool: DelegateePoolNotRegistered
+    //
+    // Haskell `DelegateeStakePoolNotRegisteredDELEG` — StakeDelegation and
+    // combined delegation certs must be rejected when the target pool is not
+    // in registered_pools.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a delegation transaction balanced for the given cert.
+    fn make_deleg_tx(utxo_set: &mut UtxoSet, cert: Certificate) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_deleg_unregistered_pool_rejected() {
+        // StakeDelegation to an unregistered pool must produce
+        // DelegateePoolNotRegistered.
+        let pool_id = Hash28::from_bytes([0x20u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x21u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools is Some but does NOT contain pool_id
+        let registered_pools: std::collections::HashSet<Hash28> = HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools), // pool not present
+            None,
+            None,
+            None,
+            None, // registered_dreps
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected DelegateePoolNotRegistered for delegation to unregistered pool; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DelegateePoolNotRegistered { .. })),
+            "Expected DelegateePoolNotRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_deleg_registered_pool_accepted() {
+        // StakeDelegation to a registered pool must not produce
+        // DelegateePoolNotRegistered.
+        let pool_id = Hash28::from_bytes([0x22u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x23u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools contains the pool_id
+        let mut registered_pools: std::collections::HashSet<Hash28> = HashSet::new();
+        registered_pools.insert(pool_id);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+        );
+
+        let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DelegateePoolNotRegistered { .. })
+        }));
+        assert!(
+            !has_pool_err,
+            "Expected no DelegateePoolNotRegistered for registered pool; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_deleg_no_registered_pools_skips_check() {
+        // When registered_pools is None, the pool registration check must be
+        // skipped — structural validation only.
+        let pool_id = Hash28::from_bytes([0x24u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x25u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools = None → check must be skipped
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None,
+            None, // registered_pools = None → check skipped
+            None, None, None, None, // registered_dreps
+        );
+
+        let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DelegateePoolNotRegistered { .. })
+        }));
+        assert!(
+            !has_pool_err,
+            "Expected no DelegateePoolNotRegistered when registered_pools is None; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // DRep re-registration: DRepAlreadyRegistered
+    //
+    // Haskell `ConwayDRepAlreadyRegistered` — RegDRep certificate naming a
+    // credential already in the DRep registry must be rejected.
+    //
+    // Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a DRep registration transaction balanced with a deposit.
+    fn make_drep_reg_tx(utxo_set: &mut UtxoSet, cred_bytes: [u8; 28], deposit: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        };
+        // Use a 1 000 ADA UTxO so the value balance holds for any deposit amount
+        // up to ~1 000 ADA (DRep deposit is 500 ADA on mainnet defaults).
+        let utxo_value = 1_000_000_000u64;
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(utxo_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let fee = 200_000u64;
+        let output_value = utxo_value - fee - deposit;
+        let mut tx = make_simple_tx(input, output_value, fee);
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential,
+            deposit: torsten_primitives::value::Lovelace(deposit),
+            anchor: None,
+        });
+        tx
+    }
+
+    #[test]
+    fn test_drep_reg_already_registered_rejected() {
+        // RegDRep for an already-registered DRep credential must produce
+        // DRepAlreadyRegistered in Conway era.
+        let cred_bytes = [0x30u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        // Build a registered_dreps set containing this credential
+        let key = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected DRepAlreadyRegistered for duplicate DRep registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DRepAlreadyRegistered { .. })),
+            "Expected DRepAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_fresh_accepted() {
+        // RegDRep for a DRep not already registered must not produce
+        // DRepAlreadyRegistered.
+        let cred_bytes = [0x31u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        // registered_dreps contains a DIFFERENT credential — ours is not present
+        let other_key = Hash28::from_bytes([0xFFu8; 28]).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(other_key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered for fresh DRep; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_no_drep_registry_skips_check() {
+        // When registered_dreps is None, the DRep re-registration check must be
+        // skipped — structural validation only.
+        let cred_bytes = [0x32u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None,
+            None, // registered_dreps = None → check skipped
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered when registered_dreps is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_pre_conway_skips_check() {
+        // The DRepAlreadyRegistered check is only enforced in Conway (proto >= 9).
+        // Pre-Conway blocks cannot carry RegDRep certs (era-gating), but we still
+        // ensure the check is bypassed when proto < 9 for defence-in-depth.
+        let cred_bytes = [0x33u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8; // Pre-Conway (Babbage)
+                                           // Use a non-zero deposit so we don't accidentally pass due to value conservation
+        let drep_deposit = 500_000u64; // not key_deposit — doesn't matter for this test
+
+        let mut utxo_set = UtxoSet::new();
+        // Build tx manually since drep_deposit amount is arbitrary here
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential,
+            deposit: torsten_primitives::value::Lovelace(drep_deposit),
+            anchor: None,
+        });
+
+        // registered_dreps contains the credential — check should be skipped in pre-Conway
+        let key = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered in pre-Conway (proto=8); got: {result:?}"
         );
     }
 }

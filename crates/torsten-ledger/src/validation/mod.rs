@@ -278,6 +278,53 @@ pub enum ValidationError {
          expected key_deposit={expected}"
     )]
     StakeDeregistrationRefundMismatch { declared: u64, expected: u64 },
+    /// Haskell `StakeKeyRegisteredDELEG`: a stake registration certificate
+    /// names a credential that is already registered in the ledger.
+    ///
+    /// Both legacy `StakeRegistration` (tag 0) and Conway
+    /// `ConwayStakeRegistration` (tag 7) are covered — Haskell enforces the
+    /// same predicate for both certificate variants.
+    ///
+    /// Reference: Haskell `StakeKeyRegisteredDELEG` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake registration rejected: credential {credential_hash} is already registered \
+         (StakeKeyRegisteredDELEG)"
+    )]
+    StakeKeyAlreadyRegistered {
+        /// Hex-encoded credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+    },
+    /// Haskell `DelegateeStakePoolNotRegisteredDELEG`: a stake delegation
+    /// certificate names a pool ID that is not currently registered.
+    ///
+    /// Covers all delegation certificate variants: `StakeDelegation` (tag 2),
+    /// `RegStakeDeleg` (tag 11), `StakeVoteDelegation` (tag 13),
+    /// `RegStakeVoteDeleg` (tag 14).
+    ///
+    /// Reference: Haskell `DelegateeStakePoolNotRegisteredDELEG` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake delegation rejected: target pool {pool_id} is not registered \
+         (DelegateeStakePoolNotRegisteredDELEG)"
+    )]
+    DelegateePoolNotRegistered {
+        /// Hex-encoded pool ID (Hash28).
+        pool_id: String,
+    },
+    /// Haskell `ConwayDRepAlreadyRegistered`: a `RegDRep` certificate names a
+    /// DRep credential that is already present in the DRep registry.
+    ///
+    /// Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    #[error(
+        "DRep registration rejected: credential {credential_hash} is already registered \
+         (ConwayDRepAlreadyRegistered)"
+    )]
+    DRepAlreadyRegistered {
+        /// Hex-encoded DRep credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +358,7 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -320,6 +368,10 @@ pub fn validate_transaction(
 /// pool's parameters) do not charge an additional deposit — only new pool
 /// registrations do. When `None`, all pool registrations are treated as new
 /// (deposit always charged).
+///
+/// When `registered_dreps` is `Some`, duplicate DRep registration certificates
+/// (`RegDRep`) are rejected with [`ValidationError::DRepAlreadyRegistered`].
+/// When `None`, the DRep re-registration check is skipped.
 ///
 /// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
 /// including the standard on-chain `&UtxoSet` and the composite
@@ -343,6 +395,7 @@ pub fn validate_transaction_with_pools(
     current_treasury: Option<u64>,
     reward_accounts: Option<&HashMap<Hash32, Lovelace>>,
     current_epoch: Option<u64>,
+    registered_dreps: Option<&HashSet<Hash32>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -409,6 +462,118 @@ pub fn validate_transaction_with_pools(
                         errors.push(ValidationError::StakeKeyHasNonZeroBalance {
                             credential_hash: key.to_hex(),
                             balance: balance.0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Stake key already registered check (Haskell `StakeKeyRegisteredDELEG`)
+    //
+    // A StakeRegistration or ConwayStakeRegistration certificate is rejected
+    // when the named credential is already present in the reward accounts map
+    // (i.e., the key has previously registered and not yet deregistered).
+    //
+    // This check is only enforced when `reward_accounts` is provided (block
+    // validation mode). When `None`, the check is skipped to match the
+    // pattern of other ledger-state-dependent checks (e.g. the balance check
+    // above). Both the pre-Conway `StakeRegistration` (tag 0) and the Conway
+    // `ConwayStakeRegistration` (tag 7) variants are covered.
+    //
+    // Reference: Haskell `StakeKeyRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if let Some(accounts) = reward_accounts {
+        for cert in &tx.body.certificates {
+            let opt_cred: Option<&torsten_primitives::credentials::Credential> = match cert {
+                torsten_primitives::transaction::Certificate::StakeRegistration(cred) => Some(cred),
+                torsten_primitives::transaction::Certificate::ConwayStakeRegistration {
+                    credential: cred,
+                    ..
+                } => Some(cred),
+                _ => None,
+            };
+            if let Some(credential) = opt_cred {
+                // Use the same Hash28 → Hash32 zero-padding as the reward
+                // account map key (mirrors `credential_to_hash` in state/mod.rs).
+                let key = credential.to_hash().to_hash32_padded();
+                if accounts.contains_key(&key) {
+                    errors.push(ValidationError::StakeKeyAlreadyRegistered {
+                        credential_hash: key.to_hex(),
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Delegation to unregistered pool (Haskell `DelegateeStakePoolNotRegisteredDELEG`)
+    //
+    // A delegation certificate that targets a pool ID not currently registered
+    // in `pool_params` is rejected. This covers all variants that carry a
+    // target pool hash: `StakeDelegation` (tag 2), `RegStakeDeleg` (tag 11),
+    // `StakeVoteDelegation` (tag 13), `RegStakeVoteDeleg` (tag 14).
+    //
+    // `VoteRegDeleg` (tag 15) does NOT include a pool delegation component —
+    // it registers and sets a DRep vote delegation only — so it is excluded.
+    //
+    // This check is only enforced when `registered_pools` is provided.
+    //
+    // Reference: Haskell `DelegateeStakePoolNotRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if let Some(pools) = registered_pools {
+        for cert in &tx.body.certificates {
+            let opt_pool: Option<Hash28> = match cert {
+                torsten_primitives::transaction::Certificate::StakeDelegation {
+                    pool_hash, ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::RegStakeDeleg {
+                    pool_hash, ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::StakeVoteDelegation {
+                    pool_hash,
+                    ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::RegStakeVoteDeleg {
+                    pool_hash,
+                    ..
+                } => Some(*pool_hash),
+                _ => None,
+            };
+            if let Some(pool_id) = opt_pool {
+                if !pools.contains(&pool_id) {
+                    errors.push(ValidationError::DelegateePoolNotRegistered {
+                        pool_id: pool_id.to_hex(),
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // DRep already registered check (Haskell `ConwayDRepAlreadyRegistered`)
+    //
+    // A `RegDRep` certificate is rejected when the named DRep credential is
+    // already present in the DRep registry. This check is only enforced in
+    // Conway (protocol >= 9) when `registered_dreps` is provided.
+    //
+    // Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let Some(dreps) = registered_dreps {
+            for cert in &tx.body.certificates {
+                if let torsten_primitives::transaction::Certificate::RegDRep {
+                    credential, ..
+                } = cert
+                {
+                    let key = credential.to_hash().to_hash32_padded();
+                    if dreps.contains(&key) {
+                        errors.push(ValidationError::DRepAlreadyRegistered {
+                            credential_hash: key.to_hex(),
                         });
                     }
                 }

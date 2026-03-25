@@ -369,6 +369,36 @@ pub(crate) fn convert_validation_error(
                 ),
             }
         }
+        VE::StakeKeyHasNonZeroBalance {
+            credential_hash,
+            balance,
+        } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Stake deregistration rejected: credential {credential_hash} has non-zero balance ({balance} lovelace)"
+            ),
+        },
+        VE::StakeDeregistrationRefundMismatch { declared, expected } => {
+            TxValidationError::ScriptFailed {
+                reason: format!(
+                    "Conway stake deregistration refund mismatch: declared={declared}, expected={expected}"
+                ),
+            }
+        }
+        VE::StakeKeyAlreadyRegistered { credential_hash } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Stake registration rejected: credential {credential_hash} is already registered"
+            ),
+        },
+        VE::DelegateePoolNotRegistered { pool_id } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Stake delegation rejected: target pool {pool_id} is not registered"
+            ),
+        },
+        VE::DRepAlreadyRegistered { credential_hash } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "DRep registration rejected: credential {credential_hash} is already registered"
+            ),
+        },
     }
 }
 
