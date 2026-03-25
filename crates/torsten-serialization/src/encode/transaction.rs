@@ -10,6 +10,29 @@ use super::script::{
 };
 use super::value::{encode_mint, encode_value};
 
+/// Encode a set-typed field as CBOR tag 258 with a sorted definite-length array.
+///
+/// Per Conway CDDL: `set<a> = #6.258([* a])`. The canonical encoding wraps the
+/// items in tag 258. Items are sorted lexicographically by their CBOR encoding
+/// to produce canonical ordering.
+fn encode_tagged_set<T, F>(items: &[T], encode_item: F) -> Vec<u8>
+where
+    F: Fn(&T) -> Vec<u8>,
+{
+    // Encode each item individually so we can sort them.
+    let mut encoded_items: Vec<Vec<u8>> = items.iter().map(|item| encode_item(item)).collect();
+    // Canonical CBOR set ordering: lexicographic on the CBOR encoding bytes.
+    encoded_items.sort();
+
+    // tag(258) followed by definite-length array.
+    let mut buf = encode_tag(258);
+    buf.extend(encode_array_header(encoded_items.len()));
+    for encoded in encoded_items {
+        buf.extend(encoded);
+    }
+    buf
+}
+
 /// Encode a transaction output.
 ///
 /// Two wire-format variants exist:
@@ -347,12 +370,10 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
 
     let mut buf = encode_map_header(count);
 
-    // 0: inputs (set of [tx_hash, index])
+    // 0: inputs — Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Canonical encoding uses tag 258 with items sorted by their CBOR bytes.
     buf.extend(encode_uint(0));
-    buf.extend(encode_array_header(body.inputs.len()));
-    for input in &body.inputs {
-        buf.extend(encode_tx_input(input));
-    }
+    buf.extend(encode_tagged_set(&body.inputs, encode_tx_input));
 
     // 1: outputs
     buf.extend(encode_uint(1));
@@ -371,13 +392,11 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
         buf.extend(encode_uint(ttl.0));
     }
 
-    // 4: certificates
+    // 4: certificates — Conway CDDL: nonempty_oset<certificate> = #6.258([+ certificate])
+    // Canonical encoding uses tag 258 with items sorted by their CBOR bytes.
     if !body.certificates.is_empty() {
         buf.extend(encode_uint(4));
-        buf.extend(encode_array_header(body.certificates.len()));
-        for cert in &body.certificates {
-            buf.extend(encode_certificate(cert));
-        }
+        buf.extend(encode_tagged_set(&body.certificates, encode_certificate));
     }
 
     // 5: withdrawals
@@ -414,13 +433,11 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
         buf.extend(encode_hash32(hash));
     }
 
-    // 13: collateral
+    // 13: collateral — Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Canonical encoding uses tag 258 with items sorted by their CBOR bytes.
     if !body.collateral.is_empty() {
         buf.extend(encode_uint(13));
-        buf.extend(encode_array_header(body.collateral.len()));
-        for input in &body.collateral {
-            buf.extend(encode_tx_input(input));
-        }
+        buf.extend(encode_tagged_set(&body.collateral, encode_tx_input));
     }
 
     // 14: required_signers
@@ -453,13 +470,11 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
         buf.extend(encode_uint(total.0));
     }
 
-    // 18: reference_inputs
+    // 18: reference_inputs — Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Canonical encoding uses tag 258 with items sorted by their CBOR bytes.
     if !body.reference_inputs.is_empty() {
         buf.extend(encode_uint(18));
-        buf.extend(encode_array_header(body.reference_inputs.len()));
-        for input in &body.reference_inputs {
-            buf.extend(encode_tx_input(input));
-        }
+        buf.extend(encode_tagged_set(&body.reference_inputs, encode_tx_input));
     }
 
     // 19: voting_procedures
