@@ -5,8 +5,8 @@ use torsten_primitives::transaction::*;
 use super::certificate::encode_certificate;
 use super::governance::{encode_proposal_procedure, encode_voting_procedures};
 use super::script::{
-    encode_bootstrap_witness, encode_metadata_map, encode_native_script, encode_redeemer,
-    encode_redeemer_tag, encode_script_ref, encode_vkey_witness,
+    encode_bootstrap_witness, encode_metadata_map, encode_native_script, encode_redeemer_tag,
+    encode_script_ref, encode_vkey_witness,
 };
 use super::value::{encode_mint, encode_value};
 
@@ -20,7 +20,7 @@ where
     F: Fn(&T) -> Vec<u8>,
 {
     // Encode each item individually so we can sort them.
-    let mut encoded_items: Vec<Vec<u8>> = items.iter().map(|item| encode_item(item)).collect();
+    let mut encoded_items: Vec<Vec<u8>> = items.iter().map(encode_item).collect();
     // Canonical CBOR set ordering: lexicographic on the CBOR encoding bytes.
     encoded_items.sort();
 

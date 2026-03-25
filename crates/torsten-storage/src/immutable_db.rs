@@ -638,9 +638,7 @@ impl ImmutableDB {
             }
 
             // Truncate the chunk file
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&chunk_path)?;
+            let file = std::fs::OpenOptions::new().write(true).open(&chunk_path)?;
             file.set_len(truncate_at)?;
             file.sync_all()?;
 

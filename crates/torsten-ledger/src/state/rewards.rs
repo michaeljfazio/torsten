@@ -284,8 +284,7 @@ impl LedgerState {
             let one_minus_d_num = d_den.saturating_sub(d_num); // (1 - d) numerator
 
             // expectedBlocks = floor(one_minus_d_num * f_num * epochLength / (d_den * f_den))
-            let numerator =
-                one_minus_d_num * f_num as u128 * self.epoch_length as u128;
+            let numerator = one_minus_d_num * f_num as u128 * self.epoch_length as u128;
             let denominator = d_den * f_den as u128;
 
             let raw_expected_blocks = (numerator / denominator) as u64;
