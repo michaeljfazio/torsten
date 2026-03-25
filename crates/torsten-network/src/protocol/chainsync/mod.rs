@@ -31,7 +31,7 @@ pub mod client;
 pub mod server;
 
 use crate::codec::{self, Point};
-use minicbor::{Decoder, Encoder};
+use minicbor::{data::Type, Decoder, Encoder};
 
 /// ChainSync protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,13 +246,35 @@ pub fn decode_message(data: &[u8]) -> Result<ChainSyncMessage, String> {
             })
         }
         TAG_FIND_INTERSECT => {
-            let arr_len = dec
-                .array()
-                .map_err(|e| e.to_string())?
-                .ok_or("indefinite array not supported")?;
-            let mut points = Vec::with_capacity(arr_len as usize);
-            for _ in 0..arr_len {
-                points.push(codec::decode_point(&mut dec).map_err(|e| e.to_string())?);
+            // Accept both definite and indefinite-length arrays.
+            // The CDDL spec uses `[* point]` which permits either encoding.
+            let mut points = Vec::new();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                Type::ArrayIndef => {
+                    dec.array().map_err(|e| e.to_string())?;
+                    loop {
+                        if dec.datatype().map_err(|e| e.to_string())? == Type::Break {
+                            dec.skip().map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        points.push(codec::decode_point(&mut dec).map_err(|e| e.to_string())?);
+                    }
+                }
+                Type::Array => {
+                    let arr_len = dec
+                        .array()
+                        .map_err(|e| e.to_string())?
+                        .ok_or("expected definite array length")?;
+                    points.reserve(arr_len as usize);
+                    for _ in 0..arr_len {
+                        points.push(codec::decode_point(&mut dec).map_err(|e| e.to_string())?);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "MsgFindIntersect: expected array of points, got {other:?}"
+                    ));
+                }
             }
             Ok(ChainSyncMessage::MsgFindIntersect(points))
         }

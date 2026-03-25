@@ -389,7 +389,7 @@ mod tests {
         let _ = handle.await;
 
         let events = events_clone.lock().unwrap();
-        assert!(events.len() >= 1);
+        assert!(!events.is_empty());
         assert!(matches!(events[0], ChainSyncEvent::RollForward { .. }));
     }
 
