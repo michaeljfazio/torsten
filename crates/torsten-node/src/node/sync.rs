@@ -1517,6 +1517,20 @@ impl Node {
                         ledger.pool_params.keys().copied().collect();
                     self.consensus.prune_opcert_counters(&active_pools);
 
+                    // Update mempool capacity limits from the new epoch's protocol params.
+                    //
+                    // Haskell cardano-node sets mempool capacity to 2x the block's
+                    // resource limits (`blockCapacityTxMeasure`).  Protocol params can
+                    // change via governance actions at epoch boundaries, so we
+                    // recalculate capacity here to stay in sync with the current limits.
+                    // This must happen BEFORE revalidation so eviction uses the updated
+                    // bounds when computing whether a tx still fits.
+                    self.mempool.update_capacity_from_params(
+                        ledger.protocol_params.max_block_body_size,
+                        ledger.protocol_params.max_block_ex_units.mem,
+                        ledger.protocol_params.max_block_ex_units.steps,
+                    );
+
                     // Revalidate all mempool transactions against the new epoch's
                     // protocol parameters.  Protocol parameters can change at epoch
                     // boundaries (fee structure, max tx size, execution unit prices,
