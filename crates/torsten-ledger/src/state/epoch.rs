@@ -231,6 +231,18 @@ impl LedgerState {
             epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
+        // Capture the DRep distribution snapshot from the current live state.
+        //
+        // Per Haskell `snapDRepDistr` in `Conway.Rules.Epoch`, the DRep voting power
+        // used during ratification for the new epoch is measured against the stake
+        // distribution at the *start* of that epoch (i.e. now, after the mark snapshot
+        // is taken).  This snapshot is consumed by `build_drep_power_cache` during
+        // `ratify_proposals` so that mid-epoch delegation changes do not affect
+        // in-progress governance votes.
+        if self.protocol_params.protocol_version_major >= 9 {
+            self.capture_drep_distribution_snapshot();
+        }
+
         // Apply future pool parameters (re-registrations deferred from previous epoch).
         //
         // In Haskell's POOLREAP, futurePoolParams are merged with psStakePools using

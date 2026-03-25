@@ -345,6 +345,28 @@ pub struct GovernanceState {
     pub last_expired: Vec<GovActionId>,
     #[serde(default)]
     pub last_ratify_delayed: bool,
+    /// DRep voting power snapshot captured at each epoch boundary (the "mark" snapshot).
+    ///
+    /// Maps DRep credential hash → total delegated stake (lovelace).  Only active DReps
+    /// (those whose `active` flag is `true`) appear in this map.
+    ///
+    /// Per Haskell `reDRepDistr` in `Conway.Rules.Epoch`, DRep voting power used during
+    /// ratification is measured against the snapshot taken at the *start* of the current
+    /// epoch, not the live state.  This prevents mid-epoch stake movements from
+    /// affecting in-flight governance ratification.
+    ///
+    /// Populated by `process_epoch_transition` at each epoch boundary.
+    /// `serde(default)` ensures backward compatibility with existing ledger snapshots.
+    #[serde(default)]
+    pub drep_distribution_snapshot: HashMap<Hash32, u64>,
+    /// Snapshot of total `AlwaysNoConfidence`-delegated stake at the last epoch boundary.
+    /// Companion to `drep_distribution_snapshot`.
+    #[serde(default)]
+    pub drep_snapshot_no_confidence: u64,
+    /// Snapshot of total `AlwaysAbstain`-delegated stake at the last epoch boundary.
+    /// Companion to `drep_distribution_snapshot`.
+    #[serde(default)]
+    pub drep_snapshot_abstain: u64,
 }
 
 /// Registration state for a DRep

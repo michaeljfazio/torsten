@@ -11,15 +11,88 @@ use tracing::{debug, trace, warn};
 
 impl LedgerState {
     /// Process a governance proposal.
-    /// Validates prev_action_id chain if present.
+    ///
+    /// Validates:
+    /// 1. Bootstrap phase restrictions — only certain action types are allowed at protocol == 9
+    ///    (Haskell: `validBootstrap` in `Conway.GOV` rule).
+    /// 2. prev_action_id chain — must reference an active proposal **or** the last enacted
+    ///    action of the same purpose (Haskell: `prevActionAsExpected`).
+    ///    Validated at submission (not just ratification) per GOV rule.
+    /// 3. pvCanFollow for HardForkInitiation — target version must follow the current version
+    ///    by exactly one major increment (minor=0) or the same major with a higher minor
+    ///    (Haskell: `pvCanFollow`).
     pub(crate) fn process_proposal(
         &mut self,
         tx_hash: &Hash32,
         action_index: u32,
         proposal: &ProposalProcedure,
     ) {
-        // Validate prev_action_id: if specified, the referenced action must exist
-        // as an active proposal or must have been previously enacted
+        // --- Check 1: Bootstrap phase proposal restrictions ---
+        //
+        // During Conway bootstrap (protocol_version.major == 9), only NoConfidence,
+        // UpdateCommittee, NewConstitution, and InfoAction are permitted.
+        // ParameterChange, HardForkInitiation, and TreasuryWithdrawals must be rejected.
+        //
+        // Per Haskell `validBootstrap` in `Conway.GOV` (cardano-ledger >=1.7):
+        //   isBootstrap => actionTag `elem` [NoConfidence, UpdateCommittee, NewConstitution, InfoAction]
+        if self.is_bootstrap_phase() {
+            let disallowed = matches!(
+                &proposal.gov_action,
+                GovAction::ParameterChange { .. }
+                    | GovAction::HardForkInitiation { .. }
+                    | GovAction::TreasuryWithdrawals { .. }
+            );
+            if disallowed {
+                warn!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    action_type = ?std::mem::discriminant(&proposal.gov_action),
+                    "DisallowedProposalDuringBootstrap: rejecting governance proposal (protocol == 9)"
+                );
+                // Drop proposal — do not insert into active proposals
+                return;
+            }
+        }
+
+        // --- Check 2: pvCanFollow for HardForkInitiation ---
+        //
+        // The target protocol version must be reachable from the current version.
+        // Per Haskell `pvCanFollow cur target`:
+        //   (major+1, 0)  — major bump
+        //   (major, minor+1)  — minor bump
+        //
+        // Reject with ProposalCantFollow if neither condition is met.
+        if let GovAction::HardForkInitiation {
+            protocol_version: (tgt_major, tgt_minor),
+            ..
+        } = &proposal.gov_action
+        {
+            let cur_major = self.protocol_params.protocol_version_major;
+            let cur_minor = self.protocol_params.protocol_version_minor;
+            let can_follow = (*tgt_major == cur_major + 1 && *tgt_minor == 0)
+                || (*tgt_major == cur_major && *tgt_minor > cur_minor);
+            if !can_follow {
+                warn!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    cur_version = %format!("{cur_major}.{cur_minor}"),
+                    target_version = %format!("{tgt_major}.{tgt_minor}"),
+                    "ProposalCantFollow: HardForkInitiation target version does not follow current version"
+                );
+                // Drop proposal — do not insert into active proposals
+                return;
+            }
+        }
+
+        // --- Check 3: prev_action_id validation at submission ---
+        //
+        // Per Haskell's GOV rule, `prevActionAsExpected` is checked at proposal submission
+        // (not only at ratification). The proposal's prev_action_id must either:
+        //   (a) match the last enacted action of the same purpose, or
+        //   (b) reference an active proposal already in the proposals map.
+        //
+        // This mirrors `prevActionAsExpected` used in Ratify.hs but applied here at
+        // submission so invalid chains are dropped before they occupy governance state.
         let prev_id = match &proposal.gov_action {
             GovAction::ParameterChange { prev_action_id, .. }
             | GovAction::HardForkInitiation { prev_action_id, .. }
@@ -29,11 +102,21 @@ impl LedgerState {
             GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
         };
         if let Some(prev) = prev_id {
-            if !self.governance.proposals.contains_key(prev) {
-                debug!(
-                    "Governance proposal references unknown prev_action_id {:?} (allowed — may have been enacted)",
-                    prev
+            // Allowed if: (a) it references the last enacted root of this purpose, OR
+            //             (b) it references an active (in-flight) proposal.
+            let valid_root =
+                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.governance);
+            let in_flight = self.governance.proposals.contains_key(prev);
+            if !valid_root && !in_flight {
+                warn!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    prev_action = %prev.transaction_id.to_hex(),
+                    prev_index = prev.action_index,
+                    "InvalidPrevActionId: proposal's prev_action_id is neither an active proposal nor the last enacted action of this purpose"
                 );
+                // Drop proposal — do not insert into active proposals
+                return;
             }
         }
 
@@ -112,13 +195,63 @@ impl LedgerState {
         Arc::make_mut(&mut self.governance).proposal_count += 1;
     }
 
-    /// Process a governance vote
+    /// Process a governance vote.
+    ///
+    /// Validates that a CC voter is an elected (current) committee member.
+    /// Post-bootstrap (protocol >= 10), votes from non-committee credentials are
+    /// rejected with `UnelectedCommitteeVoter` per Haskell's GOV rule.
+    ///
+    /// During bootstrap (protocol == 9) this check is skipped since committee
+    /// membership rules are not yet fully active.
     pub(crate) fn process_vote(
         &mut self,
         voter: &Voter,
         action_id: &GovActionId,
         procedure: &VotingProcedure,
     ) {
+        // --- Check: Unelected CC member vote rejection (protocol >= 10) ---
+        //
+        // Per Haskell `Conway.GOV` rule, a `ConstitutionalCommittee` voter must
+        // correspond to a hot credential that is currently authorized for an elected
+        // (non-expired, non-resigned) cold credential in `committee_hot_keys`.
+        //
+        // Haskell: `isElected govState voter` checks that the hot credential maps
+        // back to a cold credential that is a current committee member.
+        //
+        // We check during vote processing (not just ratification) to match Haskell's
+        // UTXOW / GOV rule which rejects the entire transaction carrying such a vote.
+        // Here we emit a warning and skip the vote record to avoid permanent state
+        // pollution, while still allowing block replay for confirmed blocks.
+        if let Voter::ConstitutionalCommittee(cred) = voter {
+            if !self.is_bootstrap_phase() {
+                let hot_hash = credential_to_hash(cred);
+                // A vote is valid if the hot credential is authorised for any
+                // current (non-expired, non-resigned) cold credential.
+                let is_elected =
+                    self.governance
+                        .committee_hot_keys
+                        .iter()
+                        .any(|(cold_hash, registered_hot)| {
+                            *registered_hot == hot_hash
+                                && !self.governance.committee_resigned.contains_key(cold_hash)
+                                && self
+                                    .governance
+                                    .committee_expiration
+                                    .get(cold_hash)
+                                    .is_some_and(|exp| self.epoch <= *exp)
+                        });
+                if !is_elected {
+                    warn!(
+                        tx = %action_id.transaction_id.to_hex(),
+                        action_index = action_id.action_index,
+                        hot_cred = %hot_hash.to_hex(),
+                        "UnelectedCommitteeVoter: CC vote from unelected hot credential — ignoring"
+                    );
+                    return;
+                }
+            }
+        }
+
         // Update vote tally on the proposal
         if let Some(proposal) = Arc::make_mut(&mut self.governance)
             .proposals
@@ -661,11 +794,41 @@ impl LedgerState {
         utxo + reward
     }
 
-    /// Build a cache of DRep voting power (Hash32 -> delegated stake).
+    /// Build a cache of DRep voting power (Hash32 -> delegated stake) for ratification.
+    ///
+    /// Per Haskell `reDRepDistr` (`Conway.Rules.Epoch`), ratification must use the
+    /// DRep stake distribution captured at the *start* of the current epoch (the
+    /// "mark" snapshot), not the live state.  If a snapshot is available it is used
+    /// directly.  Otherwise the live `vote_delegations` state is scanned as a fallback
+    /// (first epoch, or nodes upgrading from older snapshots without this field).
+    ///
+    /// Returns `(drep_power_cache, always_no_confidence_stake, always_abstain_stake)`.
+    pub(crate) fn build_drep_power_cache(&self) -> (HashMap<Hash32, u64>, u64, u64) {
+        // Use epoch-boundary snapshot when available (preferred — matches Haskell).
+        if !self.governance.drep_distribution_snapshot.is_empty()
+            || self.governance.drep_snapshot_no_confidence > 0
+            || self.governance.drep_snapshot_abstain > 0
+        {
+            return (
+                self.governance.drep_distribution_snapshot.clone(),
+                self.governance.drep_snapshot_no_confidence,
+                self.governance.drep_snapshot_abstain,
+            );
+        }
+
+        // Fallback: compute from live state.  This path runs during the first epoch
+        // (before any snapshot has been captured) or when loading an older ledger
+        // snapshot that predates this field.
+        debug!("DRep power cache: using live vote_delegations (snapshot not yet populated)");
+        self.build_drep_power_cache_live()
+    }
+
+    /// Compute DRep voting power directly from live `vote_delegations`.
+    ///
     /// Iterates vote_delegations once, O(n), instead of per-DRep O(n) lookups.
     /// Only includes active DReps (inactive DReps are excluded from voting power).
     /// Returns (drep_power_cache, always_no_confidence_stake, always_abstain_stake).
-    pub(crate) fn build_drep_power_cache(&self) -> (HashMap<Hash32, u64>, u64, u64) {
+    pub(crate) fn build_drep_power_cache_live(&self) -> (HashMap<Hash32, u64>, u64, u64) {
         let mut cache: HashMap<Hash32, u64> = HashMap::new();
         let mut no_confidence_stake = 0u64;
         let mut abstain_stake = 0u64;
@@ -695,6 +858,26 @@ impl LedgerState {
         // Per Haskell `reDRepDistr`: only DReps with actual delegated stake appear.
         // DReps registered but with no delegators have 0 voting power.
         (cache, no_confidence_stake, abstain_stake)
+    }
+
+    /// Capture the DRep distribution snapshot at an epoch boundary.
+    ///
+    /// Called during `process_epoch_transition` (after the mark stake snapshot is
+    /// taken, before ratification runs) so that all ratification within the new
+    /// epoch uses consistent stake figures, matching Haskell's `snapDRepDistr`
+    /// step in `Conway.Rules.Epoch`.
+    pub(crate) fn capture_drep_distribution_snapshot(&mut self) {
+        let (cache, no_confidence, abstain) = self.build_drep_power_cache_live();
+        let gov = Arc::make_mut(&mut self.governance);
+        gov.drep_distribution_snapshot = cache;
+        gov.drep_snapshot_no_confidence = no_confidence;
+        gov.drep_snapshot_abstain = abstain;
+        debug!(
+            "DRep distribution snapshot captured: {} DReps, no_confidence={}, abstain={}",
+            gov.drep_distribution_snapshot.len(),
+            gov.drep_snapshot_no_confidence,
+            gov.drep_snapshot_abstain,
+        );
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
@@ -1302,6 +1485,35 @@ pub(crate) fn prev_action_as_expected(action: &GovAction, governance: &Governanc
         // TreasuryWithdrawals and InfoAction have no chain requirement
         GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => true,
     }
+}
+
+/// Check whether a specific `prev_id` matches the last enacted action root for the
+/// given action's governance purpose.
+///
+/// Used at proposal *submission* time (GOV rule) to validate that `prev_action_id`
+/// is coherent before inserting the proposal into the active set.
+///
+/// Unlike `prev_action_as_expected` (which checks `action.prev_action_id == enacted_root`),
+/// this takes the candidate `prev_id` directly so callers can test it without having
+/// to reconstruct the action's own `prev_action_id`.
+fn prev_action_matches_enacted_root(
+    action: &GovAction,
+    prev_id: &GovActionId,
+    governance: &GovernanceState,
+) -> bool {
+    let enacted = match action {
+        GovAction::ParameterChange { .. } => governance.enacted_pparam_update.as_ref(),
+        GovAction::HardForkInitiation { .. } => governance.enacted_hard_fork.as_ref(),
+        GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
+            governance.enacted_committee.as_ref()
+        }
+        GovAction::NewConstitution { .. } => governance.enacted_constitution.as_ref(),
+        GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {
+            // No chain requirement; the caller should not pass a prev_id for these types.
+            return false;
+        }
+    };
+    enacted.is_some_and(|e| e == prev_id)
 }
 
 /// Returns the governance action priority for ratification ordering.
