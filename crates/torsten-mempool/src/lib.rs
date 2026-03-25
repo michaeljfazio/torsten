@@ -369,13 +369,8 @@ impl Mempool {
         let count = self.tx_count.fetch_add(1, Ordering::Relaxed);
         if count >= cfg_max_txs {
             self.tx_count.fetch_sub(1, Ordering::Relaxed);
-            warn!(
-                max = cfg_max_txs,
-                "Mempool: full, rejecting tx"
-            );
-            return Err(MempoolError::Full {
-                max: cfg_max_txs,
-            });
+            warn!(max = cfg_max_txs, "Mempool: full, rejecting tx");
+            return Err(MempoolError::Full { max: cfg_max_txs });
         }
 
         let total = *self.total_bytes.read();
