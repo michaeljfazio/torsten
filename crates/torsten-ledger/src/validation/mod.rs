@@ -184,6 +184,19 @@ pub enum ValidationError {
     /// "ccHotKeyOK" predicate from the Haskell implementation.
     #[error("CommitteeHotAuth cold credential is not a current CC member: {cold_credential_hash}")]
     UnelectedCommitteeMember { cold_credential_hash: String },
+    /// Conway LEDGERS rule: the `CommitteeHotAuth` certificate's cold credential
+    /// belongs to a committee member that has previously resigned via
+    /// `CommitteeColdResign`.  Resigned members may not re-authorise hot keys
+    /// until they are re-elected (the Haskell `CERT` rule predicate
+    /// "membersResigned ∩ {coldKey} = ∅").
+    ///
+    /// Reference: Haskell `ConwayCommitteeHasPreviouslyResigned` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Cert`.
+    #[error(
+        "CommitteeHotAuth rejected: cold credential {cold_credential_hash} has previously \
+         resigned (ConwayCommitteeHasPreviouslyResigned)"
+    )]
+    CommitteeHasPreviouslyResigned { cold_credential_hash: String },
     /// Alonzo/Conway Phase-1 rule: a script-locked spending input carries a
     /// `DatumHash` in its UTxO but no corresponding datum bytes were supplied
     /// in `tx.witness_set.plutus_data`.
@@ -418,6 +431,8 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -436,6 +451,16 @@ pub fn validate_transaction(
 /// declare a VRF key hash already held by another pool are rejected with
 /// [`ValidationError::VrfKeyHashAlreadyRegistered`] (Conway+ only).
 /// When `None`, the VRF key deduplication check is skipped.
+///
+/// When `committee_members` is `Some`, `CommitteeHotAuth` certificates for cold
+/// credentials NOT present in the committee are rejected with
+/// [`ValidationError::UnelectedCommitteeMember`] (Conway+ only).
+/// When `None`, the committee membership check is skipped.
+///
+/// When `committee_resigned` is `Some`, `CommitteeHotAuth` certificates for cold
+/// credentials that have previously resigned are rejected with
+/// [`ValidationError::CommitteeHasPreviouslyResigned`] (Conway+ only).
+/// When `None`, the resigned-member check is skipped.
 ///
 /// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
 /// including the standard on-chain `&UtxoSet` and the composite
@@ -461,6 +486,8 @@ pub fn validate_transaction_with_pools(
     current_epoch: Option<u64>,
     registered_dreps: Option<&HashSet<Hash32>>,
     registered_vrf_keys: Option<&HashMap<Hash32, Hash28>>,
+    committee_members: Option<&HashSet<Hash32>>,
+    committee_resigned: Option<&HashSet<Hash32>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -677,6 +704,55 @@ pub fn validate_transaction_with_pools(
                                 existing_pool_id: existing_pool.to_hex(),
                             });
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // CommitteeHotAuth: elected-member and non-resigned checks (Conway+)
+    //
+    // Haskell `CERT` rule predicates in
+    // `Cardano.Ledger.Conway.Rules.Cert`:
+    //
+    //   1. "failOnNonEmpty unelected": every cold credential in a
+    //      CommitteeHotAuth certificate must appear in the current
+    //      committee (committee_expiration / committee_members map).
+    //      → `ValidationError::UnelectedCommitteeMember`
+    //
+    //   2. "membersResigned ∩ {coldKey} = ∅": a cold credential that has
+    //      previously resigned via CommitteeColdResign may not re-authorize
+    //      a hot key without being re-elected.
+    //      → `ValidationError::CommitteeHasPreviouslyResigned`
+    //
+    // Both checks are only enforced in Conway (protocol >= 9) and only
+    // when the relevant state is provided (block application mode).
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for cert in &tx.body.certificates {
+            if let torsten_primitives::transaction::Certificate::CommitteeHotAuth {
+                cold_credential,
+                ..
+            } = cert
+            {
+                let cold_key = cold_credential.to_hash().to_hash32_padded();
+
+                // Check 1: cold credential must be a current CC member.
+                if let Some(members) = committee_members {
+                    if !members.contains(&cold_key) {
+                        errors.push(ValidationError::UnelectedCommitteeMember {
+                            cold_credential_hash: cold_key.to_hex(),
+                        });
+                    }
+                }
+
+                // Check 2: cold credential must not have previously resigned.
+                if let Some(resigned) = committee_resigned {
+                    if resigned.contains(&cold_key) {
+                        errors.push(ValidationError::CommitteeHasPreviouslyResigned {
+                            cold_credential_hash: cold_key.to_hex(),
+                        });
                     }
                 }
             }

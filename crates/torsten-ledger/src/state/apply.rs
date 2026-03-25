@@ -606,6 +606,16 @@ impl LedgerState {
                         .values()
                         .map(|reg| (reg.vrf_keyhash, reg.pool_id))
                         .collect();
+                    // Build the set of current CC cold credential hashes for the
+                    // CommitteeHotAuth "unelected member" check (Conway+ only).
+                    let committee_member_keys: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self.governance.committee_expiration.keys().copied().collect();
+                    // Build the set of resigned CC cold credential hashes for the
+                    // "previously resigned" check (Conway+ only).
+                    let committee_resigned_keys: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self.governance.committee_resigned.keys().copied().collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
@@ -619,6 +629,8 @@ impl LedgerState {
                         Some(self.epoch.0),
                         Some(&registered_drep_ids),
                         Some(&registered_vrf_keys),
+                        Some(&committee_member_keys),
+                        Some(&committee_resigned_keys),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

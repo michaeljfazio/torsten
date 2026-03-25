@@ -2229,6 +2229,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(
             result.is_ok(),
@@ -2279,6 +2281,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(
             result.is_ok(),
@@ -2326,6 +2330,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -8078,6 +8084,8 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8139,6 +8147,8 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8188,6 +8198,8 @@ mod tests {
             None, // current_epoch
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8297,6 +8309,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8342,6 +8356,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8380,6 +8396,8 @@ mod tests {
             None, // reward_accounts = None → balance check skipped
             None, None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8427,6 +8445,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8479,6 +8499,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8532,6 +8554,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8584,6 +8608,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8666,6 +8692,8 @@ mod tests {
             None, // current_epoch
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8715,6 +8743,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8750,6 +8780,8 @@ mod tests {
             None, // reward_accounts = None
             None, None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8798,6 +8830,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8879,6 +8913,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -8929,6 +8965,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8964,6 +9002,8 @@ mod tests {
             None, // registered_pools = None → check skipped
             None, None, None, None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9052,6 +9092,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9098,6 +9140,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9125,6 +9169,8 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None,
             None, // registered_dreps = None → check skipped
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9195,6 +9241,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9272,6 +9320,8 @@ mod tests {
             )));
 
         // registered_vrf_keys: shared_vrf is already held by pool_a
+        None, // committee_members
+        None, // committee_resigned
         let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
             std::collections::HashMap::new();
         registered_vrf_keys.insert(shared_vrf, pool_a);
@@ -9292,6 +9342,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9366,6 +9418,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9433,6 +9487,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9499,6 +9555,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys = None → check skipped
+            None, // committee_members
+            None, // committee_resigned
         );
 
         // The only expected error is VRF dedup — all other checks should pass.
@@ -9570,6 +9628,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9639,6 +9699,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9707,6 +9769,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9778,6 +9842,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         assert!(
@@ -9840,6 +9906,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
+            None, // committee_members
+            None, // committee_resigned
         );
 
         let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9849,6 +9917,285 @@ mod tests {
             !has_net_err,
             "Pool reward account network check must be skipped when tx.body.network_id is None; \
              got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // CommitteeHotAuth: unelected member and previously-resigned member checks
+    //
+    // Conway LEDGER / CERT rule: CommitteeHotAuth certificates are only valid
+    // when:
+    //   1. The cold credential is currently elected (present in committee_members).
+    //   2. The cold credential has not previously resigned.
+    //
+    // These checks are only enforced in Conway (protocol_version_major >= 9) when
+    // the committee state is provided (block validation mode).
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a UTxO set with a single entry and return the input reference.
+    fn make_hot_auth_utxo(utxo_set: &mut UtxoSet) -> TransactionInput {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        input
+    }
+
+    /// Build a transaction with a single CommitteeHotAuth certificate.
+    fn make_hot_auth_tx(
+        utxo_set: &mut UtxoSet,
+        cold_bytes: [u8; 28],
+        hot_bytes: [u8; 28],
+    ) -> Transaction {
+        use torsten_primitives::credentials::Credential;
+        let input = make_hot_auth_utxo(utxo_set);
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::CommitteeHotAuth {
+            cold_credential: Credential::VerificationKey(Hash28::from_bytes(cold_bytes)),
+            hot_credential: Credential::VerificationKey(Hash28::from_bytes(hot_bytes)),
+        });
+        tx
+    }
+
+    #[test]
+    fn test_committee_hot_auth_unknown_member_rejected() {
+        // CommitteeHotAuth with a cold credential NOT in committee_members must be
+        // rejected with UnelectedCommitteeMember (Conway+).
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC0u8; 28];
+        let hot_bytes = [0xC1u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        // Empty committee_members set — cold credential is not a member.
+        let committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,  // slot_config
+            None,  // registered_pools
+            None,  // current_treasury
+            None,  // reward_accounts
+            None,  // current_epoch
+            None,  // registered_dreps
+            None,  // registered_vrf_keys
+            Some(&committee_members),
+            None,  // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected UnelectedCommitteeMember for unknown CC cold credential; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnelectedCommitteeMember { .. })),
+            "Expected UnelectedCommitteeMember error; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_known_member_accepted() {
+        // CommitteeHotAuth with a cold credential present in committee_members must
+        // NOT produce UnelectedCommitteeMember.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC2u8; 28];
+        let hot_bytes = [0xC3u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        // committee_members contains the cold credential.
+        let cold_hash = Hash28::from_bytes(cold_bytes).to_hash32_padded();
+        let mut committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_members.insert(cold_hash);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&committee_members),
+            None, // committee_resigned
+        );
+
+        let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::UnelectedCommitteeMember { .. })
+        }));
+        assert!(
+            !has_unelected,
+            "Known CC member must not trigger UnelectedCommitteeMember; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_resigned_member_rejected() {
+        // CommitteeHotAuth for a cold credential present in committee_resigned must
+        // be rejected with CommitteeHasPreviouslyResigned.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC4u8; 28];
+        let hot_bytes = [0xC5u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let cold_hash = Hash28::from_bytes(cold_bytes).to_hash32_padded();
+        // committee_members contains the cold credential (passes the unelected check).
+        let mut committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_members.insert(cold_hash);
+        // committee_resigned also contains it — this is the governing check.
+        let mut committee_resigned: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_resigned.insert(cold_hash);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&committee_members),
+            Some(&committee_resigned),
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected CommitteeHasPreviouslyResigned for resigned CC member; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CommitteeHasPreviouslyResigned { .. })),
+            "Expected CommitteeHasPreviouslyResigned error; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_check_skipped_when_no_state() {
+        // When committee_members and committee_resigned are both None (e.g. mempool
+        // structural validation without ledger context), the CC checks must be skipped.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC6u8; 28];
+        let hot_bytes = [0xC7u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // committee_members = None → check skipped
+            None, // committee_resigned = None → check skipped
+        );
+
+        let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::UnelectedCommitteeMember { .. }
+                    | ValidationError::CommitteeHasPreviouslyResigned { .. }
+            )
+        }));
+        assert!(
+            !has_committee_err,
+            "CC checks must be skipped when committee state is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_check_skipped_pre_conway() {
+        // In pre-Conway (protocol < 9), CommitteeHotAuth certificates are era-gated.
+        // Even if committee_members is provided and the cold credential is absent,
+        // the UnelectedCommitteeMember check must not fire (the era-gating check
+        // rejects these certs first).
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC8u8; 28];
+        let hot_bytes = [0xC9u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        // Pre-Conway (Babbage).
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8;
+
+        let committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new(); // empty — would trigger UnelectedCommitteeMember in Conway
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&committee_members),
+            None,
+        );
+
+        // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
+        let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::UnelectedCommitteeMember { .. })
+        }));
+        assert!(
+            !has_unelected,
+            "UnelectedCommitteeMember must not fire in pre-Conway era; got: {result:?}"
         );
     }
 }
