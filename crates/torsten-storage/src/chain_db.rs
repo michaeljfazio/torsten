@@ -545,6 +545,12 @@ impl ChainDB {
     ///
     /// Blocks with block_no <= (tip_block_no - k) are considered finalized.
     /// Call this after each batch of blocks is processed.
+    ///
+    /// Unlike the old block_no scan, this walks the canonical `selected_chain`
+    /// fragment oldest-to-newest — exactly as Haskell cardano-node walks its
+    /// `AnchoredFragment`.  Fork blocks at the same block_no are never touched:
+    /// only the block on the selected chain is flushed, and only that block is
+    /// removed from the VolatileDB (via hash, not by slot).
     pub fn flush_to_immutable(&mut self) -> Result<u64, ChainDBError> {
         let vol_tip = match self.volatile.get_tip() {
             Some(t) => t,
@@ -557,18 +563,26 @@ impl ChainDB {
         }
 
         let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
-
-        // Collect blocks to finalize (in order by block_no).
-        // Start from last_flushed_block_no + 1 to avoid re-scanning blocks
-        // that were already persisted in a prior flush call.
         let start_block_no = self.last_flushed_block_no + 1;
+
+        // Walk the canonical selected-chain fragment (oldest → newest) and
+        // collect only those blocks whose block_no falls in [start, finalize].
+        // `selected_chain_entries` returns (hash, slot, block_no, prev_hash).
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new(); // (slot, hash, block_no, cbor)
-        for block_no in start_block_no..=finalize_up_to_block_no {
-            if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
-                // Skip if already in immutable
-                if self.immutable.has_block(&hash) {
-                    continue;
-                }
+        for (hash, slot, block_no, _prev_hash) in self.volatile.selected_chain_entries() {
+            if block_no < start_block_no {
+                // Already flushed in a prior call — skip cheaply.
+                continue;
+            }
+            if block_no > finalize_up_to_block_no {
+                // Within the rollback window — stop here; the chain is ordered.
+                break;
+            }
+            // Skip blocks already present in ImmutableDB (e.g. Mithril import).
+            if self.immutable.has_block(&hash) {
+                continue;
+            }
+            if let Some(cbor) = self.volatile.get_block_cbor(&hash) {
                 to_finalize.push((slot, hash, block_no, cbor.to_vec()));
             }
         }
@@ -579,26 +593,28 @@ impl ChainDB {
 
         let count = to_finalize.len() as u64;
 
-        // Append to ImmutableDB
+        // Append canonical-chain blocks to ImmutableDB in oldest-first order.
         for (slot, hash, block_no, cbor) in &to_finalize {
             self.immutable.append_block(*slot, *block_no, hash, cbor)?;
         }
 
-        // Update immutable tip and last flushed tracking
+        // Update immutable tip and last-flushed tracking.
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
             self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
             self.last_flushed_block_no = *block_no;
         }
 
-        // Remove finalized blocks from VolatileDB
-        let max_slot = to_finalize.last().map(|(s, _, _, _)| *s).unwrap_or(0);
-        self.volatile.remove_blocks_up_to_slot(max_slot);
+        // Remove only the flushed canonical blocks from VolatileDB.
+        // We do NOT remove by slot because fork blocks at the same slots must
+        // survive until they are naturally garbage-collected.
+        let flushed_hashes: Vec<Hash32> = to_finalize.iter().map(|(_, h, _, _)| *h).collect();
+        self.volatile.remove_blocks_by_hashes(&flushed_hashes);
 
         debug!(
             flushed = count,
             immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
             volatile_remaining = self.volatile.len(),
-            "ChainDB: flushed blocks to immutable"
+            "ChainDB: flushed canonical-chain blocks to immutable"
         );
 
         Ok(count)
@@ -627,21 +643,31 @@ impl ChainDB {
         }
 
         let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
-
-        // Collect finalizable blocks within the LoE slot ceiling.
-        // Start from last_flushed_block_no + 1 to avoid re-scanning already
-        // persisted blocks.
         let start_block_no = self.last_flushed_block_no + 1;
+
+        // Walk the canonical chain fragment (oldest → newest), applying both
+        // the k-depth cutoff and the LoE slot ceiling.  The LoE ceiling is an
+        // *additional* constraint: even if a block is deep enough to finalize
+        // by block_no, we skip it if its slot exceeds `loe_slot`.
+        //
+        // Unlike the old block_no scan this never touches fork blocks.
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
-        for block_no in start_block_no..=finalize_up_to_block_no {
-            if let Some((slot, hash, cbor)) = self.volatile.get_block_by_number(block_no) {
-                // LoE: skip blocks whose slot exceeds the limit
-                if slot > loe_slot {
-                    continue;
-                }
-                if self.immutable.has_block(&hash) {
-                    continue;
-                }
+        for (hash, slot, block_no, _prev_hash) in self.volatile.selected_chain_entries() {
+            if block_no < start_block_no {
+                continue;
+            }
+            if block_no > finalize_up_to_block_no {
+                // Past the rollback window; further blocks won't qualify.
+                break;
+            }
+            // LoE: hold back blocks whose slot exceeds the common-prefix ceiling.
+            if slot > loe_slot {
+                continue;
+            }
+            if self.immutable.has_block(&hash) {
+                continue;
+            }
+            if let Some(cbor) = self.volatile.get_block_cbor(&hash) {
                 to_finalize.push((slot, hash, block_no, cbor.to_vec()));
             }
         }
@@ -656,21 +682,22 @@ impl ChainDB {
             self.immutable.append_block(*slot, *block_no, hash, cbor)?;
         }
 
-        // Update immutable tip and last flushed tracking
+        // Update immutable tip and last-flushed tracking.
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
             self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
             self.last_flushed_block_no = *block_no;
         }
 
-        let max_slot = to_finalize.last().map(|(s, _, _, _)| *s).unwrap_or(0);
-        self.volatile.remove_blocks_up_to_slot(max_slot);
+        // Remove only the flushed canonical blocks; leave fork blocks intact.
+        let flushed_hashes: Vec<Hash32> = to_finalize.iter().map(|(_, h, _, _)| *h).collect();
+        self.volatile.remove_blocks_by_hashes(&flushed_hashes);
 
         debug!(
             flushed = count,
             loe_slot,
             immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
             volatile_remaining = self.volatile.len(),
-            "ChainDB: flushed blocks to immutable (LoE-gated)"
+            "ChainDB: flushed canonical-chain blocks to immutable (LoE-gated)"
         );
 
         Ok(count)
@@ -1695,5 +1722,97 @@ mod tests {
         assert_eq!(points[1], Point::Specific(SlotNo(3), make_hash(3)));
         assert_eq!(points[2], Point::Specific(SlotNo(2), make_hash(2)));
         assert_eq!(points[3], Point::Specific(SlotNo(1), make_hash(1)));
+    }
+
+    /// Verify that `flush_to_immutable` only flushes the canonical-chain block
+    /// when two competing blocks exist at the same block_no (fork scenario).
+    ///
+    /// Scenario
+    /// --------
+    /// Build a linear canonical chain of k+3 blocks.  At block_no = k+1
+    /// (which is outside the rollback window and will be finalized) also add
+    /// a fork block with the same block_no but a different hash and a
+    /// different parent.  After flushing:
+    ///   - Only the canonical block at block_no k+1 must appear in ImmutableDB.
+    ///   - The fork block must still be present in VolatileDB (not silently
+    ///     removed because it shared the same slot).
+    #[test]
+    fn test_flush_to_immutable_canonical_chain_only_ignores_fork_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Helper: deterministic hash from an integer seed.
+        let h = |seed: u64| -> Hash32 {
+            let mut bytes = [0u8; 32];
+            bytes[0..8].copy_from_slice(&seed.to_be_bytes());
+            Hash32::from_bytes(bytes)
+        };
+
+        let k = SECURITY_PARAM_K as u64;
+
+        // Build canonical chain: blocks 1 .. k+3
+        // Each block i has slot = i and is linked to block i-1.
+        for i in 1..=(k + 3) {
+            db.add_block(
+                h(i),
+                SlotNo(i),
+                BlockNo(i),
+                h(i - 1),
+                format!("canonical_{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Add a fork block at block_no = 1 (deepest finalizable position).
+        // It has a different hash (seed = 10_000) and a different parent
+        // (origin), so it is NOT on the selected chain.
+        let fork_hash = h(10_000);
+        let fork_block_no = 1u64;
+        let fork_slot = 1u64; // same slot as canonical block 1
+        db.add_block(
+            fork_hash,
+            SlotNo(fork_slot),
+            BlockNo(fork_block_no),
+            h(99_999), // unknown parent — off the selected chain
+            b"fork_block".to_vec(),
+        )
+        .unwrap();
+
+        // The volatile store now contains k+3 canonical blocks plus 1 fork.
+        assert_eq!(db.volatile.len(), k as usize + 4);
+
+        // Flush: blocks 1..3 are deep enough (tip block_no = k+3, k+3-k = 3).
+        let flushed = db.flush_to_immutable().unwrap();
+        assert_eq!(flushed, 3, "expected exactly 3 canonical blocks flushed");
+
+        // Canonical blocks 1-3 must be in ImmutableDB.
+        for i in 1..=3u64 {
+            assert!(
+                db.immutable.has_block(&h(i)),
+                "canonical block {i} must be in ImmutableDB"
+            );
+        }
+
+        // The fork block at the same slot as block 1 must still be in
+        // VolatileDB — it was NOT on the canonical chain so it must not have
+        // been silently removed by the flush.
+        assert!(
+            db.volatile.has_block(&fork_hash),
+            "fork block must survive in VolatileDB after canonical flush"
+        );
+
+        // The canonical block 1 must have been removed from VolatileDB
+        // (it was flushed to ImmutableDB).
+        assert!(
+            !db.volatile.has_block(&h(1)),
+            "canonical block 1 must be removed from VolatileDB after flush"
+        );
+
+        // Volatile should contain exactly k canonical blocks (4..k+3) + 1 fork.
+        assert_eq!(
+            db.volatile.len(),
+            k as usize + 1,
+            "volatile should hold k canonical blocks plus the fork block"
+        );
     }
 }
