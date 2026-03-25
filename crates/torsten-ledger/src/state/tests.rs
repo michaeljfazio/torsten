@@ -1789,7 +1789,18 @@ fn test_treasury_donation() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    assert_eq!(state.treasury, Lovelace(1_000_000));
+    // Per Haskell spec, donations are buffered in pending_donations during block
+    // processing and flushed to treasury only at the epoch boundary (NEWEPOCH).
+    assert_eq!(
+        state.pending_donations,
+        Lovelace(1_000_000),
+        "Donation should sit in pending_donations mid-epoch"
+    );
+    assert_eq!(
+        state.treasury,
+        Lovelace(0),
+        "Treasury should not yet reflect the donation mid-epoch"
+    );
 }
 
 #[test]
@@ -1895,6 +1906,8 @@ fn test_parameter_change_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: ParameterChange requires actual DRep votes (not auto-pass)
+    state.protocol_params.protocol_version_major = 10;
     // Set CC threshold to 0 so CC auto-approves (we're testing DRep voting here)
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
@@ -1973,6 +1986,8 @@ fn test_parameter_change_not_ratified_below_threshold() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: ParameterChange requires actual DRep votes
+    state.protocol_params.protocol_version_major = 10;
 
     // Register 10 DReps with equal stake-weighted voting power
     for i in 0..10 {
@@ -2057,6 +2072,8 @@ fn test_treasury_withdrawal_ratification() {
     state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
     state.needs_stake_rebuild = false;
     state.treasury = Lovelace(10_000_000_000);
+    // Post-bootstrap: TreasuryWithdrawals requires actual DRep votes (and is allowed)
+    state.protocol_params.protocol_version_major = 10;
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
@@ -2188,6 +2205,10 @@ fn test_hard_fork_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: HardForkInitiation is allowed and requires actual DRep + SPO votes.
+    // (HardForkInitiation is rejected during bootstrap phase, protocol == 9)
+    state.protocol_params.protocol_version_major = 10;
+    state.protocol_params.protocol_version_minor = 0;
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
@@ -2203,7 +2224,7 @@ fn test_hard_fork_ratification() {
         return_addr: vec![0u8; 29],
         gov_action: GovAction::HardForkInitiation {
             prev_action_id: None,
-            protocol_version: (10, 0),
+            protocol_version: (11, 0),
         },
         anchor: Anchor {
             url: "https://example.com".to_string(),
@@ -2246,9 +2267,9 @@ fn test_hard_fork_ratification() {
         );
     }
 
-    assert_eq!(state.protocol_params.protocol_version_major, 9);
-    state.process_epoch_transition(EpochNo(1));
     assert_eq!(state.protocol_params.protocol_version_major, 10);
+    state.process_epoch_transition(EpochNo(1));
+    assert_eq!(state.protocol_params.protocol_version_major, 11);
     assert_eq!(state.protocol_params.protocol_version_minor, 0);
 }
 
@@ -3076,6 +3097,8 @@ fn test_pool_registration_stores_metadata() {
 fn test_guardrail_script_policy_validation() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
+    // Post-bootstrap: ParameterChange is allowed and guardrail policy is enforced
+    state.protocol_params.protocol_version_major = 10;
 
     // Set up a constitution with a guardrail script hash
     let guardrail_hash = Hash28::from_bytes([42u8; 28]);
@@ -7304,25 +7327,27 @@ fn governance_test_state() -> LedgerState {
 
 #[test]
 fn test_parameter_change_ratification_bootstrap() {
-    // During bootstrap (protocol version 9), DRep thresholds are 0 (auto-pass).
-    // CC approval is still required. SPO threshold applies for security params.
-    let mut state = governance_test_state();
+    // During Conway bootstrap (protocol version 9), ParameterChange/HardForkInitiation/
+    // TreasuryWithdrawals proposals are REJECTED at submission time (matching Haskell
+    // `validBootstrap`).  Only NoConfidence, UpdateCommittee, NewConstitution, and InfoAction
+    // are permitted.
+    //
+    // This test verifies that:
+    //   1. ParameterChange is rejected during bootstrap (proposal never added).
+    //   2. UpdateCommittee IS permitted in bootstrap and ratifies with DRep auto-pass
+    //      (DRep thresholds are 0 during bootstrap, per Haskell `hardforkConwayBootstrapPhase`).
+    let mut state = governance_test_state(); // protocol_version_major = 9 (bootstrap)
 
-    // Submit ParameterChange to update maxTxExUnits
-    let tx_hash = Hash32::from_bytes([42u8; 32]);
+    // --- Part 1: ParameterChange is rejected during bootstrap ---
+    let rejected_hash = Hash32::from_bytes([42u8; 32]);
     let ppu = ProtocolParamUpdate {
         max_tx_ex_units: Some(ExUnits {
             mem: 16_500_000,
             steps: 10_000_000_000,
         }),
-        max_block_ex_units: Some(ExUnits {
-            mem: 72_000_000,
-            steps: 40_000_000_000,
-        }),
         ..Default::default()
     };
-
-    let proposal = ProposalProcedure {
+    let rejected_proposal = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
         return_addr: vec![0u8; 29],
         gov_action: GovAction::ParameterChange {
@@ -7335,32 +7360,50 @@ fn test_parameter_change_ratification_bootstrap() {
             data_hash: Hash32::ZERO,
         },
     };
+    state.process_proposal(&rejected_hash, 0, &rejected_proposal);
+    assert!(
+        state.governance.proposals.is_empty(),
+        "ParameterChange must be rejected during bootstrap (protocol == 9)"
+    );
+
+    // --- Part 2: UpdateCommittee is allowed and DRep auto-passes ---
+    let tx_hash = Hash32::from_bytes([43u8; 32]);
+    let new_cc_cred = Credential::VerificationKey(Hash28::from_bytes([99u8; 28]));
+    let mut members_to_add = std::collections::BTreeMap::new();
+    members_to_add.insert(new_cc_cred.clone(), 1000u64); // expires epoch 1000
+
+    let proposal = ProposalProcedure {
+        deposit: Lovelace(100_000_000_000),
+        return_addr: vec![0u8; 29],
+        gov_action: GovAction::UpdateCommittee {
+            prev_action_id: None,
+            members_to_remove: vec![],
+            members_to_add,
+            threshold: Rational {
+                numerator: 2,
+                denominator: 3,
+            },
+        },
+        anchor: Anchor {
+            url: "https://example.com".to_string(),
+            data_hash: Hash32::ZERO,
+        },
+    };
 
     state.process_proposal(&tx_hash, 0, &proposal);
+    assert_eq!(
+        state.governance.proposals.len(),
+        1,
+        "UpdateCommittee must be accepted during bootstrap"
+    );
     let action_id = GovActionId {
         transaction_id: tx_hash,
         action_index: 0,
     };
 
-    // CC member votes Yes (using hot credential)
-    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
-    let cc_voter = Voter::ConstitutionalCommittee(hot_cred);
-    state.process_vote(
-        &cc_voter,
-        &action_id,
-        &VotingProcedure {
-            vote: Vote::Yes,
-            anchor: None,
-        },
-    );
-
-    // maxTxExUnits changes require Network group + Security SPO
-    // In bootstrap, DRep thresholds are 0 (auto-pass)
-    // max_block_ex_units is (Network, Security) -> needs SPO pvt_pp_security
-    // We need 51% of SPO stake to vote Yes
-    // Total SPO stake: 5 pools * 2T = 10T
-    // Need > 5.1T in Yes votes
-    // 3 SPOs voting Yes = 6T (60% > 51%)
+    // In bootstrap: DRep thresholds are 0 (auto-pass), no DRep votes needed.
+    // UpdateCommittee requires only SPO votes (pvt_committee_normal = 51%).
+    // Total SPO stake: 5 pools * 2T = 10T; 3 SPOs = 6T (60% > 51%).
     for i in 0..3 {
         let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
         let spo_voter = Voter::StakePool(pool_hash28.to_hash32_padded());
@@ -7377,24 +7420,23 @@ fn test_parameter_change_ratification_bootstrap() {
     // Ratify at epoch boundary
     state.process_epoch_transition(EpochNo(1));
 
-    // Verify protocol parameters were updated
-    assert_eq!(
-        state.protocol_params.max_tx_ex_units.mem, 16_500_000,
-        "maxTxExUnits.mem should be updated by governance"
+    // Verify the new CC member was added
+    let new_cc_key = credential_to_hash(&new_cc_cred);
+    assert!(
+        state
+            .governance
+            .committee_expiration
+            .contains_key(&new_cc_key),
+        "New CC member should be added after UpdateCommittee ratification"
     );
-    assert_eq!(
-        state.protocol_params.max_block_ex_units.mem, 72_000_000,
-        "maxBlockExUnits.mem should be updated by governance"
-    );
-    // Proposal should be removed (enacted)
     assert!(
         state.governance.proposals.is_empty(),
         "Enacted proposal should be removed"
     );
-    // Enacted root should be set
+    // Enacted committee root should be set
     assert!(
-        state.governance.enacted_pparam_update.is_some(),
-        "enacted_pparam_update should be set after ratification"
+        state.governance.enacted_committee.is_some(),
+        "enacted_committee should be set after ratification"
     );
 }
 
@@ -7478,6 +7520,8 @@ fn test_update_committee_no_cc_required() {
 fn test_parameter_change_fails_without_cc() {
     // ParameterChange requires CC approval. If no CC can vote, it fails.
     let mut state = governance_test_state();
+    // Post-bootstrap: ParameterChange is allowed but requires CC + DRep votes
+    state.protocol_params.protocol_version_major = 10;
 
     // Remove all CC members (no hot keys)
     Arc::make_mut(&mut state.governance)
@@ -7526,7 +7570,10 @@ fn test_parameter_change_fails_without_cc() {
 #[test]
 fn test_chained_parameter_changes() {
     // Two successive ParameterChange proposals with prev_action_id chain
+    // Use protocol version 10 (post-bootstrap) since ParameterChange is
+    // disallowed during bootstrap phase (protocol == 9)
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
 
     // First ParameterChange: update drep_activity to 25
     let tx1 = Hash32::from_bytes([50u8; 32]);
@@ -7566,6 +7613,22 @@ fn test_chained_parameter_changes() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes on first proposal (post-bootstrap requires 67% DRep threshold for
+    // Gov-group parameters; drep_activity is a Gov-group parameter)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id1,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     // Ratify first proposal
     state.process_epoch_transition(EpochNo(1));
@@ -7608,6 +7671,21 @@ fn test_chained_parameter_changes() {
         },
     );
 
+    // 7/10 DReps vote Yes on second proposal (same 67% Gov-group threshold applies)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id2,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
+
     // Ratify second proposal
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(
@@ -7620,6 +7698,8 @@ fn test_chained_parameter_changes() {
 fn test_cost_model_update_via_governance() {
     // ParameterChange can update PlutusV1/V2/V3 cost models
     let mut state = governance_test_state();
+    // Post-bootstrap: ParameterChange is allowed; DRep votes required (cost models are Technical group)
+    state.protocol_params.protocol_version_major = 10;
 
     let tx_hash = Hash32::from_bytes([55u8; 32]);
     let v2_costs = vec![1i64; 175]; // PlutusV2 has 175 cost model params
@@ -7663,6 +7743,21 @@ fn test_cost_model_update_via_governance() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes (Technical-group threshold = 67%; 70% > 67%)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     state.process_epoch_transition(EpochNo(1));
 
@@ -7753,7 +7848,10 @@ fn test_pre_conway_ppup_version_upgrade() {
 #[test]
 fn test_hard_fork_initiation_ratification() {
     // HardForkInitiation requires DRep + SPO + CC
+    // Post-bootstrap: HardForkInitiation is allowed (blocked at protocol == 9)
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
+    state.protocol_params.protocol_version_minor = 0;
 
     let tx_hash = Hash32::from_bytes([60u8; 32]);
     let proposal = ProposalProcedure {
@@ -7761,7 +7859,7 @@ fn test_hard_fork_initiation_ratification() {
         return_addr: vec![0u8; 29],
         gov_action: GovAction::HardForkInitiation {
             prev_action_id: None,
-            protocol_version: (10, 0),
+            protocol_version: (11, 0),
         },
         anchor: Anchor {
             url: "https://example.com".to_string(),
@@ -7786,6 +7884,21 @@ fn test_hard_fork_initiation_ratification() {
         },
     );
 
+    // 6/10 DReps vote Yes (dvt_hard_fork = 60%; 60% meets threshold)
+    for i in 0..6 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
+
     // SPOs vote Yes (need 51% for pvt_hard_fork)
     for i in 0..3 {
         let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
@@ -7802,8 +7915,8 @@ fn test_hard_fork_initiation_ratification() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.protocol_version_major, 10,
-        "Protocol version should be 10 after HardForkInitiation"
+        state.protocol_params.protocol_version_major, 11,
+        "Protocol version should be 11 after HardForkInitiation from v10"
     );
     assert_eq!(
         state.protocol_params.protocol_version_minor, 0,
@@ -7870,7 +7983,9 @@ fn test_prev_action_id_chain_mismatch_blocks_ratification() {
 #[test]
 fn test_committee_min_size_update_via_governance() {
     // committeeMinSize should be updatable via governance ParameterChange
+    // Post-bootstrap: ParameterChange is allowed; Gov-group params need 67% DRep votes
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
     assert_eq!(state.protocol_params.committee_min_size, 0);
 
     let tx_hash = Hash32::from_bytes([80u8; 32]);
@@ -7909,6 +8024,21 @@ fn test_committee_min_size_update_via_governance() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes (Gov-group threshold = 67%; 70% > 67%)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     state.process_epoch_transition(EpochNo(1));
 
@@ -13221,9 +13351,10 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
 
 /// Verify treasury donations accumulate correctly.
 ///
-/// Donations from `tx.body.donation` are added to `self.treasury` immediately
-/// during block application (not deferred through RUPD). This test ensures
-/// donations are not double-counted or lost.
+/// Per Haskell spec, `tx.body.donation` amounts are buffered in `pending_donations`
+/// during block application (matching `UTxOState.utxosDonation`) and are only flushed
+/// into the treasury at the epoch boundary (NEWEPOCH step, before RUPD reward computation).
+/// This test ensures donations sit in pending_donations mid-epoch and are not lost.
 #[test]
 fn test_treasury_donation_accumulates_correctly() {
     let params = ProtocolParameters::mainnet_defaults();
@@ -13307,10 +13438,14 @@ fn test_treasury_donation_accumulates_correctly() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .expect("block application must succeed");
 
+    // Mid-epoch: donation is buffered, treasury is unchanged.
     assert_eq!(
-        state.treasury.0,
-        1_000_000_000 + donation_amount,
-        "Treasury should increase by exactly the donation amount"
+        state.pending_donations.0, donation_amount,
+        "Donation should sit in pending_donations mid-epoch"
+    );
+    assert_eq!(
+        state.treasury.0, 1_000_000_000,
+        "Treasury should not yet reflect the donation mid-epoch"
     );
 }
 
@@ -13323,7 +13458,8 @@ fn test_treasury_donation_accumulates_correctly() {
 #[test]
 fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     let mut params = ProtocolParameters::mainnet_defaults();
-    params.protocol_version_major = 9;
+    // Post-bootstrap: TreasuryWithdrawals is allowed (blocked during bootstrap at protocol == 9)
+    params.protocol_version_major = 10;
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
