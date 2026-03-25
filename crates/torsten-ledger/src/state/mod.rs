@@ -234,6 +234,16 @@ pub struct LedgerState {
     /// covers the case where the diff window is insufficient.
     #[serde(skip)]
     pub diff_seq: DiffSeq,
+    /// The network this node is running on (mainnet, testnet, etc.).
+    ///
+    /// Used for unconditional output/withdrawal address network checks during
+    /// Phase-1 validation (Haskell's `Globals.networkId`).  Not persisted in
+    /// snapshots — set from genesis/config at node startup.
+    ///
+    /// Defaults to `None` (check skipped) when not set, preserving backwards
+    /// compatibility with existing snapshot-loaded ledger states.
+    #[serde(skip)]
+    pub node_network: Option<torsten_primitives::network::NetworkId>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -561,6 +571,7 @@ impl LedgerState {
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
             diff_seq: DiffSeq::new(),
+            node_network: None,
         }
     }
 

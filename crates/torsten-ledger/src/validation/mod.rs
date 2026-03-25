@@ -396,6 +396,49 @@ pub enum ValidationError {
         expected: torsten_primitives::network::NetworkId,
         actual: torsten_primitives::network::NetworkId,
     },
+    /// Auxiliary data hash content mismatch.
+    ///
+    /// When both `auxiliary_data_hash` and `auxiliary_data` are present in a
+    /// transaction, the declared hash must equal `blake2b_256(raw_aux_data_cbor)`.
+    /// This check ensures the auxiliary data has not been altered after signing.
+    ///
+    /// Reference: Haskell `AuxiliaryDataHash` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error(
+        "Auxiliary data hash mismatch: declared hash does not match blake2b_256 of aux data bytes \
+         (AuxDataHashMismatch)"
+    )]
+    AuxiliaryDataHashMismatch,
+    /// Output address network does not match the node's configured network.
+    ///
+    /// Every transaction output address must be on the same network as the node.
+    /// This is an unconditional check (unlike Rule 5b which only fires when the
+    /// tx body carries a `network_id` field).
+    ///
+    /// Reference: Haskell `WrongNetwork` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+    #[error(
+        "Output address network {actual:?} does not match node network {expected:?} \
+         (WrongNetworkInOutput)"
+    )]
+    WrongNetworkInOutput {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
+    /// Withdrawal reward address network does not match the node's configured network.
+    ///
+    /// Every withdrawal reward address must be on the same network as the node.
+    ///
+    /// Reference: Haskell `WrongNetworkWithdrawal` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error(
+        "Withdrawal reward address network {actual:?} does not match node network {expected:?} \
+         (WrongNetworkWithdrawal)"
+    )]
+    WrongNetworkWithdrawal {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +468,7 @@ pub fn validate_transaction(
         current_slot,
         tx_size,
         slot_config,
+        None,
         None,
         None,
         None,
@@ -486,6 +530,7 @@ pub fn validate_transaction_with_pools(
     current_epoch: Option<u64>,
     registered_dreps: Option<&HashSet<Hash32>>,
     registered_vrf_keys: Option<&HashMap<Hash32, Hash28>>,
+    node_network: Option<torsten_primitives::network::NetworkId>,
     committee_members: Option<&HashSet<Hash32>>,
     committee_resigned: Option<&HashSet<Hash32>>,
 ) -> Result<(), Vec<ValidationError>> {
@@ -512,6 +557,7 @@ pub fn validate_transaction_with_pools(
         tx_size,
         registered_pools,
         current_epoch,
+        node_network,
         &mut errors,
     );
 

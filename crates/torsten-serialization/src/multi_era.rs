@@ -760,6 +760,10 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
             None
         };
 
+    // KeepRaw preserves original CBOR; use raw_cbor() if available.
+    // These bytes are used by phase-1 rule 1c content-hash verification.
+    let raw_cbor_bytes: Option<Vec<u8>> = raw_aux.map(|kr| kr.raw_cbor().to_vec());
+
     if let Some(aux) = raw_aux {
         use std::ops::Deref;
         match aux.deref() {
@@ -796,6 +800,7 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
             plutus_v1_scripts,
             plutus_v2_scripts,
             plutus_v3_scripts,
+            raw_cbor: raw_cbor_bytes,
         })
     } else {
         None

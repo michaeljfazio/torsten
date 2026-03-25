@@ -1576,6 +1576,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
@@ -1597,6 +1598,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
@@ -2229,7 +2231,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
         assert!(
@@ -2281,7 +2284,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
         assert!(
@@ -2330,7 +2334,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
@@ -3320,6 +3325,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
         assert!(result.is_err(), "Data without hash must be rejected");
@@ -3368,6 +3374,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(empty_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xCD; 32]));
@@ -3397,6 +3404,7 @@ mod tests {
             plutus_v1_scripts: vec![vec![0x01, 0x02, 0x03]],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(script_only_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xEF; 32]));
@@ -3429,6 +3437,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![vec![0xAA, 0xBB]],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(mixed_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
@@ -8084,7 +8093,8 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8147,7 +8157,8 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8198,7 +8209,8 @@ mod tests {
             None, // current_epoch
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8309,7 +8321,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8356,7 +8369,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8396,7 +8410,8 @@ mod tests {
             None, // reward_accounts = None → balance check skipped
             None, None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8445,7 +8460,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8499,7 +8515,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8554,7 +8571,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8608,7 +8626,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8692,7 +8711,8 @@ mod tests {
             None, // current_epoch
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8743,7 +8763,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8780,7 +8801,8 @@ mod tests {
             None, // reward_accounts = None
             None, None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8830,7 +8852,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8913,7 +8936,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -8965,7 +8989,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9002,7 +9027,8 @@ mod tests {
             None, // registered_pools = None → check skipped
             None, None, None, None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9092,7 +9118,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9140,7 +9167,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9169,7 +9197,8 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None,
             None, // registered_dreps = None → check skipped
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9241,7 +9270,8 @@ mod tests {
             None,
             Some(&registered_dreps),
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9320,8 +9350,6 @@ mod tests {
             )));
 
         // registered_vrf_keys: shared_vrf is already held by pool_a
-        None, // committee_members
-        None, // committee_resigned
         let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
             std::collections::HashMap::new();
         registered_vrf_keys.insert(shared_vrf, pool_a);
@@ -9342,7 +9370,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9418,7 +9447,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9487,7 +9517,8 @@ mod tests {
             None,
             None, // registered_dreps
             Some(&registered_vrf_keys),
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9555,7 +9586,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys = None → check skipped
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9628,7 +9660,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9699,7 +9732,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9769,7 +9803,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9842,7 +9877,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9906,7 +9942,8 @@ mod tests {
             None,
             None, // registered_dreps
             None, // registered_vrf_keys
-            None, // committee_members
+            None, // node_network
+        None, // committee_members
             None, // committee_resigned
         );
 
@@ -9999,6 +10036,7 @@ mod tests {
             None,  // current_epoch
             None,  // registered_dreps
             None,  // registered_vrf_keys
+            None,  // node_network
             Some(&committee_members),
             None,  // committee_resigned
         );
@@ -10047,6 +10085,7 @@ mod tests {
             None,
             None,
             None,
+            None, // node_network
             Some(&committee_members),
             None, // committee_resigned
         );
@@ -10095,6 +10134,7 @@ mod tests {
             None,
             None,
             None,
+            None, // node_network
             Some(&committee_members),
             Some(&committee_resigned),
         );
@@ -10137,8 +10177,9 @@ mod tests {
             None,
             None,
             None,
-            None, // committee_members = None → check skipped
-            None, // committee_resigned = None → check skipped
+            None,  // node_network
+            None,  // committee_members = None → check skipped
+            None,  // committee_resigned = None → check skipped
         );
 
         let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10185,8 +10226,9 @@ mod tests {
             None,
             None,
             None,
+            None, // node_network
             Some(&committee_members),
-            None,
+            None, // committee_resigned
         );
 
         // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
@@ -10196,6 +10238,352 @@ mod tests {
         assert!(
             !has_unelected,
             "UnelectedCommitteeMember must not fire in pre-Conway era; got: {result:?}"
+        );
+    }
+
+    // ─── Sub-task B: aux data hash content verification ──────────────────────
+
+    #[test]
+    fn test_aux_data_hash_content_mismatch() {
+        // When raw_cbor is provided and its blake2b_256 does not match the
+        // declared auxiliary_data_hash, AuxiliaryDataHashMismatch must fire.
+        //
+        // Reference: Haskell `AuxDataHashMismatch` predicate in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Use some arbitrary bytes as the raw auxiliary CBOR.
+        let raw_cbor = vec![0xA0u8]; // empty CBOR map
+
+        // Compute the correct hash, then deliberately corrupt it.
+        let correct_hash = torsten_primitives::hash::blake2b_256(&raw_cbor);
+        let mut wrong_hash_bytes = *correct_hash.as_bytes();
+        wrong_hash_bytes[0] ^= 0xFF; // flip bits in first byte
+        let wrong_hash = Hash32::from_bytes(wrong_hash_bytes);
+
+        tx.body.auxiliary_data_hash = Some(wrong_hash);
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: Some(raw_cbor),
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(result.is_err(), "Expected validation failure, got: {result:?}");
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::AuxiliaryDataHashMismatch)),
+            "Expected AuxiliaryDataHashMismatch; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_aux_data_hash_content_match() {
+        // When raw_cbor is provided and its blake2b_256 equals the declared
+        // auxiliary_data_hash, no content-mismatch error should fire.
+        //
+        // Reference: Haskell `AuxDataHashMismatch` predicate.
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        let raw_cbor = vec![0xA0u8]; // empty CBOR map
+        let correct_hash = torsten_primitives::hash::blake2b_256(&raw_cbor);
+
+        tx.body.auxiliary_data_hash = Some(correct_hash);
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: Some(raw_cbor),
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // Content matches — no mismatch error.
+        let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::AuxiliaryDataHashMismatch)
+        }));
+        assert!(!has_mismatch, "AuxiliaryDataHashMismatch must not fire when content is correct; got: {result:?}");
+    }
+
+    #[test]
+    fn test_aux_data_hash_no_raw_cbor_skips_content_check() {
+        // When raw_cbor is None the content-hash check is skipped.
+        // The existing presence/absence checks still run (both present → ok even
+        // though we cannot verify content).
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Deliberately wrong declared hash — but raw_cbor is None so the
+        // content check is skipped and no AuxiliaryDataHashMismatch fires.
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: None,
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // The content check is skipped when raw_cbor is absent; this should
+        // pass (the hash/data presence checks both pass since both are present).
+        let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::AuxiliaryDataHashMismatch)
+        }));
+        assert!(!has_mismatch, "AuxiliaryDataHashMismatch must not fire when raw_cbor is None; got: {result:?}");
+    }
+
+    // ─── Sub-task B: unconditional network ID checks ──────────────────────────
+
+    #[test]
+    fn test_wrong_network_in_output_rejected() {
+        // When node_network is Mainnet but an output carries a Testnet address,
+        // WrongNetworkInOutput must fire (Rule 5c — unconditional network check).
+        //
+        // Reference: Haskell `WrongNetwork` in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Replace the output with a Testnet Enterprise address.
+        tx.body.outputs = vec![TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xAA; 28])),
+            }),
+            value: Value::lovelace(9_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }];
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Mainnet), // node expects Mainnet
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        assert!(result.is_err(), "Expected WrongNetworkInOutput failure; got: {result:?}");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::WrongNetworkInOutput {
+                    expected: NetworkId::Mainnet,
+                    actual: NetworkId::Testnet,
+                }
+            )),
+            "Expected WrongNetworkInOutput {{Mainnet, Testnet}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrong_network_in_output_matching_network_ok() {
+        // When node_network matches the output address network, no error fires.
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Output is a Testnet address; node_network is also Testnet — OK.
+        tx.body.outputs = vec![TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xAA; 28])),
+            }),
+            value: Value::lovelace(9_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }];
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Testnet), // node is Testnet — matches output
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::WrongNetworkInOutput { .. })
+        }));
+        assert!(!has_wrong_network, "WrongNetworkInOutput must not fire when networks match; got: {result:?}");
+    }
+
+    #[test]
+    fn test_wrong_network_withdrawal_rejected() {
+        // When node_network is Mainnet but a withdrawal reward address is on
+        // Testnet, WrongNetworkWithdrawal must fire (Rule 5d).
+        //
+        // Reward account byte layout (Shelley):
+        //   0xe0 = Testnet key-hash, 0xe1 = Mainnet key-hash
+        //
+        // Reference: Haskell `WrongNetworkWithdrawal` in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+        use torsten_primitives::network::NetworkId;
+
+        let (mut utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let keyhash = Hash28::from_bytes([0x55u8; 28]);
+
+        // Seed the rewards ledger so the withdrawal amount is correct.
+        let testnet_reward_addr = make_reward_account_vkey(keyhash); // 0xe0 prefix → Testnet
+
+        // Pre-register the reward account with a non-zero balance so the
+        // withdrawal amount check passes (we set the withdrawal to 0 to
+        // avoid a ZeroWithdrawal error — the network check fires first in
+        // the iteration order).
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(torsten_primitives::address::ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+        // Insert a withdrawal for the Testnet reward account.
+        // We do NOT register the account in the rewards ledger — the network
+        // check runs before account-existence checks.
+        // Use amount 0 triggers ZeroWithdrawal — use 1 lovelace instead.
+        tx.body
+            .withdrawals
+            .insert(testnet_reward_addr.clone(), Lovelace(1));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Mainnet), // node expects Mainnet
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        // The network check fires regardless of whether other withdrawal
+        // checks also fail.
+        let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::WrongNetworkWithdrawal {
+                    expected: NetworkId::Mainnet,
+                    actual: NetworkId::Testnet,
+                }
+            )
+        }));
+        assert!(
+            has_wrong_network,
+            "Expected WrongNetworkWithdrawal {{Mainnet, Testnet}}; got: {result:?}"
         );
     }
 }

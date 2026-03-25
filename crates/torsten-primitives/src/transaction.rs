@@ -716,6 +716,15 @@ pub struct AuxiliaryData {
     pub plutus_v1_scripts: Vec<Vec<u8>>,
     pub plutus_v2_scripts: Vec<Vec<u8>>,
     pub plutus_v3_scripts: Vec<Vec<u8>>,
+    /// Verbatim CBOR bytes of this auxiliary data object as received on the wire.
+    ///
+    /// Used to verify the `auxiliary_data_hash` in the transaction body: the hash
+    /// must equal `blake2b_256(raw_cbor)`.  When `None`, the hash content check is
+    /// skipped (e.g. for locally-constructed transactions or older decoded data).
+    ///
+    /// Not serialized via bincode (ledger snapshot compatibility).
+    #[serde(default, skip_serializing)]
+    pub raw_cbor: Option<Vec<u8>>,
 }
 
 /// Transaction metadata value

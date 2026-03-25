@@ -399,6 +399,51 @@ pub(crate) fn convert_validation_error(
                 "DRep registration rejected: credential {credential_hash} is already registered"
             ),
         },
+        VE::CommitteeHasPreviouslyResigned { cold_credential_hash } => {
+            TxValidationError::ScriptFailed {
+                reason: format!(
+                    "CommitteeHotAuth rejected: cold credential {cold_credential_hash} has previously resigned \
+                     (ConwayCommitteeHasPreviouslyResigned)"
+                ),
+            }
+        }
+        VE::VrfKeyHashAlreadyRegistered {
+            vrf_keyhash,
+            existing_pool_id,
+        } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "VRF key {vrf_keyhash} is already registered to pool {existing_pool_id}"
+            ),
+        },
+        VE::StakePoolCostTooLow { actual, minimum } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Pool registration rejected: cost {actual} is below minimum pool cost {minimum} \
+                 (StakePoolCostTooLowPOOL)"
+            ),
+        },
+        VE::PoolRewardAccountWrongNetwork { expected, actual } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Pool registration rejected: reward account network {actual:?} does not match \
+                 transaction network {expected:?} (WrongNetworkInTxBody)"
+            ),
+        },
+        VE::AuxiliaryDataHashMismatch => TxValidationError::ScriptFailed {
+            reason: "Auxiliary data hash mismatch: declared hash does not match blake2b_256 of \
+                     aux data bytes (AuxDataHashMismatch)"
+                .to_string(),
+        },
+        VE::WrongNetworkInOutput { expected, actual } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Output address network {actual:?} does not match node network {expected:?} \
+                 (WrongNetworkInOutput)"
+            ),
+        },
+        VE::WrongNetworkWithdrawal { expected, actual } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Withdrawal reward address network {actual:?} does not match node network \
+                 {expected:?} (WrongNetworkWithdrawal)"
+            ),
+        },
     }
 }
 

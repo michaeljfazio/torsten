@@ -195,6 +195,7 @@ pub(super) fn run_phase1_rules(
     tx_size: u64,
     registered_pools: Option<&std::collections::HashSet<Hash28>>,
     current_epoch: Option<u64>,
+    node_network: Option<torsten_primitives::network::NetworkId>,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
@@ -220,6 +221,13 @@ pub(super) fn run_phase1_rules(
 
     // ------------------------------------------------------------------
     // Rule 1c: Auxiliary data hash / auxiliary data consistency
+    //
+    // Sub-rule 1c.i: presence/absence consistency.
+    // Sub-rule 1c.ii: when both are present, verify the content hash.
+    //   The declared hash must equal blake2b_256(raw_aux_cbor).
+    //   We can only verify this when raw_cbor bytes were preserved from
+    //   the wire (set by the serialization layer); locally-constructed
+    //   transactions with raw_cbor=None skip the content check.
     // ------------------------------------------------------------------
     match (&body.auxiliary_data_hash, &tx.auxiliary_data) {
         (Some(_), None) => {
@@ -228,7 +236,16 @@ pub(super) fn run_phase1_rules(
         (None, Some(_)) => {
             errors.push(ValidationError::AuxiliaryDataWithoutHash);
         }
-        _ => {} // Both present or both absent — OK
+        (Some(declared_hash), Some(aux_data)) => {
+            // Content-hash verification: only when raw CBOR bytes are available.
+            if let Some(ref raw_cbor) = aux_data.raw_cbor {
+                let computed = torsten_primitives::hash::blake2b_256(raw_cbor);
+                if computed != *declared_hash {
+                    errors.push(ValidationError::AuxiliaryDataHashMismatch);
+                }
+            }
+        }
+        (None, None) => {} // Both absent — OK
     }
 
     // ------------------------------------------------------------------
@@ -598,6 +615,67 @@ pub(super) fn run_phase1_rules(
                     errors.push(ValidationError::NetworkMismatch {
                         expected: expected_network,
                         actual: addr_network,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 5c: Unconditional output address network check
+    //
+    // Unlike Rule 5b (which fires only when `tx.body.network_id` is set),
+    // this check applies unconditionally using the node's configured network
+    // (Haskell's `Globals.networkId`).  Every output address with a parseable
+    // network tag must be on the node's network.
+    //
+    // Only enforced when `node_network` is provided. Addresses that return
+    // `None` from `network_id()` (e.g. Byron addresses) are accepted without
+    // a network check (they carry no explicit network tag).
+    //
+    // Reference: Haskell `WrongNetwork` predicate in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+    // ------------------------------------------------------------------
+    if let Some(expected_net) = node_network {
+        for output in &body.outputs {
+            if let Some(addr_network) = output.address.network_id() {
+                if addr_network != expected_net {
+                    errors.push(ValidationError::WrongNetworkInOutput {
+                        expected: expected_net,
+                        actual: addr_network,
+                    });
+                    // Report once per transaction to avoid flooding.
+                    break;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 5d: Unconditional withdrawal reward address network check
+    //
+    // Every withdrawal reward address must be on the node's configured
+    // network (Haskell's `Globals.networkId`).
+    // Bit 0 of the reward account header encodes the network:
+    //   0 = testnet, 1 = mainnet.
+    //
+    // Reference: Haskell `WrongNetworkWithdrawal` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    // ------------------------------------------------------------------
+    if let Some(expected_net) = node_network {
+        for reward_account in body.withdrawals.keys() {
+            if let Some(header) = reward_account.first() {
+                let network_bit = header & 0x01;
+                let actual_net = if network_bit == 0 {
+                    torsten_primitives::network::NetworkId::Testnet
+                } else {
+                    torsten_primitives::network::NetworkId::Mainnet
+                };
+                if actual_net != expected_net {
+                    errors.push(ValidationError::WrongNetworkWithdrawal {
+                        expected: expected_net,
+                        actual: actual_net,
                     });
                     break;
                 }

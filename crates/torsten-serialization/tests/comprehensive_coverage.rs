@@ -1828,6 +1828,7 @@ fn test_encode_auxiliary_data_with_native_scripts() {
         plutus_v1_scripts: vec![],
         plutus_v2_scripts: vec![],
         plutus_v3_scripts: vec![],
+        raw_cbor: None,
     };
 
     let enc = encode_auxiliary_data(&aux);
@@ -1850,6 +1851,7 @@ fn test_encode_auxiliary_data_with_plutus_scripts() {
         plutus_v1_scripts: vec![vec![0x01, 0x02]],
         plutus_v2_scripts: vec![vec![0x03, 0x04]],
         plutus_v3_scripts: vec![vec![0x05, 0x06]],
+        raw_cbor: None,
     };
 
     let enc = encode_auxiliary_data(&aux);

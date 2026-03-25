@@ -423,6 +423,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
 
         let encoded = encode_auxiliary_data(&aux);

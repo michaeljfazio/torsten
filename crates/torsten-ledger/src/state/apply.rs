@@ -629,6 +629,7 @@ impl LedgerState {
                         Some(self.epoch.0),
                         Some(&registered_drep_ids),
                         Some(&registered_vrf_keys),
+                        self.node_network,
                         Some(&committee_member_keys),
                         Some(&committee_resigned_keys),
                     );
