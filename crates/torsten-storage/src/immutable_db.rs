@@ -261,8 +261,15 @@ impl ImmutableDB {
     /// Scans all `.chunk` and `.secondary` files and builds an in-memory
     /// hash index for O(1) block lookups. For preview (~4M blocks) this
     /// uses ~300 MB of memory; mainnet will need an on-disk index.
+    ///
+    /// After building the index, validates the most recent chunk to detect
+    /// partial writes or corruption from an unclean shutdown. Corrupt entries
+    /// at the tail of the last chunk are truncated so the database is always
+    /// in a consistent state before use.
     pub fn open(dir: &Path) -> Result<Self, ImmutableDBError> {
-        Self::open_with_config(dir, &ImmutableConfig::default())
+        let mut db = Self::open_with_config(dir, &ImmutableConfig::default())?;
+        db.validate_most_recent_chunk()?;
+        Ok(db)
     }
 
     /// Open an ImmutableDB from a directory of chunk files with the given config.
@@ -492,6 +499,183 @@ impl ImmutableDB {
             active_chunk: None,
             checksums,
         })
+    }
+
+    /// Validate the most recent (last) finalized chunk on disk.
+    ///
+    /// Reads the secondary index for the last chunk and checks the CRC32
+    /// of each block entry.  Any entries whose CRC32 does not match are
+    /// assumed to result from a partial write during an unclean shutdown.
+    ///
+    /// When corrupt entries are found at the END of the chunk, the method:
+    /// 1. Truncates the chunk file to exclude the corrupt entries.
+    /// 2. Rewrites the secondary index without those entries.
+    /// 3. Updates in-memory state (block index, checksums, tip) accordingly.
+    ///
+    /// Corrupt entries in the *middle* of the chunk (i.e. with valid entries
+    /// after them) are unusual and indicate hardware failure.  In that case
+    /// the corrupt block is removed from the index so reads don't surface it,
+    /// but the file is not truncated (truncating would discard later valid
+    /// data).  A `warn!` is emitted for diagnostic purposes.
+    ///
+    /// Legacy entries with CRC32 == 0 are skipped (no checksum to verify).
+    pub fn validate_most_recent_chunk(&mut self) -> Result<(), ImmutableDBError> {
+        let last_chunk = match self.chunks.last().cloned() {
+            Some(c) => c,
+            None => return Ok(()), // Nothing to validate
+        };
+
+        let chunk_path = self.dir.join(format!("{:05}.chunk", last_chunk.chunk_num));
+        let secondary_path = self
+            .dir
+            .join(format!("{:05}.secondary", last_chunk.chunk_num));
+
+        // If either file is missing, nothing to do (can happen on first run)
+        if !chunk_path.exists() || !secondary_path.exists() {
+            return Ok(());
+        }
+
+        let chunk_data = fs::read(&chunk_path)?;
+        let secondary_data = fs::read(&secondary_path)?;
+
+        let entry_count = secondary_data.len() / SECONDARY_ENTRY_SIZE;
+        if entry_count == 0 {
+            return Ok(());
+        }
+
+        // Build a list of (block_offset, block_end, hash, checksum) from the
+        // secondary index so we can verify each entry independently.
+        let mut entries_meta: Vec<(u64, u64, [u8; 32], u32)> = Vec::with_capacity(entry_count);
+        let chunk_len = chunk_data.len() as u64;
+
+        let mut pos = 0;
+        while pos + SECONDARY_ENTRY_SIZE <= secondary_data.len() {
+            let data = &secondary_data[pos..pos + SECONDARY_ENTRY_SIZE];
+            let Some(block_offset) = read_be_u64(&data[0..8]) else {
+                pos += SECONDARY_ENTRY_SIZE;
+                continue;
+            };
+            let checksum = read_crc32_from_entry(data);
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes.copy_from_slice(&data[16..48]);
+
+            // Determine block end: start of next entry's block_offset, or chunk_len
+            let next_offset = if pos + SECONDARY_ENTRY_SIZE < secondary_data.len() {
+                let next_data = &secondary_data[pos + SECONDARY_ENTRY_SIZE..];
+                read_be_u64(&next_data[0..8]).unwrap_or(chunk_len)
+            } else {
+                chunk_len
+            };
+
+            entries_meta.push((block_offset, next_offset, hash_bytes, checksum));
+            pos += SECONDARY_ENTRY_SIZE;
+        }
+
+        // Scan entries for CRC32 mismatches.  Track the index of the first bad entry.
+        let mut first_bad_tail: Option<usize> = None;
+        let mut any_bad_middle = false;
+
+        for (i, &(block_offset, block_end, _hash, checksum)) in entries_meta.iter().enumerate() {
+            // Skip legacy entries without CRC
+            if checksum == 0 {
+                continue;
+            }
+
+            let start = block_offset as usize;
+            let end = block_end as usize;
+
+            if end > chunk_data.len() || start > end {
+                // Truncated block data — this is a tail corruption.
+                if first_bad_tail.is_none() {
+                    first_bad_tail = Some(i);
+                }
+                continue;
+            }
+
+            let actual_crc = crc32fast::hash(&chunk_data[start..end]);
+            if actual_crc != checksum {
+                if i == entries_meta.len() - 1 || first_bad_tail.is_some() {
+                    // Bad tail entry
+                    if first_bad_tail.is_none() {
+                        first_bad_tail = Some(i);
+                    }
+                } else {
+                    // Bad middle entry — unusual, don't truncate
+                    let hash = Hash32::from_bytes(entries_meta[i].2);
+                    warn!(
+                        chunk = last_chunk.chunk_num,
+                        offset = block_offset,
+                        hash = %hash.to_hex(),
+                        "ImmutableDB: CRC32 mismatch for middle block entry — removing from index"
+                    );
+                    self.block_index.remove(&hash);
+                    self.checksums.remove(&hash);
+                    any_bad_middle = true;
+                }
+            }
+        }
+
+        if let Some(bad_start) = first_bad_tail {
+            let good_count = bad_start;
+            let truncate_at = if good_count > 0 {
+                entries_meta[bad_start].0 // block_offset of first bad entry
+            } else {
+                0
+            };
+
+            warn!(
+                chunk = last_chunk.chunk_num,
+                bad_entries = entries_meta.len() - good_count,
+                truncate_bytes = truncate_at,
+                "ImmutableDB: truncating corrupt tail entries from last chunk"
+            );
+
+            // Remove bad entries from in-memory indexes
+            for &(_offset, _end, hash_bytes, _crc) in &entries_meta[bad_start..] {
+                let hash = Hash32::from_bytes(hash_bytes);
+                self.block_index.remove(&hash);
+                self.checksums.remove(&hash);
+            }
+
+            // Truncate the chunk file
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&chunk_path)?;
+            file.set_len(truncate_at)?;
+            file.sync_all()?;
+
+            // Rewrite the secondary index with only the valid entries
+            let good_secondary = &secondary_data[..good_count * SECONDARY_ENTRY_SIZE];
+            fs::write(&secondary_path, good_secondary)?;
+
+            // Recalculate tip from the remaining entries
+            if good_count > 0 {
+                // Tip is the last good entry's hash and slot
+                let last_good = good_count - 1;
+                let data = &secondary_data[last_good * SECONDARY_ENTRY_SIZE..];
+                let slot = read_be_u64(&data[48..56]).unwrap_or(0);
+                let mut hash_bytes = [0u8; 32];
+                hash_bytes.copy_from_slice(&data[16..48]);
+                let hash = Hash32::from_bytes(hash_bytes);
+                if slot >= self.tip_slot {
+                    self.tip_slot = slot;
+                    self.tip_hash = hash;
+                }
+                self.total_blocks -= (entries_meta.len() - good_count) as u64;
+            } else {
+                // Entire last chunk is corrupt — remove it from chunks list
+                self.chunks.pop();
+                self.total_blocks -= entries_meta.len() as u64;
+            }
+        } else if any_bad_middle {
+            // Recalculate tip since middle entries were removed
+            debug!(
+                chunk = last_chunk.chunk_num,
+                "ImmutableDB: removed corrupt middle entries, tip unchanged"
+            );
+        }
+
+        Ok(())
     }
 
     /// Get block CBOR by header hash.
