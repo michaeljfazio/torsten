@@ -620,6 +620,18 @@ impl ChainDB {
         Ok(count)
     }
 
+    /// Compact the volatile WAL after flushing blocks to immutable storage.
+    ///
+    /// Rewrites the volatile WAL to contain only the blocks that remain in
+    /// the VolatileDB. This is called automatically by `remove_blocks_by_hashes`
+    /// inside `flush_to_immutable`, but can also be called explicitly (e.g.
+    /// after rollback) to reclaim disk space.
+    ///
+    /// This is a no-op when the VolatileDB has no WAL configured.
+    pub fn compact_volatile_wal(&mut self) {
+        self.volatile.compact_wal();
+    }
+
     /// Flush finalized blocks up to a maximum slot (LoE-gated flush).
     ///
     /// Like `flush_to_immutable`, but also enforces a slot ceiling so that

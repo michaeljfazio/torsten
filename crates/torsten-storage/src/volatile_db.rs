@@ -1000,6 +1000,41 @@ impl VolatileDB {
         self.blocks.is_empty()
     }
 
+    /// Compact the WAL by rewriting it with only the current volatile blocks.
+    ///
+    /// The WAL is an append-only log — every block ever added is present until
+    /// the file is rewritten.  After `flush_to_immutable` moves finalized blocks
+    /// out of the VolatileDB, those entries remain in the WAL until a rewrite.
+    ///
+    /// `compact_wal()` triggers that rewrite explicitly, shrinking the WAL to
+    /// contain only the blocks that are still in the in-memory store.  This is
+    /// a no-op when no WAL is configured.
+    ///
+    /// Calling this after each `flush_to_immutable` keeps crash-recovery time
+    /// proportional to the volatile window size rather than the full sync history.
+    pub fn compact_wal(&mut self) {
+        if let Some(ref mut wal) = self.wal {
+            let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
+                .blocks
+                .iter()
+                .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
+                .collect();
+            if let Err(e) = wal.rewrite(&remaining) {
+                warn!(
+                    error = %e,
+                    blocks = remaining.len(),
+                    "WAL: compact_wal rewrite failed"
+                );
+            } else {
+                debug!(
+                    blocks = remaining.len(),
+                    "WAL: compacted to {} volatile entries",
+                    remaining.len()
+                );
+            }
+        }
+    }
+
     /// Return `(hash, slot, block_no, prev_hash)` tuples for every block on the
     /// current selected chain, ordered oldest → newest.
     ///
