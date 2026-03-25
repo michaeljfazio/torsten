@@ -975,9 +975,14 @@ impl LedgerState {
                     }
                 }
 
-                // Process treasury donations
+                // Buffer treasury donations until epoch boundary.
+                //
+                // In Haskell, `txDonation` is accumulated in `UTxOState.utxosDonation`
+                // during block processing and flushed into the treasury only at the epoch
+                // boundary (NEWEPOCH → applyRUpd step).  We mirror this by accumulating
+                // in `pending_donations` and draining in `process_epoch_transition`.
                 if let Some(donation) = tx.body.donation {
-                    self.treasury += donation;
+                    self.pending_donations += donation;
                 }
             } else {
                 if !tx.body.proposal_procedures.is_empty() {

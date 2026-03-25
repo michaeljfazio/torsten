@@ -49,6 +49,27 @@ impl LedgerState {
         let bprev_block_count = self.epoch_block_count;
         let bprev_blocks_by_pool = Arc::clone(&self.epoch_blocks_by_pool);
 
+        // Step 0: Flush pending treasury donations accumulated during the epoch.
+        //
+        // In Haskell, `UTxOState.utxosDonation` (collected from `txDonation` fields
+        // in each transaction) is transferred into the treasury as part of the
+        // NEWEPOCH rule before reward computation (Haskell's `applyRUpd` receives
+        // the post-donation treasury balance).
+        //
+        // We buffer donations in `pending_donations` during block application and
+        // drain them here so the donation ADA is visible to reward-pot calculations
+        // for this epoch boundary — matching Haskell's ordering exactly.
+        if self.pending_donations.0 > 0 {
+            let flushed = self.pending_donations;
+            self.treasury.0 = self.treasury.0.saturating_add(flushed.0);
+            self.pending_donations = Lovelace(0);
+            debug!(
+                epoch = new_epoch.0,
+                donations_lovelace = flushed.0,
+                "Flushed pending treasury donations to treasury at epoch boundary"
+            );
+        }
+
         // Step 1: Apply any pending reward update (backward compat for old snapshots).
         self.apply_pending_reward_update();
 

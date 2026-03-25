@@ -13835,3 +13835,209 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
         "Each epoch's treasury_cut should be slightly smaller than the prior: ratio_2_3={tc_ratio_2_3}"
     );
 }
+
+// ─── Sub-task C: treasury donations buffered until epoch boundary ─────────────
+
+/// Build a minimal Conway transaction that carries a `donation` field.
+///
+/// The transaction spends a UTxO seeded in `state.utxo_set` (inserted by this
+/// helper) and donates `donation_lovelace` to the treasury.  Because the
+/// donation reduces the available balance, the output is sized accordingly.
+fn make_donation_tx(
+    state: &mut LedgerState,
+    unique_id: u8,
+    donation_lovelace: u64,
+) -> Transaction {
+    let input_value = 10_000_000u64;
+    let fee = 200_000u64;
+    let output_value = input_value - fee - donation_lovelace;
+
+    let input = TransactionInput {
+        transaction_id: Hash32::from_bytes([unique_id; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(input_value),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    Transaction {
+        hash: Hash32::from_bytes([unique_id + 100; 32]),
+        body: TransactionBody {
+            inputs: vec![input],
+            outputs: vec![TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(output_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            }],
+            fee: Lovelace(fee),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: Some(Lovelace(donation_lovelace)),
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+#[test]
+fn test_treasury_donation_buffered_until_epoch_boundary() {
+    // Haskell accumulates `txDonation` fields in `UTxOState.utxosDonation` during block
+    // processing and flushes them into the treasury only at the epoch boundary
+    // (NEWEPOCH rule).  This test verifies that:
+    //
+    //   1. After a donation transaction is applied, `treasury` is NOT yet credited —
+    //      the donation sits in `pending_donations`.
+    //   2. After the epoch boundary, `pending_donations` is drained into `treasury`.
+    //
+    // Reference: Haskell `UTxOState.utxosDonation` / NEWEPOCH `applyRUpd`.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 200;        // short epoch for testing
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let donation_amount = 5_000_000u64;
+
+    // --- Apply a block in epoch 0 containing a donation tx ---
+    let donation_tx = make_donation_tx(&mut state, 10, donation_amount);
+    let block0 = make_test_block(50, 1, Hash32::ZERO, vec![donation_tx]);
+    state
+        .apply_block(&block0, BlockValidationMode::ApplyOnly)
+        .expect("apply_block with donation should succeed");
+
+    // Immediately after block application: treasury must NOT yet include the donation;
+    // it must sit in pending_donations instead.
+    assert_eq!(
+        state.treasury.0, 0,
+        "Treasury must not be credited immediately; donation is still pending. \
+         treasury={}, pending_donations={}",
+        state.treasury.0, state.pending_donations.0
+    );
+    assert_eq!(
+        state.pending_donations.0, donation_amount,
+        "pending_donations must equal the donated amount after block application. \
+         pending_donations={}, expected={}",
+        state.pending_donations.0, donation_amount
+    );
+
+    // --- Cross the epoch boundary (slot 200 → epoch 1) ---
+    let block1 = make_test_block(250, 2, *block0.hash(), vec![]);
+    state
+        .apply_block(&block1, BlockValidationMode::ApplyOnly)
+        .expect("epoch-boundary block should succeed");
+
+    assert_eq!(state.epoch, EpochNo(1), "Should have transitioned to epoch 1");
+
+    // After epoch boundary: pending_donations must be zero (fully flushed).
+    assert_eq!(
+        state.pending_donations.0, 0,
+        "pending_donations must be zero after epoch boundary. got: {}",
+        state.pending_donations.0
+    );
+
+    // The donation must now appear in the treasury (plus any RUPD delta_treasury
+    // from reward calculation; the reserve starts at max supply so delta_treasury
+    // is non-zero — we just assert treasury ≥ donation_amount).
+    assert!(
+        state.treasury.0 >= donation_amount,
+        "Treasury must include the flushed donation after epoch boundary. \
+         treasury={}, donation_amount={}",
+        state.treasury.0,
+        donation_amount
+    );
+}
+
+#[test]
+fn test_treasury_donation_accumulates_across_transactions() {
+    // Multiple transactions in the same epoch may each carry a `donation` field.
+    // All donations must be buffered together in `pending_donations` and flushed
+    // as a single amount at the epoch boundary.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 200;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let donation_a = 3_000_000u64;
+    let donation_b = 2_000_000u64;
+
+    let tx_a = make_donation_tx(&mut state, 20, donation_a);
+    let tx_b = make_donation_tx(&mut state, 21, donation_b);
+
+    // Both donation transactions in the same block.
+    let block0 = make_test_block(50, 1, Hash32::ZERO, vec![tx_a, tx_b]);
+    state
+        .apply_block(&block0, BlockValidationMode::ApplyOnly)
+        .expect("apply_block with two donations should succeed");
+
+    assert_eq!(
+        state.pending_donations.0,
+        donation_a + donation_b,
+        "pending_donations must equal the sum of all donations. \
+         pending_donations={}, expected={}",
+        state.pending_donations.0,
+        donation_a + donation_b
+    );
+    assert_eq!(
+        state.treasury.0, 0,
+        "Treasury must not be credited before epoch boundary"
+    );
+
+    // Epoch boundary flushes the combined amount.
+    let block1 = make_test_block(250, 2, *block0.hash(), vec![]);
+    state
+        .apply_block(&block1, BlockValidationMode::ApplyOnly)
+        .expect("epoch boundary block should succeed");
+
+    assert_eq!(state.pending_donations.0, 0, "pending_donations must be zero post-boundary");
+    assert!(
+        state.treasury.0 >= donation_a + donation_b,
+        "Treasury must include all flushed donations. treasury={}, min_expected={}",
+        state.treasury.0,
+        donation_a + donation_b
+    );
+}

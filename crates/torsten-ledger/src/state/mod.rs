@@ -122,6 +122,18 @@ pub struct LedgerState {
     pub stake_distribution: StakeDistributionState,
     /// Treasury balance
     pub treasury: Lovelace,
+    /// Pending treasury donations (Conway `TreasuryDonation` field from transaction bodies).
+    ///
+    /// In Haskell, `curTreasuryDonation` is accumulated in `UTxOState.utxosDonation` during
+    /// block processing and flushed into the treasury at each epoch boundary (NEWEPOCH rule,
+    /// step `applyRUpd`).  We mirror this by buffering here and draining in
+    /// `process_epoch_transition` before reward computation so that the treasury includes
+    /// donations from the epoch that just ended, matching Haskell's ordering exactly.
+    ///
+    /// The field must use a custom serde default so that ledger snapshots written before this
+    /// field was added deserialise correctly (missing field → `Lovelace(0)`).
+    #[serde(default = "default_lovelace_zero")]
+    pub pending_donations: Lovelace,
     /// Reserves balance (ADA not yet in circulation)
     pub reserves: Lovelace,
     /// Delegation state: credential_hash -> pool_id (Arc for copy-on-write)
@@ -539,6 +551,7 @@ impl LedgerState {
             prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
+            pending_donations: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),
             delegations: Arc::new(HashMap::new()),
             pool_params: Arc::new(HashMap::new()),
