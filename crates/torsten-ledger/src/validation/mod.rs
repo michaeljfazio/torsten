@@ -325,6 +325,64 @@ pub enum ValidationError {
         /// Hex-encoded DRep credential hash (zero-padded to 32 bytes).
         credential_hash: String,
     },
+    /// Conway+ POOL rule: a `PoolRegistration` certificate uses a VRF key hash
+    /// that is already registered to a different pool.
+    ///
+    /// Enforced only when `protocol_version_major >= 9` (Conway). In earlier
+    /// eras, multiple pools sharing a VRF key is theoretically possible (though
+    /// inadvisable). From Conway onward, Haskell rejects duplicate VRF keys to
+    /// prevent ambiguity in the VRF-based leader election.
+    ///
+    /// Reference: Haskell `VRFKeyHashAlreadyRegistered` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Pool`.
+    #[error(
+        "Pool registration rejected: VRF key {vrf_keyhash} is already registered to pool \
+         {existing_pool_id} (VRFKeyHashAlreadyRegistered)"
+    )]
+    VrfKeyHashAlreadyRegistered {
+        /// Hex-encoded VRF key hash (32 bytes).
+        vrf_keyhash: String,
+        /// Hex-encoded pool ID that currently holds the VRF key.
+        existing_pool_id: String,
+    },
+    /// Shelley+ POOL rule: pool registration cost is below the minimum pool cost
+    /// (`minPoolCost` / `min_pool_cost`) from the protocol parameters.
+    ///
+    /// Per Haskell's POOL rule (Shelley spec, Figure 14): "The declared pool cost
+    /// must satisfy `poolCost >= minPoolCost`." This prevents pools from declaring
+    /// artificially low costs to attract delegators at the expense of network
+    /// sustainability.
+    ///
+    /// Reference: Haskell `StakePoolCostTooLowPOOL` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Pool`.
+    #[error(
+        "Pool registration rejected: cost {actual} is below minimum pool cost {minimum} \
+         (StakePoolCostTooLowPOOL)"
+    )]
+    StakePoolCostTooLow {
+        /// Declared pool cost in lovelace.
+        actual: u64,
+        /// `minPoolCost` protocol parameter in lovelace.
+        minimum: u64,
+    },
+    /// Alonzo+ POOL rule: pool registration reward account network must match the
+    /// network ID declared in the transaction body.
+    ///
+    /// When a transaction body carries a `network_id` field (Alonzo+), every pool
+    /// registration certificate's reward account must be on the same network.
+    /// Mixing networks (e.g., a testnet reward account in a mainnet transaction)
+    /// is rejected as `WrongNetworkInTxBody`.
+    ///
+    /// Reference: Haskell `WrongNetworkInTxBody` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    #[error(
+        "Pool registration rejected: reward account network {actual:?} does not match \
+         transaction network {expected:?} (WrongNetworkInTxBody)"
+    )]
+    PoolRewardAccountWrongNetwork {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +417,7 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -372,6 +431,11 @@ pub fn validate_transaction(
 /// When `registered_dreps` is `Some`, duplicate DRep registration certificates
 /// (`RegDRep`) are rejected with [`ValidationError::DRepAlreadyRegistered`].
 /// When `None`, the DRep re-registration check is skipped.
+///
+/// When `registered_vrf_keys` is `Some`, pool registration certificates that
+/// declare a VRF key hash already held by another pool are rejected with
+/// [`ValidationError::VrfKeyHashAlreadyRegistered`] (Conway+ only).
+/// When `None`, the VRF key deduplication check is skipped.
 ///
 /// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
 /// including the standard on-chain `&UtxoSet` and the composite
@@ -396,6 +460,7 @@ pub fn validate_transaction_with_pools(
     reward_accounts: Option<&HashMap<Hash32, Lovelace>>,
     current_epoch: Option<u64>,
     registered_dreps: Option<&HashSet<Hash32>>,
+    registered_vrf_keys: Option<&HashMap<Hash32, Hash28>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -575,6 +640,43 @@ pub fn validate_transaction_with_pools(
                         errors.push(ValidationError::DRepAlreadyRegistered {
                             credential_hash: key.to_hex(),
                         });
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // VRF key deduplication (Haskell `VRFKeyHashAlreadyRegistered`, Conway+)
+    //
+    // From Conway (protocol >= 9), a pool registration certificate whose VRF
+    // key hash is already registered to a DIFFERENT pool is rejected. A pool
+    // re-registering its own parameters with the same VRF key is permitted (the
+    // key already belongs to that pool, so the new registration is not a
+    // collision).
+    //
+    // This check is only enforced when `registered_vrf_keys` is provided (block
+    // validation mode). The map is keyed by VRF key hash (Hash32) and maps to
+    // the pool ID (Hash28) that currently holds that key.
+    //
+    // Reference: Haskell `VRFKeyHashAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Pool`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let Some(vrf_keys) = registered_vrf_keys {
+            for cert in &tx.body.certificates {
+                if let torsten_primitives::transaction::Certificate::PoolRegistration(pool_params) =
+                    cert
+                {
+                    // Check if this VRF key is held by a different pool.
+                    // Same pool re-registering with the same key is fine.
+                    if let Some(&existing_pool) = vrf_keys.get(&pool_params.vrf_keyhash) {
+                        if existing_pool != pool_params.operator {
+                            errors.push(ValidationError::VrfKeyHashAlreadyRegistered {
+                                vrf_keyhash: pool_params.vrf_keyhash.to_hex(),
+                                existing_pool_id: existing_pool.to_hex(),
+                            });
+                        }
                     }
                 }
             }

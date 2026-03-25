@@ -2228,6 +2228,7 @@ mod tests {
             None,
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
         assert!(
             result.is_ok(),
@@ -2277,6 +2278,7 @@ mod tests {
             None,
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
         assert!(
             result.is_ok(),
@@ -2323,6 +2325,7 @@ mod tests {
             None,
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -8074,6 +8077,7 @@ mod tests {
             None,      // reward_accounts
             None,      // current_epoch
             None,      // registered_dreps
+            None,      // registered_vrf_keys
         );
 
         assert!(
@@ -8134,6 +8138,7 @@ mod tests {
             None,      // reward_accounts
             None,      // current_epoch
             None,      // registered_dreps
+            None,      // registered_vrf_keys
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8182,6 +8187,7 @@ mod tests {
             None, // reward_accounts
             None, // current_epoch
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8290,6 +8296,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8334,6 +8341,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8371,6 +8379,7 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None, None, None,
             None, // reward_accounts = None → balance check skipped
             None, None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8417,6 +8426,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8468,6 +8478,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8520,6 +8531,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8571,6 +8583,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8652,6 +8665,7 @@ mod tests {
             Some(&reward_accounts),
             None, // current_epoch
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8700,6 +8714,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8734,6 +8749,7 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None, None, None,
             None, // reward_accounts = None
             None, None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8781,6 +8797,7 @@ mod tests {
             Some(&reward_accounts),
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8861,6 +8878,7 @@ mod tests {
             None,
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -8910,6 +8928,7 @@ mod tests {
             None,
             None,
             None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8944,6 +8963,7 @@ mod tests {
             &tx, &utxo_set, &params, 100, 300, None,
             None, // registered_pools = None → check skipped
             None, None, None, None, // registered_dreps
+            None, // registered_vrf_keys
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9031,6 +9051,7 @@ mod tests {
             None,
             None,
             Some(&registered_dreps),
+            None, // registered_vrf_keys
         );
 
         assert!(
@@ -9076,6 +9097,7 @@ mod tests {
             None,
             None,
             Some(&registered_dreps),
+            None, // registered_vrf_keys
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9102,6 +9124,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None,
             None, // registered_dreps = None → check skipped
+            None, // registered_vrf_keys
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9171,6 +9194,7 @@ mod tests {
             None,
             None,
             Some(&registered_dreps),
+            None, // registered_vrf_keys
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9179,6 +9203,652 @@ mod tests {
         assert!(
             !has_drep_err,
             "Expected no DRepAlreadyRegistered in pre-Conway (proto=8); got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: VRF key deduplication (Conway+, `VRFKeyHashAlreadyRegistered`)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a PoolRegistration cert with a given pool ID and VRF key.
+    fn make_pool_params_with_vrf(pool_id: Hash28, vrf_keyhash: Hash32) -> PoolParams {
+        PoolParams {
+            operator: pool_id,
+            vrf_keyhash,
+            pledge: Lovelace(100_000_000),
+            // cost=340 ADA is above mainnet min_pool_cost (170 ADA)
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            // 0xe1 = mainnet reward account (0b1110_0001)
+            reward_account: vec![0xe1u8; 29],
+            pool_owners: vec![pool_id],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_vrf_key_already_registered_rejected_in_conway() {
+        // A new pool registration using a VRF key that belongs to a DIFFERENT
+        // registered pool must be rejected in Conway (proto >= 9).
+        let pool_a = Hash28::from_bytes([0xA0u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB0u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xCCu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Pool B tries to register with the VRF key already held by Pool A.
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        // registered_vrf_keys: shared_vrf is already held by pool_a
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(shared_vrf, pool_a);
+
+        // registered_pools: pool_b is NEW (so deposit is charged → value conserved)
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected VrfKeyHashAlreadyRegistered for duplicate VRF key in Conway; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })),
+            "Expected VrfKeyHashAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_already_registered_same_pool_allowed() {
+        // A pool re-registering with its OWN VRF key must be accepted (no collision).
+        let pool_a = Hash28::from_bytes([0xA0u8; 28]);
+        let own_vrf = Hash32::from_bytes([0xCCu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Pool A re-registers with its own VRF key (no deposit charged for re-reg).
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_a, own_vrf,
+            )));
+
+        // VRF key is currently held by pool_a itself — re-registration is fine.
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(own_vrf, pool_a);
+
+        // pool_a is already registered → re-reg (no deposit charged)
+        let mut registered_pools: std::collections::HashSet<Hash28> =
+            std::collections::HashSet::new();
+        registered_pools.insert(pool_a);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool re-registration with own VRF key must succeed; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_dedup_skipped_pre_conway() {
+        // VRF key deduplication is only enforced in Conway (proto >= 9). In
+        // Babbage (proto = 8), duplicate VRF keys are allowed.
+        let pool_a = Hash28::from_bytes([0xA1u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB1u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xDDu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8; // Babbage — VRF dedup not enforced
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x03u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(shared_vrf, pool_a);
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+        );
+
+        let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_vrf_err,
+            "VRF key dedup must not fire in pre-Conway (proto=8); got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_dedup_no_map_skips_check() {
+        // When registered_vrf_keys is None, the VRF dedup check must be skipped.
+        // pool_a would hold the shared_vrf key in a real map, but we pass None here.
+        let _pool_a = Hash28::from_bytes([0xA2u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB2u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xEEu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway — but map is None
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x04u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys = None → check skipped
+        );
+
+        // The only expected error is VRF dedup — all other checks should pass.
+        let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_vrf_err,
+            "VRF dedup check must be skipped when registered_vrf_keys is None; got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: minimum pool cost (`StakePoolCostTooLowPOOL`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pool_cost_below_min_rejected() {
+        // A pool registration with cost < min_pool_cost must be rejected.
+        let pool_id = Hash28::from_bytes([0xC0u8; 28]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Raise min_pool_cost above 340 ADA to trigger the check.
+        params.min_pool_cost = Lovelace(500_000_000); // 500 ADA minimum
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // make_pool_params_with_vrf uses cost = 340 ADA, below the 500 ADA minimum.
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_id,
+                Hash32::from_bytes([0x00u8; 32]),
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+        );
+
+        assert!(
+            result.is_err(),
+            "Pool cost below minimum must be rejected; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakePoolCostTooLow { .. })),
+            "Expected StakePoolCostTooLow; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_cost_at_minimum_accepted() {
+        // A pool registration with cost == min_pool_cost must be accepted.
+        let pool_id = Hash28::from_bytes([0xC1u8; 28]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Set min_pool_cost to exactly 340 ADA (which is also the cert's cost).
+        params.min_pool_cost = Lovelace(340_000_000);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_id,
+                Hash32::from_bytes([0x00u8; 32]),
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool cost at minimum must be accepted; got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: reward account network (`WrongNetworkInTxBody`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pool_reward_account_wrong_network_rejected() {
+        // A pool registration with a testnet reward account in a mainnet tx
+        // (tx.body.network_id = 1) must be rejected.
+        let pool_id = Hash28::from_bytes([0xD0u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // Declare network_id = 1 (mainnet) in the tx body.
+        tx.body.network_id = Some(1);
+
+        // Pool reward account: 0xe0 = testnet (bit 0 = 0)
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe0u8; 29]; // testnet header
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+        );
+
+        assert!(
+            result.is_err(),
+            "Pool with testnet reward account in mainnet tx must be rejected; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::PoolRewardAccountWrongNetwork { .. })),
+            "Expected PoolRewardAccountWrongNetwork; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_reward_account_correct_network_accepted() {
+        // A pool registration with a matching mainnet reward account in a mainnet tx
+        // must be accepted.
+        let pool_id = Hash28::from_bytes([0xD1u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x21u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // Declare network_id = 1 (mainnet) in the tx body.
+        tx.body.network_id = Some(1);
+
+        // Pool reward account: 0xe1 = mainnet (bit 0 = 1)
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe1u8; 29]; // mainnet header
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool with correct mainnet reward account must be accepted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_reward_account_no_network_id_in_tx_skips_check() {
+        // When the tx body has no network_id field, the pool reward account
+        // network check must be skipped (pre-Alonzo or network-agnostic tx).
+        let pool_id = Hash28::from_bytes([0xD2u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x22u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // No network_id in tx body → check skipped.
+        // Pool uses testnet header which would fail if the check fired.
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe0u8; 29]; // testnet — would fail if checked
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+        );
+
+        let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::PoolRewardAccountWrongNetwork { .. })
+        }));
+        assert!(
+            !has_net_err,
+            "Pool reward account network check must be skipped when tx.body.network_id is None; \
+             got: {result:?}"
         );
     }
 }
