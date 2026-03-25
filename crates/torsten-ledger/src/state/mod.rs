@@ -345,6 +345,21 @@ pub struct GovernanceState {
     pub last_expired: Vec<GovActionId>,
     #[serde(default)]
     pub last_ratify_delayed: bool,
+    /// Number of "dormant epochs" accumulated since the start of the Conway era.
+    ///
+    /// Per Haskell `vsNumDormantEpochs` (Conway.Rules.Epoch, `updateNumDormantEpochs`):
+    /// an epoch is "dormant" if there were no active governance proposals at the epoch
+    /// boundary (i.e. `proposals` was empty during that epoch).  Dormant epochs do not
+    /// count against DRep activity — a DRep is considered inactive only when:
+    ///
+    ///   new_epoch - last_active_epoch - num_dormant_epochs > drep_activity_threshold
+    ///
+    /// This prevents DReps from being incorrectly marked inactive during quiescent
+    /// periods where there was nothing to vote on.
+    ///
+    /// `serde(default)` ensures backward compatibility with existing ledger snapshots.
+    #[serde(default)]
+    pub num_dormant_epochs: u64,
     /// DRep voting power snapshot captured at each epoch boundary (the "mark" snapshot).
     ///
     /// Maps DRep credential hash → total delegated stake (lovelace).  Only active DReps
