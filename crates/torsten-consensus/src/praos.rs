@@ -71,6 +71,20 @@ pub enum ConsensusError {
     },
     #[error("Unregistered pool: pool {pool_id} not found in stake distribution")]
     UnregisteredPool { pool_id: Hash28 },
+    #[error(
+        "Block body too large: body_size={body_size} exceeds max_block_body_size={max_block_body_size}"
+    )]
+    BlockBodyTooLarge {
+        body_size: u64,
+        max_block_body_size: u64,
+    },
+    #[error(
+        "Block header too large: header_size={header_size} exceeds max_block_header_size={max_block_header_size}"
+    )]
+    BlockHeaderTooLarge {
+        header_size: u64,
+        max_block_header_size: u64,
+    },
 }
 
 /// Information about a registered pool needed for full block validation.
@@ -561,6 +575,68 @@ impl OuroborosPraos {
             });
         }
         trace!(slot = header.slot.0, "Praos: block body hash verified");
+        Ok(())
+    }
+
+    /// Validate block envelope size limits against protocol parameters.
+    ///
+    /// This corresponds to Haskell's `envelopeChecks` in the consensus layer
+    /// (`ouroboros-consensus/src/ouroboros-consensus/Ouroboros/Consensus/Ledger/Extended.hs`).
+    /// Haskell runs `envelopeChecks` as a separate validation step before
+    /// `updateChainDepState`, so this method should be called at the block-processing
+    /// call site prior to `validate_header_full`.
+    ///
+    /// Two checks are performed:
+    /// - `body_size` (from the block header) must not exceed `max_block_body_size`.
+    /// - `header_cbor_size`, when provided, must not exceed `max_block_header_size`.
+    ///   This is optional because header CBOR length is only knowable when the raw bytes
+    ///   are available (e.g. BlockFetch), not during header-only ChainSync.
+    ///
+    /// Both limits are always fatal — the ledger assumes that any block which reaches
+    /// it has already passed `envelopeChecks`.
+    pub fn validate_envelope(
+        &self,
+        slot: SlotNo,
+        body_size: u64,
+        header_cbor_size: Option<u64>,
+        max_block_body_size: u64,
+        max_block_header_size: u64,
+    ) -> Result<(), ConsensusError> {
+        // Body size is declared by the block producer in the header body and
+        // must not exceed the protocol-parameter limit.
+        if body_size > max_block_body_size {
+            warn!(
+                slot = slot.0,
+                body_size, max_block_body_size, "Praos: block body size exceeds protocol limit"
+            );
+            return Err(ConsensusError::BlockBodyTooLarge {
+                body_size,
+                max_block_body_size,
+            });
+        }
+
+        // Header CBOR size is checked only when the raw bytes are available.
+        if let Some(header_size) = header_cbor_size {
+            if header_size > max_block_header_size {
+                warn!(
+                    slot = slot.0,
+                    header_size,
+                    max_block_header_size,
+                    "Praos: block header size exceeds protocol limit"
+                );
+                return Err(ConsensusError::BlockHeaderTooLarge {
+                    header_size,
+                    max_block_header_size,
+                });
+            }
+        }
+
+        trace!(
+            slot = slot.0,
+            body_size,
+            header_cbor_size = header_cbor_size.unwrap_or(0),
+            "Praos: envelope checks passed"
+        );
         Ok(())
     }
 
@@ -2738,6 +2814,141 @@ mod tests {
         let header = make_valid_header(5000);
         let result = praos.validate_header(&header, SlotNo(10000), ValidationMode::Replay);
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Tests for validate_envelope() — Haskell envelopeChecks
+    // ========================================================================
+
+    #[test]
+    fn test_envelope_body_size_within_limit_passes() {
+        // body_size exactly at the limit should pass.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(
+            SlotNo(100),
+            90112, // exactly max_block_body_size
+            None,
+            90112,
+            1100,
+        );
+        assert!(
+            result.is_ok(),
+            "body_size == limit should pass, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_body_size_exceeds_limit_rejected() {
+        // body_size one byte over the limit must be rejected.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(
+            SlotNo(100),
+            90113, // one byte over max_block_body_size
+            None,
+            90112,
+            1100,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::BlockBodyTooLarge {
+                    body_size: 90113,
+                    max_block_body_size: 90112,
+                })
+            ),
+            "body_size > limit should be rejected with BlockBodyTooLarge, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_body_size_zero_passes() {
+        // An empty body (body_size=0) is always within any non-zero limit.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(SlotNo(1), 0, None, 90112, 1100);
+        assert!(result.is_ok(), "body_size=0 should pass, got: {result:?}");
+    }
+
+    #[test]
+    fn test_envelope_header_size_within_limit_passes() {
+        // header_cbor_size exactly at the limit should pass.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(SlotNo(100), 0, Some(1100), 90112, 1100);
+        assert!(
+            result.is_ok(),
+            "header_size == limit should pass, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_header_size_exceeds_limit_rejected() {
+        // header_cbor_size one byte over the limit must be rejected.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(SlotNo(100), 0, Some(1101), 90112, 1100);
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::BlockHeaderTooLarge {
+                    header_size: 1101,
+                    max_block_header_size: 1100,
+                })
+            ),
+            "header_size > limit should be rejected with BlockHeaderTooLarge, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_header_size_none_skips_check() {
+        // When header_cbor_size is None, the header size check is skipped even
+        // if the limit would be exceeded. This reflects that ChainSync processes
+        // headers without their raw CBOR bytes available.
+        let praos = OuroborosPraos::new();
+        // max_block_header_size=0 would reject any real header, but None skips it.
+        let result = praos.validate_envelope(SlotNo(100), 0, None, 90112, 0);
+        assert!(
+            result.is_ok(),
+            "None header_cbor_size should skip the header size check, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_body_check_runs_before_header_check() {
+        // When both body and header are oversized, BlockBodyTooLarge is returned
+        // (body is checked first, matching left-to-right evaluation order).
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(
+            SlotNo(100),
+            99_999,      // body too large
+            Some(9_999), // header also too large
+            90112,
+            1100,
+        );
+        assert!(
+            matches!(result, Err(ConsensusError::BlockBodyTooLarge { .. })),
+            "Body check must precede header check; expected BlockBodyTooLarge, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_envelope_body_size_large_body_with_ok_header() {
+        // Oversized body with a valid header size should still fail on the body check.
+        let praos = OuroborosPraos::new();
+        let result = praos.validate_envelope(
+            SlotNo(500),
+            200_000,   // well above the 90112 limit
+            Some(800), // header is fine
+            90112,
+            1100,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ConsensusError::BlockBodyTooLarge {
+                    body_size: 200_000,
+                    max_block_body_size: 90112,
+                })
+            ),
+            "Expected BlockBodyTooLarge, got: {result:?}"
+        );
     }
 }
 

@@ -333,7 +333,7 @@ impl NodePeerManager {
 
     /// Mark a peer as connected.
     pub fn peer_connected(&mut self, addr: &SocketAddr, direction: ConnectionDirection) {
-        if !self.inner.get_peer(addr).is_some() {
+        if self.inner.get_peer(addr).is_none() {
             let source = match direction {
                 ConnectionDirection::Inbound => PeerSource::PeerSharing,
                 ConnectionDirection::Outbound => PeerSource::Topology,
@@ -436,9 +436,7 @@ impl NodePeerManager {
     /// Get the category of a peer.
     #[allow(dead_code)] // used by networking rewrite
     pub fn peer_category(&self, addr: &SocketAddr) -> Option<PeerCategory> {
-        if !self.inner.get_peer(addr).is_some() {
-            return None;
-        }
+        self.inner.get_peer(addr)?;
         for group in &self.local_root_groups {
             if group.addrs.contains(addr) {
                 return Some(PeerCategory::LocalRoot);

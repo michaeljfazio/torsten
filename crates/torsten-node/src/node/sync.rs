@@ -847,6 +847,24 @@ impl Node {
                     None
                 };
 
+                // Envelope checks (Haskell's `envelopeChecks`): body size and
+                // optional header size against protocol parameter limits.
+                // These are always fatal — no strict/non-strict bypass.
+                if let Err(e) = self.consensus.validate_envelope(
+                    block.slot(),
+                    block.header.body_size,
+                    None, // header CBOR size not available during ChainSync header processing
+                    ls.protocol_params.max_block_body_size,
+                    ls.protocol_params.max_block_header_size,
+                ) {
+                    error!(
+                        slot = block.slot().0,
+                        block_no = block.block_number().0,
+                        "Envelope check failed: {e} — rejecting batch"
+                    );
+                    return 0;
+                }
+
                 if let Err(e) = self.consensus.validate_header_full(
                     &header_with_nonce,
                     block.slot(),
@@ -2631,7 +2649,7 @@ pub async fn chainsync_client_task(
                         }
 
                         // Log progress periodically.
-                        if headers_received % 10_000 == 0 {
+                        if headers_received.is_multiple_of(10_000) {
                             debug!(
                                 %peer_addr,
                                 headers_received,

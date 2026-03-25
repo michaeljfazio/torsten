@@ -1964,23 +1964,20 @@ impl Node {
                             // Process all actions. For Connect actions, immediately
                             // follow up with Promote (Cold→Warm→Hot atomically).
                             for action in &actions {
-                                match action {
-                                    torsten_network::peer::governor::GovernorAction::PromoteToWarm(addr) => {
-                                        // Cold→Warm→Hot atomically per peer.
-                                        // Each connect takes ~600ms (TCP+handshake),
-                                        // but we must do it sequentially because
-                                        // lifecycle needs &mut self.
-                                        if let Err(e) = lifecycle.promote_to_warm(*addr, &mut pm).await {
-                                            warn!(%addr, "Cold→Warm failed: {e}");
-                                            pm.peer_failed(addr);
-                                            continue;
-                                        }
-                                        // Immediately promote to Hot on the SAME connection.
-                                        if let Err(e) = lifecycle.promote_to_hot(*addr, &mut pm).await {
-                                            warn!(%addr, "Warm→Hot failed: {e}");
-                                        }
+                                if let torsten_network::peer::governor::GovernorAction::PromoteToWarm(addr) = action {
+                                    // Cold→Warm→Hot atomically per peer.
+                                    // Each connect takes ~600ms (TCP+handshake),
+                                    // but we must do it sequentially because
+                                    // lifecycle needs &mut self.
+                                    if let Err(e) = lifecycle.promote_to_warm(*addr, &mut pm).await {
+                                        warn!(%addr, "Cold→Warm failed: {e}");
+                                        pm.peer_failed(addr);
+                                        continue;
                                     }
-                                    _ => {}
+                                    // Immediately promote to Hot on the SAME connection.
+                                    if let Err(e) = lifecycle.promote_to_hot(*addr, &mut pm).await {
+                                        warn!(%addr, "Warm→Hot failed: {e}");
+                                    }
                                 }
                             }
 
