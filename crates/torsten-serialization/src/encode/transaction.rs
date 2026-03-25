@@ -6,7 +6,7 @@ use super::certificate::encode_certificate;
 use super::governance::{encode_proposal_procedure, encode_voting_procedures};
 use super::script::{
     encode_bootstrap_witness, encode_metadata_map, encode_native_script, encode_redeemer,
-    encode_script_ref, encode_vkey_witness,
+    encode_redeemer_tag, encode_script_ref, encode_vkey_witness,
 };
 use super::value::{encode_mint, encode_value};
 
@@ -207,10 +207,23 @@ pub fn encode_witness_set(ws: &TransactionWitnessSet) -> Vec<u8> {
     }
 
     if !ws.redeemers.is_empty() {
+        // Conway default encoding for redeemers is map format:
+        //   { [tag, index] => [data, ex_units], ... }
+        // Pre-Conway (Babbage and earlier) used array format: [* [tag, index, data, ex_units]]
+        // We emit the Conway map format for canonical new transactions.
         buf.extend(encode_uint(5));
-        buf.extend(encode_array_header(ws.redeemers.len()));
+        buf.extend(encode_map_header(ws.redeemers.len()));
         for r in &ws.redeemers {
-            buf.extend(encode_redeemer(r));
+            // Key: [tag, index]
+            buf.extend(encode_array_header(2));
+            buf.extend(encode_redeemer_tag(&r.tag));
+            buf.extend(encode_uint(r.index as u64));
+            // Value: [data, ex_units]
+            buf.extend(encode_array_header(2));
+            buf.extend(encode_plutus_data(&r.data));
+            buf.extend(encode_array_header(2));
+            buf.extend(encode_uint(r.ex_units.mem));
+            buf.extend(encode_uint(r.ex_units.steps));
         }
     }
 
