@@ -221,7 +221,6 @@ pub struct Node {
     /// Triggers at epoch boundaries, every N blocks, and on graceful
     /// shutdown.  Matches Haskell's snapshot policy in Background.hs.
     pub(crate) bg_snapshot_scheduler: SnapshotScheduler,
-
 }
 
 // ─── Node impl: new() ────────────────────────────────────────────────────────
@@ -969,7 +968,6 @@ impl Node {
             copy_to_immutable: CopyToImmutable::new(consensus_security_param as usize),
             gc_scheduler: GcScheduler::new(),
             bg_snapshot_scheduler: SnapshotScheduler::new(),
-
         })
     }
 

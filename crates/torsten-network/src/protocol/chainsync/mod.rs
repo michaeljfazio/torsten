@@ -26,12 +26,24 @@
 //! - `MsgIntersectFound` = `[5, point, tip]`
 //! - `MsgIntersectNotFound` = `[6, tip]`
 //! - `MsgDone` = `[7]`
+//!
+//! ## N2N ChainSync header field format
+//! For N2N ChainSync, `MsgRollForward` sends a block *header*, not the full block.
+//! The header field is HFC-wrapped: `[era_id, #6.24(bstr(header_cbor))]`
+//! where `era_id` identifies the era (1=Byron, 2=Shelley, …, 6=Conway) and
+//! `header_cbor` is the serialised block header extracted from position 0 of the
+//! block body array.
+//!
+//! The `hfc_header` field in [`ChainSyncMessage::MsgRollForward`] stores the
+//! pre-encoded CBOR bytes of this two-element array.  The encoder inlines them
+//! verbatim into the message; the decoder captures the corresponding sub-value.
 
 pub mod client;
 pub mod server;
 
 use crate::codec::{self, Point};
 use minicbor::{data::Type, Decoder, Encoder};
+use std::io::Write as _;
 
 /// ChainSync protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +67,16 @@ pub enum ChainSyncMessage {
     MsgRequestNext,
     /// Server signals it's at the tip, will reply when a new block arrives (tag 1).
     MsgAwaitReply,
-    /// Server sends a new header/block rolling the chain forward (tag 2).
-    /// Contains raw header CBOR and tip info (slot, hash, block_number).
+    /// Server sends a new header rolling the chain forward (tag 2).
+    ///
+    /// For N2N ChainSync the `header` field holds the pre-encoded CBOR bytes of
+    /// the HFC-wrapped header: `[era_id, #6.24(bstr(header_cbor))]`.
+    /// The encoder inlines these bytes verbatim as a CBOR value (not as a bstr).
+    ///
+    /// The decoder captures the raw bytes of the header sub-value so that the
+    /// field always contains ready-to-inline CBOR.
     MsgRollForward {
+        /// Pre-encoded CBOR bytes of `[era_id, #6.24(bstr(inner_header))]`.
         header: Vec<u8>,
         tip_slot: u64,
         tip_hash: [u8; 32],
@@ -120,8 +139,11 @@ pub fn encode_message(msg: &ChainSyncMessage) -> Vec<u8> {
         } => {
             enc.array(3).expect("infallible");
             enc.u64(TAG_ROLL_FORWARD).expect("infallible");
-            // Header is raw CBOR — write it as a bytes value
-            enc.bytes(header).expect("infallible");
+            // The header field holds pre-encoded CBOR bytes for the HFC-wrapped
+            // header array [era_id, #6.24(bstr(inner_header))].  We inline them
+            // verbatim as a CBOR value (not wrapped in a bstr) so that the wire
+            // format matches what Haskell cardano-node sends.
+            enc.writer_mut().write_all(header).expect("infallible");
             codec::encode_tip(&mut enc, *tip_slot, tip_hash, *tip_block_number);
         }
         ChainSyncMessage::MsgRollBackward {
@@ -181,50 +203,32 @@ pub fn decode_message(data: &[u8]) -> Result<ChainSyncMessage, String> {
         TAG_REQUEST_NEXT => Ok(ChainSyncMessage::MsgRequestNext),
         TAG_AWAIT_REPLY => Ok(ChainSyncMessage::MsgAwaitReply),
         TAG_ROLL_FORWARD => {
-            // The header is HFC-wrapped: [era_id, CBOR_tag_24(header_bytes)]
-            // We need to handle both the HFC-wrapped format (from Haskell nodes)
-            // and raw bytes (from Torsten-to-Torsten connections).
+            // The header field is an HFC-wrapped header array: [era_id, #6.24(bstr(hdr))]
+            // Haskell cardano-node sends: [2, [era_id, tag24(header_cbor)], tip]
             //
-            // Haskell sends: [2, [era_id, tag24(header_cbor)], tip]
-            // We extract the raw header bytes from inside the tag24 wrapper.
-            let header = match dec.datatype().map_err(|e| e.to_string())? {
-                minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
-                    // Raw bytes (Torsten-to-Torsten or simple encoding)
-                    dec.bytes().map_err(|e| e.to_string())?.to_vec()
+            // We capture the raw CBOR bytes of the entire header sub-value so they can
+            // be stored and inlined verbatim when re-encoding (no double-wrapping).
+            // This is required because the encoder writes `header` bytes inline as a raw
+            // CBOR value rather than as a bstr.
+            let header_start = dec.position();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                minicbor::data::Type::Array | minicbor::data::Type::ArrayIndef => {
+                    // HFC-wrapped: [era_id, tag24(header_cbor)] — skip the whole value.
+                    dec.skip().map_err(|e| e.to_string())?;
                 }
-                minicbor::data::Type::Array => {
-                    // HFC-wrapped: [era_id, tag24(header_bytes)]
-                    let _arr = dec.array().map_err(|e| e.to_string())?;
-                    let _era_id = dec.u64().map_err(|e| e.to_string())?;
-                    // The header is typically wrapped in CBOR tag 24 (embedded CBOR)
-                    match dec.datatype().map_err(|e| e.to_string())? {
-                        minicbor::data::Type::Tag => {
-                            let tag = dec.tag().map_err(|e| e.to_string())?;
-                            if tag.as_u64() == 24 {
-                                // tag24(header_bytes) — extract the inner bytes
-                                dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                            } else {
-                                // Unknown tag — try to read as bytes
-                                dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                            }
-                        }
-                        minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
-                            // Plain bytes inside the array (no tag24 wrapper)
-                            dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                        }
-                        other => {
-                            return Err(format!(
-                                "ChainSync RollForward: unexpected type {other:?} inside HFC wrapper"
-                            ));
-                        }
-                    }
+                minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
+                    // Legacy / Torsten-to-Torsten: raw bytes fallback.
+                    dec.skip().map_err(|e| e.to_string())?;
                 }
                 other => {
                     return Err(format!(
-                        "ChainSync RollForward: unexpected header type {other:?}, expected bytes or array"
+                        "ChainSync RollForward: unexpected header type {other:?}"
                     ));
                 }
-            };
+            }
+            let header_end = dec.position();
+            // Capture the raw CBOR bytes of the header sub-value for verbatim re-encoding.
+            let header = data[header_start..header_end].to_vec();
             let (tip_slot, tip_hash, tip_block_number) =
                 codec::decode_tip(&mut dec).map_err(|e| e.to_string())?;
             Ok(ChainSyncMessage::MsgRollForward {
@@ -329,10 +333,26 @@ mod tests {
         assert!(matches!(decoded, ChainSyncMessage::MsgAwaitReply));
     }
 
+    /// Build the pre-encoded CBOR bytes for an HFC header:
+    /// `[era_id, #6.24(bstr(inner_header))]`.
+    fn make_hfc_header(era_id: u64, inner_header: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u64(era_id).unwrap();
+        enc.tag(minicbor::data::Tag::new(24)).unwrap();
+        enc.bytes(inner_header).unwrap();
+        buf
+    }
+
     #[test]
     fn msg_roll_forward_roundtrip() {
+        // The `header` field must be pre-encoded CBOR — the HFC-wrapped header
+        // array [era_id, #6.24(bstr(inner_header))].  The encoder inlines it
+        // verbatim; the decoder captures the sub-value bytes.
+        let hfc_header = make_hfc_header(6, &[0xDE, 0xAD]);
         let msg = ChainSyncMessage::MsgRollForward {
-            header: vec![0xDE, 0xAD],
+            header: hfc_header.clone(),
             tip_slot: 100,
             tip_hash: [0xAB; 32],
             tip_block_number: 50,
@@ -346,13 +366,44 @@ mod tests {
             tip_block_number,
         } = decoded
         {
-            assert_eq!(header, vec![0xDE, 0xAD]);
+            // The decoded header bytes should be the same pre-encoded CBOR that was
+            // provided — the sub-value was captured verbatim by the decoder.
+            assert_eq!(header, hfc_header);
             assert_eq!(tip_slot, 100);
             assert_eq!(tip_hash, [0xAB; 32]);
             assert_eq!(tip_block_number, 50);
         } else {
             panic!("expected MsgRollForward");
         }
+    }
+
+    #[test]
+    fn msg_roll_forward_hfc_wire_format() {
+        // Verify the exact wire bytes produced for a Conway-era (era_id=6) header.
+        //
+        // Expected outer structure: [2, [6, #6.24(bstr(inner))], tip]
+        // where tip = [[slot, hash], block_number]
+        let inner = vec![0xAA, 0xBB];
+        let hfc_header = make_hfc_header(6, &inner);
+        let msg = ChainSyncMessage::MsgRollForward {
+            header: hfc_header,
+            tip_slot: 0,
+            tip_hash: [0; 32],
+            tip_block_number: 0,
+        };
+        let encoded = encode_message(&msg);
+        // The third byte after the outer array+tag should be the start of the
+        // HFC-wrapped header array (0x82 = definite array of 2).
+        // [0x83, 0x02, 0x82, 0x06, 0xd8, 0x18, 0x42, 0xAA, 0xBB, <tip>]
+        assert_eq!(encoded[0], 0x83, "outer array(3)");
+        assert_eq!(encoded[1], 0x02, "TAG_ROLL_FORWARD");
+        assert_eq!(encoded[2], 0x82, "HFC header array(2)");
+        assert_eq!(encoded[3], 0x06, "era_id=6 (Conway)");
+        assert_eq!(encoded[4], 0xd8, "CBOR tag major type + 1-byte follows");
+        assert_eq!(encoded[5], 0x18, "tag value 24");
+        assert_eq!(encoded[6], 0x42, "bstr of length 2");
+        assert_eq!(encoded[7], 0xAA, "inner header byte 0");
+        assert_eq!(encoded[8], 0xBB, "inner header byte 1");
     }
 
     #[test]

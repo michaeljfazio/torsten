@@ -371,9 +371,12 @@ mod tests {
         }
         assert_eq!(request_count, 5);
 
-        // Send a MsgRollForward response
+        // Send a MsgRollForward response.
+        // The `header` field must be pre-encoded CBOR: [era_id, #6.24(bstr(inner))].
+        // Here: [1, #6.24(bstr(b"\x01"))] = 0x82 0x01 0xd8 0x18 0x41 0x01
+        let hfc_header = vec![0x82u8, 0x01, 0xd8, 0x18, 0x41, 0x01];
         let response = encode_message(&ChainSyncMessage::MsgRollForward {
-            header: vec![0x01],
+            header: hfc_header,
             tip_slot: 1,
             tip_hash: [0x01; 32],
             tip_block_number: 1,
