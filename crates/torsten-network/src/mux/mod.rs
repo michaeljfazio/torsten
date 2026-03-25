@@ -177,14 +177,21 @@ impl<B: Bearer> Mux<B> {
                 let mut buf = vec![0u8; n];
                 match reader.read_exact(&mut buf).await {
                     Ok(()) => {
+                        tracing::trace!(
+                            bytes = n,
+                            hex = %hex::encode(&buf[..buf.len().min(16)]),
+                            "mux: read from bearer"
+                        );
                         let _ = reply.send(Ok(buf));
                     }
                     Err(e) => {
+                        tracing::debug!("mux: bearer read error: {e}");
                         let _ = reply.send(Err(e));
-                        return; // bearer read half is dead
+                        return;
                     }
                 }
             }
+            tracing::debug!("mux: reader task exiting (read_rx channel closed)");
         });
 
         // Combine into a single handle for cleanup

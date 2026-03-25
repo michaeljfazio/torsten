@@ -3655,6 +3655,13 @@ pub async fn chainsync_client_task(
                         // Refill pipeline after rollback.
                         if !at_tip && outstanding <= low_mark {
                             let to_send = high_mark - outstanding;
+                            debug!(
+                                %peer_addr,
+                                outstanding,
+                                low_mark,
+                                to_send,
+                                "ChainSync refilling pipeline after rollback",
+                            );
                             for _ in 0..to_send {
                                 let req = cs_encode(&ChainSyncMessage::MsgRequestNext);
                                 channel.send(req).await.map_err(|e| {
@@ -3662,6 +3669,15 @@ pub async fn chainsync_client_task(
                                 })?;
                                 outstanding += 1;
                             }
+                            debug!(%peer_addr, outstanding, "ChainSync pipeline refilled");
+                        } else {
+                            debug!(
+                                %peer_addr,
+                                at_tip,
+                                outstanding,
+                                low_mark,
+                                "ChainSync NOT refilling after rollback",
+                            );
                         }
                     }
 

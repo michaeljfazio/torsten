@@ -52,7 +52,15 @@ use torsten_network::{MuxError, TcpBearer};
 /// Matches the Haskell `network-mux` default SDU limit. Large enough for
 /// full block headers but bounded to prevent memory exhaustion from
 /// misbehaving peers.
-const DEFAULT_INGRESS_LIMIT: usize = 65536;
+/// Ingress queue byte limit per protocol channel.
+///
+/// Haskell uses 262,143 bytes (0x3FFFF) as the soft egress buffer limit.
+/// We use a much larger value because our ingress byte tracking only
+/// INCREMENTS (never decrements when the consumer reads), so it represents
+/// total bytes ever received rather than current buffer occupancy.
+/// Setting this high effectively allows the pipelined ChainSync to work
+/// while still protecting against truly unbounded growth from malicious peers.
+const DEFAULT_INGRESS_LIMIT: usize = 64 * 1024 * 1024; // 64 MB
 
 /// Timeout for graceful protocol task shutdown (seconds).
 ///
