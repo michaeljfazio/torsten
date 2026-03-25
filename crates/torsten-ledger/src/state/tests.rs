@@ -176,6 +176,7 @@ fn test_apply_block_with_transaction() {
 
     let tx_hash = Hash32::from_bytes([2u8; 32]);
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -267,6 +268,7 @@ fn test_apply_block_skips_invalid_tx() {
 
     // Transaction marked as invalid (phase-2 failure)
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input.clone()],
@@ -552,6 +554,7 @@ fn test_fee_accumulation() {
     );
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -1742,6 +1745,7 @@ fn test_treasury_donation() {
     let mut state = LedgerState::new(params);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -3640,6 +3644,7 @@ fn test_utxo_stake_distribution_tracking() {
 
     // Create a transaction that spends the genesis UTxO and creates new outputs
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([0x02; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -4244,6 +4249,7 @@ fn test_invalid_tx_uses_collateral_for_fees_not_declared_fee() {
 
     // Create an invalid tx with declared fee of 200_000 but collateral of 5_000_000
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([11u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -4333,6 +4339,7 @@ fn test_invalid_tx_collateral_with_return() {
     };
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([21u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -4410,6 +4417,7 @@ fn test_invalid_tx_total_collateral_field() {
         .insert(collateral_input.clone(), collateral_output);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([31u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -9762,6 +9770,7 @@ fn make_delegation_block(
     let tx_hash = Hash32::from_bytes(tx_id_bytes);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![],
@@ -9852,6 +9861,7 @@ fn make_pool_registration_block(
         pool_metadata: None,
     };
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![],
@@ -10750,6 +10760,7 @@ fn make_invalid_tx_with_collateral(
     total_collateral: Option<Lovelace>,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![regular_input],
@@ -11814,6 +11825,7 @@ fn make_simple_tx(
     outputs: Vec<TransactionOutput>,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12271,6 +12283,7 @@ fn make_tx_with_treasury(
     treasury_value: Lovelace,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12324,6 +12337,7 @@ fn make_tx_with_committee_hot_auth(
     hot_credential: Credential,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12633,6 +12647,7 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
 /// the block-level ExUnits accumulation without a live Plutus evaluator.
 fn make_tx_with_redeemers(tx_hash_byte: u8, mem: u64, steps: u64) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -12923,6 +12938,7 @@ fn make_invalid_tx_with_col_return(
     };
 
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs: vec![regular_input],
@@ -13382,6 +13398,7 @@ fn test_treasury_donation_accumulates_correctly() {
 
     let donation_amount = 50_000_000u64;
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([0xBBu8; 32]),
         body: TransactionBody {
             inputs: vec![donor_input],
@@ -14003,6 +14020,7 @@ fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u
     );
 
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([unique_id + 100; 32]),
         body: TransactionBody {
             inputs: vec![input],

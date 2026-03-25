@@ -433,6 +433,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
 
     Ok(Transaction {
         hash,
+        era: torsten_primitives::era::Era::Conway,
         body,
         witness_set: TransactionWitnessSet {
             vkey_witnesses: Vec::new(),

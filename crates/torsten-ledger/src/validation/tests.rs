@@ -53,6 +53,7 @@ mod tests {
 
     fn make_simple_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction {
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -410,6 +411,7 @@ mod tests {
             .insert(asset, 100);
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -500,6 +502,7 @@ mod tests {
             .insert(asset, 200);
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1671,6 +1674,7 @@ mod tests {
         let mut params = ProtocolParameters::mainnet_defaults();
         params.max_val_size = 50;
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1825,6 +1829,7 @@ mod tests {
         );
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1927,6 +1932,7 @@ mod tests {
         );
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -2421,6 +2427,7 @@ mod tests {
             None,
         );
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4072,6 +4079,7 @@ mod tests {
         withdrawals.insert(reward_addr, Lovelace(1_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4168,6 +4176,7 @@ mod tests {
         withdrawals.insert(reward_addr, Lovelace(1_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4278,6 +4287,7 @@ mod tests {
         mint.entry(policy_id).or_default().insert(asset, 100);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4376,6 +4386,7 @@ mod tests {
         mint.entry(policy_id).or_default().insert(asset, 100);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4497,6 +4508,7 @@ mod tests {
 
         // Only a redeemer for index 0 — the second policy (index 1) is missing.
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4638,6 +4650,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input_a, input_b],
@@ -4776,6 +4789,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4880,6 +4894,7 @@ mod tests {
             },
         );
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5005,6 +5020,7 @@ mod tests {
         // Transaction: spending input locked by script hash, reference input
         // provides the script body.  NO redeemers — this is what we are testing.
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![spend_input],
@@ -5129,6 +5145,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![spend_input],
@@ -5248,6 +5265,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5346,6 +5364,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5451,6 +5470,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5545,6 +5565,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5641,6 +5662,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5745,6 +5767,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5880,6 +5903,7 @@ mod tests {
         // --- Part A: RegDRep with Script credential — no redeemer required ---
 
         let tx_reg = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input.clone()],
@@ -5949,6 +5973,7 @@ mod tests {
         // --- Part B: UnregDRep with Script credential — redeemer required ---
 
         let tx_unreg = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6046,6 +6071,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6163,6 +6189,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6273,6 +6300,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6391,6 +6419,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6514,6 +6543,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6622,6 +6652,7 @@ mod tests {
         voting_procedures.insert(Voter::StakePool(pool_id), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6718,6 +6749,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6829,6 +6861,7 @@ mod tests {
         treasury_withdrawals.insert(vec![0xE1, 0x02, 0x03], Lovelace(500_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6929,6 +6962,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7032,6 +7066,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7136,6 +7171,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7283,6 +7319,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7363,6 +7400,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7440,6 +7478,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7519,6 +7558,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7598,6 +7638,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7696,6 +7737,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input_a, input_b],
@@ -7776,6 +7818,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7859,6 +7902,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],

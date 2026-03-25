@@ -126,6 +126,7 @@ fn empty_witness_set() -> TransactionWitnessSet {
 fn minimal_tx() -> Transaction {
     Transaction {
         hash: Hash32::ZERO,
+        era: torsten_primitives::era::Era::Conway,
         body: minimal_body(),
         witness_set: empty_witness_set(),
         is_valid: true,
@@ -809,73 +810,83 @@ fn witness_set_with_redeemer(tag: RedeemerTag, index: u32) -> Vec<u8> {
 
 #[test]
 fn test_encode_redeemer_spend_tag() {
-    // map(1) { 5: array(1) [ array(4) [tag, index, data, ex_units] ] }
+    // Conway map format:
+    //   map(1) { 5: map(1) { array(2)[tag, index] => array(2)[data, ex_units] } }
     let enc = witness_set_with_redeemer(RedeemerTag::Spend, 0);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap(); // map(1)
+    dec.map().unwrap(); // outer witness_set map(1)
     assert_eq!(dec.u64().unwrap(), 5); // key 5 = redeemers
-    dec.array().unwrap(); // outer array(1)
-    dec.array().unwrap(); // inner array(4)
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 0); // Spend = 0
 }
 
 #[test]
 fn test_encode_redeemer_mint_tag() {
+    // Conway map format: key array(2) starts with Mint tag = 1
     let enc = witness_set_with_redeemer(RedeemerTag::Mint, 0);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap();
+    dec.map().unwrap(); // witness_set map(1)
     dec.u64().unwrap(); // key 5
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 1); // Mint = 1
 }
 
 #[test]
 fn test_encode_redeemer_cert_tag() {
+    // Conway map format: key array(2) starts with Cert tag = 2
     let enc = witness_set_with_redeemer(RedeemerTag::Cert, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 2); // Cert = 2
 }
 
 #[test]
 fn test_encode_redeemer_reward_tag() {
+    // Conway map format: key array(2) starts with Reward tag = 3
     let enc = witness_set_with_redeemer(RedeemerTag::Reward, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 3); // Reward = 3
 }
 
 #[test]
 fn test_encode_redeemer_vote_tag() {
+    // Conway map format: key array(2) starts with Vote tag = 4
     let enc = witness_set_with_redeemer(RedeemerTag::Vote, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 4); // Vote = 4
 }
 
 #[test]
 fn test_encode_redeemer_propose_tag() {
+    // Conway map format: key array(2) starts with Propose tag = 5
     let enc = witness_set_with_redeemer(RedeemerTag::Propose, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 5); // Propose = 5
 }
 
 #[test]
 fn test_encode_redeemer_ex_units_encoding() {
+    // Conway map format:
+    //   map(1) { 5: map(1) { array(2)[tag, index] => array(2)[data, ex_units] } }
+    // Key:   array(2) [ Spend=0, index=3 ]
+    // Value: array(2) [ data, array(2)[mem, steps] ]
     let ws = TransactionWitnessSet {
         redeemers: vec![Redeemer {
             tag: RedeemerTag::Spend,
@@ -890,13 +901,17 @@ fn test_encode_redeemer_ex_units_encoding() {
     };
     let enc = encode_witness_set(&ws);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap(); // map(1)
-    dec.u64().unwrap(); // key 5
-    dec.array().unwrap(); // array(1)
-    let arr = dec.array().unwrap().unwrap();
-    assert_eq!(arr, 4);
-    assert_eq!(dec.u64().unwrap(), 0); // Spend
-    assert_eq!(dec.u64().unwrap(), 3); // index
+    dec.map().unwrap(); // witness_set map(1)
+    dec.u64().unwrap(); // key 5 = redeemers
+    dec.map().unwrap(); // redeemers map(1)
+                        // Key: array(2) [tag, index]
+    let key_arr = dec.array().unwrap().unwrap();
+    assert_eq!(key_arr, 2);
+    assert_eq!(dec.u64().unwrap(), 0); // Spend = 0
+    assert_eq!(dec.u64().unwrap(), 3); // index = 3
+                                       // Value: array(2) [data, ex_units_array]
+    let val_arr = dec.array().unwrap().unwrap();
+    assert_eq!(val_arr, 2);
     let _ = dec.bytes().unwrap(); // empty bytes datum
     let ex_arr = dec.array().unwrap().unwrap();
     assert_eq!(ex_arr, 2);

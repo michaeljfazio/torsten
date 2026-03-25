@@ -1279,6 +1279,7 @@ mod tests {
         id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
@@ -3558,6 +3559,7 @@ mod tests {
         in_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: tx_hash,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
@@ -3614,6 +3616,7 @@ mod tests {
         id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::from_bytes(id_bytes),
             body: TransactionBody {
                 inputs: vec![TransactionInput {

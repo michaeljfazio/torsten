@@ -575,11 +575,7 @@ impl LedgerState {
                 debug!(
                     "DRep activity update at epoch {}: {} newly inactive, {} reactivated \
                      (threshold: {} epochs, dormant: {})",
-                    new_epoch.0,
-                    newly_inactive,
-                    reactivated,
-                    drep_activity,
-                    num_dormant
+                    new_epoch.0, newly_inactive, reactivated, drep_activity, num_dormant
                 );
             }
         }

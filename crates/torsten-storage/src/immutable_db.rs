@@ -1490,19 +1490,22 @@ mod tests {
             .write_all(&garbage)
             .unwrap();
 
-        // Should not panic
+        // Should not panic — validate_most_recent_chunk runs on open and
+        // detects that the garbage secondary entry fails the CRC/offset check,
+        // so it removes the entry from the in-memory index.  The result is 0
+        // blocks rather than 1, because no valid blocks survived validation.
         let db = ImmutableDB::open(dir.path()).unwrap();
-        assert_eq!(db.total_blocks(), 1);
+        assert_eq!(db.total_blocks(), 0);
 
-        // The block offset decoded from garbage will likely be out of range,
-        // so get_block should return None without panicking
+        // Lookup for the garbage hash must not panic
         let hash = {
             let mut h = [0u8; 32];
             h.copy_from_slice(&garbage[16..48]);
             Hash32::from_bytes(h)
         };
-        // get_block won't panic even with wild offsets
-        let _ = db.get_block(&hash);
+        // Block was rejected during validation; get_block returns None
+        let result = db.get_block(&hash);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1862,11 +1865,16 @@ mod tests {
 
         let db = ImmutableDB::open(dir.path()).unwrap();
 
-        // CRC should be loaded
+        // validate_most_recent_chunk detects the CRC mismatch on startup and
+        // removes the corrupted entry from the in-memory index entirely.
+        // The block is no longer accessible — not just rejected at read time.
         let hash32 = Hash32::from_bytes(hash);
-        assert!(db.checksums.contains_key(&hash32));
+        assert!(
+            !db.checksums.contains_key(&hash32),
+            "corrupted block should be evicted from checksums on startup validation"
+        );
 
-        // Read should return None because CRC mismatch indicates corruption
+        // Read must return None — the block was removed from the index
         let result = db.get_block(&hash32);
         assert!(result.is_none());
     }

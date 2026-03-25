@@ -284,6 +284,7 @@ mod tests {
     #[test]
     fn test_encode_transaction_complete() {
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {

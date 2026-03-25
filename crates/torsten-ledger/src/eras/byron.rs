@@ -449,6 +449,7 @@ mod tests {
             donation: None,
         };
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::from_bytes([tx_id_byte; 32]),
             body,
             witness_set: TransactionWitnessSet {

@@ -92,7 +92,12 @@ pub(crate) fn encode_redeemer_tag(tag: &RedeemerTag) -> Vec<u8> {
     })
 }
 
-/// Encode a redeemer [tag, index, data, ex_units]
+/// Encode a redeemer in Babbage array format: [tag, index, data, ex_units]
+///
+/// This is the pre-Conway array format. Conway transactions use map format
+/// instead (see `encode_witness_set` in transaction.rs). Kept for compatibility
+/// with pre-Conway era serialization and as a utility function.
+#[allow(dead_code)]
 pub(crate) fn encode_redeemer(redeemer: &Redeemer) -> Vec<u8> {
     let mut buf = encode_array_header(4);
     buf.extend(encode_redeemer_tag(&redeemer.tag));
