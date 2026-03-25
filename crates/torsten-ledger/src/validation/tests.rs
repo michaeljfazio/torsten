@@ -2232,7 +2232,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
         assert!(
@@ -2285,7 +2285,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
         assert!(
@@ -2335,7 +2335,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
@@ -8093,9 +8093,9 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
-            None, // node_network
-        None, // committee_members
-            None, // committee_resigned
+            None,      // node_network
+            None,      // committee_members
+            None,      // committee_resigned
         );
 
         assert!(
@@ -8157,9 +8157,9 @@ mod tests {
             None,      // current_epoch
             None,      // registered_dreps
             None,      // registered_vrf_keys
-            None, // node_network
-        None, // committee_members
-            None, // committee_resigned
+            None,      // node_network
+            None,      // committee_members
+            None,      // committee_resigned
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8210,7 +8210,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8322,7 +8322,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8370,7 +8370,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8411,7 +8411,7 @@ mod tests {
             None, None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8461,7 +8461,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8516,7 +8516,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8572,7 +8572,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8627,7 +8627,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8712,7 +8712,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8764,7 +8764,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8802,7 +8802,7 @@ mod tests {
             None, None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8853,7 +8853,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8937,7 +8937,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -8990,7 +8990,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9028,7 +9028,7 @@ mod tests {
             None, None, None, None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9119,7 +9119,7 @@ mod tests {
             Some(&registered_dreps),
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9168,7 +9168,7 @@ mod tests {
             Some(&registered_dreps),
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9198,7 +9198,7 @@ mod tests {
             None, // registered_dreps = None → check skipped
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9271,7 +9271,7 @@ mod tests {
             Some(&registered_dreps),
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9371,7 +9371,7 @@ mod tests {
             None, // registered_dreps
             Some(&registered_vrf_keys),
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9448,7 +9448,7 @@ mod tests {
             None, // registered_dreps
             Some(&registered_vrf_keys),
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9518,7 +9518,7 @@ mod tests {
             None, // registered_dreps
             Some(&registered_vrf_keys),
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9587,7 +9587,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys = None → check skipped
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9661,7 +9661,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9733,7 +9733,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9804,7 +9804,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9878,7 +9878,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -9943,7 +9943,7 @@ mod tests {
             None, // registered_dreps
             None, // registered_vrf_keys
             None, // node_network
-        None, // committee_members
+            None, // committee_members
             None, // committee_resigned
         );
 
@@ -10020,8 +10020,7 @@ mod tests {
         params.protocol_version_major = 9;
 
         // Empty committee_members set — cold credential is not a member.
-        let committee_members: std::collections::HashSet<Hash32> =
-            std::collections::HashSet::new();
+        let committee_members: std::collections::HashSet<Hash32> = std::collections::HashSet::new();
 
         let result = validate_transaction_with_pools(
             &tx,
@@ -10029,16 +10028,16 @@ mod tests {
             &params,
             100,
             300,
-            None,  // slot_config
-            None,  // registered_pools
-            None,  // current_treasury
-            None,  // reward_accounts
-            None,  // current_epoch
-            None,  // registered_dreps
-            None,  // registered_vrf_keys
-            None,  // node_network
+            None, // slot_config
+            None, // registered_pools
+            None, // current_treasury
+            None, // reward_accounts
+            None, // current_epoch
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
             Some(&committee_members),
-            None,  // committee_resigned
+            None, // committee_resigned
         );
 
         assert!(
@@ -10165,21 +10164,10 @@ mod tests {
         params.protocol_version_major = 9;
 
         let result = validate_transaction_with_pools(
-            &tx,
-            &utxo_set,
-            &params,
-            100,
-            300,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,  // node_network
-            None,  // committee_members = None → check skipped
-            None,  // committee_resigned = None → check skipped
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
+            None, // node_network
+            None, // committee_members = None → check skipped
+            None, // committee_resigned = None → check skipped
         );
 
         let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10210,8 +10198,7 @@ mod tests {
         let mut params = ProtocolParameters::mainnet_defaults();
         params.protocol_version_major = 8;
 
-        let committee_members: std::collections::HashSet<Hash32> =
-            std::collections::HashSet::new(); // empty — would trigger UnelectedCommitteeMember in Conway
+        let committee_members: std::collections::HashSet<Hash32> = std::collections::HashSet::new(); // empty — would trigger UnelectedCommitteeMember in Conway
 
         let result = validate_transaction_with_pools(
             &tx,
@@ -10274,24 +10261,16 @@ mod tests {
         });
 
         let result = validate_transaction_with_pools(
-            &tx,
-            &utxo_set,
-            &params,
-            100,
-            300,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
             None, // node_network
             None, // committee_members
             None, // committee_resigned
         );
 
-        assert!(result.is_err(), "Expected validation failure, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "Expected validation failure, got: {result:?}"
+        );
         let errors = result.unwrap_err();
         assert!(
             errors
@@ -10325,18 +10304,7 @@ mod tests {
         });
 
         let result = validate_transaction_with_pools(
-            &tx,
-            &utxo_set,
-            &params,
-            100,
-            300,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
             None, // node_network
             None, // committee_members
             None, // committee_resigned
@@ -10346,7 +10314,10 @@ mod tests {
         let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
             matches!(e, ValidationError::AuxiliaryDataHashMismatch)
         }));
-        assert!(!has_mismatch, "AuxiliaryDataHashMismatch must not fire when content is correct; got: {result:?}");
+        assert!(
+            !has_mismatch,
+            "AuxiliaryDataHashMismatch must not fire when content is correct; got: {result:?}"
+        );
     }
 
     #[test]
@@ -10371,18 +10342,7 @@ mod tests {
         });
 
         let result = validate_transaction_with_pools(
-            &tx,
-            &utxo_set,
-            &params,
-            100,
-            300,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
             None, // node_network
             None, // committee_members
             None, // committee_resigned
@@ -10393,7 +10353,10 @@ mod tests {
         let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
             matches!(e, ValidationError::AuxiliaryDataHashMismatch)
         }));
-        assert!(!has_mismatch, "AuxiliaryDataHashMismatch must not fire when raw_cbor is None; got: {result:?}");
+        assert!(
+            !has_mismatch,
+            "AuxiliaryDataHashMismatch must not fire when raw_cbor is None; got: {result:?}"
+        );
     }
 
     // ─── Sub-task B: unconditional network ID checks ──────────────────────────
@@ -10444,7 +10407,10 @@ mod tests {
             None,                     // committee_resigned
         );
 
-        assert!(result.is_err(), "Expected WrongNetworkInOutput failure; got: {result:?}");
+        assert!(
+            result.is_err(),
+            "Expected WrongNetworkInOutput failure; got: {result:?}"
+        );
         let errors = result.unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
@@ -10503,7 +10469,10 @@ mod tests {
         let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
             matches!(e, ValidationError::WrongNetworkInOutput { .. })
         }));
-        assert!(!has_wrong_network, "WrongNetworkInOutput must not fire when networks match; got: {result:?}");
+        assert!(
+            !has_wrong_network,
+            "WrongNetworkInOutput must not fire when networks match; got: {result:?}"
+        );
     }
 
     #[test]

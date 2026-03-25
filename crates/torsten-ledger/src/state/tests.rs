@@ -13843,11 +13843,7 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
 /// The transaction spends a UTxO seeded in `state.utxo_set` (inserted by this
 /// helper) and donates `donation_lovelace` to the treasury.  Because the
 /// donation reduces the available balance, the output is sized accordingly.
-fn make_donation_tx(
-    state: &mut LedgerState,
-    unique_id: u8,
-    donation_lovelace: u64,
-) -> Transaction {
+fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u64) -> Transaction {
     let input_value = 10_000_000u64;
     let fee = 200_000u64;
     let output_value = input_value - fee - donation_lovelace;
@@ -13936,7 +13932,7 @@ fn test_treasury_donation_buffered_until_epoch_boundary() {
     // Reference: Haskell `UTxOState.utxosDonation` / NEWEPOCH `applyRUpd`.
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.epoch_length = 200;        // short epoch for testing
+    state.epoch_length = 200; // short epoch for testing
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
 
@@ -13970,7 +13966,11 @@ fn test_treasury_donation_buffered_until_epoch_boundary() {
         .apply_block(&block1, BlockValidationMode::ApplyOnly)
         .expect("epoch-boundary block should succeed");
 
-    assert_eq!(state.epoch, EpochNo(1), "Should have transitioned to epoch 1");
+    assert_eq!(
+        state.epoch,
+        EpochNo(1),
+        "Should have transitioned to epoch 1"
+    );
 
     // After epoch boundary: pending_donations must be zero (fully flushed).
     assert_eq!(
@@ -14033,7 +14033,10 @@ fn test_treasury_donation_accumulates_across_transactions() {
         .apply_block(&block1, BlockValidationMode::ApplyOnly)
         .expect("epoch boundary block should succeed");
 
-    assert_eq!(state.pending_donations.0, 0, "pending_donations must be zero post-boundary");
+    assert_eq!(
+        state.pending_donations.0, 0,
+        "pending_donations must be zero post-boundary"
+    );
     assert!(
         state.treasury.0 >= donation_a + donation_b,
         "Treasury must include all flushed donations. treasury={}, min_expected={}",

@@ -610,7 +610,12 @@ impl LedgerState {
                     // CommitteeHotAuth "unelected member" check (Conway+ only).
                     let committee_member_keys: std::collections::HashSet<
                         torsten_primitives::hash::Hash32,
-                    > = self.governance.committee_expiration.keys().copied().collect();
+                    > = self
+                        .governance
+                        .committee_expiration
+                        .keys()
+                        .copied()
+                        .collect();
                     // Build the set of resigned CC cold credential hashes for the
                     // "previously resigned" check (Conway+ only).
                     let committee_resigned_keys: std::collections::HashSet<
