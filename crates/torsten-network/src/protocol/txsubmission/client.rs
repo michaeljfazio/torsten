@@ -138,6 +138,7 @@ mod tests {
             egress_tx,
             ingress_rx,
             1_000_000,
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
         (channel, egress_rx, ingress_tx)
     }

@@ -59,6 +59,7 @@ fn make_tx_output_ada(seed: u8, lovelace: u64) -> TransactionOutput {
 /// Build a realistic Conway transaction: 2 inputs, 2 outputs, 2 witnesses.
 fn make_realistic_transaction() -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([0xAA; 32]),
         body: TransactionBody {
             inputs: vec![make_tx_input(1), make_tx_input(2)],

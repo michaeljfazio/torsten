@@ -1,14 +1,70 @@
 use crate::cbor::*;
+use torsten_primitives::era::Era;
 use torsten_primitives::hash::{blake2b_256, Hash32};
 use torsten_primitives::transaction::*;
 
 use super::certificate::encode_certificate;
 use super::governance::{encode_proposal_procedure, encode_voting_procedures};
 use super::script::{
-    encode_bootstrap_witness, encode_metadata_map, encode_native_script, encode_redeemer,
+    encode_bootstrap_witness, encode_metadata_map, encode_native_script, encode_redeemer_tag,
     encode_script_ref, encode_vkey_witness,
 };
 use super::value::{encode_mint, encode_value};
+
+/// Encode a set-typed field as CBOR tag 258 with a sorted definite-length array.
+///
+/// Per Conway CDDL: `set<a> = #6.258([* a])`. The canonical encoding wraps the
+/// items in tag 258. Items are sorted lexicographically by their CBOR encoding
+/// to produce canonical ordering.
+fn encode_tagged_set<T, F>(items: &[T], encode_item: F) -> Vec<u8>
+where
+    F: Fn(&T) -> Vec<u8>,
+{
+    // Encode each item individually so we can sort them.
+    let mut encoded_items: Vec<Vec<u8>> = items.iter().map(encode_item).collect();
+    // Canonical CBOR set ordering: lexicographic on the CBOR encoding bytes.
+    encoded_items.sort();
+
+    // tag(258) followed by definite-length array.
+    let mut buf = encode_tag(258);
+    buf.extend(encode_array_header(encoded_items.len()));
+    for encoded in encoded_items {
+        buf.extend(encoded);
+    }
+    buf
+}
+
+/// Encode a sequence as a plain definite-length array (pre-Conway eras).
+///
+/// Pre-Conway CDDL uses `[* item]` for inputs, certificates, collateral, and
+/// reference inputs — NOT `set<item> = #6.258([* item])`. Items are encoded in
+/// their original order without sorting, preserving the original transaction body.
+fn encode_plain_array<T, F>(items: &[T], encode_item: F) -> Vec<u8>
+where
+    F: Fn(&T) -> Vec<u8>,
+{
+    let mut buf = encode_array_header(items.len());
+    for item in items {
+        buf.extend(encode_item(item));
+    }
+    buf
+}
+
+/// Encode a set-typed body field using the correct format for the given era.
+///
+/// - Conway: CBOR tag 258 with lexicographically sorted items
+///   (`set<a> = #6.258([* a])` per Conway CDDL)
+/// - Pre-Conway: plain definite-length array (`[* a]`)
+fn encode_set_for_era<T, F>(era: Era, items: &[T], encode_item: F) -> Vec<u8>
+where
+    F: Fn(&T) -> Vec<u8>,
+{
+    if era == Era::Conway {
+        encode_tagged_set(items, encode_item)
+    } else {
+        encode_plain_array(items, encode_item)
+    }
+}
 
 /// Encode a transaction output.
 ///
@@ -114,7 +170,22 @@ fn encode_post_alonzo_transaction_output(output: &TransactionOutput) -> Vec<u8> 
 ///
 /// Map keys: 0=vkeywitnesses, 1=native_scripts, 2=bootstrap_witnesses,
 ///           3=plutus_v1, 4=plutus_data, 5=redeemers, 6=plutus_v2, 7=plutus_v3
+/// Encode a transaction witness set (Conway format by default).
+///
+/// This is a compatibility wrapper that always uses Conway-era encoding
+/// (map format for redeemers). For era-specific encoding, use
+/// `encode_witness_set_for_era`.
 pub fn encode_witness_set(ws: &TransactionWitnessSet) -> Vec<u8> {
+    encode_witness_set_for_era(ws, Era::Conway)
+}
+
+/// Encode a transaction witness set using era-specific encoding rules.
+///
+/// - Conway: redeemers use map format `{ [tag, index] => [data, ex_units] }`
+///   (per Conway CDDL `nonempty_map<redeemer_key, redeemer_value>`)
+/// - Pre-Conway (Alonzo/Babbage): redeemers use array format
+///   `[* [tag, index, data, ex_units]]`
+pub(super) fn encode_witness_set_for_era(ws: &TransactionWitnessSet, era: Era) -> Vec<u8> {
     let mut count = 0;
     if !ws.vkey_witnesses.is_empty() {
         count += 1;
@@ -185,9 +256,35 @@ pub fn encode_witness_set(ws: &TransactionWitnessSet) -> Vec<u8> {
 
     if !ws.redeemers.is_empty() {
         buf.extend(encode_uint(5));
-        buf.extend(encode_array_header(ws.redeemers.len()));
-        for r in &ws.redeemers {
-            buf.extend(encode_redeemer(r));
+        if era == Era::Conway {
+            // Conway map format: { [tag, index] => [data, ex_units], ... }
+            // Per Conway CDDL: redeemers = nonempty_map<redeemer_key, redeemer_value>
+            buf.extend(encode_map_header(ws.redeemers.len()));
+            for r in &ws.redeemers {
+                // Key: [tag, index]
+                buf.extend(encode_array_header(2));
+                buf.extend(encode_redeemer_tag(&r.tag));
+                buf.extend(encode_uint(r.index as u64));
+                // Value: [data, ex_units]
+                buf.extend(encode_array_header(2));
+                buf.extend(encode_plutus_data(&r.data));
+                buf.extend(encode_array_header(2));
+                buf.extend(encode_uint(r.ex_units.mem));
+                buf.extend(encode_uint(r.ex_units.steps));
+            }
+        } else {
+            // Pre-Conway (Alonzo/Babbage) array format:
+            //   [* [tag, index, data, ex_units]]
+            buf.extend(encode_array_header(ws.redeemers.len()));
+            for r in &ws.redeemers {
+                buf.extend(encode_array_header(4));
+                buf.extend(encode_redeemer_tag(&r.tag));
+                buf.extend(encode_uint(r.index as u64));
+                buf.extend(encode_plutus_data(&r.data));
+                buf.extend(encode_array_header(2));
+                buf.extend(encode_uint(r.ex_units.mem));
+                buf.extend(encode_uint(r.ex_units.steps));
+            }
         }
     }
 
@@ -282,7 +379,11 @@ pub fn encode_auxiliary_data(aux: &AuxiliaryData) -> Vec<u8> {
     buf
 }
 
-/// Encode a transaction body as CBOR map.
+/// Encode a transaction body as CBOR map (Conway format by default).
+///
+/// This is a compatibility wrapper that always uses Conway-era encoding
+/// (tag 258 for set fields). For era-specific encoding, use
+/// `encode_transaction_body_for_era`.
 ///
 /// Required keys: 0=inputs, 1=outputs, 2=fee
 /// Optional keys: 3=ttl, 4=certs, 5=withdrawals, 7=aux_data_hash, 8=validity_start,
@@ -291,6 +392,16 @@ pub fn encode_auxiliary_data(aux: &AuxiliaryData) -> Vec<u8> {
 ///                18=reference_inputs, 19=voting_procedures, 20=proposal_procedures,
 ///                21=treasury_value, 22=donation
 pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
+    encode_transaction_body_for_era(body, Era::Conway)
+}
+
+/// Encode a transaction body as CBOR map using era-specific encoding rules.
+///
+/// - Conway: inputs, certificates, collateral, and reference_inputs are
+///   encoded as CBOR tag 258 sets (`#6.258([* item])`) with items sorted
+///   lexicographically by their CBOR encoding.
+/// - Pre-Conway: those fields are encoded as plain definite-length arrays.
+pub(super) fn encode_transaction_body_for_era(body: &TransactionBody, era: Era) -> Vec<u8> {
     // Count fields
     let mut count = 3; // inputs, outputs, fee always present
     if body.ttl.is_some() {
@@ -347,12 +458,11 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
 
     let mut buf = encode_map_header(count);
 
-    // 0: inputs (set of [tx_hash, index])
+    // 0: inputs
+    // Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Pre-Conway CDDL: [* transaction_input]  (plain array, no tag 258)
     buf.extend(encode_uint(0));
-    buf.extend(encode_array_header(body.inputs.len()));
-    for input in &body.inputs {
-        buf.extend(encode_tx_input(input));
-    }
+    buf.extend(encode_set_for_era(era, &body.inputs, encode_tx_input));
 
     // 1: outputs
     buf.extend(encode_uint(1));
@@ -372,12 +482,15 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
     }
 
     // 4: certificates
+    // Conway CDDL: nonempty_oset<certificate> = #6.258([+ certificate])
+    // Pre-Conway CDDL: [* certificate]  (plain array, no tag 258)
     if !body.certificates.is_empty() {
         buf.extend(encode_uint(4));
-        buf.extend(encode_array_header(body.certificates.len()));
-        for cert in &body.certificates {
-            buf.extend(encode_certificate(cert));
-        }
+        buf.extend(encode_set_for_era(
+            era,
+            &body.certificates,
+            encode_certificate,
+        ));
     }
 
     // 5: withdrawals
@@ -415,20 +528,22 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
     }
 
     // 13: collateral
+    // Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Pre-Conway CDDL: [* transaction_input]  (plain array, no tag 258)
     if !body.collateral.is_empty() {
         buf.extend(encode_uint(13));
-        buf.extend(encode_array_header(body.collateral.len()));
-        for input in &body.collateral {
-            buf.extend(encode_tx_input(input));
-        }
+        buf.extend(encode_set_for_era(era, &body.collateral, encode_tx_input));
     }
 
     // 14: required_signers
+    // CDDL: required_signers = nonempty_set<addr_keyhash> where addr_keyhash = hash28.
+    // required_signers is stored internally as Hash32 (zero-padded from 28-byte pallas hashes),
+    // so we emit only the first 28 bytes on the wire to match the CDDL spec.
     if !body.required_signers.is_empty() {
         buf.extend(encode_uint(14));
         buf.extend(encode_array_header(body.required_signers.len()));
         for hash in &body.required_signers {
-            buf.extend(encode_hash32(hash));
+            buf.extend(encode_bytes(&hash.as_bytes()[..28]));
         }
     }
 
@@ -451,12 +566,15 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
     }
 
     // 18: reference_inputs
+    // Conway CDDL: set<transaction_input> = #6.258([* transaction_input])
+    // Pre-Conway (Babbage) CDDL: [* transaction_input]  (plain array, no tag 258)
     if !body.reference_inputs.is_empty() {
         buf.extend(encode_uint(18));
-        buf.extend(encode_array_header(body.reference_inputs.len()));
-        for input in &body.reference_inputs {
-            buf.extend(encode_tx_input(input));
-        }
+        buf.extend(encode_set_for_era(
+            era,
+            &body.reference_inputs,
+            encode_tx_input,
+        ));
     }
 
     // 19: voting_procedures
@@ -490,10 +608,14 @@ pub fn encode_transaction_body(body: &TransactionBody) -> Vec<u8> {
 }
 
 /// Encode a complete transaction: [body, witness_set, is_valid, auxiliary_data]
+///
+/// Uses era-aware encoding driven by `tx.era`:
+/// - Conway: tag 258 for set fields in body; map format for redeemers
+/// - Pre-Conway: plain arrays for set fields; array format for redeemers
 pub fn encode_transaction(tx: &Transaction) -> Vec<u8> {
     let mut buf = encode_array_header(4);
-    buf.extend(encode_transaction_body(&tx.body));
-    buf.extend(encode_witness_set(&tx.witness_set));
+    buf.extend(encode_transaction_body_for_era(&tx.body, tx.era));
+    buf.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
     buf.extend(encode_bool(tx.is_valid));
     match &tx.auxiliary_data {
         Some(aux) => buf.extend(encode_auxiliary_data(aux)),

@@ -98,8 +98,8 @@ pub async fn run_n2n_handshake_server(
                     simultaneous_open: false,
                 });
             } else {
-                // Magic mismatch — refuse
-                let msg = encode_refuse(our_version, "network magic mismatch");
+                // Magic mismatch — use Refused (tag 2) with the matched version and a reason string
+                let msg = encode_refuse_with_reason(2, our_version, "network magic mismatch");
                 channel.send(msg).await.map_err(HandshakeError::from)?;
                 return Err(HandshakeError::NetworkMagicMismatch {
                     ours: our_data.network_magic,
@@ -109,10 +109,10 @@ pub async fn run_n2n_handshake_server(
         }
     }
 
-    // No common version
+    // No common version — emit VersionMismatch with our supported version list
     let our_versions: Vec<u16> = n2n::N2N_VERSIONS.to_vec();
     let their_versions: Vec<u16> = remote_versions.keys().copied().collect();
-    let msg = encode_refuse(0, "no common version");
+    let msg = encode_refuse_version_mismatch(&our_versions);
     let _ = channel.send(msg).await;
     Err(HandshakeError::VersionMismatch {
         ours: our_versions,
@@ -154,7 +154,9 @@ pub async fn run_n2c_handshake_server(
                     simultaneous_open: false,
                 });
             } else {
-                let msg = encode_refuse(
+                // Magic mismatch — use Refused (tag 2); wire-encode the version number
+                let msg = encode_refuse_with_reason(
+                    2,
                     n2c::encode_n2c_version(our_version),
                     "network magic mismatch",
                 );
@@ -167,9 +169,14 @@ pub async fn run_n2c_handshake_server(
         }
     }
 
+    // No common version — emit VersionMismatch with our supported version list (wire-encoded)
     let our_versions: Vec<u16> = n2c::N2C_VERSIONS.to_vec();
     let their_versions: Vec<u16> = remote_versions.keys().copied().collect();
-    let msg = encode_refuse(0, "no common version");
+    let wire_versions: Vec<u16> = our_versions
+        .iter()
+        .map(|&v| n2c::encode_n2c_version(v))
+        .collect();
+    let msg = encode_refuse_version_mismatch(&wire_versions);
     let _ = channel.send(msg).await;
     Err(HandshakeError::VersionMismatch {
         ours: our_versions,
@@ -240,17 +247,38 @@ fn encode_accept_version_n2c(version: u16, data: &N2CVersionData) -> Vec<u8> {
     buf
 }
 
-/// Encode MsgRefuse: `[2, [0, [version, reason_text]]]`.
-/// Tag 0 = VersionMismatch in the Haskell encoding.
-fn encode_refuse(version: u16, reason: &str) -> Vec<u8> {
+/// Encode MsgRefuse for a VersionMismatch: `[2, [0, [v1, v2, ...]]]`.
+///
+/// Per CDDL `refuseReasonVersionMismatch = (0, [*versionNumber])`.
+/// The second element is a list of the versions *we* support — not a
+/// `(version, reason_text)` pair as was previously (incorrectly) encoded.
+fn encode_refuse_version_mismatch(our_versions: &[u16]) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = Encoder::new(&mut buf);
     enc.array(2).expect("infallible");
     enc.u64(MSG_REFUSE).expect("infallible");
-    // RefuseReason: [0, [version, reason]] for VersionMismatch
+    // RefuseReason: [0, [v1, v2, ...]] — tag 0 with our supported version list
     enc.array(2).expect("infallible");
     enc.u8(0).expect("infallible");
+    enc.array(our_versions.len() as u64).expect("infallible");
+    for v in our_versions {
+        enc.u16(*v).expect("infallible");
+    }
+    buf
+}
+
+/// Encode MsgRefuse for a non-version-mismatch reason: `[2, [tag, version, reason_text]]`.
+///
+/// Used for HandshakeDecodeError (tag 1) and Refused (tag 2), both of which carry
+/// `(tag, versionNumber, text)` per the CDDL spec.
+fn encode_refuse_with_reason(tag: u8, version: u16, reason: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut enc = Encoder::new(&mut buf);
     enc.array(2).expect("infallible");
+    enc.u64(MSG_REFUSE).expect("infallible");
+    // RefuseReason: [tag, version, reason_text]
+    enc.array(3).expect("infallible");
+    enc.u8(tag).expect("infallible");
     enc.u16(version).expect("infallible");
     enc.str(reason).expect("infallible");
     buf
@@ -359,14 +387,27 @@ fn decode_handshake_response(data: &[u8]) -> Result<HandshakeResult, HandshakeEr
                 .map_err(|e| HandshakeError::DecodeError(e.to_string()))?;
             let reason = match reason_tag {
                 0 => {
-                    // VersionMismatch: [version, reason_text]
-                    let _inner = dec.array();
-                    let v = dec.u16().unwrap_or(0);
-                    let r = dec.str().unwrap_or("unknown");
-                    format!("version mismatch (v{v}): {r}")
+                    // VersionMismatch: [0, [v1, v2, ...]] per CDDL refuseReasonVersionMismatch.
+                    // Decode the inner list of supported version numbers.
+                    let versions: Vec<u16> = if let Ok(Some(n)) = dec.array() {
+                        (0..n).filter_map(|_| dec.u16().ok()).collect()
+                    } else {
+                        vec![]
+                    };
+                    format!("version mismatch; remote supports: {versions:?}")
                 }
-                1 => "handshake decode error".to_string(),
-                2 => "refused".to_string(),
+                1 => {
+                    // HandshakeDecodeError: [1, version, reason_text]
+                    let v = dec.u16().unwrap_or(0);
+                    let r = dec.str().unwrap_or("unknown").to_owned();
+                    format!("handshake decode error (v{v}): {r}")
+                }
+                2 => {
+                    // Refused: [2, version, reason_text]
+                    let v = dec.u16().unwrap_or(0);
+                    let r = dec.str().unwrap_or("unknown").to_owned();
+                    format!("refused (v{v}): {r}")
+                }
                 _ => format!("unknown refuse reason tag {reason_tag}"),
             };
             Err(HandshakeError::Refused { version: 0, reason })
@@ -443,12 +484,31 @@ mod tests {
     }
 
     #[test]
-    fn n2n_refuse_decode() {
-        let encoded = encode_refuse(15, "bad magic");
+    fn n2n_refuse_version_mismatch_decode() {
+        // VersionMismatch (tag 0): [0, [v1, v2, ...]] per CDDL
+        let encoded = encode_refuse_version_mismatch(&[14, 15]);
+        let result = decode_handshake_response(&encoded);
+        assert!(result.is_err());
+        if let Err(HandshakeError::Refused { reason, .. }) = result {
+            assert!(
+                reason.contains("version mismatch"),
+                "expected 'version mismatch' in reason, got: {reason}"
+            );
+        } else {
+            panic!("expected HandshakeError::Refused");
+        }
+    }
+
+    #[test]
+    fn n2n_refuse_refused_decode() {
+        // Refused (tag 2): [2, version, reason_text]
+        let encoded = encode_refuse_with_reason(2, 15, "bad magic");
         let result = decode_handshake_response(&encoded);
         assert!(result.is_err());
         if let Err(HandshakeError::Refused { reason, .. }) = result {
             assert!(reason.contains("bad magic"));
+        } else {
+            panic!("expected HandshakeError::Refused");
         }
     }
 

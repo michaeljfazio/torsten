@@ -25,7 +25,7 @@
 pub mod client;
 pub mod server;
 
-use minicbor::{Decoder, Encoder};
+use minicbor::{data::Type, Decoder, Encoder};
 
 /// TxSubmission2 protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,30 +104,41 @@ pub fn encode_message(msg: &TxSubmissionMessage) -> Vec<u8> {
             enc.u16(*req_count).expect("infallible");
         }
         TxSubmissionMessage::MsgReplyTxIds(ids) => {
+            // Outer message array is definite-length (always 2 elements).
+            // Inner txIdsAndSizes list uses indefinite-length per the CDDL spec:
+            //   MsgReplyTxIds = [1, [* [txid, word32]]]
             enc.array(2).expect("infallible");
             enc.u64(TAG_REPLY_TX_IDS).expect("infallible");
-            enc.array(ids.len() as u64).expect("infallible");
+            enc.begin_array().expect("infallible");
             for id in ids {
+                // Each [txid, size] entry is a definite 2-element array.
                 enc.array(2).expect("infallible");
                 enc.bytes(&id.tx_id).expect("infallible");
                 enc.u32(id.size_in_bytes).expect("infallible");
             }
+            enc.end().expect("infallible");
         }
         TxSubmissionMessage::MsgRequestTxs(ids) => {
+            // Inner txIdList uses indefinite-length per the CDDL spec:
+            //   MsgRequestTxs = [2, [* txid]]
             enc.array(2).expect("infallible");
             enc.u64(TAG_REQUEST_TXS).expect("infallible");
-            enc.array(ids.len() as u64).expect("infallible");
+            enc.begin_array().expect("infallible");
             for id in ids {
                 enc.bytes(id).expect("infallible");
             }
+            enc.end().expect("infallible");
         }
         TxSubmissionMessage::MsgReplyTxs(txs) => {
+            // Inner txList uses indefinite-length per the CDDL spec:
+            //   MsgReplyTxs = [3, [* tx]]
             enc.array(2).expect("infallible");
             enc.u64(TAG_REPLY_TXS).expect("infallible");
-            enc.array(txs.len() as u64).expect("infallible");
+            enc.begin_array().expect("infallible");
             for tx in txs {
                 enc.bytes(tx).expect("infallible");
             }
+            enc.end().expect("infallible");
         }
         TxSubmissionMessage::MsgDone => {
             enc.array(1).expect("infallible");
@@ -156,53 +167,135 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
             })
         }
         TAG_REPLY_TX_IDS => {
-            let len = dec
-                .array()
-                .map_err(|e| e.to_string())?
-                .ok_or("indefinite array not supported")?;
-            let mut ids = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                dec.array().map_err(|e| e.to_string())?;
-                let tx_id_bytes = dec.bytes().map_err(|e| e.to_string())?;
-                if tx_id_bytes.len() != 32 {
-                    return Err(format!("tx_id must be 32 bytes, got {}", tx_id_bytes.len()));
+            // Accept both definite and indefinite-length arrays per the CDDL spec.
+            // Haskell nodes send indefinite-length; definite is also valid CBOR.
+            let mut ids = Vec::new();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                Type::ArrayIndef => {
+                    // Indefinite-length: consume items until a Break code.
+                    dec.array().map_err(|e| e.to_string())?;
+                    loop {
+                        if dec.datatype().map_err(|e| e.to_string())? == Type::Break {
+                            dec.skip().map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        dec.array().map_err(|e| e.to_string())?;
+                        let tx_id_bytes = dec.bytes().map_err(|e| e.to_string())?;
+                        if tx_id_bytes.len() != 32 {
+                            return Err(format!(
+                                "tx_id must be 32 bytes, got {}",
+                                tx_id_bytes.len()
+                            ));
+                        }
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(tx_id_bytes);
+                        let size = dec.u32().map_err(|e| e.to_string())?;
+                        ids.push(TxIdAndSize {
+                            tx_id,
+                            size_in_bytes: size,
+                        });
+                    }
                 }
-                let mut tx_id = [0u8; 32];
-                tx_id.copy_from_slice(tx_id_bytes);
-                let size = dec.u32().map_err(|e| e.to_string())?;
-                ids.push(TxIdAndSize {
-                    tx_id,
-                    size_in_bytes: size,
-                });
+                Type::Array => {
+                    // Definite-length: read the count, then iterate.
+                    let len = dec
+                        .array()
+                        .map_err(|e| e.to_string())?
+                        .ok_or("expected definite array length")?;
+                    ids.reserve(len as usize);
+                    for _ in 0..len {
+                        dec.array().map_err(|e| e.to_string())?;
+                        let tx_id_bytes = dec.bytes().map_err(|e| e.to_string())?;
+                        if tx_id_bytes.len() != 32 {
+                            return Err(format!(
+                                "tx_id must be 32 bytes, got {}",
+                                tx_id_bytes.len()
+                            ));
+                        }
+                        let mut tx_id = [0u8; 32];
+                        tx_id.copy_from_slice(tx_id_bytes);
+                        let size = dec.u32().map_err(|e| e.to_string())?;
+                        ids.push(TxIdAndSize {
+                            tx_id,
+                            size_in_bytes: size,
+                        });
+                    }
+                }
+                other => {
+                    return Err(format!("MsgReplyTxIds: expected array, got {other:?}"));
+                }
             }
             Ok(TxSubmissionMessage::MsgReplyTxIds(ids))
         }
         TAG_REQUEST_TXS => {
-            let len = dec
-                .array()
-                .map_err(|e| e.to_string())?
-                .ok_or("indefinite array not supported")?;
-            let mut ids = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                let id_bytes = dec.bytes().map_err(|e| e.to_string())?;
-                if id_bytes.len() != 32 {
-                    return Err(format!("tx_id must be 32 bytes, got {}", id_bytes.len()));
+            // Accept both definite and indefinite-length arrays.
+            let mut ids = Vec::new();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                Type::ArrayIndef => {
+                    dec.array().map_err(|e| e.to_string())?;
+                    loop {
+                        if dec.datatype().map_err(|e| e.to_string())? == Type::Break {
+                            dec.skip().map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        let id_bytes = dec.bytes().map_err(|e| e.to_string())?;
+                        if id_bytes.len() != 32 {
+                            return Err(format!("tx_id must be 32 bytes, got {}", id_bytes.len()));
+                        }
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(id_bytes);
+                        ids.push(id);
+                    }
                 }
-                let mut id = [0u8; 32];
-                id.copy_from_slice(id_bytes);
-                ids.push(id);
+                Type::Array => {
+                    let len = dec
+                        .array()
+                        .map_err(|e| e.to_string())?
+                        .ok_or("expected definite array length")?;
+                    ids.reserve(len as usize);
+                    for _ in 0..len {
+                        let id_bytes = dec.bytes().map_err(|e| e.to_string())?;
+                        if id_bytes.len() != 32 {
+                            return Err(format!("tx_id must be 32 bytes, got {}", id_bytes.len()));
+                        }
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(id_bytes);
+                        ids.push(id);
+                    }
+                }
+                other => {
+                    return Err(format!("MsgRequestTxs: expected array, got {other:?}"));
+                }
             }
             Ok(TxSubmissionMessage::MsgRequestTxs(ids))
         }
         TAG_REPLY_TXS => {
-            let len = dec
-                .array()
-                .map_err(|e| e.to_string())?
-                .ok_or("indefinite array not supported")?;
-            let mut txs = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                let tx = dec.bytes().map_err(|e| e.to_string())?.to_vec();
-                txs.push(tx);
+            // Accept both definite and indefinite-length arrays.
+            let mut txs = Vec::new();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                Type::ArrayIndef => {
+                    dec.array().map_err(|e| e.to_string())?;
+                    loop {
+                        if dec.datatype().map_err(|e| e.to_string())? == Type::Break {
+                            dec.skip().map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        txs.push(dec.bytes().map_err(|e| e.to_string())?.to_vec());
+                    }
+                }
+                Type::Array => {
+                    let len = dec
+                        .array()
+                        .map_err(|e| e.to_string())?
+                        .ok_or("expected definite array length")?;
+                    txs.reserve(len as usize);
+                    for _ in 0..len {
+                        txs.push(dec.bytes().map_err(|e| e.to_string())?.to_vec());
+                    }
+                }
+                other => {
+                    return Err(format!("MsgReplyTxs: expected array, got {other:?}"));
+                }
             }
             Ok(TxSubmissionMessage::MsgReplyTxs(txs))
         }
@@ -332,6 +425,196 @@ mod tests {
         let msg = TxSubmissionMessage::MsgReplyTxIds(vec![]);
         let encoded = encode_message(&msg);
         let decoded = decode_message(&encoded).unwrap();
+        if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
+            assert!(ids.is_empty());
+        } else {
+            panic!("expected MsgReplyTxIds");
+        }
+    }
+
+    // ─── Indefinite-length CBOR encoding tests ───────────────────────────────
+    //
+    // The CDDL spec requires indefinite-length arrays for inner lists in
+    // TxSubmission2 messages.  0x9F is the CBOR "begin indefinite array" byte
+    // and 0xFF is the "break" (end) code.
+
+    #[test]
+    fn reply_tx_ids_uses_indefinite_inner_array() {
+        let msg = TxSubmissionMessage::MsgReplyTxIds(vec![TxIdAndSize {
+            tx_id: [0x11; 32],
+            size_in_bytes: 100,
+        }]);
+        let encoded = encode_message(&msg);
+        // The outer message array is definite (0x82 = array(2)).
+        assert_eq!(encoded[0], 0x82, "outer array must be definite array(2)");
+        // After the tag byte (0x01 for TAG_REPLY_TX_IDS), the inner list must
+        // start with 0x9F (indefinite-length array marker).
+        assert_eq!(encoded[1], 0x01, "tag must be TAG_REPLY_TX_IDS = 1");
+        assert_eq!(
+            encoded[2], 0x9F,
+            "inner txIdsAndSizes list must use indefinite-length array (0x9F)"
+        );
+        // The encoding must end with 0xFF (break code).
+        assert_eq!(
+            *encoded.last().unwrap(),
+            0xFF,
+            "indefinite array must terminate with break code 0xFF"
+        );
+    }
+
+    #[test]
+    fn request_txs_uses_indefinite_inner_array() {
+        let msg = TxSubmissionMessage::MsgRequestTxs(vec![[0x22; 32]]);
+        let encoded = encode_message(&msg);
+        assert_eq!(encoded[0], 0x82, "outer array must be definite array(2)");
+        assert_eq!(encoded[1], 0x02, "tag must be TAG_REQUEST_TXS = 2");
+        assert_eq!(
+            encoded[2], 0x9F,
+            "inner txIdList must use indefinite-length array (0x9F)"
+        );
+        assert_eq!(
+            *encoded.last().unwrap(),
+            0xFF,
+            "indefinite array must terminate with break code 0xFF"
+        );
+    }
+
+    #[test]
+    fn reply_txs_uses_indefinite_inner_array() {
+        let msg = TxSubmissionMessage::MsgReplyTxs(vec![vec![0xDE, 0xAD, 0xBE, 0xEF]]);
+        let encoded = encode_message(&msg);
+        assert_eq!(encoded[0], 0x82, "outer array must be definite array(2)");
+        assert_eq!(encoded[1], 0x03, "tag must be TAG_REPLY_TXS = 3");
+        assert_eq!(
+            encoded[2], 0x9F,
+            "inner txList must use indefinite-length array (0x9F)"
+        );
+        assert_eq!(
+            *encoded.last().unwrap(),
+            0xFF,
+            "indefinite array must terminate with break code 0xFF"
+        );
+    }
+
+    /// Decode a MsgReplyTxIds message that was encoded with a definite-length
+    /// inner array, as Torsten previously produced.  Decoders must accept both.
+    #[test]
+    fn reply_tx_ids_decodes_definite_inner_array() {
+        // Hand-craft: [1, [[h"AA…AA", 256], [h"BB…BB", 512]]]
+        // outer array(2) = 0x82, tag 1 = 0x01
+        // inner array(2) = 0x82, entry array(2) = 0x82
+        // bytes(32) of 0xAA = 0x58 0x20 0xAA*32
+        // uint 256 = 0x19 0x01 0x00
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u64(1).unwrap(); // TAG_REPLY_TX_IDS
+        enc.array(2).unwrap(); // definite inner array of 2 entries
+        for byte_val in [0xAAu8, 0xBBu8] {
+            enc.array(2).unwrap();
+            enc.bytes(&[byte_val; 32]).unwrap();
+            enc.u32(if byte_val == 0xAA { 256 } else { 512 }).unwrap();
+        }
+        let decoded = decode_message(&buf).unwrap();
+        if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0].tx_id, [0xAA; 32]);
+            assert_eq!(ids[0].size_in_bytes, 256);
+            assert_eq!(ids[1].tx_id, [0xBB; 32]);
+            assert_eq!(ids[1].size_in_bytes, 512);
+        } else {
+            panic!("expected MsgReplyTxIds");
+        }
+    }
+
+    /// Decode a MsgReplyTxIds message that was encoded with an indefinite-length
+    /// inner array, as Haskell nodes send.
+    #[test]
+    fn reply_tx_ids_decodes_indefinite_inner_array() {
+        // Hand-craft the bytes directly: [1, [_ [h"CC…CC", 99]]]
+        // 0x82 = array(2), 0x01 = tag, 0x9F = begin_indef_array
+        // 0x82 = array(2), 0x58 0x20 0xCC*32 = bytes(32), 0x18 0x63 = uint(99)
+        // 0xFF = break
+        let mut buf = Vec::new();
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2).unwrap();
+            enc.u64(1).unwrap();
+            enc.begin_array().unwrap();
+            enc.array(2).unwrap();
+            enc.bytes(&[0xCCu8; 32]).unwrap();
+            enc.u32(99).unwrap();
+            enc.end().unwrap();
+        }
+        // Verify the inner array marker is indeed indefinite (0x9F).
+        assert_eq!(buf[2], 0x9F);
+        let decoded = decode_message(&buf).unwrap();
+        if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
+            assert_eq!(ids.len(), 1);
+            assert_eq!(ids[0].tx_id, [0xCC; 32]);
+            assert_eq!(ids[0].size_in_bytes, 99);
+        } else {
+            panic!("expected MsgReplyTxIds");
+        }
+    }
+
+    /// Decode a MsgRequestTxs with an indefinite-length tx ID list.
+    #[test]
+    fn request_txs_decodes_indefinite_inner_array() {
+        let mut buf = Vec::new();
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2).unwrap();
+            enc.u64(2).unwrap(); // TAG_REQUEST_TXS
+            enc.begin_array().unwrap();
+            enc.bytes(&[0xDDu8; 32]).unwrap();
+            enc.end().unwrap();
+        }
+        assert_eq!(buf[2], 0x9F, "inner array must be indefinite");
+        let decoded = decode_message(&buf).unwrap();
+        if let TxSubmissionMessage::MsgRequestTxs(ids) = decoded {
+            assert_eq!(ids.len(), 1);
+            assert_eq!(ids[0], [0xDDu8; 32]);
+        } else {
+            panic!("expected MsgRequestTxs");
+        }
+    }
+
+    /// Decode a MsgReplyTxs with an indefinite-length tx body list.
+    #[test]
+    fn reply_txs_decodes_indefinite_inner_array() {
+        let tx_body = vec![0x01u8, 0x02, 0x03, 0x04];
+        let mut buf = Vec::new();
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2).unwrap();
+            enc.u64(3).unwrap(); // TAG_REPLY_TXS
+            enc.begin_array().unwrap();
+            enc.bytes(&tx_body).unwrap();
+            enc.end().unwrap();
+        }
+        assert_eq!(buf[2], 0x9F, "inner array must be indefinite");
+        let decoded = decode_message(&buf).unwrap();
+        if let TxSubmissionMessage::MsgReplyTxs(txs) = decoded {
+            assert_eq!(txs.len(), 1);
+            assert_eq!(txs[0], tx_body);
+        } else {
+            panic!("expected MsgReplyTxs");
+        }
+    }
+
+    /// The empty MsgReplyTxIds with indefinite encoding: [1, [_ ]] = [1, 0x9F 0xFF]
+    #[test]
+    fn empty_reply_tx_ids_indefinite() {
+        let mut buf = Vec::new();
+        {
+            let mut enc = minicbor::Encoder::new(&mut buf);
+            enc.array(2).unwrap();
+            enc.u64(1).unwrap();
+            enc.begin_array().unwrap();
+            enc.end().unwrap();
+        }
+        let decoded = decode_message(&buf).unwrap();
         if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
             assert!(ids.is_empty());
         } else {

@@ -195,6 +195,7 @@ pub(super) fn run_phase1_rules(
     tx_size: u64,
     registered_pools: Option<&std::collections::HashSet<Hash28>>,
     current_epoch: Option<u64>,
+    node_network: Option<torsten_primitives::network::NetworkId>,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
@@ -220,6 +221,13 @@ pub(super) fn run_phase1_rules(
 
     // ------------------------------------------------------------------
     // Rule 1c: Auxiliary data hash / auxiliary data consistency
+    //
+    // Sub-rule 1c.i: presence/absence consistency.
+    // Sub-rule 1c.ii: when both are present, verify the content hash.
+    //   The declared hash must equal blake2b_256(raw_aux_cbor).
+    //   We can only verify this when raw_cbor bytes were preserved from
+    //   the wire (set by the serialization layer); locally-constructed
+    //   transactions with raw_cbor=None skip the content check.
     // ------------------------------------------------------------------
     match (&body.auxiliary_data_hash, &tx.auxiliary_data) {
         (Some(_), None) => {
@@ -228,7 +236,16 @@ pub(super) fn run_phase1_rules(
         (None, Some(_)) => {
             errors.push(ValidationError::AuxiliaryDataWithoutHash);
         }
-        _ => {} // Both present or both absent — OK
+        (Some(declared_hash), Some(aux_data)) => {
+            // Content-hash verification: only when raw CBOR bytes are available.
+            if let Some(ref raw_cbor) = aux_data.raw_cbor {
+                let computed = torsten_primitives::hash::blake2b_256(raw_cbor);
+                if computed != *declared_hash {
+                    errors.push(ValidationError::AuxiliaryDataHashMismatch);
+                }
+            }
+        }
+        (None, None) => {} // Both absent — OK
     }
 
     // ------------------------------------------------------------------
@@ -279,6 +296,103 @@ pub(super) fn run_phase1_rules(
                         declared: deposit.0,
                         expected: params.key_deposit.0,
                     });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 1g: Conway stake deregistration refund must match key_deposit
+    //
+    // Per Haskell's Conway DELEG rule (`conwayStakeDeregDeposit`):
+    // `ConwayStakeDeregistration` (UnRegCert, certificate tag 8) carries an
+    // explicit refund amount that must equal the current `keyDeposit`
+    // protocol parameter. The refund field exists so that a transaction
+    // built against old parameters is rejected if `keyDeposit` has since
+    // changed via a governance update — preventing silent under-refunds.
+    //
+    // This check applies only in Conway (protocol >= 9) where the new
+    // certificate tag is used.  Pre-Conway `StakeDeregistration` (tag 1)
+    // implicitly refunds `key_deposit` without carrying an explicit amount.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for cert in &body.certificates {
+            if let Certificate::ConwayStakeDeregistration { refund, .. } = cert {
+                if refund.0 != params.key_deposit.0 {
+                    errors.push(ValidationError::StakeDeregistrationRefundMismatch {
+                        declared: refund.0,
+                        expected: params.key_deposit.0,
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 1h: Pool cost must meet minimum pool cost (Haskell `StakePoolCostTooLowPOOL`)
+    //
+    // Per Haskell's POOL rule (Shelley spec, Figure 14): every pool registration
+    // certificate must declare a cost >= `minPoolCost` from the current protocol
+    // parameters.  This check applies to all pool registrations regardless of
+    // whether the pool is new or re-registering.
+    //
+    // Reference: Haskell `StakePoolCostTooLowPOOL` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Pool`.
+    // ------------------------------------------------------------------
+    for cert in &body.certificates {
+        if let Certificate::PoolRegistration(pool_params) = cert {
+            if pool_params.cost.0 < params.min_pool_cost.0 {
+                errors.push(ValidationError::StakePoolCostTooLow {
+                    actual: pool_params.cost.0,
+                    minimum: params.min_pool_cost.0,
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 1i: Pool reward account network must match transaction network_id
+    //          (Haskell `WrongNetworkInTxBody`, Alonzo+)
+    //
+    // When the transaction body declares a `network_id` (Alonzo and later),
+    // every pool registration certificate's reward account must be on the
+    // same network. The network is encoded in bit 0 of the reward account
+    // header byte: 0 = testnet, 1 = mainnet.
+    //
+    // This mirrors Rule 5b (output address network check) but applies to the
+    // pool reward account embedded in the certificate. A pool that registers
+    // with a testnet reward account on mainnet would allow its operator
+    // rewards to be sent to the wrong network, so this is a correctness check.
+    //
+    // Reference: Haskell `WrongNetworkInTxBody` in
+    // `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    // ------------------------------------------------------------------
+    if let Some(tx_network_id) = body.network_id {
+        let expected_network = if tx_network_id == 0 {
+            torsten_primitives::network::NetworkId::Testnet
+        } else {
+            torsten_primitives::network::NetworkId::Mainnet
+        };
+        for cert in &body.certificates {
+            if let Certificate::PoolRegistration(pool_params) = cert {
+                // Reward account format: header_byte || 28-byte credential hash.
+                // Bit 0 of the header encodes the network: 0 = testnet, 1 = mainnet.
+                if let Some(header) = pool_params.reward_account.first() {
+                    let network_bit = header & 0x01;
+                    let actual_network = if network_bit == 0 {
+                        torsten_primitives::network::NetworkId::Testnet
+                    } else {
+                        torsten_primitives::network::NetworkId::Mainnet
+                    };
+                    if actual_network != expected_network {
+                        errors.push(ValidationError::PoolRewardAccountWrongNetwork {
+                            expected: expected_network,
+                            actual: actual_network,
+                        });
+                        // Report once per transaction — multiple pools with wrong
+                        // network are caught by the same error.
+                        break;
+                    }
                 }
             }
         }
@@ -501,6 +615,67 @@ pub(super) fn run_phase1_rules(
                     errors.push(ValidationError::NetworkMismatch {
                         expected: expected_network,
                         actual: addr_network,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 5c: Unconditional output address network check
+    //
+    // Unlike Rule 5b (which fires only when `tx.body.network_id` is set),
+    // this check applies unconditionally using the node's configured network
+    // (Haskell's `Globals.networkId`).  Every output address with a parseable
+    // network tag must be on the node's network.
+    //
+    // Only enforced when `node_network` is provided. Addresses that return
+    // `None` from `network_id()` (e.g. Byron addresses) are accepted without
+    // a network check (they carry no explicit network tag).
+    //
+    // Reference: Haskell `WrongNetwork` predicate in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+    // ------------------------------------------------------------------
+    if let Some(expected_net) = node_network {
+        for output in &body.outputs {
+            if let Some(addr_network) = output.address.network_id() {
+                if addr_network != expected_net {
+                    errors.push(ValidationError::WrongNetworkInOutput {
+                        expected: expected_net,
+                        actual: addr_network,
+                    });
+                    // Report once per transaction to avoid flooding.
+                    break;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Rule 5d: Unconditional withdrawal reward address network check
+    //
+    // Every withdrawal reward address must be on the node's configured
+    // network (Haskell's `Globals.networkId`).
+    // Bit 0 of the reward account header encodes the network:
+    //   0 = testnet, 1 = mainnet.
+    //
+    // Reference: Haskell `WrongNetworkWithdrawal` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    // ------------------------------------------------------------------
+    if let Some(expected_net) = node_network {
+        for reward_account in body.withdrawals.keys() {
+            if let Some(header) = reward_account.first() {
+                let network_bit = header & 0x01;
+                let actual_net = if network_bit == 0 {
+                    torsten_primitives::network::NetworkId::Testnet
+                } else {
+                    torsten_primitives::network::NetworkId::Mainnet
+                };
+                if actual_net != expected_net {
+                    errors.push(ValidationError::WrongNetworkWithdrawal {
+                        expected: expected_net,
+                        actual: actual_net,
                     });
                     break;
                 }

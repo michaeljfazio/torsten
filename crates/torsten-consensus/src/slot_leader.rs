@@ -88,25 +88,87 @@ pub struct LeaderSlot {
     pub vrf_proof: [u8; 80],
 }
 
-/// Compute the leader schedule for a given epoch.
+/// Compute the leader schedule for a given epoch using fully exact rational arithmetic.
 ///
 /// Returns all slots within the epoch where the pool (identified by its VRF secret key)
 /// is elected as slot leader.
 ///
-/// - `vrf_skey`: 32-byte VRF secret key
-/// - `epoch_nonce`: the epoch's nonce
-/// - `epoch_start_slot`: first slot of the epoch
-/// - `epoch_length`: number of slots in the epoch
-/// - `relative_stake`: pool's stake fraction (0.0 to 1.0)
-/// - `active_slot_coeff`: protocol parameter f (typically 0.05)
+/// # Parameters
+///
+/// - `vrf_skey` — 32-byte VRF secret key.
+/// - `epoch_nonce` — the epoch's randomness nonce.
+/// - `epoch_start_slot` — first slot of the epoch (absolute slot number).
+/// - `epoch_length` — number of slots in the epoch.
+/// - `pool_stake` — pool's active stake in lovelace.
+/// - `total_active_stake` — total active stake in the epoch snapshot (lovelace).
+/// - `f_num` / `f_den` — active-slot coefficient as an exact rational,
+///   e.g. `1 / 20` for the standard `f = 0.05`.
+///
+/// # Precision
+///
+/// Both sigma (= `pool_stake / total_active_stake`) and the active-slot
+/// coefficient are passed as exact rationals — no f64 rounding anywhere.
+/// The `|ln(1-f)|` value is pre-computed once before the slot loop and
+/// reused for every slot, matching Haskell's `activeSlotLog` caching pattern.
+///
+/// # Boundary conditions
+///
+/// - `pool_stake == 0` → empty schedule (pool has no chance of leading).
+/// - `f_num == 0` → empty schedule (no slots are active).
+/// - `f_num >= f_den` → all slots are leader slots (f ≥ 1, degenerate case).
+///
+/// # Note on argument count
+///
+/// The 8 arguments reflect the two exact-rational pairs (sigma, f) required
+/// for Haskell-conformant precision.  Callers that obtain these from a
+/// `ProtocolParams` struct can destructure there; the function itself must
+/// not artificially merge unrelated quantities.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_leader_schedule(
     vrf_skey: &[u8; 32],
     epoch_nonce: &Hash32,
     epoch_start_slot: u64,
     epoch_length: u64,
-    relative_stake: f64,
-    active_slot_coeff: f64,
+    pool_stake: u64,
+    total_active_stake: u64,
+    f_num: u64,
+    f_den: u64,
 ) -> Vec<LeaderSlot> {
+    // Boundary: no stake → never elected.
+    if pool_stake == 0 || total_active_stake == 0 {
+        return Vec::new();
+    }
+
+    // Boundary: f == 0 → no slots are active.
+    if f_num == 0 {
+        return Vec::new();
+    }
+
+    // Boundary: f >= 1 → all slots with a valid VRF proof are leader slots.
+    let all_slots_active = f_num >= f_den;
+
+    // Pre-compute |ln(1-f)| once for the entire epoch.  This is the most
+    // expensive part of the leader check (continued-fraction convergence),
+    // so caching it avoids repeating it for every slot.
+    //
+    // When f >= 1 we skip the log (not needed) and elect every slot.
+    let active_slot_log = if !all_slots_active {
+        match torsten_crypto::vrf::compute_active_slot_log(f_num, f_den) {
+            Some(log) => log,
+            // compute_active_slot_log returns None only for f==0 or f>=1,
+            // both of which are handled above.
+            None => return Vec::new(),
+        }
+    } else {
+        // Placeholder — never actually used in the all_slots_active branch.
+        // Safety: the branch below calls generate_vrf_proof and then pushes
+        // directly without consulting the log.
+        match torsten_crypto::vrf::compute_active_slot_log(1, 2) {
+            Some(log) => log,
+            None => return Vec::new(),
+        }
+    };
+
     let mut schedule = Vec::new();
 
     for offset in 0..epoch_length {
@@ -114,7 +176,25 @@ pub fn compute_leader_schedule(
         let seed = vrf_input(epoch_nonce, slot);
 
         if let Ok((proof, output)) = torsten_crypto::vrf::generate_vrf_proof(vrf_skey, &seed) {
-            if is_slot_leader(&output, relative_stake, active_slot_coeff) {
+            // Domain-separate the raw VRF output to produce the 32-byte
+            // Praos leader value: Blake2b-256("L" || raw_output).
+            // This is the value that Haskell's checkLeaderNatValue receives
+            // as `certNat` (interpreted as a 256-bit big-endian integer).
+            let leader_value = vrf_leader_value(&output);
+
+            let is_leader = if all_slots_active {
+                true
+            } else {
+                // Use the pre-computed log for sigma × |ln(1-f)| comparison.
+                torsten_crypto::vrf::check_leader_value_full_rational_cached(
+                    &leader_value,
+                    pool_stake,
+                    total_active_stake,
+                    &active_slot_log,
+                )
+            };
+
+            if is_leader {
                 schedule.push(LeaderSlot {
                     slot,
                     vrf_output: output,
@@ -537,7 +617,9 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair();
         let epoch_nonce = Hash32::from_bytes([0u8; 32]);
 
-        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1000, 0.0, 0.05);
+        // pool_stake = 0, total_active_stake = 1_000_000, f = 1/20
+        let schedule =
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1000, 0, 1_000_000, 1, 20);
 
         assert!(
             schedule.is_empty(),
@@ -554,8 +636,11 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x22u8; 32]);
 
-        let schedule_a = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
-        let schedule_b = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
+        // pool_stake = total_active_stake → sigma = 1.0; f = 1/20 = 0.05
+        let schedule_a =
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1, 1, 1, 20);
+        let schedule_b =
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1, 1, 1, 20);
 
         assert_eq!(
             schedule_a.len(),
@@ -576,7 +661,8 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x44u8; 32]);
 
-        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
+        // sigma = 1/1 (full stake), f = 1/20
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1, 1, 1, 20);
 
         for window in schedule.windows(2) {
             assert!(
@@ -598,13 +684,16 @@ mod tests {
         let epoch_start = 432_000u64; // a realistic epoch boundary
         let epoch_len = 500u64;
 
+        // sigma = 1/1, f = 1/20
         let schedule = compute_leader_schedule(
             kp.secret_key(),
             &epoch_nonce,
             epoch_start,
             epoch_len,
-            1.0,
-            0.05,
+            1,
+            1,
+            1,
+            20,
         );
 
         for ls in &schedule {
@@ -630,7 +719,8 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x88u8; 32]);
 
-        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
+        // sigma = 1/1, f = 1/20
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1, 1, 1, 20);
 
         assert!(
             !schedule.is_empty(),
@@ -666,11 +756,10 @@ mod tests {
         let kp_a = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&[0xAAu8; 32]);
         let kp_b = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&[0xBBu8; 32]);
         let epoch_nonce = Hash32::from_bytes([0xCCu8; 32]);
-
         let schedule_a =
-            compute_leader_schedule(kp_a.secret_key(), &epoch_nonce, 0, 1000, 1.0, 0.05);
+            compute_leader_schedule(kp_a.secret_key(), &epoch_nonce, 0, 1000, 1, 1, 1, 20);
         let schedule_b =
-            compute_leader_schedule(kp_b.secret_key(), &epoch_nonce, 0, 1000, 1.0, 0.05);
+            compute_leader_schedule(kp_b.secret_key(), &epoch_nonce, 0, 1000, 1, 1, 1, 20);
 
         // Two distinct keys will almost certainly produce different schedules
         // (the probability of identical schedules is astronomically small)
@@ -690,8 +779,9 @@ mod tests {
         let nonce_a = Hash32::from_bytes([0u8; 32]);
         let nonce_b = Hash32::from_bytes([1u8; 32]);
 
-        let schedule_a = compute_leader_schedule(kp.secret_key(), &nonce_a, 0, 1000, 1.0, 0.05);
-        let schedule_b = compute_leader_schedule(kp.secret_key(), &nonce_b, 0, 1000, 1.0, 0.05);
+        // sigma = 1/1, f = 1/20
+        let schedule_a = compute_leader_schedule(kp.secret_key(), &nonce_a, 0, 1000, 1, 1, 1, 20);
+        let schedule_b = compute_leader_schedule(kp.secret_key(), &nonce_b, 0, 1000, 1, 1, 1, 20);
 
         let slots_a: Vec<u64> = schedule_a.iter().map(|ls| ls.slot.0).collect();
         let slots_b: Vec<u64> = schedule_b.iter().map(|ls| ls.slot.0).collect();
@@ -714,7 +804,9 @@ mod tests {
         for i in 0..50u8 {
             let secret = [i; 32];
             let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
-            let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1, 1.0, 0.05);
+            // sigma = 1/1, f = 1/20
+            let schedule =
+                compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 1, 1, 1, 1, 20);
             if schedule.len() == 1 {
                 assert_eq!(
                     schedule[0].slot,
@@ -741,10 +833,11 @@ mod tests {
 
         // Run two schedules: one starting at 0, one at epoch_start
         // They must produce DIFFERENT slots (since slot is embedded in VRF input)
+        // sigma = 1/1, f = 1/20
         let schedule_base =
-            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1.0, 0.05);
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 500, 1, 1, 1, 20);
         let schedule_offset =
-            compute_leader_schedule(kp.secret_key(), &epoch_nonce, epoch_start, 500, 1.0, 0.05);
+            compute_leader_schedule(kp.secret_key(), &epoch_nonce, epoch_start, 500, 1, 1, 1, 20);
 
         // All slots in the offset schedule must be >= epoch_start
         for ls in &schedule_offset {
@@ -938,27 +1031,41 @@ mod tests {
     }
 
     /// Verify that the compute_leader_schedule election result is consistent with
-    /// manually applying is_slot_leader to each slot's VRF output.
+    /// manually applying is_slot_leader_rational to each slot's VRF output.
+    ///
+    /// Both the schedule function and the manual loop now use the fully exact
+    /// rational path (no f64), so their results must be bit-for-bit identical.
     #[test]
     fn test_leader_schedule_consistent_with_is_slot_leader() {
         let secret = [0x33u8; 32];
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0x44u8; 32]);
         let epoch_len = 200u64;
-        let stake = 1.0;
-        let f = 0.05;
+        // sigma = 1/1, f = 1/20  (same rational values used by compute_leader_schedule)
+        let sigma_num = 1u64;
+        let sigma_den = 1u64;
+        let f_num = 1u64;
+        let f_den = 20u64;
 
-        let schedule =
-            compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, epoch_len, stake, f);
+        let schedule = compute_leader_schedule(
+            kp.secret_key(),
+            &epoch_nonce,
+            0,
+            epoch_len,
+            sigma_num,
+            sigma_den,
+            f_num,
+            f_den,
+        );
 
-        // Manually check each slot
+        // Manually check each slot using the same rational path.
         let mut manual_schedule: Vec<SlotNo> = Vec::new();
         for offset in 0..epoch_len {
             let slot = SlotNo(offset);
             let seed = vrf_input(&epoch_nonce, slot);
             if let Ok((_, output)) = torsten_crypto::vrf::generate_vrf_proof(kp.secret_key(), &seed)
             {
-                if is_slot_leader(&output, stake, f) {
+                if is_slot_leader_rational(&output, sigma_num, sigma_den, f_num, f_den) {
                     manual_schedule.push(slot);
                 }
             }
@@ -967,7 +1074,7 @@ mod tests {
         let schedule_slots: Vec<SlotNo> = schedule.iter().map(|ls| ls.slot).collect();
         assert_eq!(
             schedule_slots, manual_schedule,
-            "compute_leader_schedule must match manual slot-by-slot check"
+            "compute_leader_schedule must match manual slot-by-slot rational check"
         );
     }
 
@@ -982,7 +1089,8 @@ mod tests {
         let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&secret);
         let epoch_nonce = Hash32::from_bytes([0u8; 32]);
 
-        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 0, 1.0, 0.05);
+        // sigma = 1/1, f = 1/20, epoch_length = 0
+        let schedule = compute_leader_schedule(kp.secret_key(), &epoch_nonce, 0, 0, 1, 1, 1, 20);
         assert!(
             schedule.is_empty(),
             "Empty epoch must produce empty schedule"
@@ -998,8 +1106,9 @@ mod tests {
         // The NeutralNonce is all zeros — used before the first epoch nonce is established
         let neutral_nonce = Hash32::from_bytes([0u8; 32]);
 
-        // Must not panic
-        let schedule = compute_leader_schedule(kp.secret_key(), &neutral_nonce, 0, 500, 1.0, 0.05);
+        // Must not panic; sigma = 1/1, f = 1/20
+        let schedule =
+            compute_leader_schedule(kp.secret_key(), &neutral_nonce, 0, 500, 1, 1, 1, 20);
 
         // Proofs must still verify against the neutral nonce
         for ls in &schedule {

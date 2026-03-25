@@ -14,6 +14,8 @@
 //! CBOR message has been assembled, then returns the complete message bytes.
 
 use bytes::Bytes;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::codec::try_decode_cbor_boundary;
@@ -42,6 +44,11 @@ pub struct MuxChannel {
     reassembly_buf: Vec<u8>,
     /// Maximum size for the reassembly buffer (prevents unbounded growth from malformed data).
     ingress_limit: usize,
+    /// Shared byte-in-flight counter with the paired [`IngressRoute`]. This channel
+    /// decrements the counter whenever it consumes a chunk from `ingress_rx`, giving
+    /// the ingress task an accurate measure of queue pressure and preventing false
+    /// `IngressQueueOverrun` disconnections under burst traffic.
+    bytes_in_flight: Arc<AtomicUsize>,
 }
 
 impl MuxChannel {
@@ -52,12 +59,15 @@ impl MuxChannel {
     /// - `egress_tx`: sender to the shared egress queue
     /// - `ingress_rx`: receiver for byte chunks from the ingress demuxer
     /// - `ingress_limit`: maximum reassembly buffer size in bytes
+    /// - `bytes_in_flight`: shared byte counter shared with the corresponding
+    ///   [`IngressRoute`]; decremented here as chunks are consumed
     pub fn new(
         protocol_id: u16,
         direction: Direction,
         egress_tx: mpsc::Sender<(u16, Direction, Bytes)>,
         ingress_rx: mpsc::Receiver<Bytes>,
         ingress_limit: usize,
+        bytes_in_flight: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             protocol_id,
@@ -66,6 +76,7 @@ impl MuxChannel {
             ingress_rx,
             reassembly_buf: Vec::new(),
             ingress_limit,
+            bytes_in_flight,
         }
     }
 
@@ -103,6 +114,11 @@ impl MuxChannel {
             // Need more data — read next chunk from ingress
             match self.ingress_rx.recv().await {
                 Some(chunk) => {
+                    // Decrement the shared byte counter now that we have consumed
+                    // this chunk from the channel. This unblocks the IngressTask
+                    // from sending more data without triggering a false overrun.
+                    self.bytes_in_flight
+                        .fetch_sub(chunk.len(), Ordering::Relaxed);
                     self.reassembly_buf.extend_from_slice(&chunk);
                     // Check buffer limit to prevent unbounded growth from malformed data
                     if self.reassembly_buf.len() > self.ingress_limit {
@@ -130,6 +146,9 @@ impl MuxChannel {
         loop {
             match self.ingress_rx.try_recv() {
                 Ok(chunk) => {
+                    // Decrement the shared byte counter as we consume this chunk.
+                    self.bytes_in_flight
+                        .fetch_sub(chunk.len(), Ordering::Relaxed);
                     self.reassembly_buf.extend_from_slice(&chunk);
                     if self.reassembly_buf.len() > self.ingress_limit {
                         return Err(MuxError::IngressQueueOverrun {
@@ -180,7 +199,14 @@ mod tests {
         let (egress_tx, mut egress_rx) = mpsc::channel(32);
         let (ingress_tx, ingress_rx) = mpsc::channel(32);
 
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 65536);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            65536,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         // Send a message
         let msg = vec![0x82, 0x01, 0x02]; // CBOR [1, 2]
@@ -206,7 +232,14 @@ mod tests {
         let (egress_tx, _egress_rx) = mpsc::channel(32);
         let (ingress_tx, ingress_rx) = mpsc::channel(32);
 
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 65536);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            65536,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         // CBOR array [1, 2] = 0x82 0x01 0x02, split across two chunks
         ingress_tx
@@ -224,7 +257,14 @@ mod tests {
         let (egress_tx, _egress_rx) = mpsc::channel(32);
         let (ingress_tx, ingress_rx) = mpsc::channel(32);
 
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 65536);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            65536,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         // Two complete CBOR messages back-to-back: [1] (0x81 0x01) and [2] (0x81 0x02)
         ingress_tx
@@ -245,7 +285,14 @@ mod tests {
         let (ingress_tx, ingress_rx) = mpsc::channel(32);
 
         // Very small limit: 4 bytes
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 4);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            4,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         // Send 5 bytes of incomplete CBOR — should trigger overflow
         ingress_tx
@@ -274,7 +321,14 @@ mod tests {
         let (egress_tx, _egress_rx) = mpsc::channel(32);
         let (_ingress_tx, ingress_rx) = mpsc::channel(32);
 
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 65536);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            65536,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         assert_eq!(channel.try_recv().unwrap(), None);
     }
@@ -284,7 +338,14 @@ mod tests {
         let (egress_tx, _egress_rx) = mpsc::channel(32);
         let (ingress_tx, ingress_rx) = mpsc::channel(32);
 
-        let mut channel = MuxChannel::new(2, Direction::InitiatorDir, egress_tx, ingress_rx, 65536);
+        let mut channel = MuxChannel::new(
+            2,
+            Direction::InitiatorDir,
+            egress_tx,
+            ingress_rx,
+            65536,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         ingress_tx
             .send(Bytes::from(vec![0x81, 0x05]))

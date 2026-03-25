@@ -161,6 +161,55 @@ pub fn check_leader_value_tpraos_rational(
     )
 }
 
+/// Pre-computed `activeSlotLog` = |ln(1-f)| in 34-digit fixed-point.
+///
+/// Computing `ln(1-f)` with the continued-fraction algorithm is expensive
+/// (several hundred microseconds). An epoch has ~86 400–432 000 slots, so
+/// recomputing it on every leader check would waste significant CPU.
+///
+/// Call [`compute_active_slot_log`] once per epoch with the rational
+/// active-slot coefficient, then pass the result to
+/// [`check_leader_value_full_rational_cached`] for each slot.
+pub struct ActiveSlotLog(leader_check::CachedLog);
+
+/// Pre-compute `|ln(1-f)|` for the active-slot coefficient `f = f_num/f_den`.
+///
+/// Returns `None` if `f_num == 0` (no slots ever active — caller should treat
+/// this as "never elected"), or if `f_num >= f_den` (every slot active —
+/// caller should treat this as "always elected").
+pub fn compute_active_slot_log(f_num: u64, f_den: u64) -> Option<ActiveSlotLog> {
+    leader_check::compute_log(f_num, f_den).map(ActiveSlotLog)
+}
+
+/// Praos leader check using a pre-computed `activeSlotLog`.
+///
+/// This is the hot path for `compute_leader_schedule`: the cached log avoids
+/// re-running the expensive `ln(1-f)` continued-fraction expansion on every
+/// slot, while still using fully exact rational arithmetic for sigma.
+pub fn check_leader_value_full_rational_cached(
+    vrf_output: &[u8],
+    sigma_num: u64,
+    sigma_den: u64,
+    log: &ActiveSlotLog,
+) -> bool {
+    leader_check::check_leader_value_with_cached_log(
+        vrf_output, sigma_num, sigma_den, &log.0, false,
+    )
+}
+
+/// TPraos leader check using a pre-computed `activeSlotLog`.
+///
+/// Same as [`check_leader_value_full_rational_cached`] but for
+/// Shelley-Alonzo eras (certNatMax = 2^512, raw 64-byte VRF output).
+pub fn check_leader_value_tpraos_rational_cached(
+    vrf_output: &[u8],
+    sigma_num: u64,
+    sigma_den: u64,
+    log: &ActiveSlotLog,
+) -> bool {
+    leader_check::check_leader_value_with_cached_log(vrf_output, sigma_num, sigma_den, &log.0, true)
+}
+
 /// Exact-precision VRF leader check matching Haskell's `checkLeaderNatValue`.
 ///
 /// Uses `dashu-int` (IBig) for 34-digit fixed-point arithmetic, matching the
@@ -675,6 +724,96 @@ mod leader_check {
 
         // x = sigma * c (in fixed-point)
         let mut x = &sigma_fp * &c;
+        fp_scale(&mut x);
+
+        // Check: recip_q < exp(x)?
+        match ref_exp_cmp(1000, &x, 3, &recip_q) {
+            ExpCmpResult::LT => true,       // recip_q < exp(x) → IS leader
+            ExpCmpResult::GT => false,      // recip_q >= exp(x) → NOT leader
+            ExpCmpResult::Unknown => false, // conservative: not leader
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Cached `activeSlotLog` — avoids re-computing ln(1-f) per slot
+    // -------------------------------------------------------------------------
+
+    /// A pre-computed `c = |ln(1-f)|` in 34-digit fixed-point.
+    ///
+    /// This is the value Haskell calls `activeSlotLog` in its block-forging
+    /// and leader-schedule code.  Computing it with the continued-fraction
+    /// algorithm takes several hundred microseconds; caching it across the
+    /// ~432 000 per-epoch slot checks saves significant CPU.
+    pub struct CachedLog {
+        /// |ln(1-f)| in fixed-point with scale 10^34
+        pub c: IBig,
+    }
+
+    /// Pre-compute `c = |ln(1-f)|` for the rational active-slot coefficient.
+    ///
+    /// Returns `None` when `f_num == 0` (no slots active) or
+    /// `f_num >= f_den` (all slots active); callers must handle those as
+    /// boundary cases without calling the per-slot check.
+    pub fn compute_log(f_num: u64, f_den: u64) -> Option<CachedLog> {
+        if f_num == 0 || f_den == 0 || f_num >= f_den {
+            return None;
+        }
+        // (1 - f) in exact fixed-point: (f_den - f_num) / f_den * PRECISION
+        let one_minus_f_fp = IBig::from(f_den - f_num) * &*PRECISION / IBig::from(f_den);
+        let mut ln_one_minus_f = IBig::from(0);
+        ref_ln(&mut ln_one_minus_f, &one_minus_f_fp);
+        // ln(1-f) is negative for f in (0,1); take its negation.
+        let c = -ln_one_minus_f;
+        Some(CachedLog { c })
+    }
+
+    /// Leader check using a pre-computed `c = |ln(1-f)|`.
+    ///
+    /// Skips the `ref_ln` call entirely — useful when iterating over all
+    /// slots in an epoch and `f` is constant.
+    pub fn check_leader_value_with_cached_log(
+        vrf_output: &[u8],
+        sigma_num: u64,
+        sigma_den: u64,
+        log: &CachedLog,
+        tpraos: bool,
+    ) -> bool {
+        if sigma_num == 0 || sigma_den == 0 {
+            return false;
+        }
+
+        let cert_nat_max = if tpraos {
+            IBig::from(2).pow(512)
+        } else {
+            cert_nat_max()
+        };
+
+        let cert_nat = if tpraos {
+            if vrf_output.len() >= 64 {
+                IBig::from(dashu_int::UBig::from_be_bytes(&vrf_output[..64]))
+            } else {
+                IBig::from(dashu_int::UBig::from_be_bytes(vrf_output))
+            }
+        } else if vrf_output.len() >= 32 {
+            IBig::from(dashu_int::UBig::from_be_bytes(&vrf_output[..32]))
+        } else {
+            IBig::from(dashu_int::UBig::from_be_bytes(vrf_output))
+        };
+
+        let q = &cert_nat_max - &cert_nat;
+        if q <= *ZERO {
+            return false;
+        }
+
+        // recip_q = certNatMax / q  (in fixed-point)
+        let mut recip_q = IBig::from(0);
+        fp_div(&mut recip_q, &cert_nat_max, &q);
+
+        // sigma in exact fixed-point from rational: sigma_num / sigma_den
+        let sigma_fp = IBig::from(sigma_num) * &*PRECISION / IBig::from(sigma_den);
+
+        // x = sigma * c  (in fixed-point)
+        let mut x = &sigma_fp * &log.c;
         fp_scale(&mut x);
 
         // Check: recip_q < exp(x)?

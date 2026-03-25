@@ -495,8 +495,32 @@ fn decode_transaction_from_pallas_with_mode(
         },
     };
 
+    // Determine the era from the pallas MultiEraTx variant so that the
+    // encoder can select the correct CBOR format (e.g. tag 258 for sets is
+    // Conway-only; redeemer map format is Conway-only).
+    //
+    // Pallas represents Shelley/Allegra/Mary/Alonzo as AlonzoCompatible(_,
+    // pallas_traverse::Era) — we map each inner Era tag to our own Era type.
+    let era = match tx {
+        PallasTx::Byron(_) => torsten_primitives::era::Era::Byron,
+        PallasTx::AlonzoCompatible(_, pallas_era) => match pallas_era {
+            pallas_traverse::Era::Shelley => torsten_primitives::era::Era::Shelley,
+            pallas_traverse::Era::Allegra => torsten_primitives::era::Era::Allegra,
+            pallas_traverse::Era::Mary => torsten_primitives::era::Era::Mary,
+            pallas_traverse::Era::Alonzo => torsten_primitives::era::Era::Alonzo,
+            // AlonzoCompatible should only carry Shelley-Alonzo era tags; fall
+            // through to Conway for any unexpected value.
+            _ => torsten_primitives::era::Era::Conway,
+        },
+        PallasTx::Babbage(_) => torsten_primitives::era::Era::Babbage,
+        PallasTx::Conway(_) => torsten_primitives::era::Era::Conway,
+        // MultiEraTx is #[non_exhaustive]; treat any future variant as Conway.
+        _ => torsten_primitives::era::Era::Conway,
+    };
+
     Ok(Transaction {
         hash: tx_hash,
+        era,
         body,
         witness_set,
         is_valid: tx.is_valid(),
@@ -760,6 +784,10 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
             None
         };
 
+    // KeepRaw preserves original CBOR; use raw_cbor() if available.
+    // These bytes are used by phase-1 rule 1c content-hash verification.
+    let raw_cbor_bytes: Option<Vec<u8>> = raw_aux.map(|kr| kr.raw_cbor().to_vec());
+
     if let Some(aux) = raw_aux {
         use std::ops::Deref;
         match aux.deref() {
@@ -796,6 +824,7 @@ fn convert_auxiliary_data(tx: &PallasTx) -> Option<AuxiliaryData> {
             plutus_v1_scripts,
             plutus_v2_scripts,
             plutus_v3_scripts,
+            raw_cbor: raw_cbor_bytes,
         })
     } else {
         None

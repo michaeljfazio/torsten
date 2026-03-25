@@ -1,5 +1,6 @@
 use crate::address::Address;
 use crate::credentials::Credential;
+use crate::era::Era;
 use crate::hash::{
     AuxiliaryDataHash, DatumHash, Hash28, Hash32, PolicyId, ScriptHash, TransactionHash,
 };
@@ -571,11 +572,27 @@ pub struct ExUnitPrices {
     pub step_price: Rational,
 }
 
-/// A complete Cardano transaction (Babbage/Conway era)
+/// Returns `Era::Conway` as the default era for a transaction.
+///
+/// Used by `#[serde(default)]` so that deserialized transactions that pre-date
+/// the `era` field are treated as Conway — preserving backwards compatibility
+/// while still allowing the encoder to select the correct CBOR format.
+fn default_era() -> Era {
+    Era::Conway
+}
+
+/// A complete Cardano transaction (multi-era)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     /// The blake2b-256 hash of the serialized transaction body
     pub hash: crate::hash::TransactionHash,
+    /// The ledger era this transaction belongs to.
+    ///
+    /// Drives era-specific encoding decisions (e.g. tag 258 for sets,
+    /// Conway map format for redeemers). Defaults to [`Era::Conway`] so
+    /// that legacy deserialized transactions are re-encoded correctly.
+    #[serde(default = "default_era")]
+    pub era: Era,
     pub body: TransactionBody,
     pub witness_set: TransactionWitnessSet,
     pub is_valid: bool,
@@ -590,6 +607,7 @@ impl Transaction {
     pub fn empty_with_hash(hash: crate::hash::TransactionHash) -> Self {
         Transaction {
             hash,
+            era: Era::Conway,
             body: TransactionBody {
                 inputs: vec![],
                 outputs: vec![],
@@ -716,6 +734,15 @@ pub struct AuxiliaryData {
     pub plutus_v1_scripts: Vec<Vec<u8>>,
     pub plutus_v2_scripts: Vec<Vec<u8>>,
     pub plutus_v3_scripts: Vec<Vec<u8>>,
+    /// Verbatim CBOR bytes of this auxiliary data object as received on the wire.
+    ///
+    /// Used to verify the `auxiliary_data_hash` in the transaction body: the hash
+    /// must equal `blake2b_256(raw_cbor)`.  When `None`, the hash content check is
+    /// skipped (e.g. for locally-constructed transactions or older decoded data).
+    ///
+    /// Not serialized via bincode (ledger snapshot compatibility).
+    #[serde(default, skip_serializing)]
+    pub raw_cbor: Option<Vec<u8>>,
 }
 
 /// Transaction metadata value

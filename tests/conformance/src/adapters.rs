@@ -433,6 +433,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
 
     Ok(Transaction {
         hash,
+        era: torsten_primitives::era::Era::Conway,
         body,
         witness_set: TransactionWitnessSet {
             vkey_witnesses: Vec::new(),
@@ -464,6 +465,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
                 plutus_v1_scripts: Vec::new(),
                 plutus_v2_scripts: Vec::new(),
                 plutus_v3_scripts: Vec::new(),
+                raw_cbor: None,
             })
         } else {
             None

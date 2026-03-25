@@ -589,6 +589,38 @@ impl LedgerState {
                     let registered_pool_ids: std::collections::HashSet<
                         torsten_primitives::hash::Hash28,
                     > = self.pool_params.keys().copied().collect();
+                    // Build the registered DRep credential set so that duplicate
+                    // RegDRep certificates are rejected (Haskell `ConwayDRepAlreadyRegistered`).
+                    let registered_drep_ids: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self.governance.dreps.keys().copied().collect();
+                    // Build the VRF key → pool_id map for VRF key deduplication
+                    // (Haskell `VRFKeyHashAlreadyRegistered`, Conway+ only).
+                    // When protocol < 9 this map is still built but the check in
+                    // `validate_transaction_with_pools` is gated on proto >= 9.
+                    let registered_vrf_keys: std::collections::HashMap<
+                        torsten_primitives::hash::Hash32,
+                        torsten_primitives::hash::Hash28,
+                    > = self
+                        .pool_params
+                        .values()
+                        .map(|reg| (reg.vrf_keyhash, reg.pool_id))
+                        .collect();
+                    // Build the set of current CC cold credential hashes for the
+                    // CommitteeHotAuth "unelected member" check (Conway+ only).
+                    let committee_member_keys: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self
+                        .governance
+                        .committee_expiration
+                        .keys()
+                        .copied()
+                        .collect();
+                    // Build the set of resigned CC cold credential hashes for the
+                    // "previously resigned" check (Conway+ only).
+                    let committee_resigned_keys: std::collections::HashSet<
+                        torsten_primitives::hash::Hash32,
+                    > = self.governance.committee_resigned.keys().copied().collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
@@ -600,6 +632,11 @@ impl LedgerState {
                         Some(self.treasury.0),
                         Some(&self.reward_accounts),
                         Some(self.epoch.0),
+                        Some(&registered_drep_ids),
+                        Some(&registered_vrf_keys),
+                        self.node_network,
+                        Some(&committee_member_keys),
+                        Some(&committee_resigned_keys),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.
@@ -943,9 +980,14 @@ impl LedgerState {
                     }
                 }
 
-                // Process treasury donations
+                // Buffer treasury donations until epoch boundary.
+                //
+                // In Haskell, `txDonation` is accumulated in `UTxOState.utxosDonation`
+                // during block processing and flushed into the treasury only at the epoch
+                // boundary (NEWEPOCH → applyRUpd step).  We mirror this by accumulating
+                // in `pending_donations` and draining in `process_epoch_transition`.
                 if let Some(donation) = tx.body.donation {
-                    self.treasury += donation;
+                    self.pending_donations += donation;
                 }
             } else {
                 if !tx.body.proposal_procedures.is_empty() {

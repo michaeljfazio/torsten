@@ -184,6 +184,19 @@ pub enum ValidationError {
     /// "ccHotKeyOK" predicate from the Haskell implementation.
     #[error("CommitteeHotAuth cold credential is not a current CC member: {cold_credential_hash}")]
     UnelectedCommitteeMember { cold_credential_hash: String },
+    /// Conway LEDGERS rule: the `CommitteeHotAuth` certificate's cold credential
+    /// belongs to a committee member that has previously resigned via
+    /// `CommitteeColdResign`.  Resigned members may not re-authorise hot keys
+    /// until they are re-elected (the Haskell `CERT` rule predicate
+    /// "membersResigned ∩ {coldKey} = ∅").
+    ///
+    /// Reference: Haskell `ConwayCommitteeHasPreviouslyResigned` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Cert`.
+    #[error(
+        "CommitteeHotAuth rejected: cold credential {cold_credential_hash} has previously \
+         resigned (ConwayCommitteeHasPreviouslyResigned)"
+    )]
+    CommitteeHasPreviouslyResigned { cold_credential_hash: String },
     /// Alonzo/Conway Phase-1 rule: a script-locked spending input carries a
     /// `DatumHash` in its UTxO but no corresponding datum bytes were supplied
     /// in `tx.witness_set.plutus_data`.
@@ -246,6 +259,186 @@ pub enum ValidationError {
         declared: u64,
         actual: u64,
     },
+    /// Haskell `StakeKeyHasNonZeroAccountBalanceDELEG`: a stake deregistration
+    /// is rejected when the reward account holds a non-zero balance.
+    ///
+    /// Per the Cardano ledger spec (Shelley DELEG rule and Conway DELEG rule),
+    /// deregistering a stake credential with a non-empty reward account is
+    /// invalid — the delegator must first withdraw all rewards before
+    /// deregistering. This prevents silent loss of on-chain rewards.
+    ///
+    /// Reference: Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake deregistration rejected: reward account {credential_hash} has non-zero balance \
+         ({balance} lovelace) — withdraw rewards before deregistering"
+    )]
+    StakeKeyHasNonZeroBalance {
+        /// Hex-encoded credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+        /// Current reward balance in lovelace.
+        balance: u64,
+    },
+    /// Conway `UnRegCert` (tag 8) declared refund does not match the current
+    /// `key_deposit` protocol parameter.
+    ///
+    /// Per Haskell's Conway DELEG rule: the deposit amount carried in
+    /// `ConwayStakeDeregistration` must equal the `keyDeposit` currently in
+    /// effect. A mismatch means the transaction was constructed with stale
+    /// protocol parameters and must be rejected.
+    #[error(
+        "Conway stake deregistration refund mismatch: declared={declared}, \
+         expected key_deposit={expected}"
+    )]
+    StakeDeregistrationRefundMismatch { declared: u64, expected: u64 },
+    /// Haskell `StakeKeyRegisteredDELEG`: a stake registration certificate
+    /// names a credential that is already registered in the ledger.
+    ///
+    /// Both legacy `StakeRegistration` (tag 0) and Conway
+    /// `ConwayStakeRegistration` (tag 7) are covered — Haskell enforces the
+    /// same predicate for both certificate variants.
+    ///
+    /// Reference: Haskell `StakeKeyRegisteredDELEG` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake registration rejected: credential {credential_hash} is already registered \
+         (StakeKeyRegisteredDELEG)"
+    )]
+    StakeKeyAlreadyRegistered {
+        /// Hex-encoded credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+    },
+    /// Haskell `DelegateeStakePoolNotRegisteredDELEG`: a stake delegation
+    /// certificate names a pool ID that is not currently registered.
+    ///
+    /// Covers all delegation certificate variants: `StakeDelegation` (tag 2),
+    /// `RegStakeDeleg` (tag 11), `StakeVoteDelegation` (tag 13),
+    /// `RegStakeVoteDeleg` (tag 14).
+    ///
+    /// Reference: Haskell `DelegateeStakePoolNotRegisteredDELEG` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    #[error(
+        "Stake delegation rejected: target pool {pool_id} is not registered \
+         (DelegateeStakePoolNotRegisteredDELEG)"
+    )]
+    DelegateePoolNotRegistered {
+        /// Hex-encoded pool ID (Hash28).
+        pool_id: String,
+    },
+    /// Haskell `ConwayDRepAlreadyRegistered`: a `RegDRep` certificate names a
+    /// DRep credential that is already present in the DRep registry.
+    ///
+    /// Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    #[error(
+        "DRep registration rejected: credential {credential_hash} is already registered \
+         (ConwayDRepAlreadyRegistered)"
+    )]
+    DRepAlreadyRegistered {
+        /// Hex-encoded DRep credential hash (zero-padded to 32 bytes).
+        credential_hash: String,
+    },
+    /// Conway+ POOL rule: a `PoolRegistration` certificate uses a VRF key hash
+    /// that is already registered to a different pool.
+    ///
+    /// Enforced only when `protocol_version_major >= 9` (Conway). In earlier
+    /// eras, multiple pools sharing a VRF key is theoretically possible (though
+    /// inadvisable). From Conway onward, Haskell rejects duplicate VRF keys to
+    /// prevent ambiguity in the VRF-based leader election.
+    ///
+    /// Reference: Haskell `VRFKeyHashAlreadyRegistered` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Pool`.
+    #[error(
+        "Pool registration rejected: VRF key {vrf_keyhash} is already registered to pool \
+         {existing_pool_id} (VRFKeyHashAlreadyRegistered)"
+    )]
+    VrfKeyHashAlreadyRegistered {
+        /// Hex-encoded VRF key hash (32 bytes).
+        vrf_keyhash: String,
+        /// Hex-encoded pool ID that currently holds the VRF key.
+        existing_pool_id: String,
+    },
+    /// Shelley+ POOL rule: pool registration cost is below the minimum pool cost
+    /// (`minPoolCost` / `min_pool_cost`) from the protocol parameters.
+    ///
+    /// Per Haskell's POOL rule (Shelley spec, Figure 14): "The declared pool cost
+    /// must satisfy `poolCost >= minPoolCost`." This prevents pools from declaring
+    /// artificially low costs to attract delegators at the expense of network
+    /// sustainability.
+    ///
+    /// Reference: Haskell `StakePoolCostTooLowPOOL` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Pool`.
+    #[error(
+        "Pool registration rejected: cost {actual} is below minimum pool cost {minimum} \
+         (StakePoolCostTooLowPOOL)"
+    )]
+    StakePoolCostTooLow {
+        /// Declared pool cost in lovelace.
+        actual: u64,
+        /// `minPoolCost` protocol parameter in lovelace.
+        minimum: u64,
+    },
+    /// Alonzo+ POOL rule: pool registration reward account network must match the
+    /// network ID declared in the transaction body.
+    ///
+    /// When a transaction body carries a `network_id` field (Alonzo+), every pool
+    /// registration certificate's reward account must be on the same network.
+    /// Mixing networks (e.g., a testnet reward account in a mainnet transaction)
+    /// is rejected as `WrongNetworkInTxBody`.
+    ///
+    /// Reference: Haskell `WrongNetworkInTxBody` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    #[error(
+        "Pool registration rejected: reward account network {actual:?} does not match \
+         transaction network {expected:?} (WrongNetworkInTxBody)"
+    )]
+    PoolRewardAccountWrongNetwork {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
+    /// Auxiliary data hash content mismatch.
+    ///
+    /// When both `auxiliary_data_hash` and `auxiliary_data` are present in a
+    /// transaction, the declared hash must equal `blake2b_256(raw_aux_data_cbor)`.
+    /// This check ensures the auxiliary data has not been altered after signing.
+    ///
+    /// Reference: Haskell `AuxiliaryDataHash` predicate in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error(
+        "Auxiliary data hash mismatch: declared hash does not match blake2b_256 of aux data bytes \
+         (AuxDataHashMismatch)"
+    )]
+    AuxiliaryDataHashMismatch,
+    /// Output address network does not match the node's configured network.
+    ///
+    /// Every transaction output address must be on the same network as the node.
+    /// This is an unconditional check (unlike Rule 5b which only fires when the
+    /// tx body carries a `network_id` field).
+    ///
+    /// Reference: Haskell `WrongNetwork` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+    #[error(
+        "Output address network {actual:?} does not match node network {expected:?} \
+         (WrongNetworkInOutput)"
+    )]
+    WrongNetworkInOutput {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
+    /// Withdrawal reward address network does not match the node's configured network.
+    ///
+    /// Every withdrawal reward address must be on the same network as the node.
+    ///
+    /// Reference: Haskell `WrongNetworkWithdrawal` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error(
+        "Withdrawal reward address network {actual:?} does not match node network {expected:?} \
+         (WrongNetworkWithdrawal)"
+    )]
+    WrongNetworkWithdrawal {
+        expected: torsten_primitives::network::NetworkId,
+        actual: torsten_primitives::network::NetworkId,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +472,11 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -288,6 +486,25 @@ pub fn validate_transaction(
 /// pool's parameters) do not charge an additional deposit — only new pool
 /// registrations do. When `None`, all pool registrations are treated as new
 /// (deposit always charged).
+///
+/// When `registered_dreps` is `Some`, duplicate DRep registration certificates
+/// (`RegDRep`) are rejected with [`ValidationError::DRepAlreadyRegistered`].
+/// When `None`, the DRep re-registration check is skipped.
+///
+/// When `registered_vrf_keys` is `Some`, pool registration certificates that
+/// declare a VRF key hash already held by another pool are rejected with
+/// [`ValidationError::VrfKeyHashAlreadyRegistered`] (Conway+ only).
+/// When `None`, the VRF key deduplication check is skipped.
+///
+/// When `committee_members` is `Some`, `CommitteeHotAuth` certificates for cold
+/// credentials NOT present in the committee are rejected with
+/// [`ValidationError::UnelectedCommitteeMember`] (Conway+ only).
+/// When `None`, the committee membership check is skipped.
+///
+/// When `committee_resigned` is `Some`, `CommitteeHotAuth` certificates for cold
+/// credentials that have previously resigned are rejected with
+/// [`ValidationError::CommitteeHasPreviouslyResigned`] (Conway+ only).
+/// When `None`, the resigned-member check is skipped.
 ///
 /// The `utxo_set` parameter accepts anything that implements [`UtxoLookup`],
 /// including the standard on-chain `&UtxoSet` and the composite
@@ -311,6 +528,11 @@ pub fn validate_transaction_with_pools(
     current_treasury: Option<u64>,
     reward_accounts: Option<&HashMap<Hash32, Lovelace>>,
     current_epoch: Option<u64>,
+    registered_dreps: Option<&HashSet<Hash32>>,
+    registered_vrf_keys: Option<&HashMap<Hash32, Hash28>>,
+    node_network: Option<torsten_primitives::network::NetworkId>,
+    committee_members: Option<&HashSet<Hash32>>,
+    committee_resigned: Option<&HashSet<Hash32>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -335,8 +557,253 @@ pub fn validate_transaction_with_pools(
         tx_size,
         registered_pools,
         current_epoch,
+        node_network,
         &mut errors,
     );
+
+    // ------------------------------------------------------------------
+    // Stake deregistration: non-zero reward account balance check
+    //
+    // Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` (Shelley DELEG rule and
+    // Conway DELEG rule): a stake credential may not be deregistered while its
+    // reward account holds any lovelace. The delegator must withdraw rewards
+    // before deregistering.
+    //
+    // This check is only enforced when `reward_accounts` is provided (i.e.,
+    // during block validation or mempool admission with ledger context). During
+    // simple structural validation where the caller supplies `None`, the balance
+    // check is skipped to match the withdrawal-amount check pattern above.
+    //
+    // Both legacy `StakeDeregistration` (tag 1) and Conway
+    // `ConwayStakeDeregistration` (tag 8) are covered — Haskell enforces the
+    // same predicate for both certificate variants.
+    // ------------------------------------------------------------------
+    if let Some(accounts) = reward_accounts {
+        for cert in &tx.body.certificates {
+            let opt_credential: Option<&torsten_primitives::credentials::Credential> = match cert {
+                torsten_primitives::transaction::Certificate::StakeDeregistration(cred) => {
+                    Some(cred)
+                }
+                torsten_primitives::transaction::Certificate::ConwayStakeDeregistration {
+                    credential,
+                    ..
+                } => Some(credential),
+                _ => None,
+            };
+            if let Some(credential) = opt_credential {
+                // Replicate the Hash28 → Hash32 zero-padding used in
+                // state/certificates.rs `credential_to_hash()` so the lookup
+                // key matches the key stored in `self.reward_accounts`.
+                let key = credential.to_hash().to_hash32_padded();
+                if let Some(balance) = accounts.get(&key) {
+                    if balance.0 > 0 {
+                        errors.push(ValidationError::StakeKeyHasNonZeroBalance {
+                            credential_hash: key.to_hex(),
+                            balance: balance.0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Stake key already registered check (Haskell `StakeKeyRegisteredDELEG`)
+    //
+    // A StakeRegistration or ConwayStakeRegistration certificate is rejected
+    // when the named credential is already present in the reward accounts map
+    // (i.e., the key has previously registered and not yet deregistered).
+    //
+    // This check is only enforced when `reward_accounts` is provided (block
+    // validation mode). When `None`, the check is skipped to match the
+    // pattern of other ledger-state-dependent checks (e.g. the balance check
+    // above). Both the pre-Conway `StakeRegistration` (tag 0) and the Conway
+    // `ConwayStakeRegistration` (tag 7) variants are covered.
+    //
+    // Reference: Haskell `StakeKeyRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if let Some(accounts) = reward_accounts {
+        for cert in &tx.body.certificates {
+            let opt_cred: Option<&torsten_primitives::credentials::Credential> = match cert {
+                torsten_primitives::transaction::Certificate::StakeRegistration(cred) => Some(cred),
+                torsten_primitives::transaction::Certificate::ConwayStakeRegistration {
+                    credential: cred,
+                    ..
+                } => Some(cred),
+                _ => None,
+            };
+            if let Some(credential) = opt_cred {
+                // Use the same Hash28 → Hash32 zero-padding as the reward
+                // account map key (mirrors `credential_to_hash` in state/mod.rs).
+                let key = credential.to_hash().to_hash32_padded();
+                if accounts.contains_key(&key) {
+                    errors.push(ValidationError::StakeKeyAlreadyRegistered {
+                        credential_hash: key.to_hex(),
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Delegation to unregistered pool (Haskell `DelegateeStakePoolNotRegisteredDELEG`)
+    //
+    // A delegation certificate that targets a pool ID not currently registered
+    // in `pool_params` is rejected. This covers all variants that carry a
+    // target pool hash: `StakeDelegation` (tag 2), `RegStakeDeleg` (tag 11),
+    // `StakeVoteDelegation` (tag 13), `RegStakeVoteDeleg` (tag 14).
+    //
+    // `VoteRegDeleg` (tag 15) does NOT include a pool delegation component —
+    // it registers and sets a DRep vote delegation only — so it is excluded.
+    //
+    // This check is only enforced when `registered_pools` is provided.
+    //
+    // Reference: Haskell `DelegateeStakePoolNotRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if let Some(pools) = registered_pools {
+        for cert in &tx.body.certificates {
+            let opt_pool: Option<Hash28> = match cert {
+                torsten_primitives::transaction::Certificate::StakeDelegation {
+                    pool_hash, ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::RegStakeDeleg {
+                    pool_hash, ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::StakeVoteDelegation {
+                    pool_hash,
+                    ..
+                } => Some(*pool_hash),
+                torsten_primitives::transaction::Certificate::RegStakeVoteDeleg {
+                    pool_hash,
+                    ..
+                } => Some(*pool_hash),
+                _ => None,
+            };
+            if let Some(pool_id) = opt_pool {
+                if !pools.contains(&pool_id) {
+                    errors.push(ValidationError::DelegateePoolNotRegistered {
+                        pool_id: pool_id.to_hex(),
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // DRep already registered check (Haskell `ConwayDRepAlreadyRegistered`)
+    //
+    // A `RegDRep` certificate is rejected when the named DRep credential is
+    // already present in the DRep registry. This check is only enforced in
+    // Conway (protocol >= 9) when `registered_dreps` is provided.
+    //
+    // Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let Some(dreps) = registered_dreps {
+            for cert in &tx.body.certificates {
+                if let torsten_primitives::transaction::Certificate::RegDRep {
+                    credential, ..
+                } = cert
+                {
+                    let key = credential.to_hash().to_hash32_padded();
+                    if dreps.contains(&key) {
+                        errors.push(ValidationError::DRepAlreadyRegistered {
+                            credential_hash: key.to_hex(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // VRF key deduplication (Haskell `VRFKeyHashAlreadyRegistered`, Conway+)
+    //
+    // From Conway (protocol >= 9), a pool registration certificate whose VRF
+    // key hash is already registered to a DIFFERENT pool is rejected. A pool
+    // re-registering its own parameters with the same VRF key is permitted (the
+    // key already belongs to that pool, so the new registration is not a
+    // collision).
+    //
+    // This check is only enforced when `registered_vrf_keys` is provided (block
+    // validation mode). The map is keyed by VRF key hash (Hash32) and maps to
+    // the pool ID (Hash28) that currently holds that key.
+    //
+    // Reference: Haskell `VRFKeyHashAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Pool`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let Some(vrf_keys) = registered_vrf_keys {
+            for cert in &tx.body.certificates {
+                if let torsten_primitives::transaction::Certificate::PoolRegistration(pool_params) =
+                    cert
+                {
+                    // Check if this VRF key is held by a different pool.
+                    // Same pool re-registering with the same key is fine.
+                    if let Some(&existing_pool) = vrf_keys.get(&pool_params.vrf_keyhash) {
+                        if existing_pool != pool_params.operator {
+                            errors.push(ValidationError::VrfKeyHashAlreadyRegistered {
+                                vrf_keyhash: pool_params.vrf_keyhash.to_hex(),
+                                existing_pool_id: existing_pool.to_hex(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // CommitteeHotAuth: elected-member and non-resigned checks (Conway+)
+    //
+    // Haskell `CERT` rule predicates in
+    // `Cardano.Ledger.Conway.Rules.Cert`:
+    //
+    //   1. "failOnNonEmpty unelected": every cold credential in a
+    //      CommitteeHotAuth certificate must appear in the current
+    //      committee (committee_expiration / committee_members map).
+    //      → `ValidationError::UnelectedCommitteeMember`
+    //
+    //   2. "membersResigned ∩ {coldKey} = ∅": a cold credential that has
+    //      previously resigned via CommitteeColdResign may not re-authorize
+    //      a hot key without being re-elected.
+    //      → `ValidationError::CommitteeHasPreviouslyResigned`
+    //
+    // Both checks are only enforced in Conway (protocol >= 9) and only
+    // when the relevant state is provided (block application mode).
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for cert in &tx.body.certificates {
+            if let torsten_primitives::transaction::Certificate::CommitteeHotAuth {
+                cold_credential,
+                ..
+            } = cert
+            {
+                let cold_key = cold_credential.to_hash().to_hash32_padded();
+
+                // Check 1: cold credential must be a current CC member.
+                if let Some(members) = committee_members {
+                    if !members.contains(&cold_key) {
+                        errors.push(ValidationError::UnelectedCommitteeMember {
+                            cold_credential_hash: cold_key.to_hex(),
+                        });
+                    }
+                }
+
+                // Check 2: cold credential must not have previously resigned.
+                if let Some(resigned) = committee_resigned {
+                    if resigned.contains(&cold_key) {
+                        errors.push(ValidationError::CommitteeHasPreviouslyResigned {
+                            cold_credential_hash: cold_key.to_hex(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Withdrawal validation (Haskell `wdrlNotZero` + balance check)

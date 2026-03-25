@@ -543,6 +543,7 @@ mod tests {
         let epoch_nonce = Hash32::from_bytes([42u8; 32]);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![torsten_primitives::transaction::TransactionInput {

@@ -20,7 +20,7 @@
 pub mod client;
 pub mod server;
 
-use minicbor::{Decoder, Encoder};
+use minicbor::{data::Type, Decoder, Encoder};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// PeerSharing protocol messages.
@@ -77,13 +77,35 @@ pub fn decode_message(data: &[u8]) -> Result<PeerSharingMessage, String> {
             Ok(PeerSharingMessage::MsgShareRequest(amount))
         }
         TAG_SHARE_PEERS => {
-            let len = dec
-                .array()
-                .map_err(|e| e.to_string())?
-                .ok_or("indefinite array not supported")?;
-            let mut addrs = Vec::with_capacity(len as usize);
-            for _ in 0..len {
-                addrs.push(decode_address(&mut dec)?);
+            // Accept both definite and indefinite-length arrays.
+            // The CDDL spec uses `[* addr]` which permits either encoding.
+            let mut addrs = Vec::new();
+            match dec.datatype().map_err(|e| e.to_string())? {
+                Type::ArrayIndef => {
+                    dec.array().map_err(|e| e.to_string())?;
+                    loop {
+                        if dec.datatype().map_err(|e| e.to_string())? == Type::Break {
+                            dec.skip().map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        addrs.push(decode_address(&mut dec)?);
+                    }
+                }
+                Type::Array => {
+                    let len = dec
+                        .array()
+                        .map_err(|e| e.to_string())?
+                        .ok_or("expected definite array length")?;
+                    addrs.reserve(len as usize);
+                    for _ in 0..len {
+                        addrs.push(decode_address(&mut dec)?);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "MsgSharePeers: expected array of addresses, got {other:?}"
+                    ));
+                }
             }
             Ok(PeerSharingMessage::MsgSharePeers(addrs))
         }

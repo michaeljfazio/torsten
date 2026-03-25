@@ -126,6 +126,7 @@ fn empty_witness_set() -> TransactionWitnessSet {
 fn minimal_tx() -> Transaction {
     Transaction {
         hash: Hash32::ZERO,
+        era: torsten_primitives::era::Era::Conway,
         body: minimal_body(),
         witness_set: empty_witness_set(),
         is_valid: true,
@@ -809,73 +810,83 @@ fn witness_set_with_redeemer(tag: RedeemerTag, index: u32) -> Vec<u8> {
 
 #[test]
 fn test_encode_redeemer_spend_tag() {
-    // map(1) { 5: array(1) [ array(4) [tag, index, data, ex_units] ] }
+    // Conway map format:
+    //   map(1) { 5: map(1) { array(2)[tag, index] => array(2)[data, ex_units] } }
     let enc = witness_set_with_redeemer(RedeemerTag::Spend, 0);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap(); // map(1)
+    dec.map().unwrap(); // outer witness_set map(1)
     assert_eq!(dec.u64().unwrap(), 5); // key 5 = redeemers
-    dec.array().unwrap(); // outer array(1)
-    dec.array().unwrap(); // inner array(4)
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 0); // Spend = 0
 }
 
 #[test]
 fn test_encode_redeemer_mint_tag() {
+    // Conway map format: key array(2) starts with Mint tag = 1
     let enc = witness_set_with_redeemer(RedeemerTag::Mint, 0);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap();
+    dec.map().unwrap(); // witness_set map(1)
     dec.u64().unwrap(); // key 5
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 1); // Mint = 1
 }
 
 #[test]
 fn test_encode_redeemer_cert_tag() {
+    // Conway map format: key array(2) starts with Cert tag = 2
     let enc = witness_set_with_redeemer(RedeemerTag::Cert, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 2); // Cert = 2
 }
 
 #[test]
 fn test_encode_redeemer_reward_tag() {
+    // Conway map format: key array(2) starts with Reward tag = 3
     let enc = witness_set_with_redeemer(RedeemerTag::Reward, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 3); // Reward = 3
 }
 
 #[test]
 fn test_encode_redeemer_vote_tag() {
+    // Conway map format: key array(2) starts with Vote tag = 4
     let enc = witness_set_with_redeemer(RedeemerTag::Vote, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 4); // Vote = 4
 }
 
 #[test]
 fn test_encode_redeemer_propose_tag() {
+    // Conway map format: key array(2) starts with Propose tag = 5
     let enc = witness_set_with_redeemer(RedeemerTag::Propose, 0);
     let mut dec = minicbor::Decoder::new(&enc);
     dec.map().unwrap();
     dec.u64().unwrap();
-    dec.array().unwrap();
-    dec.array().unwrap();
+    dec.map().unwrap(); // redeemers map(1)
+    dec.array().unwrap(); // key: array(2) [tag, index]
     assert_eq!(dec.u64().unwrap(), 5); // Propose = 5
 }
 
 #[test]
 fn test_encode_redeemer_ex_units_encoding() {
+    // Conway map format:
+    //   map(1) { 5: map(1) { array(2)[tag, index] => array(2)[data, ex_units] } }
+    // Key:   array(2) [ Spend=0, index=3 ]
+    // Value: array(2) [ data, array(2)[mem, steps] ]
     let ws = TransactionWitnessSet {
         redeemers: vec![Redeemer {
             tag: RedeemerTag::Spend,
@@ -890,13 +901,17 @@ fn test_encode_redeemer_ex_units_encoding() {
     };
     let enc = encode_witness_set(&ws);
     let mut dec = minicbor::Decoder::new(&enc);
-    dec.map().unwrap(); // map(1)
-    dec.u64().unwrap(); // key 5
-    dec.array().unwrap(); // array(1)
-    let arr = dec.array().unwrap().unwrap();
-    assert_eq!(arr, 4);
-    assert_eq!(dec.u64().unwrap(), 0); // Spend
-    assert_eq!(dec.u64().unwrap(), 3); // index
+    dec.map().unwrap(); // witness_set map(1)
+    dec.u64().unwrap(); // key 5 = redeemers
+    dec.map().unwrap(); // redeemers map(1)
+                        // Key: array(2) [tag, index]
+    let key_arr = dec.array().unwrap().unwrap();
+    assert_eq!(key_arr, 2);
+    assert_eq!(dec.u64().unwrap(), 0); // Spend = 0
+    assert_eq!(dec.u64().unwrap(), 3); // index = 3
+                                       // Value: array(2) [data, ex_units_array]
+    let val_arr = dec.array().unwrap().unwrap();
+    assert_eq!(val_arr, 2);
     let _ = dec.bytes().unwrap(); // empty bytes datum
     let ex_arr = dec.array().unwrap().unwrap();
     assert_eq!(ex_arr, 2);
@@ -1828,6 +1843,7 @@ fn test_encode_auxiliary_data_with_native_scripts() {
         plutus_v1_scripts: vec![],
         plutus_v2_scripts: vec![],
         plutus_v3_scripts: vec![],
+        raw_cbor: None,
     };
 
     let enc = encode_auxiliary_data(&aux);
@@ -1850,6 +1866,7 @@ fn test_encode_auxiliary_data_with_plutus_scripts() {
         plutus_v1_scripts: vec![vec![0x01, 0x02]],
         plutus_v2_scripts: vec![vec![0x03, 0x04]],
         plutus_v3_scripts: vec![vec![0x05, 0x06]],
+        raw_cbor: None,
     };
 
     let enc = encode_auxiliary_data(&aux);
@@ -2304,4 +2321,121 @@ fn test_compute_transaction_hash_is_32_bytes() {
     assert_ne!(hash, Hash32::ZERO);
     // Hash32 is always exactly 32 bytes
     assert_eq!(hash.as_bytes().len(), 32);
+}
+
+// ===========================================================================
+// required_signers — must encode as 28-byte addr_keyhash per CDDL
+// ===========================================================================
+
+/// The CDDL spec defines:
+///   required_signers = nonempty_set<addr_keyhash>
+///   addr_keyhash      = hash28
+///
+/// Internally required_signers are stored as Hash32 (zero-padded from the
+/// 28-byte pallas key hashes).  The encoder must strip the trailing 4 zero
+/// bytes and emit exactly 28 bytes on the wire so that cardano-node and
+/// cardano-cli can round-trip the transaction body without error.
+#[test]
+fn test_required_signers_encoded_as_28_bytes() {
+    let mut body = minimal_body();
+    // Build a padded Hash32 the same way pallas does: 28 real bytes followed
+    // by 4 zero bytes.
+    let mut raw = [0u8; 32];
+    raw[..28].copy_from_slice(&[0xDE; 28]);
+    // last 4 bytes remain 0x00 (zero-padding)
+    body.required_signers = vec![Hash32::from_bytes(raw)];
+
+    let enc = encode_transaction_body(&body);
+
+    // Locate key 14 in the encoded map by scanning for the uint 14 (0x0E).
+    // The map is definite-length, so navigate entry by entry.
+    let mut dec = minicbor::Decoder::new(&enc);
+    let map_len = dec.map().unwrap().unwrap() as usize;
+
+    let mut found_key14 = false;
+    for _ in 0..map_len {
+        let key = dec.u64().unwrap();
+        if key == 14 {
+            found_key14 = true;
+            // required_signers is encoded as an array of bstr values
+            let arr_len = dec.array().unwrap().unwrap();
+            assert_eq!(arr_len, 1, "expected exactly one required signer");
+            let bytes = dec.bytes().unwrap();
+            // Must be exactly 28 bytes — not 32
+            assert_eq!(
+                bytes.len(),
+                28,
+                "required_signer must be 28-byte addr_keyhash; got {} bytes",
+                bytes.len()
+            );
+            // The first byte should be 0xDE (our sentinel value)
+            assert_eq!(bytes[0], 0xDE);
+            // The 28th byte (index 27) should also be 0xDE
+            assert_eq!(bytes[27], 0xDE);
+            break;
+        } else {
+            dec.skip().unwrap();
+        }
+    }
+    assert!(
+        found_key14,
+        "key 14 (required_signers) not found in encoded body"
+    );
+}
+
+/// Verify the raw CBOR header bytes for a required_signer entry: must be
+/// `0x58 0x1C` (major type 2 / additional info 24 / length = 28 = 0x1C),
+/// NOT `0x58 0x20` (length = 32) which was the previous incorrect encoding.
+#[test]
+fn test_required_signers_cbor_header_bytes() {
+    let mut body = minimal_body();
+    let mut raw = [0u8; 32];
+    raw[..28].fill(0xAB);
+    body.required_signers = vec![Hash32::from_bytes(raw)];
+
+    let enc = encode_transaction_body(&body);
+
+    // Scan the raw bytes for the CBOR bstr header of the required signer.
+    // The sequence we're looking for is: 0x58 0x1C followed by 28 bytes of 0xAB.
+    // The incorrect sequence would be: 0x58 0x20 followed by 28 bytes 0xAB + 4 bytes 0x00.
+    let target_header: &[u8] = &[0x58, 28]; // 0x1C = 28
+    let wrong_header: &[u8] = &[0x58, 32]; // 0x20 = 32
+
+    let has_correct = enc.windows(target_header.len()).any(|w| w == target_header);
+
+    assert!(
+        has_correct,
+        "encoded body must contain 0x58 0x1C header for 28-byte addr_keyhash"
+    );
+    // The 32-byte header (0x58 0x20) must NOT appear as a required_signer encoding.
+    // Note: other fields (like tx hashes) legitimately use 0x58 0x20, so we check
+    // that the 28-byte payload following our specific sentinel bytes is present.
+    let _ = wrong_header; // documented for clarity; checked via sentinel pattern below
+    let sentinel_with_correct: Vec<u8> = {
+        let mut v = vec![0x58, 28];
+        v.extend_from_slice(&[0xAB; 28]);
+        v
+    };
+    let sentinel_with_wrong: Vec<u8> = {
+        let mut v = vec![0x58, 32];
+        v.extend_from_slice(&[0xAB; 28]);
+        v.extend_from_slice(&[0x00; 4]);
+        v
+    };
+
+    let correct_present = enc
+        .windows(sentinel_with_correct.len())
+        .any(|w| w == sentinel_with_correct.as_slice());
+    let wrong_present = enc
+        .windows(sentinel_with_wrong.len())
+        .any(|w| w == sentinel_with_wrong.as_slice());
+
+    assert!(
+        correct_present,
+        "28-byte addr_keyhash sentinel pattern not found in encoded body"
+    );
+    assert!(
+        !wrong_present,
+        "32-byte encoding of required_signer found — hash truncation to 28 bytes is broken"
+    );
 }

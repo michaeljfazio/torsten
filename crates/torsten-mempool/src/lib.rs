@@ -179,8 +179,9 @@ pub struct Mempool {
     /// The count is reserved (incremented) before inserting into the DashMap,
     /// preventing the TOCTOU race between `txs.len()` and `txs.insert()`.
     tx_count: AtomicUsize,
-    /// Configuration
-    config: MempoolConfig,
+    /// Configuration (behind a RwLock so capacity can be updated dynamically
+    /// from live protocol params without requiring `&mut self`).
+    config: RwLock<MempoolConfig>,
     /// Fairness mutex for remote submissions — all remote peers compete for this first
     remote_fifo: Mutex<()>,
     /// Fairness mutex for all submissions — local acquires only this, remote acquires both
@@ -239,7 +240,7 @@ impl Mempool {
             total_ex_steps: AtomicU64::new(0),
             total_ref_scripts_bytes: AtomicUsize::new(0),
             tx_count: AtomicUsize::new(0),
-            config,
+            config: RwLock::new(config),
             remote_fifo: Mutex::new(()),
             all_fifo: Mutex::new(()),
         }
@@ -361,25 +362,24 @@ impl Mempool {
 
         // Atomically reserve a slot: increment tx_count first, then check capacity.
         // This eliminates the TOCTOU race between checking txs.len() and inserting.
+        let (cfg_max_txs, cfg_max_bytes) = {
+            let cfg = self.config.read();
+            (cfg.max_transactions, cfg.max_bytes)
+        };
         let count = self.tx_count.fetch_add(1, Ordering::Relaxed);
-        if count >= self.config.max_transactions {
+        if count >= cfg_max_txs {
             self.tx_count.fetch_sub(1, Ordering::Relaxed);
-            warn!(
-                max = self.config.max_transactions,
-                "Mempool: full, rejecting tx"
-            );
-            return Err(MempoolError::Full {
-                max: self.config.max_transactions,
-            });
+            warn!(max = cfg_max_txs, "Mempool: full, rejecting tx");
+            return Err(MempoolError::Full { max: cfg_max_txs });
         }
 
         let total = *self.total_bytes.read();
-        if total + size_bytes > self.config.max_bytes {
+        if total + size_bytes > cfg_max_bytes {
             self.tx_count.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 size_bytes,
                 total,
-                max = self.config.max_bytes,
+                max = cfg_max_bytes,
                 "Mempool: tx too large, rejecting"
             );
             return Err(MempoolError::TooLarge { size: size_bytes });
@@ -530,28 +530,39 @@ impl Mempool {
         new_ex_steps: u64,
         new_ref_scripts: usize,
     ) -> bool {
+        let (cfg_max_txs, cfg_max_bytes, cfg_max_ex_mem, cfg_max_ex_steps, cfg_max_ref) = {
+            let cfg = self.config.read();
+            (
+                cfg.max_transactions,
+                cfg.max_bytes,
+                cfg.max_ex_mem,
+                cfg.max_ex_steps,
+                cfg.max_ref_scripts_bytes,
+            )
+        };
+
         let count = self.tx_count.load(Ordering::Relaxed);
-        if count >= self.config.max_transactions {
+        if count >= cfg_max_txs {
             return true;
         }
 
         let total_bytes = *self.total_bytes.read();
-        if total_bytes + new_size > self.config.max_bytes {
+        if total_bytes + new_size > cfg_max_bytes {
             return true;
         }
 
         let total_ex_mem = self.total_ex_mem.load(Ordering::Relaxed);
-        if total_ex_mem + new_ex_mem > self.config.max_ex_mem {
+        if total_ex_mem + new_ex_mem > cfg_max_ex_mem {
             return true;
         }
 
         let total_ex_steps = self.total_ex_steps.load(Ordering::Relaxed);
-        if total_ex_steps + new_ex_steps > self.config.max_ex_steps {
+        if total_ex_steps + new_ex_steps > cfg_max_ex_steps {
             return true;
         }
 
         let total_ref = self.total_ref_scripts_bytes.load(Ordering::Relaxed);
-        if total_ref + new_ref_scripts > self.config.max_ref_scripts_bytes {
+        if total_ref + new_ref_scripts > cfg_max_ref {
             return true;
         }
 
@@ -821,7 +832,45 @@ impl Mempool {
 
     /// Maximum number of transactions the mempool can hold
     pub fn capacity(&self) -> usize {
-        self.config.max_transactions
+        self.config.read().max_transactions
+    }
+
+    /// Update mempool capacity limits from live protocol parameters.
+    ///
+    /// Haskell cardano-node sets mempool capacity to `2 * blockCapacityTxMeasure`
+    /// (i.e., 2x the block's byte limit, execution-unit limits, and reference script
+    /// limit) and re-evaluates this at every epoch transition when protocol params
+    /// may have changed via governance actions.
+    ///
+    /// `max_block_body_size`  — from `ProtocolParameters::max_block_body_size`
+    /// `max_block_ex_mem`     — from `ProtocolParameters::max_block_ex_units.mem`
+    /// `max_block_ex_steps`   — from `ProtocolParameters::max_block_ex_units.steps`
+    pub fn update_capacity_from_params(
+        &self,
+        max_block_body_size: u64,
+        max_block_ex_mem: u64,
+        max_block_ex_steps: u64,
+    ) {
+        let mut cfg = self.config.write();
+        let old_bytes = cfg.max_bytes;
+        let old_ex_mem = cfg.max_ex_mem;
+        let old_ex_steps = cfg.max_ex_steps;
+
+        cfg.max_bytes = (max_block_body_size as usize).saturating_mul(2);
+        cfg.max_ex_mem = max_block_ex_mem.saturating_mul(2);
+        cfg.max_ex_steps = max_block_ex_steps.saturating_mul(2);
+
+        if cfg.max_bytes != old_bytes
+            || cfg.max_ex_mem != old_ex_mem
+            || cfg.max_ex_steps != old_ex_steps
+        {
+            info!(
+                max_bytes = cfg.max_bytes,
+                max_ex_mem = cfg.max_ex_mem,
+                max_ex_steps = cfg.max_ex_steps,
+                "Mempool capacity updated from protocol params",
+            );
+        }
     }
 
     /// Get a transaction's raw CBOR bytes (for LocalTxMonitor protocol)
@@ -1230,6 +1279,7 @@ mod tests {
         id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
@@ -3509,6 +3559,7 @@ mod tests {
         in_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: tx_hash,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
@@ -3565,6 +3616,7 @@ mod tests {
         id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
 
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::from_bytes(id_bytes),
             body: TransactionBody {
                 inputs: vec![TransactionInput {

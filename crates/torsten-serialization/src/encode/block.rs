@@ -3,7 +3,9 @@ use torsten_primitives::block::{Block, BlockHeader, OperationalCert, ProtocolVer
 use torsten_primitives::hash::{blake2b_256, Hash32};
 use torsten_primitives::transaction::Transaction;
 
-use super::transaction::{encode_auxiliary_data, encode_transaction_body, encode_witness_set};
+use super::transaction::{
+    encode_auxiliary_data, encode_transaction_body_for_era, encode_witness_set_for_era,
+};
 
 /// Encode an operational certificate: [hot_vkey, sequence_number, kes_period, sigma]
 pub fn encode_operational_cert(cert: &OperationalCert) -> Vec<u8> {
@@ -87,16 +89,16 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
     // Header
     buf.extend(encode_block_header(&block.header, kes_signature));
 
-    // Transaction bodies
+    // Transaction bodies — use per-tx era for correct set encoding
     buf.extend(encode_array_header(block.transactions.len()));
     for tx in &block.transactions {
-        buf.extend(encode_transaction_body(&tx.body));
+        buf.extend(encode_transaction_body_for_era(&tx.body, tx.era));
     }
 
-    // Transaction witness sets
+    // Transaction witness sets — use per-tx era for correct redeemer encoding
     buf.extend(encode_array_header(block.transactions.len()));
     for tx in &block.transactions {
-        buf.extend(encode_witness_set(&tx.witness_set));
+        buf.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
     }
 
     // Auxiliary data map: {tx_index: aux_data}
@@ -138,17 +140,17 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
 ///   h3 = blake2b_256(CBOR map of {tx_index: auxiliary_data})
 ///   h4 = blake2b_256(CBOR array of invalid tx indices)
 pub fn compute_block_body_hash(transactions: &[Transaction]) -> Hash32 {
-    // 1. Transaction bodies
+    // 1. Transaction bodies — use per-tx era for correct set encoding
     let mut bodies_cbor = encode_array_header(transactions.len());
     for tx in transactions {
-        bodies_cbor.extend(encode_transaction_body(&tx.body));
+        bodies_cbor.extend(encode_transaction_body_for_era(&tx.body, tx.era));
     }
     let h1 = blake2b_256(&bodies_cbor);
 
-    // 2. Transaction witness sets
+    // 2. Transaction witness sets — use per-tx era for correct redeemer encoding
     let mut wits_cbor = encode_array_header(transactions.len());
     for tx in transactions {
-        wits_cbor.extend(encode_witness_set(&tx.witness_set));
+        wits_cbor.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
     }
     let h2 = blake2b_256(&wits_cbor);
 

@@ -118,6 +118,29 @@ impl BlockIndex {
         self.len() == 0
     }
 
+    /// Remove a block from the index.
+    ///
+    /// For `InMemoryBlockIndex` this is a true removal.  For `MmapBlockIndex`
+    /// (open-addressing hash table) removal is not supported without a full
+    /// rebuild; the entry is left in place but a warning is logged.  This is
+    /// acceptable because `remove` is only called during startup validation to
+    /// evict corrupt entries — nodes running with a mmap index should rebuild
+    /// the database if corruption is detected.
+    pub fn remove(&mut self, hash: &Hash32) {
+        match self {
+            BlockIndex::InMemory(idx) => {
+                idx.remove(hash);
+            }
+            BlockIndex::Mmap(_idx) => {
+                warn!(
+                    hash = %hash,
+                    "BlockIndex::remove called on MmapBlockIndex — removal not supported; \
+                     block will remain in index until next full rebuild"
+                );
+            }
+        }
+    }
+
     /// Persist the mmap index to disk. No-op for in-memory.
     pub fn persist(&self) -> Result<(), std::io::Error> {
         match self {
@@ -154,6 +177,11 @@ impl InMemoryBlockIndex {
 
     pub fn insert(&mut self, hash: Hash32, loc: BlockLocation) {
         self.map.insert(hash, loc);
+    }
+
+    /// Remove a block from the index. Returns true if the block was present.
+    pub fn remove(&mut self, hash: &Hash32) -> bool {
+        self.map.remove(hash).is_some()
     }
 
     pub fn contains(&self, hash: &Hash32) -> bool {

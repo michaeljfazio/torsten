@@ -284,6 +284,7 @@ mod tests {
     #[test]
     fn test_encode_transaction_complete() {
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![TransactionInput {
@@ -423,6 +424,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
 
         let encoded = encode_auxiliary_data(&aux);

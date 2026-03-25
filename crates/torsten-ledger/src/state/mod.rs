@@ -122,6 +122,18 @@ pub struct LedgerState {
     pub stake_distribution: StakeDistributionState,
     /// Treasury balance
     pub treasury: Lovelace,
+    /// Pending treasury donations (Conway `TreasuryDonation` field from transaction bodies).
+    ///
+    /// In Haskell, `curTreasuryDonation` is accumulated in `UTxOState.utxosDonation` during
+    /// block processing and flushed into the treasury at each epoch boundary (NEWEPOCH rule,
+    /// step `applyRUpd`).  We mirror this by buffering here and draining in
+    /// `process_epoch_transition` before reward computation so that the treasury includes
+    /// donations from the epoch that just ended, matching Haskell's ordering exactly.
+    ///
+    /// The field must use a custom serde default so that ledger snapshots written before this
+    /// field was added deserialise correctly (missing field → `Lovelace(0)`).
+    #[serde(default = "default_lovelace_zero")]
+    pub pending_donations: Lovelace,
     /// Reserves balance (ADA not yet in circulation)
     pub reserves: Lovelace,
     /// Delegation state: credential_hash -> pool_id (Arc for copy-on-write)
@@ -234,6 +246,16 @@ pub struct LedgerState {
     /// covers the case where the diff window is insufficient.
     #[serde(skip)]
     pub diff_seq: DiffSeq,
+    /// The network this node is running on (mainnet, testnet, etc.).
+    ///
+    /// Used for unconditional output/withdrawal address network checks during
+    /// Phase-1 validation (Haskell's `Globals.networkId`).  Not persisted in
+    /// snapshots — set from genesis/config at node startup.
+    ///
+    /// Defaults to `None` (check skipped) when not set, preserving backwards
+    /// compatibility with existing snapshot-loaded ledger states.
+    #[serde(skip)]
+    pub node_network: Option<torsten_primitives::network::NetworkId>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -323,6 +345,43 @@ pub struct GovernanceState {
     pub last_expired: Vec<GovActionId>,
     #[serde(default)]
     pub last_ratify_delayed: bool,
+    /// Number of "dormant epochs" accumulated since the start of the Conway era.
+    ///
+    /// Per Haskell `vsNumDormantEpochs` (Conway.Rules.Epoch, `updateNumDormantEpochs`):
+    /// an epoch is "dormant" if there were no active governance proposals at the epoch
+    /// boundary (i.e. `proposals` was empty during that epoch).  Dormant epochs do not
+    /// count against DRep activity — a DRep is considered inactive only when:
+    ///
+    ///   new_epoch - last_active_epoch - num_dormant_epochs > drep_activity_threshold
+    ///
+    /// This prevents DReps from being incorrectly marked inactive during quiescent
+    /// periods where there was nothing to vote on.
+    ///
+    /// `serde(default)` ensures backward compatibility with existing ledger snapshots.
+    #[serde(default)]
+    pub num_dormant_epochs: u64,
+    /// DRep voting power snapshot captured at each epoch boundary (the "mark" snapshot).
+    ///
+    /// Maps DRep credential hash → total delegated stake (lovelace).  Only active DReps
+    /// (those whose `active` flag is `true`) appear in this map.
+    ///
+    /// Per Haskell `reDRepDistr` in `Conway.Rules.Epoch`, DRep voting power used during
+    /// ratification is measured against the snapshot taken at the *start* of the current
+    /// epoch, not the live state.  This prevents mid-epoch stake movements from
+    /// affecting in-flight governance ratification.
+    ///
+    /// Populated by `process_epoch_transition` at each epoch boundary.
+    /// `serde(default)` ensures backward compatibility with existing ledger snapshots.
+    #[serde(default)]
+    pub drep_distribution_snapshot: HashMap<Hash32, u64>,
+    /// Snapshot of total `AlwaysNoConfidence`-delegated stake at the last epoch boundary.
+    /// Companion to `drep_distribution_snapshot`.
+    #[serde(default)]
+    pub drep_snapshot_no_confidence: u64,
+    /// Snapshot of total `AlwaysAbstain`-delegated stake at the last epoch boundary.
+    /// Companion to `drep_distribution_snapshot`.
+    #[serde(default)]
+    pub drep_snapshot_abstain: u64,
 }
 
 /// Registration state for a DRep
@@ -529,6 +588,7 @@ impl LedgerState {
             prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)
             stake_distribution: StakeDistributionState::default(),
             treasury: Lovelace(0),
+            pending_donations: Lovelace(0),
             reserves: Lovelace(MAX_LOVELACE_SUPPLY),
             delegations: Arc::new(HashMap::new()),
             pool_params: Arc::new(HashMap::new()),
@@ -561,6 +621,7 @@ impl LedgerState {
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
             diff_seq: DiffSeq::new(),
+            node_network: None,
         }
     }
 

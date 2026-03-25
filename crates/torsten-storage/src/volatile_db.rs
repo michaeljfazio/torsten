@@ -492,7 +492,11 @@ pub struct VolatileDB {
     /// Block-number index for the SELECTED chain only.
     block_no_index: BTreeMap<u64, Hash32>,
     /// Successor relationships for all blocks (all forks).
-    successors: HashMap<Hash32, Vec<Hash32>>,
+    ///
+    /// Maps each block hash to the set of its immediate successors (children).
+    /// Using HashSet rather than Vec prevents duplicate entries and provides
+    /// O(1) membership tests needed for fork enumeration.
+    successors: HashMap<Hash32, HashSet<Hash32>>,
     /// Tip of the selected chain: (slot, hash, block_no).
     tip: Option<(u64, Hash32, u64)>,
     wal: Option<WalWriter>,
@@ -617,7 +621,7 @@ impl VolatileDB {
         cbor: Vec<u8>,
     ) {
         // Track successor relationship (all forks)
-        self.successors.entry(prev_hash).or_default().push(hash);
+        self.successors.entry(prev_hash).or_default().insert(hash);
         // Slot index (all forks)
         self.slot_index.entry(slot).or_default().push(hash);
 
@@ -657,6 +661,17 @@ impl VolatileDB {
     /// Check if a block exists.
     pub fn has_block(&self, hash: &Hash32) -> bool {
         self.blocks.contains_key(hash)
+    }
+
+    /// Return the set of immediate successors for the given block hash.
+    ///
+    /// Returns `None` when the block has no known successors (i.e. it is a
+    /// current tip on some fork).  Returns `Some(&set)` with all children
+    /// when one or more successor blocks have been added to the store.
+    ///
+    /// O(1) — the successor map is maintained on every `add_block` / `remove_block`.
+    pub fn get_successors(&self, hash: &Hash32) -> Option<&HashSet<Hash32>> {
+        self.successors.get(hash)
     }
 
     /// Get the first block on the selected chain strictly after a given slot.
@@ -699,13 +714,66 @@ impl VolatileDB {
                 self.block_no_index.remove(&block.block_no);
             }
             if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                succs.retain(|h| h != hash);
+                succs.remove(hash);
                 if succs.is_empty() {
                     self.successors.remove(&block.prev_hash);
                 }
             }
             self.selected_chain.retain(|h| h != hash);
             self.gc_schedule.remove(hash);
+        }
+    }
+
+    /// Remove a specific set of blocks by hash.
+    ///
+    /// Only the named blocks are removed — blocks at the same slot but on
+    /// different forks are left intact.  This is used by
+    /// `ChainDB::flush_to_immutable` to remove only the canonical-chain
+    /// blocks that were just flushed, without accidentally evicting competing
+    /// fork blocks that still live in the VolatileDB.
+    ///
+    /// After removal the WAL is rewritten (if enabled) with the surviving
+    /// entries.
+    pub fn remove_blocks_by_hashes(&mut self, hashes: &[Hash32]) {
+        let hash_set: HashSet<&Hash32> = hashes.iter().collect();
+
+        for hash in hashes {
+            if let Some(block) = self.blocks.remove(hash) {
+                // Remove from slot index
+                if let Some(slot_hashes) = self.slot_index.get_mut(&block.slot) {
+                    slot_hashes.retain(|h| h != hash);
+                    if slot_hashes.is_empty() {
+                        self.slot_index.remove(&block.slot);
+                    }
+                }
+                // Remove from block-number index (only tracks selected chain)
+                if self.block_no_index.get(&block.block_no) == Some(hash) {
+                    self.block_no_index.remove(&block.block_no);
+                }
+                // Remove from successors map
+                if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
+                    succs.remove(hash);
+                    if succs.is_empty() {
+                        self.successors.remove(&block.prev_hash);
+                    }
+                }
+                self.gc_schedule.remove(hash);
+            }
+        }
+
+        // Trim flushed blocks from the front of selected_chain
+        self.selected_chain.retain(|h| !hash_set.contains(h));
+
+        // Rewrite WAL with remaining entries (upgrades legacy format)
+        if let Some(ref mut wal) = self.wal {
+            let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
+                .blocks
+                .iter()
+                .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
+                .collect();
+            if let Err(e) = wal.rewrite(&remaining) {
+                warn!(error = %e, "WAL: failed to rewrite after canonical flush");
+            }
         }
     }
 
@@ -728,7 +796,7 @@ impl VolatileDB {
                             self.block_no_index.remove(&block.block_no);
                         }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                            succs.retain(|h| *h != hash);
+                            succs.remove(&hash);
                             if succs.is_empty() {
                                 self.successors.remove(&block.prev_hash);
                             }
@@ -869,7 +937,10 @@ impl VolatileDB {
                             self.block_no_index.remove(&block.block_no);
                         }
                         if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                            succs.retain(|h| *h != hash);
+                            succs.remove(&hash);
+                            if succs.is_empty() {
+                                self.successors.remove(&block.prev_hash);
+                            }
                         }
                     }
                     self.gc_schedule.remove(&hash);
@@ -927,6 +998,41 @@ impl VolatileDB {
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// Compact the WAL by rewriting it with only the current volatile blocks.
+    ///
+    /// The WAL is an append-only log — every block ever added is present until
+    /// the file is rewritten.  After `flush_to_immutable` moves finalized blocks
+    /// out of the VolatileDB, those entries remain in the WAL until a rewrite.
+    ///
+    /// `compact_wal()` triggers that rewrite explicitly, shrinking the WAL to
+    /// contain only the blocks that are still in the in-memory store.  This is
+    /// a no-op when no WAL is configured.
+    ///
+    /// Calling this after each `flush_to_immutable` keeps crash-recovery time
+    /// proportional to the volatile window size rather than the full sync history.
+    pub fn compact_wal(&mut self) {
+        if let Some(ref mut wal) = self.wal {
+            let remaining: Vec<(u64, u64, Hash32, Hash32, Vec<u8>)> = self
+                .blocks
+                .iter()
+                .map(|(h, b)| (b.slot, b.block_no, *h, b.prev_hash, b.cbor.clone()))
+                .collect();
+            if let Err(e) = wal.rewrite(&remaining) {
+                warn!(
+                    error = %e,
+                    blocks = remaining.len(),
+                    "WAL: compact_wal rewrite failed"
+                );
+            } else {
+                debug!(
+                    blocks = remaining.len(),
+                    "WAL: compacted to {} volatile entries",
+                    remaining.len()
+                );
+            }
+        }
     }
 
     /// Return `(hash, slot, block_no, prev_hash)` tuples for every block on the
@@ -1121,7 +1227,7 @@ impl VolatileDB {
                         }
                     }
                     if let Some(succs) = self.successors.get_mut(&block.prev_hash) {
-                        succs.retain(|h| h != hash);
+                        succs.remove(hash);
                         if succs.is_empty() {
                             self.successors.remove(&block.prev_hash);
                         }

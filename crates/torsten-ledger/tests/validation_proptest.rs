@@ -45,6 +45,7 @@ fn make_utxo_set(input_value: u64) -> (UtxoSet, TransactionInput) {
 
 fn make_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::ZERO,
         body: TransactionBody {
             inputs: vec![input],
@@ -729,6 +730,7 @@ fn make_mint_tx(
     }
 
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::ZERO,
         body: TransactionBody {
             inputs: vec![ada_input],
@@ -947,6 +949,7 @@ proptest! {
         }
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![ada_input, token_input],
@@ -1069,6 +1072,7 @@ proptest! {
             .insert(name, -(burn_qty as i64));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![ada_input, token_input],
@@ -1215,6 +1219,7 @@ proptest! {
         }
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![ada_input, token_b_input],
@@ -1354,6 +1359,7 @@ proptest! {
             .insert(name_a, mint_qty as u64 + 1); // off by 1
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![ada_input, token_b_input],
@@ -1451,6 +1457,7 @@ fn minting_without_policy_script_rejected() {
     let _ = script; // consumed to silence the unused-variable warning
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::ZERO,
         body: TransactionBody {
             inputs: vec![ada_input],

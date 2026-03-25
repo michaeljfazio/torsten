@@ -92,7 +92,12 @@ pub(crate) fn encode_redeemer_tag(tag: &RedeemerTag) -> Vec<u8> {
     })
 }
 
-/// Encode a redeemer [tag, index, data, ex_units]
+/// Encode a redeemer in Babbage array format: [tag, index, data, ex_units]
+///
+/// This is the pre-Conway array format. Conway transactions use map format
+/// instead (see `encode_witness_set` in transaction.rs). Kept for compatibility
+/// with pre-Conway era serialization and as a utility function.
+#[allow(dead_code)]
 pub(crate) fn encode_redeemer(redeemer: &Redeemer) -> Vec<u8> {
     let mut buf = encode_array_header(4);
     buf.extend(encode_redeemer_tag(&redeemer.tag));
@@ -160,13 +165,30 @@ pub fn compute_script_data_hash(
 ) -> Hash32 {
     let mut preimage = Vec::new();
 
-    // 1. Redeemers: use raw CBOR when available, otherwise re-encode
+    // 1. Redeemers: use raw CBOR when available, otherwise re-encode.
+    //
+    // Conway uses map format for redeemers in the script data hash preimage:
+    //   { [tag, index] => [data, ex_units], ... }
+    // Empty redeemers are encoded as 0xa0 (empty map), not 0x80 (empty array),
+    // matching Haskell's `hashScriptIntegrity` which uses `encodeRedeemers` always
+    // producing a map in the Conway era.
     if let Some(raw) = raw_redeemers_cbor {
         preimage.extend_from_slice(raw);
+    } else if redeemers.is_empty() {
+        // Empty redeemers: use 0xa0 (empty map) for Conway compatibility.
+        preimage.push(0xa0);
     } else {
-        let mut redeemers_buf = encode_array_header(redeemers.len());
+        // Re-encode as Conway map format: { [tag, index] => [data, ex_units] }
+        let mut redeemers_buf = encode_map_header(redeemers.len());
         for r in redeemers {
-            redeemers_buf.extend(encode_redeemer(r));
+            redeemers_buf.extend(encode_array_header(2));
+            redeemers_buf.extend(encode_redeemer_tag(&r.tag));
+            redeemers_buf.extend(encode_uint(r.index as u64));
+            redeemers_buf.extend(encode_array_header(2));
+            redeemers_buf.extend(encode_plutus_data(&r.data));
+            redeemers_buf.extend(encode_array_header(2));
+            redeemers_buf.extend(encode_uint(r.ex_units.mem));
+            redeemers_buf.extend(encode_uint(r.ex_units.steps));
         }
         preimage.extend(&redeemers_buf);
     }

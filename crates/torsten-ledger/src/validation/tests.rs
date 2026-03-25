@@ -53,6 +53,7 @@ mod tests {
 
     fn make_simple_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction {
         Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -410,6 +411,7 @@ mod tests {
             .insert(asset, 100);
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -500,6 +502,7 @@ mod tests {
             .insert(asset, 200);
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1576,6 +1579,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
@@ -1597,6 +1601,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
@@ -1669,6 +1674,7 @@ mod tests {
         let mut params = ProtocolParameters::mainnet_defaults();
         params.max_val_size = 50;
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1823,6 +1829,7 @@ mod tests {
         );
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -1925,6 +1932,7 @@ mod tests {
         );
         let params = ProtocolParameters::mainnet_defaults();
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -2227,6 +2235,11 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(
             result.is_ok(),
@@ -2275,6 +2288,11 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(
             result.is_ok(),
@@ -2320,6 +2338,11 @@ mod tests {
             None,
             None,
             None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -2404,6 +2427,7 @@ mod tests {
             None,
         );
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -3308,6 +3332,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 200, None);
         assert!(result.is_err(), "Data without hash must be rejected");
@@ -3356,6 +3381,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(empty_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xCD; 32]));
@@ -3385,6 +3411,7 @@ mod tests {
             plutus_v1_scripts: vec![vec![0x01, 0x02, 0x03]],
             plutus_v2_scripts: vec![],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(script_only_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xEF; 32]));
@@ -3417,6 +3444,7 @@ mod tests {
             plutus_v1_scripts: vec![],
             plutus_v2_scripts: vec![vec![0xAA, 0xBB]],
             plutus_v3_scripts: vec![],
+            raw_cbor: None,
         };
         tx.auxiliary_data = Some(mixed_aux);
         tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
@@ -4051,6 +4079,7 @@ mod tests {
         withdrawals.insert(reward_addr, Lovelace(1_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4147,6 +4176,7 @@ mod tests {
         withdrawals.insert(reward_addr, Lovelace(1_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4257,6 +4287,7 @@ mod tests {
         mint.entry(policy_id).or_default().insert(asset, 100);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4355,6 +4386,7 @@ mod tests {
         mint.entry(policy_id).or_default().insert(asset, 100);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4476,6 +4508,7 @@ mod tests {
 
         // Only a redeemer for index 0 — the second policy (index 1) is missing.
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4617,6 +4650,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input_a, input_b],
@@ -4755,6 +4789,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4859,6 +4894,7 @@ mod tests {
             },
         );
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -4984,6 +5020,7 @@ mod tests {
         // Transaction: spending input locked by script hash, reference input
         // provides the script body.  NO redeemers — this is what we are testing.
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![spend_input],
@@ -5108,6 +5145,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![spend_input],
@@ -5227,6 +5265,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5325,6 +5364,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5430,6 +5470,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5524,6 +5565,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5620,6 +5662,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5724,6 +5767,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -5859,6 +5903,7 @@ mod tests {
         // --- Part A: RegDRep with Script credential — no redeemer required ---
 
         let tx_reg = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input.clone()],
@@ -5928,6 +5973,7 @@ mod tests {
         // --- Part B: UnregDRep with Script credential — redeemer required ---
 
         let tx_unreg = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6025,6 +6071,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6142,6 +6189,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6252,6 +6300,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6370,6 +6419,7 @@ mod tests {
         voting_procedures.insert(Voter::DRep(Credential::Script(script_hash)), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6493,6 +6543,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6601,6 +6652,7 @@ mod tests {
         voting_procedures.insert(Voter::StakePool(pool_id), votes);
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6697,6 +6749,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6808,6 +6861,7 @@ mod tests {
         treasury_withdrawals.insert(vec![0xE1, 0x02, 0x03], Lovelace(500_000_000));
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -6908,6 +6962,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7011,6 +7066,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7115,6 +7171,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7262,6 +7319,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7342,6 +7400,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7419,6 +7478,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7498,6 +7558,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7577,6 +7638,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7675,6 +7737,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input_a, input_b],
@@ -7755,6 +7818,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -7838,6 +7902,7 @@ mod tests {
         );
 
         let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
             hash: Hash32::ZERO,
             body: TransactionBody {
                 inputs: vec![input],
@@ -8070,6 +8135,11 @@ mod tests {
             Some(500), // current_treasury — mismatches declared 999
             None,      // reward_accounts
             None,      // current_epoch
+            None,      // registered_dreps
+            None,      // registered_vrf_keys
+            None,      // node_network
+            None,      // committee_members
+            None,      // committee_resigned
         );
 
         assert!(
@@ -8129,6 +8199,11 @@ mod tests {
             Some(500), // current_treasury matches declared
             None,      // reward_accounts
             None,      // current_epoch
+            None,      // registered_dreps
+            None,      // registered_vrf_keys
+            None,      // node_network
+            None,      // committee_members
+            None,      // committee_resigned
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8176,6 +8251,11 @@ mod tests {
             None, // current_treasury = None → check must be skipped
             None, // reward_accounts
             None, // current_epoch
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8185,6 +8265,2338 @@ mod tests {
         assert!(
             !has_mismatch,
             "Expected no TreasuryValueMismatch when current_treasury is None; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stake deregistration: non-zero reward account balance check
+    //
+    // Haskell `StakeKeyHasNonZeroAccountBalanceDELEG` — both pre-Conway
+    // `StakeDeregistration` and Conway `ConwayStakeDeregistration` must be
+    // rejected when the reward account has a non-zero balance.
+    //
+    // Four sub-cases:
+    //   1. StakeDeregistration  + zero balance   → accepted
+    //   2. StakeDeregistration  + non-zero balance → StakeKeyHasNonZeroBalance
+    //   3. ConwayStakeDeregistration + zero balance + correct refund → accepted
+    //   4. ConwayStakeDeregistration + non-zero balance + correct refund → rejected
+    //
+    // Conway-only refund mismatch:
+    //   5. ConwayStakeDeregistration + wrong refund → StakeDeregistrationRefundMismatch
+    //   6. ConwayStakeDeregistration + correct refund → accepted
+    //
+    // Reference: Haskell predicate `StakeKeyHasNonZeroAccountBalanceDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`; Conway
+    // `conwayStakeDeregDeposit` check in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a reward_accounts map with a single entry for the given
+    /// credential bytes (28-byte Hash28 zero-padded to Hash32) and balance.
+    fn make_reward_accounts(
+        cred_bytes: [u8; 28],
+        balance: u64,
+    ) -> std::collections::HashMap<Hash32, torsten_primitives::value::Lovelace> {
+        use torsten_primitives::hash::Hash28;
+        let h28 = Hash28::from_bytes(cred_bytes);
+        let key = h28.to_hash32_padded();
+        let mut map = std::collections::HashMap::new();
+        map.insert(key, torsten_primitives::value::Lovelace(balance));
+        map
+    }
+
+    /// Helper: build a transaction with a single certificate and a value-balanced body.
+    ///
+    /// The input UTxO is inserted into `utxo_set` and the output + fee = 10_000_000.
+    /// The `refund_delta` is added to the output to balance the deregistration refund.
+    fn make_dereg_tx(utxo_set: &mut UtxoSet, cert: Certificate, refund_delta: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xDEu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        // Output = inputs + refund - fee = 10_000_000 + refund_delta - 200_000
+        let output_value = 10_000_000 + refund_delta - 200_000;
+        let mut tx = make_simple_tx(input, output_value, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_dereg_zero_balance_accepted() {
+        // StakeDeregistration with zero reward account balance must succeed.
+        let cred_bytes = [0x01u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // There should be no StakeKeyHasNonZeroBalance error.
+        let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyHasNonZeroBalance { .. })
+        }));
+        assert!(
+            !has_balance_err,
+            "Expected no StakeKeyHasNonZeroBalance for zero balance; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_dereg_nonzero_balance_rejected() {
+        // StakeDeregistration with a non-zero reward balance must produce
+        // StakeKeyHasNonZeroBalance.
+        let cred_bytes = [0x02u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+        // Reward account has 500_000 lovelace — must be withdrawn first.
+        let reward_accounts = make_reward_accounts(cred_bytes, 500_000);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for deregistration with non-zero balance; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyHasNonZeroBalance { balance, .. } if *balance == 500_000)),
+            "Expected StakeKeyHasNonZeroBalance {{balance: 500_000}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_dereg_no_reward_accounts_skips_balance_check() {
+        // When reward_accounts is None (e.g. simple mempool structural check),
+        // the balance guard must be skipped — only structural rules apply.
+        let cred_bytes = [0x03u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::StakeDeregistration(credential),
+            key_deposit,
+        );
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None,
+            None, // reward_accounts = None → balance check skipped
+            None, None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyHasNonZeroBalance { .. })
+        }));
+        assert!(
+            !has_balance_err,
+            "Expected no StakeKeyHasNonZeroBalance when reward_accounts is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_zero_balance_correct_refund_accepted() {
+        // Conway ConwayStakeDeregistration with zero balance and correct refund
+        // must not produce StakeKeyHasNonZeroBalance or StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x04u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::StakeKeyHasNonZeroBalance { .. }
+                    | ValidationError::StakeDeregistrationRefundMismatch { .. }
+            )
+        }));
+        assert!(
+            !has_target_err,
+            "Expected no balance/refund errors for Conway dereg with zero balance + correct refund; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_nonzero_balance_rejected() {
+        // Conway ConwayStakeDeregistration with a non-zero reward balance must
+        // produce StakeKeyHasNonZeroBalance even in Conway era.
+        let cred_bytes = [0x05u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        // Non-zero balance: delegator must withdraw rewards first.
+        let reward_accounts = make_reward_accounts(cred_bytes, 1_500_000);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for Conway deregistration with non-zero balance; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::StakeKeyHasNonZeroBalance { balance, .. } if *balance == 1_500_000
+            )),
+            "Expected StakeKeyHasNonZeroBalance {{balance: 1_500_000}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_wrong_refund_rejected() {
+        // Conway ConwayStakeDeregistration with a refund that differs from
+        // key_deposit must produce StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x06u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+        let wrong_refund = key_deposit + 1; // deliberately wrong
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(wrong_refund),
+            },
+            wrong_refund,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure for wrong Conway deregistration refund; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::StakeDeregistrationRefundMismatch { declared, expected }
+                    if *declared == wrong_refund && *expected == key_deposit
+            )),
+            "Expected StakeDeregistrationRefundMismatch {{declared: {wrong_refund}, expected: {key_deposit}}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_dereg_correct_refund_no_refund_error() {
+        // Exact-match refund must not produce StakeDeregistrationRefundMismatch.
+        let cred_bytes = [0x07u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_dereg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeDeregistrationRefundMismatch { .. })
+        }));
+        assert!(
+            !has_refund_err,
+            "Expected no StakeDeregistrationRefundMismatch for correct refund; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Duplicate stake registration: StakeKeyAlreadyRegistered
+    //
+    // Haskell `StakeKeyRegisteredDELEG` — both pre-Conway `StakeRegistration`
+    // (tag 0) and Conway `ConwayStakeRegistration` (tag 7) must be rejected when
+    // the credential is already present in the reward_accounts map.
+    //
+    // Reference: Haskell `StakeKeyRegisteredDELEG` in
+    // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a stake-registration transaction balanced with a deposit.
+    fn make_reg_tx(utxo_set: &mut UtxoSet, cert: Certificate, deposit: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        // Output + fee + deposit = 10_000_000
+        let output_value = 10_000_000 - 200_000 - deposit;
+        let mut tx = make_simple_tx(input, output_value, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_reg_already_registered_rejected() {
+        // Pre-Conway StakeRegistration for an already-registered credential
+        // must produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x10u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // Simulate an already-registered credential in reward_accounts.
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None, // slot_config
+            None, // registered_pools
+            None, // current_treasury
+            Some(&reward_accounts),
+            None, // current_epoch
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_reg_not_registered_accepted() {
+        // StakeRegistration for a fresh (unregistered) credential must not
+        // produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x11u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // reward_accounts has a DIFFERENT credential — ours is not present.
+        let reward_accounts = make_reward_accounts([0xFFu8; 28], 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_dup_err,
+            "Expected no StakeKeyAlreadyRegistered for fresh credential; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_reg_no_reward_accounts_skips_dup_check() {
+        // When reward_accounts is None, the duplicate registration check must be
+        // skipped — structural validation only.
+        let cred_bytes = [0x12u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::StakeRegistration(credential),
+            key_deposit,
+        );
+
+        // reward_accounts = None → check must be skipped entirely
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None,
+            None, // reward_accounts = None
+            None, None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_dup_err,
+            "Expected no StakeKeyAlreadyRegistered when reward_accounts is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_conway_stake_reg_already_registered_rejected() {
+        // Conway ConwayStakeRegistration for an already-registered credential
+        // must also produce StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x13u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::ConwayStakeRegistration {
+                credential,
+                deposit: torsten_primitives::value::Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate Conway registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered for Conway dup reg; got: {errors:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Delegation to unregistered pool: DelegateePoolNotRegistered
+    //
+    // Haskell `DelegateeStakePoolNotRegisteredDELEG` — StakeDelegation and
+    // combined delegation certs must be rejected when the target pool is not
+    // in registered_pools.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a delegation transaction balanced for the given cert.
+    fn make_deleg_tx(utxo_set: &mut UtxoSet, cert: Certificate) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(cert);
+        tx
+    }
+
+    #[test]
+    fn test_stake_deleg_unregistered_pool_rejected() {
+        // StakeDelegation to an unregistered pool must produce
+        // DelegateePoolNotRegistered.
+        let pool_id = Hash28::from_bytes([0x20u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x21u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools is Some but does NOT contain pool_id
+        let registered_pools: std::collections::HashSet<Hash28> = HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools), // pool not present
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected DelegateePoolNotRegistered for delegation to unregistered pool; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DelegateePoolNotRegistered { .. })),
+            "Expected DelegateePoolNotRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_deleg_registered_pool_accepted() {
+        // StakeDelegation to a registered pool must not produce
+        // DelegateePoolNotRegistered.
+        let pool_id = Hash28::from_bytes([0x22u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x23u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools contains the pool_id
+        let mut registered_pools: std::collections::HashSet<Hash28> = HashSet::new();
+        registered_pools.insert(pool_id);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DelegateePoolNotRegistered { .. })
+        }));
+        assert!(
+            !has_pool_err,
+            "Expected no DelegateePoolNotRegistered for registered pool; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stake_deleg_no_registered_pools_skips_check() {
+        // When registered_pools is None, the pool registration check must be
+        // skipped — structural validation only.
+        let pool_id = Hash28::from_bytes([0x24u8; 28]);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes([0x25u8; 28]),
+        );
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_deleg_tx(
+            &mut utxo_set,
+            Certificate::StakeDelegation {
+                credential: cred,
+                pool_hash: pool_id,
+            },
+        );
+
+        // registered_pools = None → check must be skipped
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None,
+            None, // registered_pools = None → check skipped
+            None, None, None, None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DelegateePoolNotRegistered { .. })
+        }));
+        assert!(
+            !has_pool_err,
+            "Expected no DelegateePoolNotRegistered when registered_pools is None; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // DRep re-registration: DRepAlreadyRegistered
+    //
+    // Haskell `ConwayDRepAlreadyRegistered` — RegDRep certificate naming a
+    // credential already in the DRep registry must be rejected.
+    //
+    // Reference: Haskell `ConwayDRepAlreadyRegistered` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Deleg`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a DRep registration transaction balanced with a deposit.
+    fn make_drep_reg_tx(utxo_set: &mut UtxoSet, cred_bytes: [u8; 28], deposit: u64) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        };
+        // Use a 1 000 ADA UTxO so the value balance holds for any deposit amount
+        // up to ~1 000 ADA (DRep deposit is 500 ADA on mainnet defaults).
+        let utxo_value = 1_000_000_000u64;
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(utxo_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let fee = 200_000u64;
+        let output_value = utxo_value - fee - deposit;
+        let mut tx = make_simple_tx(input, output_value, fee);
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential,
+            deposit: torsten_primitives::value::Lovelace(deposit),
+            anchor: None,
+        });
+        tx
+    }
+
+    #[test]
+    fn test_drep_reg_already_registered_rejected() {
+        // RegDRep for an already-registered DRep credential must produce
+        // DRepAlreadyRegistered in Conway era.
+        let cred_bytes = [0x30u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        // Build a registered_dreps set containing this credential
+        let key = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected DRepAlreadyRegistered for duplicate DRep registration; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DRepAlreadyRegistered { .. })),
+            "Expected DRepAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_fresh_accepted() {
+        // RegDRep for a DRep not already registered must not produce
+        // DRepAlreadyRegistered.
+        let cred_bytes = [0x31u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        // registered_dreps contains a DIFFERENT credential — ours is not present
+        let other_key = Hash28::from_bytes([0xFFu8; 28]).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(other_key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered for fresh DRep; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_no_drep_registry_skips_check() {
+        // When registered_dreps is None, the DRep re-registration check must be
+        // skipped — structural validation only.
+        let cred_bytes = [0x32u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let drep_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, drep_deposit);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None,
+            None, // registered_dreps = None → check skipped
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered when registered_dreps is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_reg_pre_conway_skips_check() {
+        // The DRepAlreadyRegistered check is only enforced in Conway (proto >= 9).
+        // Pre-Conway blocks cannot carry RegDRep certs (era-gating), but we still
+        // ensure the check is bypassed when proto < 9 for defence-in-depth.
+        let cred_bytes = [0x33u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8; // Pre-Conway (Babbage)
+                                           // Use a non-zero deposit so we don't accidentally pass due to value conservation
+        let drep_deposit = 500_000u64; // not key_deposit — doesn't matter for this test
+
+        let mut utxo_set = UtxoSet::new();
+        // Build tx manually since drep_deposit amount is arbitrary here
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential,
+            deposit: torsten_primitives::value::Lovelace(drep_deposit),
+            anchor: None,
+        });
+
+        // registered_dreps contains the credential — check should be skipped in pre-Conway
+        let key = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        let mut registered_dreps: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        registered_dreps.insert(key);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&registered_dreps),
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_drep_err,
+            "Expected no DRepAlreadyRegistered in pre-Conway (proto=8); got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: VRF key deduplication (Conway+, `VRFKeyHashAlreadyRegistered`)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a PoolRegistration cert with a given pool ID and VRF key.
+    fn make_pool_params_with_vrf(pool_id: Hash28, vrf_keyhash: Hash32) -> PoolParams {
+        PoolParams {
+            operator: pool_id,
+            vrf_keyhash,
+            pledge: Lovelace(100_000_000),
+            // cost=340 ADA is above mainnet min_pool_cost (170 ADA)
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 100,
+            },
+            // 0xe1 = mainnet reward account (0b1110_0001)
+            reward_account: vec![0xe1u8; 29],
+            pool_owners: vec![pool_id],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_vrf_key_already_registered_rejected_in_conway() {
+        // A new pool registration using a VRF key that belongs to a DIFFERENT
+        // registered pool must be rejected in Conway (proto >= 9).
+        let pool_a = Hash28::from_bytes([0xA0u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB0u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xCCu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Pool B tries to register with the VRF key already held by Pool A.
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        // registered_vrf_keys: shared_vrf is already held by pool_a
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(shared_vrf, pool_a);
+
+        // registered_pools: pool_b is NEW (so deposit is charged → value conserved)
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected VrfKeyHashAlreadyRegistered for duplicate VRF key in Conway; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })),
+            "Expected VrfKeyHashAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_already_registered_same_pool_allowed() {
+        // A pool re-registering with its OWN VRF key must be accepted (no collision).
+        let pool_a = Hash28::from_bytes([0xA0u8; 28]);
+        let own_vrf = Hash32::from_bytes([0xCCu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Pool A re-registers with its own VRF key (no deposit charged for re-reg).
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_a, own_vrf,
+            )));
+
+        // VRF key is currently held by pool_a itself — re-registration is fine.
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(own_vrf, pool_a);
+
+        // pool_a is already registered → re-reg (no deposit charged)
+        let mut registered_pools: std::collections::HashSet<Hash28> =
+            std::collections::HashSet::new();
+        registered_pools.insert(pool_a);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool re-registration with own VRF key must succeed; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_dedup_skipped_pre_conway() {
+        // VRF key deduplication is only enforced in Conway (proto >= 9). In
+        // Babbage (proto = 8), duplicate VRF keys are allowed.
+        let pool_a = Hash28::from_bytes([0xA1u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB1u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xDDu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8; // Babbage — VRF dedup not enforced
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x03u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
+            std::collections::HashMap::new();
+        registered_vrf_keys.insert(shared_vrf, pool_a);
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            Some(&registered_vrf_keys),
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_vrf_err,
+            "VRF key dedup must not fire in pre-Conway (proto=8); got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vrf_key_dedup_no_map_skips_check() {
+        // When registered_vrf_keys is None, the VRF dedup check must be skipped.
+        // pool_a would hold the shared_vrf key in a real map, but we pass None here.
+        let _pool_a = Hash28::from_bytes([0xA2u8; 28]);
+        let pool_b = Hash28::from_bytes([0xB2u8; 28]);
+        let shared_vrf = Hash32::from_bytes([0xEEu8; 32]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway — but map is None
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x04u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_b, shared_vrf,
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys = None → check skipped
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // The only expected error is VRF dedup — all other checks should pass.
+        let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::VrfKeyHashAlreadyRegistered { .. })
+        }));
+        assert!(
+            !has_vrf_err,
+            "VRF dedup check must be skipped when registered_vrf_keys is None; got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: minimum pool cost (`StakePoolCostTooLowPOOL`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pool_cost_below_min_rejected() {
+        // A pool registration with cost < min_pool_cost must be rejected.
+        let pool_id = Hash28::from_bytes([0xC0u8; 28]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Raise min_pool_cost above 340 ADA to trigger the check.
+        params.min_pool_cost = Lovelace(500_000_000); // 500 ADA minimum
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // make_pool_params_with_vrf uses cost = 340 ADA, below the 500 ADA minimum.
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_id,
+                Hash32::from_bytes([0x00u8; 32]),
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Pool cost below minimum must be rejected; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakePoolCostTooLow { .. })),
+            "Expected StakePoolCostTooLow; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_cost_at_minimum_accepted() {
+        // A pool registration with cost == min_pool_cost must be accepted.
+        let pool_id = Hash28::from_bytes([0xC1u8; 28]);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Set min_pool_cost to exactly 340 ADA (which is also the cert's cost).
+        params.min_pool_cost = Lovelace(340_000_000);
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
+                pool_id,
+                Hash32::from_bytes([0x00u8; 32]),
+            )));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool cost at minimum must be accepted; got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pool registration: reward account network (`WrongNetworkInTxBody`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pool_reward_account_wrong_network_rejected() {
+        // A pool registration with a testnet reward account in a mainnet tx
+        // (tx.body.network_id = 1) must be rejected.
+        let pool_id = Hash28::from_bytes([0xD0u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // Declare network_id = 1 (mainnet) in the tx body.
+        tx.body.network_id = Some(1);
+
+        // Pool reward account: 0xe0 = testnet (bit 0 = 0)
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe0u8; 29]; // testnet header
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Pool with testnet reward account in mainnet tx must be rejected; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::PoolRewardAccountWrongNetwork { .. })),
+            "Expected PoolRewardAccountWrongNetwork; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_reward_account_correct_network_accepted() {
+        // A pool registration with a matching mainnet reward account in a mainnet tx
+        // must be accepted.
+        let pool_id = Hash28::from_bytes([0xD1u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x21u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // Declare network_id = 1 (mainnet) in the tx body.
+        tx.body.network_id = Some(1);
+
+        // Pool reward account: 0xe1 = mainnet (bit 0 = 1)
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe1u8; 29]; // mainnet header
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_ok(),
+            "Pool with correct mainnet reward account must be accepted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_pool_reward_account_no_network_id_in_tx_skips_check() {
+        // When the tx body has no network_id field, the pool reward account
+        // network check must be skipped (pre-Alonzo or network-agnostic tx).
+        let pool_id = Hash28::from_bytes([0xD2u8; 28]);
+        let params = ProtocolParameters::mainnet_defaults();
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x22u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(1_000_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let pool_deposit = params.pool_deposit.0;
+        let fee = 200_000u64;
+        let output = 1_000_000_000 - fee - pool_deposit;
+        let mut tx = make_simple_tx(input, output, fee);
+
+        // No network_id in tx body → check skipped.
+        // Pool uses testnet header which would fail if the check fired.
+        let mut pool_params = make_pool_params_with_vrf(pool_id, Hash32::from_bytes([0x00u8; 32]));
+        pool_params.reward_account = vec![0xe0u8; 29]; // testnet — would fail if checked
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(pool_params));
+
+        let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            Some(&registered_pools),
+            None,
+            None,
+            None,
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::PoolRewardAccountWrongNetwork { .. })
+        }));
+        assert!(
+            !has_net_err,
+            "Pool reward account network check must be skipped when tx.body.network_id is None; \
+             got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // CommitteeHotAuth: unelected member and previously-resigned member checks
+    //
+    // Conway LEDGER / CERT rule: CommitteeHotAuth certificates are only valid
+    // when:
+    //   1. The cold credential is currently elected (present in committee_members).
+    //   2. The cold credential has not previously resigned.
+    //
+    // These checks are only enforced in Conway (protocol_version_major >= 9) when
+    // the committee state is provided (block validation mode).
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a UTxO set with a single entry and return the input reference.
+    fn make_hot_auth_utxo(utxo_set: &mut UtxoSet) -> TransactionInput {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        input
+    }
+
+    /// Build a transaction with a single CommitteeHotAuth certificate.
+    fn make_hot_auth_tx(
+        utxo_set: &mut UtxoSet,
+        cold_bytes: [u8; 28],
+        hot_bytes: [u8; 28],
+    ) -> Transaction {
+        use torsten_primitives::credentials::Credential;
+        let input = make_hot_auth_utxo(utxo_set);
+        let mut tx = make_simple_tx(input, 9_800_000, 200_000);
+        tx.body.certificates.push(Certificate::CommitteeHotAuth {
+            cold_credential: Credential::VerificationKey(Hash28::from_bytes(cold_bytes)),
+            hot_credential: Credential::VerificationKey(Hash28::from_bytes(hot_bytes)),
+        });
+        tx
+    }
+
+    #[test]
+    fn test_committee_hot_auth_unknown_member_rejected() {
+        // CommitteeHotAuth with a cold credential NOT in committee_members must be
+        // rejected with UnelectedCommitteeMember (Conway+).
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC0u8; 28];
+        let hot_bytes = [0xC1u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        // Empty committee_members set — cold credential is not a member.
+        let committee_members: std::collections::HashSet<Hash32> = std::collections::HashSet::new();
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None, // slot_config
+            None, // registered_pools
+            None, // current_treasury
+            None, // reward_accounts
+            None, // current_epoch
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            Some(&committee_members),
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected UnelectedCommitteeMember for unknown CC cold credential; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnelectedCommitteeMember { .. })),
+            "Expected UnelectedCommitteeMember error; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_known_member_accepted() {
+        // CommitteeHotAuth with a cold credential present in committee_members must
+        // NOT produce UnelectedCommitteeMember.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC2u8; 28];
+        let hot_bytes = [0xC3u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        // committee_members contains the cold credential.
+        let cold_hash = Hash28::from_bytes(cold_bytes).to_hash32_padded();
+        let mut committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_members.insert(cold_hash);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            Some(&committee_members),
+            None, // committee_resigned
+        );
+
+        let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::UnelectedCommitteeMember { .. })
+        }));
+        assert!(
+            !has_unelected,
+            "Known CC member must not trigger UnelectedCommitteeMember; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_resigned_member_rejected() {
+        // CommitteeHotAuth for a cold credential present in committee_resigned must
+        // be rejected with CommitteeHasPreviouslyResigned.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC4u8; 28];
+        let hot_bytes = [0xC5u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let cold_hash = Hash28::from_bytes(cold_bytes).to_hash32_padded();
+        // committee_members contains the cold credential (passes the unelected check).
+        let mut committee_members: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_members.insert(cold_hash);
+        // committee_resigned also contains it — this is the governing check.
+        let mut committee_resigned: std::collections::HashSet<Hash32> =
+            std::collections::HashSet::new();
+        committee_resigned.insert(cold_hash);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            Some(&committee_members),
+            Some(&committee_resigned),
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected CommitteeHasPreviouslyResigned for resigned CC member; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CommitteeHasPreviouslyResigned { .. })),
+            "Expected CommitteeHasPreviouslyResigned error; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_check_skipped_when_no_state() {
+        // When committee_members and committee_resigned are both None (e.g. mempool
+        // structural validation without ledger context), the CC checks must be skipped.
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC6u8; 28];
+        let hot_bytes = [0xC7u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
+            None, // node_network
+            None, // committee_members = None → check skipped
+            None, // committee_resigned = None → check skipped
+        );
+
+        let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::UnelectedCommitteeMember { .. }
+                    | ValidationError::CommitteeHasPreviouslyResigned { .. }
+            )
+        }));
+        assert!(
+            !has_committee_err,
+            "CC checks must be skipped when committee state is None; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_committee_hot_auth_check_skipped_pre_conway() {
+        // In pre-Conway (protocol < 9), CommitteeHotAuth certificates are era-gated.
+        // Even if committee_members is provided and the cold credential is absent,
+        // the UnelectedCommitteeMember check must not fire (the era-gating check
+        // rejects these certs first).
+        let mut utxo_set = UtxoSet::new();
+        let cold_bytes = [0xC8u8; 28];
+        let hot_bytes = [0xC9u8; 28];
+        let tx = make_hot_auth_tx(&mut utxo_set, cold_bytes, hot_bytes);
+
+        // Pre-Conway (Babbage).
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8;
+
+        let committee_members: std::collections::HashSet<Hash32> = std::collections::HashSet::new(); // empty — would trigger UnelectedCommitteeMember in Conway
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // node_network
+            Some(&committee_members),
+            None, // committee_resigned
+        );
+
+        // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
+        let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::UnelectedCommitteeMember { .. })
+        }));
+        assert!(
+            !has_unelected,
+            "UnelectedCommitteeMember must not fire in pre-Conway era; got: {result:?}"
+        );
+    }
+
+    // ─── Sub-task B: aux data hash content verification ──────────────────────
+
+    #[test]
+    fn test_aux_data_hash_content_mismatch() {
+        // When raw_cbor is provided and its blake2b_256 does not match the
+        // declared auxiliary_data_hash, AuxiliaryDataHashMismatch must fire.
+        //
+        // Reference: Haskell `AuxDataHashMismatch` predicate in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Use some arbitrary bytes as the raw auxiliary CBOR.
+        let raw_cbor = vec![0xA0u8]; // empty CBOR map
+
+        // Compute the correct hash, then deliberately corrupt it.
+        let correct_hash = torsten_primitives::hash::blake2b_256(&raw_cbor);
+        let mut wrong_hash_bytes = *correct_hash.as_bytes();
+        wrong_hash_bytes[0] ^= 0xFF; // flip bits in first byte
+        let wrong_hash = Hash32::from_bytes(wrong_hash_bytes);
+
+        tx.body.auxiliary_data_hash = Some(wrong_hash);
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: Some(raw_cbor),
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected validation failure, got: {result:?}"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::AuxiliaryDataHashMismatch)),
+            "Expected AuxiliaryDataHashMismatch; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_aux_data_hash_content_match() {
+        // When raw_cbor is provided and its blake2b_256 equals the declared
+        // auxiliary_data_hash, no content-mismatch error should fire.
+        //
+        // Reference: Haskell `AuxDataHashMismatch` predicate.
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        let raw_cbor = vec![0xA0u8]; // empty CBOR map
+        let correct_hash = torsten_primitives::hash::blake2b_256(&raw_cbor);
+
+        tx.body.auxiliary_data_hash = Some(correct_hash);
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: Some(raw_cbor),
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // Content matches — no mismatch error.
+        let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::AuxiliaryDataHashMismatch)
+        }));
+        assert!(
+            !has_mismatch,
+            "AuxiliaryDataHashMismatch must not fire when content is correct; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_aux_data_hash_no_raw_cbor_skips_content_check() {
+        // When raw_cbor is None the content-hash check is skipped.
+        // The existing presence/absence checks still run (both present → ok even
+        // though we cannot verify content).
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Deliberately wrong declared hash — but raw_cbor is None so the
+        // content check is skipped and no AuxiliaryDataHashMismatch fires.
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xAB; 32]));
+        tx.auxiliary_data = Some(AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: None,
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None,
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+        );
+
+        // The content check is skipped when raw_cbor is absent; this should
+        // pass (the hash/data presence checks both pass since both are present).
+        let has_mismatch = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::AuxiliaryDataHashMismatch)
+        }));
+        assert!(
+            !has_mismatch,
+            "AuxiliaryDataHashMismatch must not fire when raw_cbor is None; got: {result:?}"
+        );
+    }
+
+    // ─── Sub-task B: unconditional network ID checks ──────────────────────────
+
+    #[test]
+    fn test_wrong_network_in_output_rejected() {
+        // When node_network is Mainnet but an output carries a Testnet address,
+        // WrongNetworkInOutput must fire (Rule 5c — unconditional network check).
+        //
+        // Reference: Haskell `WrongNetwork` in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxo`.
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Replace the output with a Testnet Enterprise address.
+        tx.body.outputs = vec![TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xAA; 28])),
+            }),
+            value: Value::lovelace(9_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }];
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Mainnet), // node expects Mainnet
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected WrongNetworkInOutput failure; got: {result:?}"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::WrongNetworkInOutput {
+                    expected: NetworkId::Mainnet,
+                    actual: NetworkId::Testnet,
+                }
+            )),
+            "Expected WrongNetworkInOutput {{Mainnet, Testnet}}; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrong_network_in_output_matching_network_ok() {
+        // When node_network matches the output address network, no error fires.
+        use torsten_primitives::address::EnterpriseAddress;
+        use torsten_primitives::credentials::Credential;
+        use torsten_primitives::network::NetworkId;
+
+        let (utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+
+        // Output is a Testnet address; node_network is also Testnet — OK.
+        tx.body.outputs = vec![TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xAA; 28])),
+            }),
+            value: Value::lovelace(9_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }];
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Testnet), // node is Testnet — matches output
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(e, ValidationError::WrongNetworkInOutput { .. })
+        }));
+        assert!(
+            !has_wrong_network,
+            "WrongNetworkInOutput must not fire when networks match; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrong_network_withdrawal_rejected() {
+        // When node_network is Mainnet but a withdrawal reward address is on
+        // Testnet, WrongNetworkWithdrawal must fire (Rule 5d).
+        //
+        // Reward account byte layout (Shelley):
+        //   0xe0 = Testnet key-hash, 0xe1 = Mainnet key-hash
+        //
+        // Reference: Haskell `WrongNetworkWithdrawal` in
+        // `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+        use torsten_primitives::network::NetworkId;
+
+        let (mut utxo_set, input) = make_simple_utxo_set();
+        let params = ProtocolParameters::mainnet_defaults();
+        let keyhash = Hash28::from_bytes([0x55u8; 28]);
+
+        // Seed the rewards ledger so the withdrawal amount is correct.
+        let testnet_reward_addr = make_reward_account_vkey(keyhash); // 0xe0 prefix → Testnet
+
+        // Pre-register the reward account with a non-zero balance so the
+        // withdrawal amount check passes (we set the withdrawal to 0 to
+        // avoid a ZeroWithdrawal error — the network check fires first in
+        // the iteration order).
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(torsten_primitives::address::ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let mut tx = make_simple_tx(input, 9_000_000, 1_000_000);
+        // Insert a withdrawal for the Testnet reward account.
+        // We do NOT register the account in the rewards ledger — the network
+        // check runs before account-existence checks.
+        // Use amount 0 triggers ZeroWithdrawal — use 1 lovelace instead.
+        tx.body
+            .withdrawals
+            .insert(testnet_reward_addr.clone(), Lovelace(1));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Mainnet), // node expects Mainnet
+            None,                     // committee_members
+            None,                     // committee_resigned
+        );
+
+        // The network check fires regardless of whether other withdrawal
+        // checks also fail.
+        let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::WrongNetworkWithdrawal {
+                    expected: NetworkId::Mainnet,
+                    actual: NetworkId::Testnet,
+                }
+            )
+        }));
+        assert!(
+            has_wrong_network,
+            "Expected WrongNetworkWithdrawal {{Mainnet, Testnet}}; got: {result:?}"
         );
     }
 }

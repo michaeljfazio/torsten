@@ -847,6 +847,24 @@ impl Node {
                     None
                 };
 
+                // Envelope checks (Haskell's `envelopeChecks`): body size and
+                // optional header size against protocol parameter limits.
+                // These are always fatal — no strict/non-strict bypass.
+                if let Err(e) = self.consensus.validate_envelope(
+                    block.slot(),
+                    block.header.body_size,
+                    None, // header CBOR size not available during ChainSync header processing
+                    ls.protocol_params.max_block_body_size,
+                    ls.protocol_params.max_block_header_size,
+                ) {
+                    error!(
+                        slot = block.slot().0,
+                        block_no = block.block_number().0,
+                        "Envelope check failed: {e} — rejecting batch"
+                    );
+                    return 0;
+                }
+
                 if let Err(e) = self.consensus.validate_header_full(
                     &header_with_nonce,
                     block.slot(),
@@ -1498,6 +1516,20 @@ impl Node {
                     let active_pools: std::collections::HashSet<_> =
                         ledger.pool_params.keys().copied().collect();
                     self.consensus.prune_opcert_counters(&active_pools);
+
+                    // Update mempool capacity limits from the new epoch's protocol params.
+                    //
+                    // Haskell cardano-node sets mempool capacity to 2x the block's
+                    // resource limits (`blockCapacityTxMeasure`).  Protocol params can
+                    // change via governance actions at epoch boundaries, so we
+                    // recalculate capacity here to stay in sync with the current limits.
+                    // This must happen BEFORE revalidation so eviction uses the updated
+                    // bounds when computing whether a tx still fits.
+                    self.mempool.update_capacity_from_params(
+                        ledger.protocol_params.max_block_body_size,
+                        ledger.protocol_params.max_block_ex_units.mem,
+                        ledger.protocol_params.max_block_ex_units.steps,
+                    );
 
                     // Revalidate all mempool transactions against the new epoch's
                     // protocol parameters.  Protocol parameters can change at epoch
@@ -2631,7 +2663,7 @@ pub async fn chainsync_client_task(
                         }
 
                         // Log progress periodically.
-                        if headers_received % 10_000 == 0 {
+                        if headers_received.is_multiple_of(10_000) {
                             debug!(
                                 %peer_addr,
                                 headers_received,

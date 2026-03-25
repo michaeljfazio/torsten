@@ -176,6 +176,7 @@ fn test_apply_block_with_transaction() {
 
     let tx_hash = Hash32::from_bytes([2u8; 32]);
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -267,6 +268,7 @@ fn test_apply_block_skips_invalid_tx() {
 
     // Transaction marked as invalid (phase-2 failure)
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input.clone()],
@@ -552,6 +554,7 @@ fn test_fee_accumulation() {
     );
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -1225,6 +1228,49 @@ fn test_drep_activity_tracking() {
     params.drep_activity = 5; // DReps inactive after 5 epochs
     let mut state = LedgerState::new(params);
 
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (9).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
+
     let cred = Credential::VerificationKey(Hash28::from_bytes([50u8; 28]));
     let key = credential_to_hash(&cred);
 
@@ -1325,6 +1371,49 @@ fn test_drep_marked_inactive_on_expiry() {
     let mut params = ProtocolParameters::mainnet_defaults();
     params.drep_activity = 2;
     let mut state = LedgerState::new(params);
+
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (3).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([50u8; 28]));
     let key = credential_to_hash(&cred);
@@ -1742,6 +1831,7 @@ fn test_treasury_donation() {
     let mut state = LedgerState::new(params);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([2u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -1789,7 +1879,18 @@ fn test_treasury_donation() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    assert_eq!(state.treasury, Lovelace(1_000_000));
+    // Per Haskell spec, donations are buffered in pending_donations during block
+    // processing and flushed to treasury only at the epoch boundary (NEWEPOCH).
+    assert_eq!(
+        state.pending_donations,
+        Lovelace(1_000_000),
+        "Donation should sit in pending_donations mid-epoch"
+    );
+    assert_eq!(
+        state.treasury,
+        Lovelace(0),
+        "Treasury should not yet reflect the donation mid-epoch"
+    );
 }
 
 #[test]
@@ -1895,6 +1996,8 @@ fn test_parameter_change_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: ParameterChange requires actual DRep votes (not auto-pass)
+    state.protocol_params.protocol_version_major = 10;
     // Set CC threshold to 0 so CC auto-approves (we're testing DRep voting here)
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
@@ -1973,6 +2076,8 @@ fn test_parameter_change_not_ratified_below_threshold() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: ParameterChange requires actual DRep votes
+    state.protocol_params.protocol_version_major = 10;
 
     // Register 10 DReps with equal stake-weighted voting power
     for i in 0..10 {
@@ -2057,6 +2162,8 @@ fn test_treasury_withdrawal_ratification() {
     state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
     state.needs_stake_rebuild = false;
     state.treasury = Lovelace(10_000_000_000);
+    // Post-bootstrap: TreasuryWithdrawals requires actual DRep votes (and is allowed)
+    state.protocol_params.protocol_version_major = 10;
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
@@ -2188,6 +2295,10 @@ fn test_hard_fork_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
+    // Post-bootstrap: HardForkInitiation is allowed and requires actual DRep + SPO votes.
+    // (HardForkInitiation is rejected during bootstrap phase, protocol == 9)
+    state.protocol_params.protocol_version_major = 10;
+    state.protocol_params.protocol_version_minor = 0;
     Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
@@ -2203,7 +2314,7 @@ fn test_hard_fork_ratification() {
         return_addr: vec![0u8; 29],
         gov_action: GovAction::HardForkInitiation {
             prev_action_id: None,
-            protocol_version: (10, 0),
+            protocol_version: (11, 0),
         },
         anchor: Anchor {
             url: "https://example.com".to_string(),
@@ -2246,9 +2357,9 @@ fn test_hard_fork_ratification() {
         );
     }
 
-    assert_eq!(state.protocol_params.protocol_version_major, 9);
-    state.process_epoch_transition(EpochNo(1));
     assert_eq!(state.protocol_params.protocol_version_major, 10);
+    state.process_epoch_transition(EpochNo(1));
+    assert_eq!(state.protocol_params.protocol_version_major, 11);
     assert_eq!(state.protocol_params.protocol_version_minor, 0);
 }
 
@@ -3076,6 +3187,8 @@ fn test_pool_registration_stores_metadata() {
 fn test_guardrail_script_policy_validation() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
+    // Post-bootstrap: ParameterChange is allowed and guardrail policy is enforced
+    state.protocol_params.protocol_version_major = 10;
 
     // Set up a constitution with a guardrail script hash
     let guardrail_hash = Hash28::from_bytes([42u8; 28]);
@@ -3617,6 +3730,7 @@ fn test_utxo_stake_distribution_tracking() {
 
     // Create a transaction that spends the genesis UTxO and creates new outputs
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([0x02; 32]),
         body: TransactionBody {
             inputs: vec![genesis_input],
@@ -4221,6 +4335,7 @@ fn test_invalid_tx_uses_collateral_for_fees_not_declared_fee() {
 
     // Create an invalid tx with declared fee of 200_000 but collateral of 5_000_000
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([11u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -4310,6 +4425,7 @@ fn test_invalid_tx_collateral_with_return() {
     };
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([21u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -4387,6 +4503,7 @@ fn test_invalid_tx_total_collateral_field() {
         .insert(collateral_input.clone(), collateral_output);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([31u8; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -7304,25 +7421,27 @@ fn governance_test_state() -> LedgerState {
 
 #[test]
 fn test_parameter_change_ratification_bootstrap() {
-    // During bootstrap (protocol version 9), DRep thresholds are 0 (auto-pass).
-    // CC approval is still required. SPO threshold applies for security params.
-    let mut state = governance_test_state();
+    // During Conway bootstrap (protocol version 9), ParameterChange/HardForkInitiation/
+    // TreasuryWithdrawals proposals are REJECTED at submission time (matching Haskell
+    // `validBootstrap`).  Only NoConfidence, UpdateCommittee, NewConstitution, and InfoAction
+    // are permitted.
+    //
+    // This test verifies that:
+    //   1. ParameterChange is rejected during bootstrap (proposal never added).
+    //   2. UpdateCommittee IS permitted in bootstrap and ratifies with DRep auto-pass
+    //      (DRep thresholds are 0 during bootstrap, per Haskell `hardforkConwayBootstrapPhase`).
+    let mut state = governance_test_state(); // protocol_version_major = 9 (bootstrap)
 
-    // Submit ParameterChange to update maxTxExUnits
-    let tx_hash = Hash32::from_bytes([42u8; 32]);
+    // --- Part 1: ParameterChange is rejected during bootstrap ---
+    let rejected_hash = Hash32::from_bytes([42u8; 32]);
     let ppu = ProtocolParamUpdate {
         max_tx_ex_units: Some(ExUnits {
             mem: 16_500_000,
             steps: 10_000_000_000,
         }),
-        max_block_ex_units: Some(ExUnits {
-            mem: 72_000_000,
-            steps: 40_000_000_000,
-        }),
         ..Default::default()
     };
-
-    let proposal = ProposalProcedure {
+    let rejected_proposal = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
         return_addr: vec![0u8; 29],
         gov_action: GovAction::ParameterChange {
@@ -7335,32 +7454,50 @@ fn test_parameter_change_ratification_bootstrap() {
             data_hash: Hash32::ZERO,
         },
     };
+    state.process_proposal(&rejected_hash, 0, &rejected_proposal);
+    assert!(
+        state.governance.proposals.is_empty(),
+        "ParameterChange must be rejected during bootstrap (protocol == 9)"
+    );
+
+    // --- Part 2: UpdateCommittee is allowed and DRep auto-passes ---
+    let tx_hash = Hash32::from_bytes([43u8; 32]);
+    let new_cc_cred = Credential::VerificationKey(Hash28::from_bytes([99u8; 28]));
+    let mut members_to_add = std::collections::BTreeMap::new();
+    members_to_add.insert(new_cc_cred.clone(), 1000u64); // expires epoch 1000
+
+    let proposal = ProposalProcedure {
+        deposit: Lovelace(100_000_000_000),
+        return_addr: vec![0u8; 29],
+        gov_action: GovAction::UpdateCommittee {
+            prev_action_id: None,
+            members_to_remove: vec![],
+            members_to_add,
+            threshold: Rational {
+                numerator: 2,
+                denominator: 3,
+            },
+        },
+        anchor: Anchor {
+            url: "https://example.com".to_string(),
+            data_hash: Hash32::ZERO,
+        },
+    };
 
     state.process_proposal(&tx_hash, 0, &proposal);
+    assert_eq!(
+        state.governance.proposals.len(),
+        1,
+        "UpdateCommittee must be accepted during bootstrap"
+    );
     let action_id = GovActionId {
         transaction_id: tx_hash,
         action_index: 0,
     };
 
-    // CC member votes Yes (using hot credential)
-    let hot_cred = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
-    let cc_voter = Voter::ConstitutionalCommittee(hot_cred);
-    state.process_vote(
-        &cc_voter,
-        &action_id,
-        &VotingProcedure {
-            vote: Vote::Yes,
-            anchor: None,
-        },
-    );
-
-    // maxTxExUnits changes require Network group + Security SPO
-    // In bootstrap, DRep thresholds are 0 (auto-pass)
-    // max_block_ex_units is (Network, Security) -> needs SPO pvt_pp_security
-    // We need 51% of SPO stake to vote Yes
-    // Total SPO stake: 5 pools * 2T = 10T
-    // Need > 5.1T in Yes votes
-    // 3 SPOs voting Yes = 6T (60% > 51%)
+    // In bootstrap: DRep thresholds are 0 (auto-pass), no DRep votes needed.
+    // UpdateCommittee requires only SPO votes (pvt_committee_normal = 51%).
+    // Total SPO stake: 5 pools * 2T = 10T; 3 SPOs = 6T (60% > 51%).
     for i in 0..3 {
         let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
         let spo_voter = Voter::StakePool(pool_hash28.to_hash32_padded());
@@ -7377,24 +7514,23 @@ fn test_parameter_change_ratification_bootstrap() {
     // Ratify at epoch boundary
     state.process_epoch_transition(EpochNo(1));
 
-    // Verify protocol parameters were updated
-    assert_eq!(
-        state.protocol_params.max_tx_ex_units.mem, 16_500_000,
-        "maxTxExUnits.mem should be updated by governance"
+    // Verify the new CC member was added
+    let new_cc_key = credential_to_hash(&new_cc_cred);
+    assert!(
+        state
+            .governance
+            .committee_expiration
+            .contains_key(&new_cc_key),
+        "New CC member should be added after UpdateCommittee ratification"
     );
-    assert_eq!(
-        state.protocol_params.max_block_ex_units.mem, 72_000_000,
-        "maxBlockExUnits.mem should be updated by governance"
-    );
-    // Proposal should be removed (enacted)
     assert!(
         state.governance.proposals.is_empty(),
         "Enacted proposal should be removed"
     );
-    // Enacted root should be set
+    // Enacted committee root should be set
     assert!(
-        state.governance.enacted_pparam_update.is_some(),
-        "enacted_pparam_update should be set after ratification"
+        state.governance.enacted_committee.is_some(),
+        "enacted_committee should be set after ratification"
     );
 }
 
@@ -7478,6 +7614,8 @@ fn test_update_committee_no_cc_required() {
 fn test_parameter_change_fails_without_cc() {
     // ParameterChange requires CC approval. If no CC can vote, it fails.
     let mut state = governance_test_state();
+    // Post-bootstrap: ParameterChange is allowed but requires CC + DRep votes
+    state.protocol_params.protocol_version_major = 10;
 
     // Remove all CC members (no hot keys)
     Arc::make_mut(&mut state.governance)
@@ -7526,7 +7664,10 @@ fn test_parameter_change_fails_without_cc() {
 #[test]
 fn test_chained_parameter_changes() {
     // Two successive ParameterChange proposals with prev_action_id chain
+    // Use protocol version 10 (post-bootstrap) since ParameterChange is
+    // disallowed during bootstrap phase (protocol == 9)
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
 
     // First ParameterChange: update drep_activity to 25
     let tx1 = Hash32::from_bytes([50u8; 32]);
@@ -7566,6 +7707,22 @@ fn test_chained_parameter_changes() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes on first proposal (post-bootstrap requires 67% DRep threshold for
+    // Gov-group parameters; drep_activity is a Gov-group parameter)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id1,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     // Ratify first proposal
     state.process_epoch_transition(EpochNo(1));
@@ -7608,6 +7765,21 @@ fn test_chained_parameter_changes() {
         },
     );
 
+    // 7/10 DReps vote Yes on second proposal (same 67% Gov-group threshold applies)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id2,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
+
     // Ratify second proposal
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(
@@ -7620,6 +7792,8 @@ fn test_chained_parameter_changes() {
 fn test_cost_model_update_via_governance() {
     // ParameterChange can update PlutusV1/V2/V3 cost models
     let mut state = governance_test_state();
+    // Post-bootstrap: ParameterChange is allowed; DRep votes required (cost models are Technical group)
+    state.protocol_params.protocol_version_major = 10;
 
     let tx_hash = Hash32::from_bytes([55u8; 32]);
     let v2_costs = vec![1i64; 175]; // PlutusV2 has 175 cost model params
@@ -7663,6 +7837,21 @@ fn test_cost_model_update_via_governance() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes (Technical-group threshold = 67%; 70% > 67%)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     state.process_epoch_transition(EpochNo(1));
 
@@ -7753,7 +7942,10 @@ fn test_pre_conway_ppup_version_upgrade() {
 #[test]
 fn test_hard_fork_initiation_ratification() {
     // HardForkInitiation requires DRep + SPO + CC
+    // Post-bootstrap: HardForkInitiation is allowed (blocked at protocol == 9)
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
+    state.protocol_params.protocol_version_minor = 0;
 
     let tx_hash = Hash32::from_bytes([60u8; 32]);
     let proposal = ProposalProcedure {
@@ -7761,7 +7953,7 @@ fn test_hard_fork_initiation_ratification() {
         return_addr: vec![0u8; 29],
         gov_action: GovAction::HardForkInitiation {
             prev_action_id: None,
-            protocol_version: (10, 0),
+            protocol_version: (11, 0),
         },
         anchor: Anchor {
             url: "https://example.com".to_string(),
@@ -7786,6 +7978,21 @@ fn test_hard_fork_initiation_ratification() {
         },
     );
 
+    // 6/10 DReps vote Yes (dvt_hard_fork = 60%; 60% meets threshold)
+    for i in 0..6 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
+
     // SPOs vote Yes (need 51% for pvt_hard_fork)
     for i in 0..3 {
         let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
@@ -7802,8 +8009,8 @@ fn test_hard_fork_initiation_ratification() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.protocol_version_major, 10,
-        "Protocol version should be 10 after HardForkInitiation"
+        state.protocol_params.protocol_version_major, 11,
+        "Protocol version should be 11 after HardForkInitiation from v10"
     );
     assert_eq!(
         state.protocol_params.protocol_version_minor, 0,
@@ -7870,7 +8077,9 @@ fn test_prev_action_id_chain_mismatch_blocks_ratification() {
 #[test]
 fn test_committee_min_size_update_via_governance() {
     // committeeMinSize should be updatable via governance ParameterChange
+    // Post-bootstrap: ParameterChange is allowed; Gov-group params need 67% DRep votes
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
     assert_eq!(state.protocol_params.committee_min_size, 0);
 
     let tx_hash = Hash32::from_bytes([80u8; 32]);
@@ -7909,6 +8118,21 @@ fn test_committee_min_size_update_via_governance() {
             anchor: None,
         },
     );
+
+    // 7/10 DReps vote Yes (Gov-group threshold = 67%; 70% > 67%)
+    for i in 0..7 {
+        let voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes(
+            [i as u8; 28],
+        )));
+        state.process_vote(
+            &voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
 
     state.process_epoch_transition(EpochNo(1));
 
@@ -9632,6 +9856,7 @@ fn make_delegation_block(
     let tx_hash = Hash32::from_bytes(tx_id_bytes);
 
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![],
@@ -9722,6 +9947,7 @@ fn make_pool_registration_block(
         pool_metadata: None,
     };
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![],
@@ -10620,6 +10846,7 @@ fn make_invalid_tx_with_collateral(
     total_collateral: Option<Lovelace>,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: tx_hash,
         body: TransactionBody {
             inputs: vec![regular_input],
@@ -11301,6 +11528,49 @@ fn test_epoch_transition_marks_inactive_drep() {
     params.drep_activity = 3; // expire after 3 epochs of inactivity
     let mut state = LedgerState::new(params);
 
+    // Directly insert a long-lived NoConfidence proposal so that no epoch transition
+    // is counted as "dormant".  Without an active proposal, every epoch boundary
+    // increments `num_dormant_epochs`, which offsets the elapsed-epoch count in the
+    // DRep inactivity check and prevents the DRep from ever being marked inactive.
+    //
+    // We use NoConfidence (not InfoAction) because InfoAction is always immediately
+    // ratified and removed during the first `ratify_proposals()` pass.  NoConfidence
+    // requires SPO stake to reach its threshold; with an empty stake snapshot the
+    // SPO vote can never be met, so the proposal persists across all epoch boundaries.
+    {
+        let return_addr = {
+            let mut v = vec![0xE1u8];
+            v.extend_from_slice(&[0xAAu8; 28]);
+            v
+        };
+        let gov = Arc::make_mut(&mut state.governance);
+        gov.proposals.insert(
+            GovActionId {
+                transaction_id: Hash32::from_bytes([0xDDu8; 32]),
+                action_index: 0,
+            },
+            ProposalState {
+                procedure: ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr,
+                    gov_action: GovAction::NoConfidence {
+                        prev_action_id: None,
+                    },
+                    anchor: Anchor {
+                        url: "https://example.com".to_string(),
+                        data_hash: Hash32::ZERO,
+                    },
+                },
+                proposed_epoch: EpochNo(0),
+                // Expires well beyond the last epoch this test visits (4).
+                expires_epoch: EpochNo(100),
+                yes_votes: 0,
+                no_votes: 0,
+                abstain_votes: 0,
+            },
+        );
+    }
+
     // Register 2 DReps at epoch 0
     let cred_a = Credential::VerificationKey(Hash28::from_bytes([0xA0u8; 28]));
     let cred_b = Credential::VerificationKey(Hash28::from_bytes([0xB0u8; 28]));
@@ -11684,6 +11954,7 @@ fn make_simple_tx(
     outputs: Vec<TransactionOutput>,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12141,6 +12412,7 @@ fn make_tx_with_treasury(
     treasury_value: Lovelace,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12194,6 +12466,7 @@ fn make_tx_with_committee_hot_auth(
     hot_credential: Credential,
 ) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs,
@@ -12503,6 +12776,7 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
 /// the block-level ExUnits accumulation without a live Plutus evaluator.
 fn make_tx_with_redeemers(tx_hash_byte: u8, mem: u64, steps: u64) -> Transaction {
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs: vec![],
@@ -12793,6 +13067,7 @@ fn make_invalid_tx_with_col_return(
     };
 
     Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([tx_hash_byte; 32]),
         body: TransactionBody {
             inputs: vec![regular_input],
@@ -13221,9 +13496,10 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
 
 /// Verify treasury donations accumulate correctly.
 ///
-/// Donations from `tx.body.donation` are added to `self.treasury` immediately
-/// during block application (not deferred through RUPD). This test ensures
-/// donations are not double-counted or lost.
+/// Per Haskell spec, `tx.body.donation` amounts are buffered in `pending_donations`
+/// during block application (matching `UTxOState.utxosDonation`) and are only flushed
+/// into the treasury at the epoch boundary (NEWEPOCH step, before RUPD reward computation).
+/// This test ensures donations sit in pending_donations mid-epoch and are not lost.
 #[test]
 fn test_treasury_donation_accumulates_correctly() {
     let params = ProtocolParameters::mainnet_defaults();
@@ -13251,6 +13527,7 @@ fn test_treasury_donation_accumulates_correctly() {
 
     let donation_amount = 50_000_000u64;
     let tx = Transaction {
+        era: torsten_primitives::era::Era::Conway,
         hash: Hash32::from_bytes([0xBBu8; 32]),
         body: TransactionBody {
             inputs: vec![donor_input],
@@ -13307,10 +13584,14 @@ fn test_treasury_donation_accumulates_correctly() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .expect("block application must succeed");
 
+    // Mid-epoch: donation is buffered, treasury is unchanged.
     assert_eq!(
-        state.treasury.0,
-        1_000_000_000 + donation_amount,
-        "Treasury should increase by exactly the donation amount"
+        state.pending_donations.0, donation_amount,
+        "Donation should sit in pending_donations mid-epoch"
+    );
+    assert_eq!(
+        state.treasury.0, 1_000_000_000,
+        "Treasury should not yet reflect the donation mid-epoch"
     );
 }
 
@@ -13323,7 +13604,8 @@ fn test_treasury_donation_accumulates_correctly() {
 #[test]
 fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     let mut params = ProtocolParameters::mainnet_defaults();
-    params.protocol_version_major = 9;
+    // Post-bootstrap: TreasuryWithdrawals is allowed (blocked during bootstrap at protocol == 9)
+    params.protocol_version_major = 10;
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
@@ -13833,5 +14115,215 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     assert!(
         tc_ratio_2_3 > 1.0 && tc_ratio_2_3 < 1.01,
         "Each epoch's treasury_cut should be slightly smaller than the prior: ratio_2_3={tc_ratio_2_3}"
+    );
+}
+
+// ─── Sub-task C: treasury donations buffered until epoch boundary ─────────────
+
+/// Build a minimal Conway transaction that carries a `donation` field.
+///
+/// The transaction spends a UTxO seeded in `state.utxo_set` (inserted by this
+/// helper) and donates `donation_lovelace` to the treasury.  Because the
+/// donation reduces the available balance, the output is sized accordingly.
+fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u64) -> Transaction {
+    let input_value = 10_000_000u64;
+    let fee = 200_000u64;
+    let output_value = input_value - fee - donation_lovelace;
+
+    let input = TransactionInput {
+        transaction_id: Hash32::from_bytes([unique_id; 32]),
+        index: 0,
+    };
+    state.utxo_set.insert(
+        input.clone(),
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(input_value),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+
+    Transaction {
+        era: torsten_primitives::era::Era::Conway,
+        hash: Hash32::from_bytes([unique_id + 100; 32]),
+        body: TransactionBody {
+            inputs: vec![input],
+            outputs: vec![TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(output_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            }],
+            fee: Lovelace(fee),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: Some(Lovelace(donation_lovelace)),
+        },
+        witness_set: TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        },
+        is_valid: true,
+        auxiliary_data: None,
+        raw_cbor: None,
+    }
+}
+
+#[test]
+fn test_treasury_donation_buffered_until_epoch_boundary() {
+    // Haskell accumulates `txDonation` fields in `UTxOState.utxosDonation` during block
+    // processing and flushes them into the treasury only at the epoch boundary
+    // (NEWEPOCH rule).  This test verifies that:
+    //
+    //   1. After a donation transaction is applied, `treasury` is NOT yet credited —
+    //      the donation sits in `pending_donations`.
+    //   2. After the epoch boundary, `pending_donations` is drained into `treasury`.
+    //
+    // Reference: Haskell `UTxOState.utxosDonation` / NEWEPOCH `applyRUpd`.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 200; // short epoch for testing
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let donation_amount = 5_000_000u64;
+
+    // --- Apply a block in epoch 0 containing a donation tx ---
+    let donation_tx = make_donation_tx(&mut state, 10, donation_amount);
+    let block0 = make_test_block(50, 1, Hash32::ZERO, vec![donation_tx]);
+    state
+        .apply_block(&block0, BlockValidationMode::ApplyOnly)
+        .expect("apply_block with donation should succeed");
+
+    // Immediately after block application: treasury must NOT yet include the donation;
+    // it must sit in pending_donations instead.
+    assert_eq!(
+        state.treasury.0, 0,
+        "Treasury must not be credited immediately; donation is still pending. \
+         treasury={}, pending_donations={}",
+        state.treasury.0, state.pending_donations.0
+    );
+    assert_eq!(
+        state.pending_donations.0, donation_amount,
+        "pending_donations must equal the donated amount after block application. \
+         pending_donations={}, expected={}",
+        state.pending_donations.0, donation_amount
+    );
+
+    // --- Cross the epoch boundary (slot 200 → epoch 1) ---
+    let block1 = make_test_block(250, 2, *block0.hash(), vec![]);
+    state
+        .apply_block(&block1, BlockValidationMode::ApplyOnly)
+        .expect("epoch-boundary block should succeed");
+
+    assert_eq!(
+        state.epoch,
+        EpochNo(1),
+        "Should have transitioned to epoch 1"
+    );
+
+    // After epoch boundary: pending_donations must be zero (fully flushed).
+    assert_eq!(
+        state.pending_donations.0, 0,
+        "pending_donations must be zero after epoch boundary. got: {}",
+        state.pending_donations.0
+    );
+
+    // The donation must now appear in the treasury (plus any RUPD delta_treasury
+    // from reward calculation; the reserve starts at max supply so delta_treasury
+    // is non-zero — we just assert treasury ≥ donation_amount).
+    assert!(
+        state.treasury.0 >= donation_amount,
+        "Treasury must include the flushed donation after epoch boundary. \
+         treasury={}, donation_amount={}",
+        state.treasury.0,
+        donation_amount
+    );
+}
+
+#[test]
+fn test_treasury_donation_accumulates_across_transactions() {
+    // Multiple transactions in the same epoch may each carry a `donation` field.
+    // All donations must be buffered together in `pending_donations` and flushed
+    // as a single amount at the epoch boundary.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 200;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let donation_a = 3_000_000u64;
+    let donation_b = 2_000_000u64;
+
+    let tx_a = make_donation_tx(&mut state, 20, donation_a);
+    let tx_b = make_donation_tx(&mut state, 21, donation_b);
+
+    // Both donation transactions in the same block.
+    let block0 = make_test_block(50, 1, Hash32::ZERO, vec![tx_a, tx_b]);
+    state
+        .apply_block(&block0, BlockValidationMode::ApplyOnly)
+        .expect("apply_block with two donations should succeed");
+
+    assert_eq!(
+        state.pending_donations.0,
+        donation_a + donation_b,
+        "pending_donations must equal the sum of all donations. \
+         pending_donations={}, expected={}",
+        state.pending_donations.0,
+        donation_a + donation_b
+    );
+    assert_eq!(
+        state.treasury.0, 0,
+        "Treasury must not be credited before epoch boundary"
+    );
+
+    // Epoch boundary flushes the combined amount.
+    let block1 = make_test_block(250, 2, *block0.hash(), vec![]);
+    state
+        .apply_block(&block1, BlockValidationMode::ApplyOnly)
+        .expect("epoch boundary block should succeed");
+
+    assert_eq!(
+        state.pending_donations.0, 0,
+        "pending_donations must be zero post-boundary"
+    );
+    assert!(
+        state.treasury.0 >= donation_a + donation_b,
+        "Treasury must include all flushed donations. treasury={}, min_expected={}",
+        state.treasury.0,
+        donation_a + donation_b
     );
 }

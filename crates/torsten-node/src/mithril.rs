@@ -208,6 +208,31 @@ pub async fn import_snapshot(
     let network_name = mithril_network_name(network_magic);
     verify_snapshot_digest(&extract_dir, network_name, &latest.beacon, &detail.digest)?;
 
+    // SECURITY NOTE: STM certificate chain verification is NOT implemented.
+    //
+    // Mithril uses a Stake-Based Threshold Multi-Signature (STM) scheme where
+    // the aggregator provides a certificate chain proving that ≥ 2/3 of stake
+    // signed the snapshot. Full verification would require:
+    //   1. Downloading the genesis certificate (trust anchor from IOHK)
+    //   2. Walking the certificate chain from genesis to the target snapshot
+    //   3. Verifying each STM multi-signature against the registered signers
+    //   4. Checking stake distribution at each epoch boundary
+    //
+    // Currently, we trust the snapshot digest as-is from the aggregator API
+    // without cryptographic proof that the chain of trust back to genesis holds.
+    // This is acceptable for testnet use and fast initial sync, but for
+    // production security the full STM chain MUST be verified.
+    //
+    // TODO: implement full STM certificate chain verification using the Mithril
+    // client library once it stabilises or by implementing the STM protocol
+    // directly against the aggregator's /certificate endpoint.
+    warn!(
+        "Mithril STM certificate chain verification is NOT implemented. \
+         Snapshot digest is trusted from the aggregator API without cryptographic \
+         proof of the full certificate chain. Do not use for production trust \
+         decisions until STM verification is implemented."
+    );
+
     // Step 6: Skip ChainDB import — chunk files are the optimal format for sequential
     // replay. The old LSM import (parse → write 5 KV pairs per block → compaction) was
     // redundant since replay reads from chunk files directly. Blocks will be imported
