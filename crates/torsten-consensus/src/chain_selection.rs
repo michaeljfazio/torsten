@@ -260,14 +260,17 @@ impl ChainSelection {
 
 /// Praos tiebreaker for equal-length chains.
 ///
-/// Implements the Cardano Blueprint tiebreaker spec:
+/// Implements the Haskell `comparePraos` logic from
+/// `Ouroboros.Consensus.Protocol.Praos`:
 ///
-/// 1. If the tip is issued by the **same stake pool** (same blake2b-224 hash
-///    of the cold verification key):
+/// 1. **`issueNoArmed`** — same stake pool AND same slot:
 ///    - The block with the **higher opcert sequence number** wins.
+///    - Both conditions (`ptvIssuer v1 == ptvIssuer v2` AND
+///      `ptvSlotNo v1 == ptvSlotNo v2`) must hold simultaneously.
 ///    - (Valid opcerts can only increment by 1, so this is deterministic.)
 ///
-/// 2. If issued by **different stake pools**:
+/// 2. **`vrfArmed`** — all other cases (different pools, OR same pool at
+///    different slots):
 ///    - The block with the **lower VRF output value** (lexicographic byte
 ///      comparison) wins.
 ///    - In Conway era (protocol version ≥ 9): this comparison is only applied
@@ -290,12 +293,19 @@ fn praos_tiebreak(
     let current_pool = blake2b_224(&current.issuer_vkey);
     let candidate_pool = blake2b_224(&candidate.issuer_vkey);
 
-    if current_pool == candidate_pool {
-        // Same pool: higher opcert sequence number wins.
+    if current_pool == candidate_pool && current.slot == candidate.slot {
+        // Same pool AND same slot: higher opcert sequence number wins.
         //
-        // Per the Haskell cardano-node implementation (Ouroboros.Consensus.Protocol.Praos),
-        // the block with the higher `ocertN` is preferred. Since valid opcerts can only
-        // increment by exactly 1, the difference will always be 0 or 1 in practice.
+        // This corresponds to Haskell's `issueNoArmed` condition in `comparePraos`:
+        //   `ptvSlotNo v1 == ptvSlotNo v2 && ptvIssuer v1 == ptvIssuer v2`
+        //
+        // Both conditions must hold. A same-pool fork at *different* slots falls
+        // through to the VRF comparison below, exactly as Haskell does. Applying
+        // opcert comparison for same-pool blocks at different slots would diverge
+        // from Haskell's chain selection for cross-slot forks from a single pool.
+        //
+        // Since valid opcerts can only increment by exactly 1, the difference will
+        // always be 0 or 1 in practice.
         let current_seq = current.operational_cert.sequence_number;
         let candidate_seq = candidate.operational_cert.sequence_number;
 
@@ -304,8 +314,8 @@ fn praos_tiebreak(
         } else if candidate_seq < current_seq {
             ChainPreference::PreferCurrent
         } else {
-            // Identical pools and identical opcert counters (same block seen twice
-            // from different paths) — treat as equal.
+            // Identical pool, identical slot, identical opcert counter — same block
+            // seen twice from different paths. Treat as equal.
             ChainPreference::Equal
         }
     } else {
@@ -1507,69 +1517,69 @@ mod tests {
 
     #[test]
     fn test_same_pool_higher_opcert_wins() {
-        // Two equal-length chains from the SAME pool.
-        // Candidate has a higher opcert sequence number → candidate preferred.
+        // Two equal-length chains from the SAME pool at the SAME slot.
+        // Haskell's `issueNoArmed` fires: candidate with higher opcert wins.
         let pool_vkey = vec![0xAB; 32]; // same issuer for both
         let current_header = make_header(
             10,
-            200,
+            200, // same slot — issueNoArmed condition
             [0xCC; 32],
             pool_vkey.clone(),
             5,              // opcert sequence = 5
-            vec![0x80; 32], // VRF output
+            vec![0x80; 32], // VRF output — irrelevant under issueNoArmed
         );
         let candidate_header = make_header(
             10,
-            205,
+            200, // same slot — issueNoArmed condition
             [0xDD; 32],
             pool_vkey.clone(),
-            6,              // opcert sequence = 6 (higher)
-            vec![0x90; 32], // higher VRF — but irrelevant since same pool
+            6,              // opcert sequence = 6 (higher) → wins
+            vec![0x90; 32], // higher VRF — irrelevant since issueNoArmed fires
         );
 
         let mut cs = ChainSelection::new();
         cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
-        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+        let candidate = make_tip_with_hash(10, 200, Hash32::from_bytes([0xDD; 32]));
 
         let result = cs.prefer_chain_with_headers(
             &candidate,
             &current_header,
             &candidate_header,
             Era::Conway,
-            u64::MAX, // no slot-distance constraint
+            u64::MAX,
         );
         assert_eq!(
             result,
             ChainPreference::PreferCandidate,
-            "Same pool, higher opcert seq should prefer candidate"
+            "Same pool + same slot: higher opcert seq should prefer candidate (issueNoArmed)"
         );
     }
 
     #[test]
     fn test_same_pool_lower_opcert_keeps_current() {
-        // Two equal-length chains from the SAME pool.
-        // Candidate has a lower opcert sequence number → current preferred.
+        // Two equal-length chains from the SAME pool at the SAME slot.
+        // Haskell's `issueNoArmed` fires: candidate with lower opcert loses.
         let pool_vkey = vec![0xAB; 32];
         let current_header = make_header(
             10,
-            200,
+            200, // same slot — issueNoArmed condition
             [0xCC; 32],
             pool_vkey.clone(),
-            6,              // opcert sequence = 6 (higher)
-            vec![0x40; 32], // lower VRF — irrelevant, same pool
+            6,              // opcert sequence = 6 (higher) → current wins
+            vec![0x40; 32], // VRF — irrelevant under issueNoArmed
         );
         let candidate_header = make_header(
             10,
-            205,
+            200, // same slot — issueNoArmed condition
             [0xDD; 32],
             pool_vkey.clone(),
-            5,              // opcert sequence = 5 (lower)
-            vec![0x10; 32], // even lower VRF — still irrelevant
+            5,              // opcert sequence = 5 (lower) → loses
+            vec![0x10; 32], // lower VRF — irrelevant under issueNoArmed
         );
 
         let mut cs = ChainSelection::new();
         cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
-        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+        let candidate = make_tip_with_hash(10, 200, Hash32::from_bytes([0xDD; 32]));
 
         let result = cs.prefer_chain_with_headers(
             &candidate,
@@ -1581,7 +1591,7 @@ mod tests {
         assert_eq!(
             result,
             ChainPreference::PreferCurrent,
-            "Same pool, lower opcert seq should keep current"
+            "Same pool + same slot: lower opcert seq should keep current (issueNoArmed)"
         );
     }
 
@@ -1836,39 +1846,123 @@ mod tests {
     }
 
     #[test]
-    fn test_should_switch_chain_with_headers_uses_opcert() {
-        // Verify should_switch_chain_with_headers correctly delegates to praos_tiebreak.
+    fn test_same_pool_same_slot_opcert_wins() {
+        // Same pool AND same slot: Haskell's `issueNoArmed` condition fires.
+        // Higher opcert counter is preferred regardless of VRF output.
         let pool_vkey = vec![0xAB; 32]; // same pool
         let current_header = make_header(
             10,
-            200,
+            200, // same slot
             [0x00; 32],
             pool_vkey.clone(),
-            3, // lower opcert
-            vec![0x80; 32],
+            3,              // lower opcert → should lose
+            vec![0x01; 32], // lower (better) VRF — irrelevant when issueNoArmed fires
         );
         let candidate_header = make_header(
             10,
-            210,
+            200, // same slot — issueNoArmed condition
             [0x11; 32],
             pool_vkey.clone(),
-            4, // higher opcert → should switch
-            vec![0x80; 32],
+            4,              // higher opcert → should win
+            vec![0xFF; 32], // higher (worse) VRF — irrelevant here
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0x00; 32])));
+        let candidate = make_tip_with_hash(10, 200, Hash32::from_bytes([0x11; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Same pool + same slot: candidate with higher opcert counter must win (issueNoArmed)"
+        );
+    }
+
+    #[test]
+    fn test_same_pool_different_slot_uses_vrf_not_opcert() {
+        // Same pool but DIFFERENT slots: issueNoArmed does NOT fire in Haskell.
+        // Falls through to VRF comparison — lower VRF value wins, opcert is irrelevant.
+        let pool_vkey = vec![0xAB; 32]; // same pool
+        let current_header = make_header(
+            10,
+            200, // different slot from candidate
+            [0x00; 32],
+            pool_vkey.clone(),
+            3,              // lower opcert — would lose under (wrong) same-pool opcert rule
+            vec![0x01; 32], // lower (better) VRF → should win via VRF tiebreak
+        );
+        let candidate_header = make_header(
+            10,
+            210, // different slot — issueNoArmed must NOT fire
+            [0x11; 32],
+            pool_vkey.clone(),
+            99,             // much higher opcert — irrelevant, different slot
+            vec![0xFF; 32], // higher (worse) VRF → should lose
         );
 
         let mut cs = ChainSelection::new();
         cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0x00; 32])));
         let candidate = make_tip_with_hash(10, 210, Hash32::from_bytes([0x11; 32]));
 
-        assert!(
-            cs.should_switch_chain_with_headers(
-                &candidate,
-                &current_header,
-                &candidate_header,
-                Era::Conway,
-                u64::MAX,
-            ),
-            "Should switch when same pool and candidate has higher opcert"
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCurrent,
+            "Same pool + different slot: VRF (not opcert) decides; current with lower VRF must win"
+        );
+    }
+
+    #[test]
+    fn test_different_pool_different_slot_uses_vrf() {
+        // Different pools: always falls through to VRF comparison (existing behavior).
+        let pool_a = vec![0x01; 32];
+        let pool_b = vec![0x02; 32];
+
+        let current_header = make_header(
+            10,
+            200,
+            [0x00; 32],
+            pool_a,
+            99,             // high opcert — irrelevant for different pools
+            vec![0xFF; 32], // higher VRF → should lose
+        );
+        let candidate_header = make_header(
+            10,
+            210,
+            [0x11; 32],
+            pool_b,
+            1,              // low opcert — irrelevant
+            vec![0x01; 32], // lower VRF → should win
+        );
+
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0x00; 32])));
+        let candidate = make_tip_with_hash(10, 210, Hash32::from_bytes([0x11; 32]));
+
+        let result = cs.prefer_chain_with_headers(
+            &candidate,
+            &current_header,
+            &candidate_header,
+            Era::Conway,
+            u64::MAX,
+        );
+        assert_eq!(
+            result,
+            ChainPreference::PreferCandidate,
+            "Different pools: lower VRF candidate must win"
         );
     }
 
@@ -1982,30 +2076,33 @@ mod tests {
         );
     }
 
-    /// Same pool, identical opcert counters → Equal (no preference).
+    /// Same pool, same slot, identical opcert counters → Equal (no preference).
+    ///
+    /// This is the `issueNoArmed` path where both blocks are identical
+    /// in every tiebreaker dimension — treat as the same block seen twice.
     #[test]
     fn test_same_pool_equal_opcert_is_equal() {
         let pool_vkey = vec![0x42; 32];
         let current_header = make_header(
             10,
-            200,
+            200, // same slot — issueNoArmed condition
             [0xCC; 32],
             pool_vkey.clone(),
-            5,              // same opcert
-            vec![0x10; 32], // different VRF — but irrelevant for same pool
+            5,              // same opcert counter
+            vec![0x10; 32], // VRF — irrelevant under issueNoArmed
         );
         let candidate_header = make_header(
             10,
-            205,
+            200, // same slot — issueNoArmed condition
             [0xDD; 32],
             pool_vkey,
-            5,              // same opcert
-            vec![0x80; 32], // different VRF — irrelevant
+            5,              // same opcert counter
+            vec![0x80; 32], // VRF — irrelevant under issueNoArmed
         );
 
         let mut cs = ChainSelection::new();
         cs.set_tip(make_tip_with_hash(10, 200, Hash32::from_bytes([0xCC; 32])));
-        let candidate = make_tip_with_hash(10, 205, Hash32::from_bytes([0xDD; 32]));
+        let candidate = make_tip_with_hash(10, 200, Hash32::from_bytes([0xDD; 32]));
 
         let result = cs.prefer_chain_with_headers(
             &candidate,
@@ -2017,7 +2114,7 @@ mod tests {
         assert_eq!(
             result,
             ChainPreference::Equal,
-            "Same pool + same opcert = Equal"
+            "Same pool + same slot + same opcert = Equal (same block seen twice)"
         );
     }
 
