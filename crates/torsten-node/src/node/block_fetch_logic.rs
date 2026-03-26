@@ -22,10 +22,10 @@
 //!   downloads blocks via `BlockFetchClient`, and sends decoded blocks to the main
 //!   run loop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::MissedTickBehavior;
@@ -59,6 +59,12 @@ const GENESIS_DECISION_INTERVAL: Duration = Duration::from_millis(40);
 /// Batching consecutive headers reduces the number of `MsgRequestRange` round-trips
 /// while keeping individual fetches bounded so that slow peers don't block progress.
 const MAX_BATCH_SIZE: usize = 100;
+
+/// Timeout for in-flight blocks.  If a block has been in-flight for longer
+/// than this, the entry is purged so the block can be re-fetched from
+/// another peer.  This prevents sync stalls when a peer's TCP connection
+/// dies silently (half-open) and the worker never reports back.
+const IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Independent block fetch decision task.
 ///
@@ -113,12 +119,18 @@ pub struct BlockFetchLogicTask {
     /// Byron epoch length in slots (needed for block deserialization).
     byron_epoch_length: u64,
 
-    /// Set of block hashes currently in-flight (requested but not yet received).
+    /// Block hashes currently in-flight, mapped to the peer that was asked
+    /// to fetch them and the timestamp when the request was dispatched.
     ///
     /// Prevents duplicate fetch requests for the same block across multiple
     /// decision iterations. Entries are added when ranges are dispatched and
     /// removed when blocks are received or ranges fail.
-    in_flight: HashSet<[u8; 32]>,
+    ///
+    /// Tracking per-peer allows cleanup when a peer disconnects: all blocks
+    /// assigned to that peer are released for re-fetch from another peer.
+    /// The timestamp enables timeout-based cleanup of stale entries when a
+    /// peer's TCP connection dies silently (half-open).
+    in_flight: HashMap<[u8; 32], (SocketAddr, Instant)>,
 
     /// The underlying decision engine that tracks queued/in-flight ranges
     /// and selects the optimal peer for each fetch.
@@ -150,7 +162,7 @@ impl BlockFetchLogicTask {
             fetch_senders: HashMap::new(),
             fetched_blocks_tx,
             byron_epoch_length,
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
             decision_engine: BlockFetchDecision::with_defaults(),
             cancel,
         }
@@ -184,9 +196,21 @@ impl BlockFetchLogicTask {
 
     /// Deregister a peer (disconnected or demoted from hot).
     ///
-    /// Removes the peer's fetch sender. Any in-flight ranges for this peer
-    /// will time out naturally in the decision engine.
+    /// Removes the peer's fetch sender and releases all in-flight blocks
+    /// that were assigned to this peer, so they can be re-fetched from
+    /// another peer.  Without this cleanup, blocks dispatched to a dead
+    /// peer would stay in `in_flight` forever, starving the sync pipeline.
     pub fn deregister_peer(&mut self, addr: &SocketAddr) {
+        let before = self.in_flight.len();
+        self.in_flight.retain(|_, (peer, _)| peer != addr);
+        let released = before - self.in_flight.len();
+        if released > 0 {
+            info!(
+                %addr,
+                released,
+                "released in-flight blocks for deregistered peer"
+            );
+        }
         debug!(%addr, "deregistering peer from block fetch");
         self.fetch_senders.remove(addr);
     }
@@ -236,6 +260,24 @@ impl BlockFetchLogicTask {
             return;
         }
 
+        // Purge stale in-flight entries.  If a peer's TCP connection dies
+        // silently (half-open), the worker blocks indefinitely on recv() and
+        // never reports back.  Without this cleanup the sync pipeline stalls
+        // because the blocks can never be re-fetched from another peer.
+        let now = Instant::now();
+        let before = self.in_flight.len();
+        self.in_flight
+            .retain(|_, (_, dispatched_at)| now.duration_since(*dispatched_at) < IN_FLIGHT_TIMEOUT);
+        let expired = before - self.in_flight.len();
+        if expired > 0 {
+            warn!(
+                expired,
+                remaining = self.in_flight.len(),
+                "purged stale in-flight blocks (exceeded {}s timeout)",
+                IN_FLIGHT_TIMEOUT.as_secs()
+            );
+        }
+
         // Read candidate chain state from all peers.
         let chains = self.candidate_chains.read().await;
 
@@ -256,7 +298,7 @@ impl BlockFetchLogicTask {
                 }
 
                 // Skip blocks already in-flight.
-                if self.in_flight.contains(&header.hash) {
+                if self.in_flight.contains_key(&header.hash) {
                     continue;
                 }
 
@@ -275,9 +317,6 @@ impl BlockFetchLogicTask {
         new_headers.sort_by_key(|(_, h)| h.slot);
 
         // Batch consecutive headers into fetch ranges.
-        // For simplicity, we batch all pending headers and dispatch to the first
-        // available peer (Task 4 will populate real candidate chains; the decision
-        // engine handles peer selection by latency).
         let ranges = batch_headers_into_ranges(&new_headers);
 
         if ranges.is_empty() {
@@ -296,7 +335,6 @@ impl BlockFetchLogicTask {
             .keys()
             .map(|addr| PeerFetchState {
                 addr: *addr,
-                // Default latency — will be updated with real measurements later.
                 latency_ms: 100.0,
                 in_flight: 0,
                 tip_slot: 0,
@@ -317,14 +355,24 @@ impl BlockFetchLogicTask {
         }
 
         // Send fetch requests to each peer's worker.
+        let now = Instant::now();
         for (addr, peer_ranges) in dispatched {
-            // Mark all blocks in these ranges as in-flight.
+            // Mark ALL blocks that fall within these ranges as in-flight.
+            // The ranges are consecutive subsets of new_headers (sorted by slot),
+            // so we find the matching headers by slot/hash and mark each one.
             for range in &peer_ranges {
-                if let Point::Specific(_, hash) = &range.from {
-                    self.in_flight.insert(*hash);
-                }
-                if let Point::Specific(_, hash) = &range.to {
-                    self.in_flight.insert(*hash);
+                let from_slot = match &range.from {
+                    Point::Specific(s, _) => *s,
+                    Point::Origin => 0,
+                };
+                let to_slot = match &range.to {
+                    Point::Specific(s, _) => *s,
+                    Point::Origin => 0,
+                };
+                for (_, header) in &new_headers {
+                    if header.slot >= from_slot && header.slot <= to_slot {
+                        self.in_flight.insert(header.hash, (addr, now));
+                    }
                 }
             }
 
@@ -350,7 +398,7 @@ impl BlockFetchLogicTask {
         }
     }
 
-    /// Remove a block hash from the in-flight set.
+    /// Remove a block hash from the in-flight map.
     ///
     /// Called when a block is successfully received or a fetch fails.
     pub fn mark_received(&mut self, hash: &[u8; 32]) {
@@ -358,10 +406,13 @@ impl BlockFetchLogicTask {
     }
 }
 
-/// Batch sorted pending headers into consecutive fetch ranges.
+/// Batch sorted pending headers into fetch ranges.
 ///
-/// Groups headers by source peer and creates `FetchRange` entries covering
-/// consecutive runs. Each range covers at most `MAX_BATCH_SIZE` headers.
+/// Groups headers into `FetchRange` entries of up to `MAX_BATCH_SIZE` headers
+/// each.  The BlockFetch `MsgRequestRange(from, to)` protocol uses Points
+/// (slot + hash) to define the range, and the server walks the chain between
+/// those points — slot gaps between blocks are perfectly normal in Cardano
+/// (Praos slots are sparse) and do NOT require splitting into separate ranges.
 ///
 /// The input must be sorted by slot (ascending).
 fn batch_headers_into_ranges(headers: &[(SocketAddr, PendingHeader)]) -> Vec<FetchRange> {
@@ -375,15 +426,11 @@ fn batch_headers_into_ranges(headers: &[(SocketAddr, PendingHeader)]) -> Vec<Fet
     let mut batch_count = 1usize;
 
     for (_, header) in headers.iter().skip(1) {
-        // Start a new batch if we've hit the size limit or there's a slot gap > 1
-        // (indicating missing headers that would break the range).
-        let is_consecutive = header.slot <= batch_end.slot + 1;
-
-        if is_consecutive && batch_count < MAX_BATCH_SIZE {
+        if batch_count < MAX_BATCH_SIZE {
             batch_end = header;
             batch_count += 1;
         } else {
-            // Flush the current batch.
+            // Flush the current batch — hit size limit.
             ranges.push(FetchRange {
                 from: Point::Specific(batch_start.slot, batch_start.hash),
                 to: Point::Specific(batch_end.slot, batch_end.hash),
@@ -459,7 +506,11 @@ pub async fn blockfetch_worker(
                     let mut decoded_blocks: Vec<torsten_primitives::block::Block> = Vec::new();
                     let epoch_len = byron_epoch_length;
 
-                    let result = BlockFetchClient::fetch_range(
+                    // Wrap the fetch in a timeout to detect dead connections.
+                    // If the peer's TCP connection is half-open, recv() blocks
+                    // forever; this timeout ensures the worker exits and the
+                    // connection lifecycle manager can clean up.
+                    let fetch_future = BlockFetchClient::fetch_range(
                         &mut channel,
                         from,
                         to,
@@ -481,8 +532,19 @@ pub async fn blockfetch_worker(
                                 }
                             }
                         },
-                    )
-                    .await;
+                    );
+
+                    let result = match tokio::time::timeout(IN_FLIGHT_TIMEOUT, fetch_future).await {
+                        Ok(inner) => inner,
+                        Err(_elapsed) => {
+                            error!(
+                                %peer_addr,
+                                timeout_secs = IN_FLIGHT_TIMEOUT.as_secs(),
+                                "blockfetch range timed out, exiting worker"
+                            );
+                            return;
+                        }
+                    };
 
                     match result {
                         Ok(count) => {
@@ -579,30 +641,26 @@ mod tests {
     }
 
     #[test]
-    fn batch_headers_gap_splits_ranges() {
+    fn batch_headers_gap_does_not_split_ranges() {
+        // Slot gaps are normal in Cardano (Praos slots are sparse).
+        // BlockFetch uses Points for range boundaries and walks the chain,
+        // so gaps do NOT require splitting into separate ranges.
         let addr = test_addr(3001);
         let headers: Vec<(SocketAddr, PendingHeader)> = vec![
             (addr, test_header(10)),
             (addr, test_header(11)),
-            // Gap: slot 12 missing
+            // Gap: slot 12-19 missing (normal in Cardano)
             (addr, test_header(20)),
             (addr, test_header(21)),
         ];
 
         let ranges = batch_headers_into_ranges(&headers);
-        assert_eq!(ranges.len(), 2);
+        // All four headers should be in a single range.
+        assert_eq!(ranges.len(), 1);
 
         match (&ranges[0].from, &ranges[0].to) {
             (Point::Specific(from, _), Point::Specific(to, _)) => {
                 assert_eq!(*from, 10);
-                assert_eq!(*to, 11);
-            }
-            _ => panic!("expected Specific points"),
-        }
-
-        match (&ranges[1].from, &ranges[1].to) {
-            (Point::Specific(from, _), Point::Specific(to, _)) => {
-                assert_eq!(*from, 20);
                 assert_eq!(*to, 21);
             }
             _ => panic!("expected Specific points"),
