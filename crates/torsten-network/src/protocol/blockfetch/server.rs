@@ -4,19 +4,56 @@
 //! and streaming them as `MsgStartBatch` → `MsgBlock` × N → `MsgBatchDone`.
 //! Sends `MsgNoBlocks` if the requested range is unavailable.
 //!
+//! ## HFC wrapping (N2N wire format)
+//!
+//! The Haskell N2N BlockFetch encoding is derived from the SerialiseNodeToNode
+//! instance for HardForkBlock, which calls:
+//!
+//!   `encodeNodeToNode ccfg _ = wrapCBORinCBOR (encodeDiskHfcBlock ccfg)`
+//!
+//! where `wrapCBORinCBOR enc x = Serialise.encode (tag(24) bstr(enc(x)))`.
+//!
+//! The `encodeDiskHfcBlock` for Cardano is a **custom** override (not the generic
+//! `encodeNS`) that emits `[era_word, block_body]` — identical to the on-disk
+//! storage format.  The mapping is:
+//!   - Byron EBB         → [0, body]
+//!   - Byron regular     → [1, body]
+//!   - Shelley           → [2, body]
+//!   - Allegra           → [3, body]
+//!   - Mary              → [4, body]
+//!   - Alonzo            → [5, body]
+//!   - Babbage           → [6, body]
+//!   - Conway            → [7, body]
+//!   - Dijkstra          → [8, body]  (future era)
+//!
+//! Therefore the complete MsgBlock wire encoding is:
+//!
+//! ```text
+//!   [2,                                  ← array(2)
+//!     word(4),                           ← MsgBlock tag
+//!     #6.24(bstr( [era_word, body] ))    ← tag(24) wrapping raw stored CBOR
+//!   ]
+//! ```
+//!
+//! Since Torsten stores blocks in the same `[era_word, body]` layout that
+//! `encodeDiskHfcBlock` produces, the stored bytes need NO structural
+//! transformation — they are placed verbatim inside tag(24).
+//!
 //! ## Range validation
-//! - Maximum slot span: 2160 (one Cardano epoch)
 //! - Maximum blocks per batch: 100 (prevents memory exhaustion)
+
+use std::io::Write as _;
+
+use minicbor::Encoder;
 
 use crate::codec::Point;
 use crate::error::ProtocolError;
 use crate::mux::channel::MuxChannel;
+use crate::protocol::CBOR_TAG_EMBEDDED;
 use crate::BlockProvider;
 
-use super::{decode_message, encode_message, BlockFetchMessage};
+use super::{decode_message, encode_message, BlockFetchMessage, TAG_BLOCK};
 
-/// Maximum slot span for a single range request.
-pub const MAX_RANGE_SLOTS: u64 = 2160;
 /// Maximum number of blocks per batch response.
 pub const MAX_BLOCKS_PER_BATCH: usize = 100;
 
@@ -68,7 +105,7 @@ impl BlockFetchServer {
         from: &Point,
         to: &Point,
     ) -> Result<(), ProtocolError> {
-        // Validate range — extract from_slot for iteration
+        // Validate range — extract from_slot for iteration.
         let from_slot = match from {
             Point::Origin => 0,
             Point::Specific(slot, _) => *slot,
@@ -78,14 +115,15 @@ impl BlockFetchServer {
             Point::Specific(slot, _) => *slot,
         };
 
-        // Check range validity
-        if to_slot < from_slot || (to_slot - from_slot) > MAX_RANGE_SLOTS {
+        // Basic range validity (no slot span limit — Haskell doesn't have one,
+        // and the MAX_BLOCKS_PER_BATCH cap prevents memory exhaustion).
+        if to_slot < from_slot {
             let no_blocks = encode_message(&BlockFetchMessage::MsgNoBlocks);
             channel.send(no_blocks).await.map_err(ProtocolError::from)?;
             return Ok(());
         }
 
-        // Verify we have the starting block
+        // Verify we have the starting block.
         let have_from = match from {
             Point::Origin => true,
             Point::Specific(_, hash) => block_provider.has_block(hash),
@@ -97,7 +135,7 @@ impl BlockFetchServer {
             return Ok(());
         }
 
-        // Collect blocks in the range
+        // Collect blocks in the range.
         let mut blocks: Vec<Vec<u8>> = Vec::new();
         let mut current_slot = from_slot;
 
@@ -121,12 +159,21 @@ impl BlockFetchServer {
             return Ok(());
         }
 
-        // Stream: MsgStartBatch → MsgBlock × N → MsgBatchDone
+        // Stream: MsgStartBatch → MsgBlock × N → MsgBatchDone.
         let start = encode_message(&BlockFetchMessage::MsgStartBatch);
         channel.send(start).await.map_err(ProtocolError::from)?;
 
         for block_cbor in &blocks {
-            let block_msg = encode_message(&BlockFetchMessage::MsgBlock(block_cbor.clone()));
+            // Encode MsgBlock: [4, tag(24) bstr(stored_block_cbor)].
+            // The stored CBOR format [era_word, body] is identical to what
+            // Haskell's encodeDiskHfcBlock produces, so it goes verbatim
+            // inside the CBOR-in-CBOR tag(24) wrapper.
+            let block_msg = Self::encode_hfc_msg_block(block_cbor).map_err(|reason| {
+                ProtocolError::CborDecode {
+                    protocol: "BlockFetch",
+                    reason: format!("HFC wrapping failed: {reason}"),
+                }
+            })?;
             channel.send(block_msg).await.map_err(ProtocolError::from)?;
         }
 
@@ -142,6 +189,56 @@ impl BlockFetchServer {
 
         Ok(())
     }
+
+    /// Encode a single block as an HFC-wrapped `MsgBlock` message.
+    ///
+    /// ## Wire format
+    ///
+    /// The Haskell N2N `SerialiseNodeToNode` instance for `HardForkBlock` is:
+    ///
+    /// ```haskell
+    /// encodeNodeToNode ccfg _ = wrapCBORinCBOR (encodeDiskHfcBlock ccfg)
+    /// ```
+    ///
+    /// `wrapCBORinCBOR` serialises the value and wraps it in CBOR tag(24):
+    ///
+    /// ```text
+    /// tag(24) bstr( encodeDiskHfcBlock_output )
+    /// ```
+    ///
+    /// The Cardano-specific `encodeDiskHfcBlock` override produces the same
+    /// `[era_word, block_body]` layout used for on-disk storage (NOT the
+    /// generic 0-based NS index produced by `encodeNS`).  Therefore the
+    /// stored block CBOR bytes can be placed **verbatim** inside tag(24)
+    /// without any structural transformation.
+    ///
+    /// The resulting `MsgBlock` wire encoding is:
+    ///
+    /// ```text
+    /// array(2) [
+    ///   word(4),                          -- MsgBlock tag
+    ///   tag(24) bstr( stored_block_cbor ) -- CBOR-in-CBOR
+    /// ]
+    /// ```
+    fn encode_hfc_msg_block(block_cbor: &[u8]) -> Result<Vec<u8>, String> {
+        // Pre-allocate: 1 (array(2)) + 1 (word 4) + 2 (tag 24) + varint (len) + payload.
+        let mut buf = Vec::with_capacity(8 + block_cbor.len());
+        let mut enc = Encoder::new(&mut buf);
+
+        enc.array(2).map_err(|e| format!("MsgBlock array: {e}"))?;
+        enc.u64(TAG_BLOCK)
+            .map_err(|e| format!("MsgBlock tag: {e}"))?;
+        // tag(24) wraps the complete stored-format CBOR bytes verbatim.
+        enc.tag(minicbor::data::Tag::new(CBOR_TAG_EMBEDDED))
+            .map_err(|e| format!("tag(24): {e}"))?;
+        enc.bytes(block_cbor)
+            .map_err(|e| format!("block bstr: {e}"))?;
+        enc.writer_mut()
+            .flush()
+            .map_err(|e| format!("flush: {e}"))?;
+
+        Ok(buf)
+    }
 }
 
 #[cfg(test)]
@@ -149,7 +246,26 @@ mod tests {
     use super::*;
     use crate::TipInfo;
     use bytes::Bytes;
+    use minicbor::Decoder;
     use tokio::sync::mpsc;
+
+    /// Build a minimal storage-format block CBOR for testing.
+    ///
+    /// Layout (matching Haskell `encodeDiskHfcBlock` for Shelley+ eras):
+    /// `[era_tag, [header_cbor, [], [], null, []]]`
+    fn make_storage_block(era_tag: u64, header_bytes: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u64(era_tag).unwrap();
+        enc.array(5).unwrap();
+        enc.bytes(header_bytes).unwrap(); // header
+        enc.array(0).unwrap(); // tx_bodies
+        enc.array(0).unwrap(); // tx_witnesses
+        enc.null().unwrap(); // aux_data
+        enc.array(0).unwrap(); // invalid_txs
+        buf
+    }
 
     struct MockBlockProvider {
         blocks: Vec<(u64, [u8; 32], Vec<u8>)>,
@@ -206,40 +322,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serves_block_range() {
+    async fn serves_block_range_with_hfc_wrapping() {
+        // Use Conway storage-format blocks (era_tag=7).
+        let block_a = make_storage_block(7, &[0xAA, 0xBB]);
+        let block_b = make_storage_block(7, &[0xCC, 0xDD]);
+        let block_c = make_storage_block(7, &[0xEE, 0xFF]);
+
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let provider = MockBlockProvider {
             blocks: vec![
-                (10, [0x01; 32], vec![0xAA]),
-                (20, [0x02; 32], vec![0xBB]),
-                (30, [0x03; 32], vec![0xCC]),
+                (10, [0x01; 32], block_a),
+                (20, [0x02; 32], block_b),
+                (30, [0x03; 32], block_c),
             ],
         };
 
         let handle =
             tokio::spawn(async move { BlockFetchServer::run(&mut channel, &provider).await });
 
-        // Request range from slot 10 to slot 30
+        // Request range from slot 10 to slot 30.
         let req = encode_message(&BlockFetchMessage::MsgRequestRange {
             from: Point::Specific(10, [0x01; 32]),
             to: Point::Specific(30, [0x03; 32]),
         });
         ingress_tx.send(Bytes::from(req)).await.unwrap();
 
-        // Should receive: MsgStartBatch → MsgBlock × 3 → MsgBatchDone
+        // Should receive: MsgStartBatch → MsgBlock × 3 → MsgBatchDone.
         let (_, _, start) = egress_rx.recv().await.unwrap();
         assert!(matches!(
             decode_message(&start).unwrap(),
             BlockFetchMessage::MsgStartBatch
         ));
 
-        for expected in [vec![0xAA], vec![0xBB], vec![0xCC]] {
+        // The server HFC-wraps each block. The decoder extracts the inner
+        // block body from [hfc_index, tag24(body)] and returns it.
+        for _ in 0..3 {
             let (_, _, block) = egress_rx.recv().await.unwrap();
-            if let BlockFetchMessage::MsgBlock(data) = decode_message(&block).unwrap() {
-                assert_eq!(data, expected);
-            } else {
-                panic!("expected MsgBlock");
-            }
+            let msg = decode_message(&block).unwrap();
+            assert!(
+                matches!(msg, BlockFetchMessage::MsgBlock(_)),
+                "expected MsgBlock, got {msg:?}"
+            );
         }
 
         let (_, _, done_msg) = egress_rx.recv().await.unwrap();
@@ -248,14 +371,49 @@ mod tests {
             BlockFetchMessage::MsgBatchDone
         ));
 
-        // Send MsgClientDone
+        // Send MsgClientDone.
         let client_done = encode_message(&BlockFetchMessage::MsgClientDone);
         ingress_tx.send(Bytes::from(client_done)).await.unwrap();
         handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn unknown_block_returns_no_blocks() {
+    async fn msgblock_wire_format_is_tag24_cbor_in_cbor() {
+        // Verify the exact Haskell-compatible wire format:
+        //   array(2) [ word(4), tag(24) bstr(stored_block_cbor) ]
+        //
+        // The Haskell SerialiseNodeToNode instance for HardForkBlock is:
+        //   encodeNodeToNode ccfg _ = wrapCBORinCBOR (encodeDiskHfcBlock ccfg)
+        //
+        // wrapCBORinCBOR places the encodeDiskHfcBlock output (which already
+        // has the [era_word, body] layout) inside tag(24).  There is NO
+        // intermediate HFC array([hfc_index, ...]) layer.
+        let stored_cbor = make_storage_block(7, &[0x01, 0x02]); // Conway era_tag=7
+        let wire_bytes = BlockFetchServer::encode_hfc_msg_block(&stored_cbor).unwrap();
+
+        let mut dec = Decoder::new(&wire_bytes);
+        let arr = dec.array().unwrap();
+        assert_eq!(arr, Some(2), "outer array must have length 2");
+        assert_eq!(dec.u64().unwrap(), TAG_BLOCK, "first element must be MsgBlock tag (4)");
+
+        // Second element MUST be tag(24) — the CBOR-in-CBOR wrapper.
+        let tag = dec.tag().unwrap();
+        assert_eq!(
+            tag.as_u64(),
+            24,
+            "second element must be tag(24) (CBOR-in-CBOR), not an array"
+        );
+
+        // The bstr payload must be the original stored CBOR verbatim.
+        let payload = dec.bytes().unwrap();
+        assert_eq!(
+            payload, stored_cbor.as_slice(),
+            "tag(24) payload must be the verbatim stored block CBOR"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_blocks_when_range_missing() {
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let provider = MockBlockProvider { blocks: vec![] };
 

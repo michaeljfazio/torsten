@@ -15,11 +15,16 @@
 //!
 //! ## Wire format (CBOR)
 //! - `MsgRequestRange` = `[0, from_point, to_point]`
-//! - `MsgClientDone` = `[1]`
-//! - `MsgStartBatch` = `[2]`
-//! - `MsgNoBlocks` = `[3]`
-//! - `MsgBlock` = `[4, block_bytes]`
-//! - `MsgBatchDone` = `[5]`
+//! - `MsgClientDone`   = `[1]`
+//! - `MsgStartBatch`   = `[2]`
+//! - `MsgNoBlocks`     = `[3]`
+//! - `MsgBlock`        = `[4, tag(24) bstr(stored_block_cbor)]`  ← CBOR-in-CBOR
+//! - `MsgBatchDone`    = `[5]`
+//!
+//! The block payload is always wrapped in CBOR tag(24).  The bstr content is
+//! the raw Cardano HFC disk encoding: `[era_word, block_body]` (where
+//! `era_word` is 0–8 matching Byron EBB through Dijkstra).  See the module
+//! documentation on [`server`] for the full derivation.
 
 pub mod client;
 pub mod decision;
@@ -63,7 +68,7 @@ const TAG_REQUEST_RANGE: u64 = 0;
 const TAG_CLIENT_DONE: u64 = 1;
 const TAG_START_BATCH: u64 = 2;
 const TAG_NO_BLOCKS: u64 = 3;
-const TAG_BLOCK: u64 = 4;
+pub(crate) const TAG_BLOCK: u64 = 4;
 const TAG_BATCH_DONE: u64 = 5;
 
 /// Encode a BlockFetch message as CBOR.
@@ -118,41 +123,37 @@ pub fn decode_message(data: &[u8]) -> Result<BlockFetchMessage, String> {
         TAG_START_BATCH => Ok(BlockFetchMessage::MsgStartBatch),
         TAG_NO_BLOCKS => Ok(BlockFetchMessage::MsgNoBlocks),
         TAG_BLOCK => {
-            // The block body from Haskell is HFC-wrapped. Multiple formats:
+            // Haskell always sends: tag(24) bstr(stored_block_cbor)
             //
-            // 1. Raw bytes: `block_cbor` (Torsten-to-Torsten)
-            // 2. HFC array: `[era_id, tag24(block_cbor)]`
-            // 3. Direct tag24: `tag24(block_cbor)` (most common from Haskell)
+            // The `Serialise` instance for `Serialised a` in ouroboros-network:
+            //   encode (Serialised bs) = encodeTag 24 <> encodeBytes bs
+            //   decode = decodeTag (must be 24) <> Serialised <$> decodeBytes
             //
-            // We handle all three by checking the CBOR type.
+            // We unwrap tag(24) and return the raw stored-CBOR bytes
+            // [era_word, block_body] as the MsgBlock payload.
+            //
+            // For robustness we also handle the legacy raw-bytes case
+            // (direct bstr without tag), which may appear from older Torsten
+            // peers or test harnesses.
             let block = match dec.datatype().map_err(|e| e.to_string())? {
+                minicbor::data::Type::Tag => {
+                    let tag = dec.tag().map_err(|e| e.to_string())?;
+                    if tag.as_u64() != 24 {
+                        return Err(format!(
+                            "BlockFetch MsgBlock: expected tag(24) (CBOR-in-CBOR), got tag({})",
+                            tag.as_u64()
+                        ));
+                    }
+                    dec.bytes().map_err(|e| e.to_string())?.to_vec()
+                }
+                // Fallback: raw bytes without tag (legacy / test peers).
                 minicbor::data::Type::Bytes | minicbor::data::Type::BytesIndef => {
                     dec.bytes().map_err(|e| e.to_string())?.to_vec()
                 }
-                minicbor::data::Type::Tag => {
-                    // tag24(block_bytes) — extract inner bytes
-                    let tag = dec.tag().map_err(|e| e.to_string())?;
-                    if tag.as_u64() == 24 {
-                        dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                    } else {
-                        // Unknown tag — try reading as bytes
-                        dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                    }
-                }
-                minicbor::data::Type::Array => {
-                    // HFC array: [era_id, tag24(block_bytes)]
-                    let _arr = dec.array().map_err(|e| e.to_string())?;
-                    let _era_id = dec.u64().map_err(|e| e.to_string())?;
-                    match dec.datatype().map_err(|e| e.to_string())? {
-                        minicbor::data::Type::Tag => {
-                            dec.tag().map_err(|e| e.to_string())?;
-                            dec.bytes().map_err(|e| e.to_string())?.to_vec()
-                        }
-                        _ => dec.bytes().map_err(|e| e.to_string())?.to_vec(),
-                    }
-                }
                 other => {
-                    return Err(format!("BlockFetch MsgBlock: unexpected type {other:?}"));
+                    return Err(format!(
+                        "BlockFetch MsgBlock: expected tag(24) or bstr, got {other:?}"
+                    ));
                 }
             };
             Ok(BlockFetchMessage::MsgBlock(block))

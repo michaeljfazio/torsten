@@ -132,3 +132,6 @@
 - cardano-ledger: CDDL specs, PParams JSON golden, Alonzo block/tx CBOR, non-integral VRF math vectors
 - plutus: 999 UPLC conformance tests (program + expected result + budget)
 - ouroboros-network: CDDL specs for all 10 mini-protocols
+
+## BlockFetch / ChainSync Wire Format
+- [blockfetch-hfc-wire-format.md](blockfetch-hfc-wire-format.md) — MsgBlock=tag(24) bstr(stored_cbor), NOT array[hfc_index,tag24(body)]; ChainSync headers use different encodeNS path
