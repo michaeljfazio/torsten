@@ -1381,27 +1381,39 @@ impl Node {
         // ceiling; blocks beyond that slot remain in VolatileDB (and were not
         // applied to the ledger above) until the GSM reaches CaughtUp.
         // In Praos mode (genesis disabled) `loe_limit` is always None.
-        {
+        //
+        // Flush finalized blocks from VolatileDB to ImmutableDB, then GC.
+        //
+        // This is split into batches of at most FLUSH_BATCH_SIZE blocks per
+        // write-lock acquisition. Between batches we yield to the async
+        // runtime so that other tasks (e.g. ChainSync server responding to
+        // MsgFindIntersect on inbound N2N connections) can acquire read locks.
+        // Without batching, the flush can hold the write lock for >10s during
+        // bulk sync, causing Haskell peers to time out their ChainSync idle
+        // timeout and drop the connection.
+        const FLUSH_BATCH_SIZE: u64 = 50;
+        loop {
+            tokio::task::yield_now().await;
             let mut db = self.chain_db.write().await;
             let flush_result = match loe_limit {
-                None => {
-                    // No LoE constraint — flush normally (Praos mode or CaughtUp).
-                    db.flush_to_immutable()
-                }
-                Some(loe_slot) => {
-                    // LoE active: cap the immutable tip at the peer common prefix.
-                    // Blocks beyond loe_slot remain in VolatileDB until the GSM
-                    // transitions to CaughtUp and the constraint is lifted.
-                    debug!(
-                        loe_slot,
-                        "LoE active: capping immutable flush at peer tip slot"
-                    );
-                    db.flush_to_immutable_loe(loe_slot)
-                }
+                None => db.flush_to_immutable_batch(FLUSH_BATCH_SIZE),
+                Some(loe_slot) => db.flush_to_immutable_loe_batch(loe_slot, FLUSH_BATCH_SIZE),
             };
-            if let Err(e) = flush_result {
-                warn!(error = %e, "Failed to flush blocks to immutable storage");
+            match flush_result {
+                Ok(0) => break, // No more to flush
+                Ok(_flushed) => {
+                    // More blocks may remain — release lock and re-acquire.
+                    drop(db);
+                    continue;
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to flush blocks to immutable storage");
+                    break;
+                }
             }
+        }
+        {
+            let mut db = self.chain_db.write().await;
             // GC orphaned fork blocks whose 60-second delay has expired.
             db.gc_volatile();
         }

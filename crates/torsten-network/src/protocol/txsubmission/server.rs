@@ -57,41 +57,39 @@ impl TxSubmissionServer {
         let mut unacked: VecDeque<TxIdAndSize> = VecDeque::new();
         // Set of tx IDs currently in-flight (requested but not yet received)
         let mut inflight: HashSet<[u8; 32]> = HashSet::new();
-        let mut is_first_request = true;
-        // Total tx IDs ever received from the client. Used for blocking mode:
-        // the Haskell TxSubmission2 client only accepts a blocking request
-        // after it has returned at least one tx ID that we then acknowledge.
-        let mut total_tx_ids_received: u64 = 0;
-
         loop {
-            let ack_count = if is_first_request {
-                0 // First request: ack_count must be 0
-            } else {
-                // Acknowledge all tx IDs that have been fully processed
-                let ack = unacked.len().min(u16::MAX as usize) as u16;
-                // Drain the acked items
-                for _ in 0..ack {
-                    unacked.pop_front();
-                }
-                ack
-            };
-            // Use blocking mode only when:
-            // 1. Not the first request
-            // 2. We are acknowledging tx IDs (ack_count > 0), OR
-            //    we have previously received tx IDs and all are now acked
-            // The Haskell client rejects blocking=true if it has never
-            // returned any tx IDs (ProtocolErrorRequestNonBlocking).
-            let blocking = !is_first_request
-                && (ack_count > 0 || (total_tx_ids_received > 0 && unacked.is_empty()));
+            // Acknowledge all tx IDs that have been fully processed.
+            // On the first iteration unacked is empty, so ack_count is 0.
+            let ack_count = unacked.len().min(u16::MAX as usize) as u16;
+            for _ in 0..ack_count {
+                unacked.pop_front();
+            }
+            // Blocking mode rules (enforced by Haskell txSubmissionOutbound):
+            //
+            // - blocking=true when unacked is empty (including the FIRST request).
+            //   The client uses STM retry to wait for mempool txs.
+            // - blocking=false when unacked has items (pipelining more requests
+            //   while waiting for tx bodies of previously announced IDs).
+            //
+            // Violating these invariants causes the Haskell peer to throw:
+            // - ProtocolErrorRequestNonBlocking: non-blocking when unacked is empty
+            // - ProtocolErrorRequestBlocking: blocking when unacked is non-empty
+            let blocking = unacked.is_empty();
 
             // Request more tx IDs
+            tracing::debug!(
+                blocking,
+                ack_count,
+                req_count = MAX_TX_IDS_PER_REQUEST,
+                unacked = unacked.len(),
+                "txsubmission2 server: sending MsgRequestTxIds"
+            );
             let req = encode_message(&TxSubmissionMessage::MsgRequestTxIds {
                 blocking,
                 ack_count,
                 req_count: MAX_TX_IDS_PER_REQUEST,
             });
             channel.send(req).await.map_err(ProtocolError::from)?;
-            is_first_request = false;
 
             // Receive reply
             let reply_bytes = channel.recv().await.map_err(ProtocolError::from)?;
@@ -118,7 +116,6 @@ impl TxSubmissionServer {
                         unacked.push_back(id.clone());
                     }
                     stats.tx_ids_received += ids.len() as u64;
-                    total_tx_ids_received += ids.len() as u64;
 
                     if to_fetch.is_empty() {
                         continue;
@@ -215,7 +212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_first_request_is_non_blocking() {
+    async fn server_blocking_mode_matches_haskell_invariants() {
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
 
         let handle = tokio::spawn(async move {
@@ -226,7 +223,9 @@ mod tests {
         let init = encode_message(&TxSubmissionMessage::MsgInit);
         ingress_tx.send(Bytes::from(init)).await.unwrap();
 
-        // Read first MsgRequestTxIds — MUST be non-blocking with ack=0
+        // Read first MsgRequestTxIds — MUST be blocking (unacked is empty).
+        // The Haskell txSubmissionOutbound enforces:
+        //   non-blocking when unacked is empty → ProtocolErrorRequestNonBlocking
         let (_, _, req) = egress_rx.recv().await.unwrap();
         if let TxSubmissionMessage::MsgRequestTxIds {
             blocking,
@@ -234,31 +233,31 @@ mod tests {
             ..
         } = decode_message(&req).unwrap()
         {
-            assert!(!blocking, "first request must be non-blocking");
+            assert!(
+                blocking,
+                "first request must be blocking (unacked is empty)"
+            );
             assert_eq!(ack_count, 0, "first request must have ack_count=0");
         } else {
             panic!("expected MsgRequestTxIds");
         }
 
-        // Reply with empty (no txs)
+        // Reply with empty (no txs) — client has nothing
         let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(vec![]));
         ingress_tx.send(Bytes::from(reply)).await.unwrap();
 
-        // Next request should still be non-blocking because the client
-        // has never returned any tx IDs (total_tx_ids_received == 0).
-        // The Haskell TxSubmission2 client rejects blocking=true if it
-        // hasn't yielded any tx IDs yet (ProtocolErrorRequestNonBlocking).
+        // Second request should also be blocking (still no unacked IDs).
         let (_, _, req2) = egress_rx.recv().await.unwrap();
         if let TxSubmissionMessage::MsgRequestTxIds { blocking, .. } =
             decode_message(&req2).unwrap()
         {
             assert!(
-                !blocking,
-                "second request must be non-blocking when no tx IDs have been received"
+                blocking,
+                "second request must be blocking when unacked is still empty"
             );
         }
 
-        // Send MsgDone
+        // Send MsgDone (allowed in blocking state with no txs)
         let done = encode_message(&TxSubmissionMessage::MsgDone);
         ingress_tx.send(Bytes::from(done)).await.unwrap();
 

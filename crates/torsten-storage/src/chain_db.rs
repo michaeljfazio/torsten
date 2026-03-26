@@ -620,6 +620,143 @@ impl ChainDB {
         Ok(count)
     }
 
+    /// Flush up to `max_blocks` finalized blocks from VolatileDB to ImmutableDB.
+    ///
+    /// Returns the number of blocks actually flushed. The caller should loop
+    /// until this returns 0 to flush all pending blocks. This batch variant
+    /// allows the caller to release the ChainDB write lock between batches,
+    /// preventing read starvation for concurrent tasks (e.g. ChainSync server).
+    pub fn flush_to_immutable_batch(&mut self, max_blocks: u64) -> Result<u64, ChainDBError> {
+        let vol_tip = match self.volatile.get_tip() {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        let tip_block_no = vol_tip.2;
+        if tip_block_no <= SECURITY_PARAM_K as u64 {
+            return Ok(0);
+        }
+
+        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let start_block_no = self.last_flushed_block_no + 1;
+
+        let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
+        for (hash, slot, block_no, _prev_hash) in self.volatile.selected_chain_entries() {
+            if block_no < start_block_no {
+                continue;
+            }
+            if block_no > finalize_up_to_block_no {
+                break;
+            }
+            if self.immutable.has_block(&hash) {
+                continue;
+            }
+            if let Some(cbor) = self.volatile.get_block_cbor(&hash) {
+                to_finalize.push((slot, hash, block_no, cbor.to_vec()));
+            }
+            if to_finalize.len() as u64 >= max_blocks {
+                break;
+            }
+        }
+
+        if to_finalize.is_empty() {
+            return Ok(0);
+        }
+
+        let count = to_finalize.len() as u64;
+
+        for (slot, hash, block_no, cbor) in &to_finalize {
+            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+        }
+
+        if let Some((slot, hash, block_no, _)) = to_finalize.last() {
+            self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+            self.last_flushed_block_no = *block_no;
+        }
+
+        let flushed_hashes: Vec<Hash32> = to_finalize.iter().map(|(_, h, _, _)| *h).collect();
+        self.volatile.remove_blocks_by_hashes(&flushed_hashes);
+
+        debug!(
+            flushed = count,
+            immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
+            volatile_remaining = self.volatile.len(),
+            "ChainDB: flushed batch to immutable"
+        );
+
+        Ok(count)
+    }
+
+    /// Batch variant of `flush_to_immutable_loe` — flushes up to `max_blocks`.
+    pub fn flush_to_immutable_loe_batch(
+        &mut self,
+        loe_slot: u64,
+        max_blocks: u64,
+    ) -> Result<u64, ChainDBError> {
+        let vol_tip = match self.volatile.get_tip() {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        let tip_block_no = vol_tip.2;
+        if tip_block_no <= SECURITY_PARAM_K as u64 {
+            return Ok(0);
+        }
+
+        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let start_block_no = self.last_flushed_block_no + 1;
+
+        let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
+        for (hash, slot, block_no, _prev_hash) in self.volatile.selected_chain_entries() {
+            if block_no < start_block_no {
+                continue;
+            }
+            if block_no > finalize_up_to_block_no {
+                break;
+            }
+            if slot > loe_slot {
+                continue;
+            }
+            if self.immutable.has_block(&hash) {
+                continue;
+            }
+            if let Some(cbor) = self.volatile.get_block_cbor(&hash) {
+                to_finalize.push((slot, hash, block_no, cbor.to_vec()));
+            }
+            if to_finalize.len() as u64 >= max_blocks {
+                break;
+            }
+        }
+
+        if to_finalize.is_empty() {
+            return Ok(0);
+        }
+
+        let count = to_finalize.len() as u64;
+
+        for (slot, hash, block_no, cbor) in &to_finalize {
+            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+        }
+
+        if let Some((slot, hash, block_no, _)) = to_finalize.last() {
+            self.immutable_tip = Some((SlotNo(*slot), *hash, BlockNo(*block_no)));
+            self.last_flushed_block_no = *block_no;
+        }
+
+        let flushed_hashes: Vec<Hash32> = to_finalize.iter().map(|(_, h, _, _)| *h).collect();
+        self.volatile.remove_blocks_by_hashes(&flushed_hashes);
+
+        debug!(
+            flushed = count,
+            loe_slot,
+            immutable_tip_slot = self.immutable_tip.map(|(s, _, _)| s.0).unwrap_or(0),
+            volatile_remaining = self.volatile.len(),
+            "ChainDB: flushed LoE batch to immutable"
+        );
+
+        Ok(count)
+    }
+
     /// Compact the volatile WAL after flushing blocks to immutable storage.
     ///
     /// Rewrites the volatile WAL to contain only the blocks that remain in

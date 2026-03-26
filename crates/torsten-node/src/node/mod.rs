@@ -2638,11 +2638,18 @@ impl Node {
             }
         }
 
-        // Register the peer in the peer manager (after handshake to avoid
-        // blocking the handshake on the write lock).
+        // Register the peer in the peer manager asynchronously — do NOT block
+        // protocol task startup on the write lock. The lifecycle manager may hold
+        // the peer manager lock for 5+ seconds during TCP connect timeouts,
+        // which would delay ChainSync/BlockFetch/TxSubmission2 server startup
+        // and cause the Haskell peer to time out its ChainSync idle timeout.
         {
-            let mut pm_w = peer_manager.write().await;
-            pm_w.peer_connected(&peer_addr, crate::node::networking::ConnectionDirection::Inbound);
+            let pm_clone = peer_manager.clone();
+            let addr = peer_addr;
+            tokio::spawn(async move {
+                let mut pm_w = pm_clone.write().await;
+                pm_w.peer_connected(&addr, crate::node::networking::ConnectionDirection::Inbound);
+            });
         }
 
         // ChainSync server
