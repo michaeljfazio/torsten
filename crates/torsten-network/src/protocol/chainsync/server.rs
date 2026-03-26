@@ -38,11 +38,64 @@ use super::{decode_message, encode_message, ChainSyncMessage};
 // CBOR tag number for embedded CBOR (RFC 7049 §2.4.4.1 / RFC 8949 §3.4.5.1).
 const CBOR_TAG_EMBEDDED: u64 = 24;
 
-/// Extract the block header from raw HFC-wrapped block CBOR and encode it as
-/// `[era_id, #6.24(bstr(header_cbor))]` ready for inlining into MsgRollForward.
+/// Convert a pallas/ImmutableDB block storage era tag to the HFC NS index used
+/// in the N2N ChainSync `MsgRollForward` header wire format.
 ///
-/// Shelley+ HFC layout: `[era_tag, [header, tx_bodies, tx_witnesses, aux_data, invalid_txs]]`
-/// Byron HFC layout:    `[era_tag, [header, body, extra]]` (similar; header at index 0)
+/// These two numbering schemes differ:
+///
+/// | Era     | Storage tag (pallas) | HFC NS index (N2N ChainSync) |
+/// |---------|----------------------|------------------------------|
+/// | Byron   | 0 or 1               | 0                            |
+/// | Shelley | 2                    | 1                            |
+/// | Allegra | 3                    | 2                            |
+/// | Mary    | 4                    | 3                            |
+/// | Alonzo  | 5                    | 4                            |
+/// | Babbage | 6                    | 5                            |
+/// | Conway  | 7                    | 6                            |
+///
+/// The storage tag appears in the outer `[era_tag, block_body]` wrapper in
+/// ImmutableDB chunk files (and in pallas's `MultiEraBlock` decoding).  The
+/// HFC NS index is the 0-based position of the era in the type-level list
+/// `[ByronBlock, ShelleyBlock TPraos, ..., ShelleyBlock Praos ConwayEra]` and
+/// is what the Haskell `encodeNS`/`decodeNS` functions expect in the wire
+/// format `[hfc_index_u8, tag(24)(header_bytes)]`.
+///
+/// Sending the wrong index causes "decodeNS: invalid index" (for indices ≥ 7)
+/// or routes to the wrong era decoder (e.g. routing Conway headers to the
+/// Alonzo/TPraos decoder which expects 15 flat fields instead of 10).
+fn storage_era_tag_to_hfc_index(storage_era_tag: u64) -> Result<u8, String> {
+    match storage_era_tag {
+        // Byron: pallas uses both 0 and 1 depending on context; both map to HFC index 0.
+        0 | 1 => Ok(0),
+        2 => Ok(1), // Shelley
+        3 => Ok(2), // Allegra
+        4 => Ok(3), // Mary
+        5 => Ok(4), // Alonzo
+        6 => Ok(5), // Babbage
+        7 => Ok(6), // Conway
+        other => Err(format!(
+            "unknown storage era tag {other}: cannot convert to HFC index"
+        )),
+    }
+}
+
+/// Extract the block header from raw HFC-wrapped block CBOR and encode it as
+/// `[hfc_index, #6.24(bstr(header_cbor))]` ready for inlining into MsgRollForward.
+///
+/// # Era tag conversion
+///
+/// The block CBOR uses pallas storage era tags (Byron=0/1, Shelley=2, …,
+/// Conway=7).  The N2N ChainSync `MsgRollForward` uses HFC NS indices
+/// (Byron=0, Shelley=1, …, Conway=6) — one less than the storage tag for all
+/// post-Byron eras.  This function converts between the two schemes so that
+/// Haskell peers route the header to the correct era-specific decoder.
+///
+/// # Block layout
+///
+/// ```text
+/// Shelley+ HFC layout: [storage_era_tag, [header, tx_bodies, tx_witnesses, aux_data, invalid_txs]]
+/// Byron HFC layout:    [storage_era_tag, [header, body, extra]]
+/// ```
 ///
 /// Returns an error if the CBOR does not match the expected structure.  The
 /// caller MUST propagate the error and MUST NOT fall back to sending the full
@@ -50,34 +103,40 @@ const CBOR_TAG_EMBEDDED: u64 = 24;
 pub fn extract_header_for_chainsync(block_cbor: &[u8]) -> Result<Vec<u8>, String> {
     let mut dec = Decoder::new(block_cbor);
 
-    // Outer array: [era_tag, block_body]
+    // Outer array: [storage_era_tag, block_body]
     dec.array()
         .map_err(|e| format!("block CBOR: expected outer array: {e}"))?;
-    let era_tag = dec
+    let storage_era_tag = dec
         .u64()
         .map_err(|e| format!("block CBOR: expected era_tag u64: {e}"))?;
 
+    // Convert to HFC NS index (the value Haskell's encodeNS/decodeNS expects).
+    let hfc_index = storage_era_tag_to_hfc_index(storage_era_tag)?;
+
     // Inner array: [header, ...]  — we only need the first element.
-    dec.array()
-        .map_err(|e| format!("block CBOR (era {era_tag}): expected inner block array: {e}"))?;
+    dec.array().map_err(|e| {
+        format!("block CBOR (storage_era={storage_era_tag}): expected inner block array: {e}")
+    })?;
 
     // Capture the raw CBOR bytes of the header sub-value.
     let header_start = dec.position();
-    dec.skip()
-        .map_err(|e| format!("block CBOR (era {era_tag}): could not skip header: {e}"))?;
+    dec.skip().map_err(|e| {
+        format!("block CBOR (storage_era={storage_era_tag}): could not skip header: {e}")
+    })?;
     let header_end = dec.position();
     let header_cbor = &block_cbor[header_start..header_end];
 
-    // Encode the HFC-wrapped header: [era_tag, #6.24(bstr(header_cbor))]
+    // Encode the HFC-wrapped header: [hfc_index, #6.24(bstr(header_cbor))]
     //
-    // The outer array [era_tag, ...] is the standard HFC wrapper used by
-    // cardano-node for all ChainSync MsgRollForward header payloads.
+    // This is the format expected by Haskell's `dispatchDecoder` in
+    // `Ouroboros.Consensus.HardFork.Combinator.Serialisation.SerialiseNodeToNode`.
+    // `encodeNS` produces `array(2)[era_index_u8, tag(24)(header_bytes)]`.
     let mut buf = Vec::with_capacity(8 + header_cbor.len());
     let mut enc = Encoder::new(&mut buf);
     enc.array(2)
         .map_err(|e| format!("encode hfc header: array: {e}"))?;
-    enc.u64(era_tag)
-        .map_err(|e| format!("encode hfc header: era_tag: {e}"))?;
+    enc.u8(hfc_index)
+        .map_err(|e| format!("encode hfc header: hfc_index: {e}"))?;
     enc.tag(minicbor::data::Tag::new(CBOR_TAG_EMBEDDED))
         .map_err(|e| format!("encode hfc header: tag24: {e}"))?;
     enc.bytes(header_cbor)
@@ -412,14 +471,20 @@ mod tests {
     /// Build the expected HFC-wrapped header bytes that `extract_header_for_chainsync`
     /// should produce.
     ///
+    /// `storage_era_tag` is the era tag from the block's on-disk/wire CBOR (pallas
+    /// convention: Byron=0/1, Shelley=2, ..., Conway=7).  The function converts it
+    /// to the HFC NS index and encodes `[hfc_index_u8, #6.24(bstr(header_cbor))]`.
+    ///
     /// `header_cbor` must be the **CBOR-encoded** form of the header element as
     /// it appears inside the block — i.e. the bytes captured by `dec.skip()`.
     /// For blocks built with `make_hfc_block`, pass `cbor_encode_bytes(raw_bytes)`.
-    fn expected_hfc_header(era_tag: u64, header_cbor: &[u8]) -> Vec<u8> {
+    fn expected_hfc_header(storage_era_tag: u64, header_cbor: &[u8]) -> Vec<u8> {
+        let hfc_index = storage_era_tag_to_hfc_index(storage_era_tag)
+            .expect("test fixture used invalid storage era tag");
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u64(era_tag).unwrap();
+        enc.u8(hfc_index).unwrap();
         enc.tag(minicbor::data::Tag::new(24)).unwrap();
         // header_cbor is the raw CBOR of the header element; embed it as a bstr
         // (this is what tag24 wraps — the CBOR serialisation of the header).
@@ -490,28 +555,56 @@ mod tests {
 
     #[test]
     fn extract_header_conway_block() {
-        // Build a synthetic Conway (era_tag=6) HFC block.
+        // Build a synthetic Conway (storage era_tag=7, HFC index=6) HFC block.
+        // Pallas uses era_tag=7 for Conway blocks in ImmutableDB and block-fetch.
+        // The ChainSync header wire format uses HFC NS index=6 for Conway.
         // In our test fixture the header element is a bstr; extraction captures
         // the full CBOR encoding of that element (bstr length prefix + bytes).
         let inner_header_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let block_cbor = make_hfc_block(6, &inner_header_bytes);
+        let block_cbor = make_hfc_block(7, &inner_header_bytes); // storage era_tag=7 (Conway)
 
         let hfc_header = extract_header_for_chainsync(&block_cbor)
             .expect("extraction should succeed for valid Conway block");
 
-        // The extractor captures the raw CBOR of the header element and wraps it
-        // in [6, #6.24(bstr(header_cbor))].  Pass the CBOR form of the element.
+        // The extractor converts storage era_tag=7 → HFC index=6, then produces
+        // [6_u8, #6.24(bstr(header_cbor))].  Pass the CBOR form of the element.
         let header_cbor = cbor_encode_bytes(&inner_header_bytes);
-        let expected = expected_hfc_header(6, &header_cbor);
+        let expected = expected_hfc_header(7, &header_cbor); // storage tag→hfc_index conversion
         assert_eq!(
             hfc_header, expected,
             "extracted HFC header does not match expected encoding"
         );
+
+        // Verify the HFC index in the output is actually 6 (Conway).
+        let mut dec = minicbor::Decoder::new(&hfc_header);
+        dec.array().unwrap();
+        let hfc_idx = dec.u8().unwrap();
+        assert_eq!(hfc_idx, 6, "Conway blocks must use HFC NS index 6");
+    }
+
+    #[test]
+    fn extract_header_babbage_block() {
+        // Babbage (storage era_tag=6, HFC index=5) — distinct from Conway.
+        let inner_header_bytes = vec![0xBA, 0xBB, 0xAA, 0xBE];
+        let block_cbor = make_hfc_block(6, &inner_header_bytes); // storage era_tag=6 (Babbage)
+
+        let hfc_header = extract_header_for_chainsync(&block_cbor)
+            .expect("extraction should succeed for valid Babbage block");
+
+        let header_cbor = cbor_encode_bytes(&inner_header_bytes);
+        let expected = expected_hfc_header(6, &header_cbor);
+        assert_eq!(hfc_header, expected);
+
+        // Verify the HFC index in the output is actually 5 (Babbage).
+        let mut dec = minicbor::Decoder::new(&hfc_header);
+        dec.array().unwrap();
+        let hfc_idx = dec.u8().unwrap();
+        assert_eq!(hfc_idx, 5, "Babbage blocks must use HFC NS index 5");
     }
 
     #[test]
     fn extract_header_shelley_block() {
-        // Shelley (era_tag=2) — same structure, different era identifier.
+        // Shelley (storage era_tag=2, HFC index=1) — same structure, different era identifier.
         let inner_header_bytes = vec![0x01, 0x02, 0x03];
         let block_cbor = make_hfc_block(2, &inner_header_bytes);
 
@@ -521,19 +614,25 @@ mod tests {
         let header_cbor = cbor_encode_bytes(&inner_header_bytes);
         let expected = expected_hfc_header(2, &header_cbor);
         assert_eq!(hfc_header, expected);
+
+        // Verify the HFC index in the output is actually 1 (Shelley).
+        let mut dec = minicbor::Decoder::new(&hfc_header);
+        dec.array().unwrap();
+        let hfc_idx = dec.u8().unwrap();
+        assert_eq!(hfc_idx, 1, "Shelley blocks must use HFC NS index 1");
     }
 
     #[test]
     fn extract_header_larger_inner_header() {
-        // Verify extraction with a larger (256-byte) inner header payload.
+        // Verify extraction with a larger (256-byte) inner header payload (Conway).
         let inner_header_bytes: Vec<u8> = (0u8..=255u8).collect();
-        let block_cbor = make_hfc_block(6, &inner_header_bytes);
+        let block_cbor = make_hfc_block(7, &inner_header_bytes); // Conway storage era_tag=7
 
         let hfc_header = extract_header_for_chainsync(&block_cbor)
             .expect("extraction should succeed with large inner header");
 
         let header_cbor = cbor_encode_bytes(&inner_header_bytes);
-        let expected = expected_hfc_header(6, &header_cbor);
+        let expected = expected_hfc_header(7, &header_cbor); // Conway storage_era_tag=7
         assert_eq!(hfc_header, expected);
     }
 
@@ -559,7 +658,8 @@ mod tests {
     async fn find_intersect_with_known_block() {
         // Block CBOR does not need to be valid for FindIntersect (the server only
         // checks presence via has_block, not the CBOR content).
-        let block_cbor = make_hfc_block(6, &[0x01, 0x02]);
+        // Use Conway storage era_tag=7 for realistic block CBOR.
+        let block_cbor = make_hfc_block(7, &[0x01, 0x02]);
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let provider = MockBlockProvider {
             blocks: vec![(100, [0xAA; 32], block_cbor)],
@@ -595,11 +695,12 @@ mod tests {
     #[tokio::test]
     async fn request_next_serves_header_not_full_block() {
         // The mock provider holds blocks whose CBOR is a valid HFC-wrapped block.
-        // The server must extract the header and send [era_id, #6.24(bstr(hdr))].
+        // The server must extract the header and send [hfc_index, #6.24(bstr(hdr))].
+        // Use Conway storage era_tag=7 (→ HFC index=6) for realistic fixtures.
         let inner_header_bytes_a = vec![0xAA, 0xBB];
         let inner_header_bytes_b = vec![0xCC, 0xDD];
-        let block_a = make_hfc_block(6, &inner_header_bytes_a);
-        let block_b = make_hfc_block(6, &inner_header_bytes_b);
+        let block_a = make_hfc_block(7, &inner_header_bytes_a); // Conway storage_era_tag=7
+        let block_b = make_hfc_block(7, &inner_header_bytes_b); // Conway storage_era_tag=7
 
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let provider = MockBlockProvider {
@@ -630,16 +731,17 @@ mod tests {
             // The header field must be the HFC-wrapped header, not the full block.
             // In our fixture the header element is a bstr, so its CBOR encoding
             // is cbor_encode_bytes(inner_header_bytes_a).
+            // Conway storage_era_tag=7 → HFC index=6, so expected = [6, tag24(bytes)].
             let header_cbor = cbor_encode_bytes(&inner_header_bytes_a);
-            let expected = expected_hfc_header(6, &header_cbor);
+            let expected = expected_hfc_header(7, &header_cbor); // storage_era_tag=7 (Conway)
             assert_eq!(
                 header, expected,
                 "server sent incorrect HFC-wrapped header; \
-                 expected [era_id, #6.24(bstr(inner))], got {header:?}"
+                 expected [hfc_index=6, #6.24(bstr(inner))], got {header:?}"
             );
             // Sanity-check: the header is strictly smaller than the full block CBOR.
             // (Full block includes tx_bodies, tx_witnesses, aux_data, invalid_txs.)
-            let full_block = make_hfc_block(6, &inner_header_bytes_a);
+            let full_block = make_hfc_block(7, &inner_header_bytes_a);
             assert!(
                 header.len() < full_block.len(),
                 "header ({} bytes) should be smaller than full block ({} bytes)",

@@ -62,12 +62,25 @@ pub fn encode_block_header(header: &BlockHeader, kes_signature: &[u8]) -> Vec<u8
     buf
 }
 
-/// Encode a complete Babbage/Conway era block.
+/// Encode a complete Shelley+ era block.
 ///
-/// Block = [era_tag, [header, tx_bodies, tx_witness_sets, aux_data_map, invalid_txs]]
+/// Block = [storage_era_tag, [header, tx_bodies, tx_witness_sets, aux_data_map, invalid_txs]]
 ///
-/// For Babbage (era 6) and Conway (era 7), blocks are wrapped with era tag.
-/// The `kes_signature` is the KES signature for the block header.
+/// Uses **pallas/ImmutableDB storage era tags**, which differ from the HFC NS
+/// indices used in the N2N ChainSync header wire format:
+///
+/// | Era     | Storage tag (this fn) | HFC NS index (ChainSync header) |
+/// |---------|-----------------------|---------------------------------|
+/// | Byron   | 0                     | 0                               |
+/// | Shelley | 2                     | 1                               |
+/// | Allegra | 3                     | 2                               |
+/// | Mary    | 4                     | 3                               |
+/// | Alonzo  | 5                     | 4                               |
+/// | Babbage | 6                     | 5                               |
+/// | Conway  | 7                     | 6                               |
+///
+/// When serving headers over N2N ChainSync, `extract_header_for_chainsync` in
+/// `torsten-network` converts the storage tag to the correct HFC NS index.
 pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
     let era_tag = match block.era {
         torsten_primitives::era::Era::Byron => 0u64,
