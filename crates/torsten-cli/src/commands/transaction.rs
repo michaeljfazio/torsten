@@ -53,6 +53,9 @@ struct BuildArgs {
     /// Certificate files to include
     #[arg(long)]
     certificate_file: Vec<PathBuf>,
+    /// Certificate files to include (alias for --certificate-file)
+    #[arg(long, short = 'c', hide = true)]
+    certificate: Vec<PathBuf>,
     /// Withdrawal (format: stake_address+amount)
     #[arg(long)]
     withdrawal: Vec<String>,
@@ -107,6 +110,11 @@ struct BuildArgs {
     /// Testnet network magic (e.g. 2 for preview, 1 for preprod)
     #[arg(long)]
     testnet_magic: Option<u64>,
+    /// Calculate the Plutus script execution costs and write the result to a JSON file.
+    /// When used with --socket-path, the node evaluates script costs using the
+    /// current protocol parameters and ledger state.
+    #[arg(long)]
+    calculate_plutus_script_cost: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -224,6 +232,18 @@ enum TxSubcommand {
         /// Script file
         #[arg(long)]
         script_file: PathBuf,
+    },
+    /// Hash script data (datum, redeemers, and language views)
+    HashScriptData {
+        /// Datum file
+        #[arg(long)]
+        datum_file: Option<PathBuf>,
+        /// Redeemer file
+        #[arg(long)]
+        redeemer_file: Option<PathBuf>,
+        /// Script data file (JSON)
+        #[arg(long)]
+        script_data_file: Option<PathBuf>,
     },
 }
 
@@ -1869,7 +1889,11 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         socket_path,
         mainnet,
         testnet_magic,
+        certificate,
+        calculate_plutus_script_cost,
     } = args;
+
+    let certificate_file = [certificate_file, certificate].concat();
 
     if tx_in.is_empty() {
         bail!("At least one --tx-in is required");
@@ -2215,6 +2239,51 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 
     std::fs::write(&out_file, serde_json::to_string_pretty(&envelope)?)?;
     println!("Transaction body written to: {}", out_file.display());
+
+    if let Some(ref cost_file) = calculate_plutus_script_cost {
+        if let Some(ref sock) = socket_path {
+            let magic = if mainnet {
+                764824073u64
+            } else {
+                testnet_magic.unwrap_or(764824073)
+            };
+            let mut client = torsten_network::N2CClient::connect(sock, magic)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Cannot connect to node socket '{}': {e}", sock.display())
+                })?;
+            client
+                .acquire()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to acquire ledger state: {e}"))?;
+
+            let result = client
+                .evaluate_tx(&tx_body_cbor)
+                .await
+                .map_err(|e| anyhow::anyhow!("Script cost evaluation failed: {e}"))?;
+
+            client.release().await.ok();
+            client.done().await.ok();
+
+            let json = serde_json::from_slice(&result).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "cborHex": hex::encode(&result),
+                    "error": "Unable to parse script costs from node response"
+                })
+            });
+            std::fs::write(cost_file, serde_json::to_string_pretty(&json)?)?;
+            println!("Script costs written to: {}", cost_file.display());
+        } else {
+            println!("Warning: --calculate-plutus-script-cost requires --socket-path. Skipping script cost calculation.");
+            let empty_costs = serde_json::json!({
+                "type": "ScriptCosts",
+                "costs": []
+            });
+            std::fs::write(cost_file, serde_json::to_string_pretty(&empty_costs)?)?;
+            println!("Empty script costs written to: {}", cost_file.display());
+        }
+    }
+
     Ok(())
 }
 
@@ -2821,6 +2890,82 @@ impl TransactionCmd {
                 hash_input.extend_from_slice(&script_cbor);
                 let hash = torsten_primitives::hash::blake2b_224(&hash_input);
                 println!("{}", hash.to_hex());
+                Ok(())
+            }
+            TxSubcommand::HashScriptData {
+                datum_file,
+                redeemer_file,
+                script_data_file,
+            } => {
+                // cardano-cli hash-script-data computes:
+                // script_data_hash = blake2b_256(redeemers_cbor || datums_cbor || language_views_cbor)
+                let mut redeemers_cbor = Vec::new();
+                let mut datums_cbor = Vec::new();
+
+                // If a script_data_file is provided, it overrides datum_file and redeemer_file
+                if let Some(ref data_file) = script_data_file {
+                    let content = std::fs::read_to_string(data_file)?;
+                    let json: serde_json::Value = serde_json::from_str(&content)?;
+
+                    // Parse script data file - can be an array of values or a JSON object
+                    if let Some(arr) = json.as_array() {
+                        for item in arr {
+                            let data = parse_plutus_data_json(item)?;
+                            let encoded = encode_plutus_data_to_cbor(&data);
+                            datums_cbor.extend_from_slice(&encoded);
+                        }
+                    } else if let Some(obj) = json.as_object() {
+                        // If it's an object with 'datum' and 'redeemer' fields
+                        if let Some(datum_val) = obj.get("datum") {
+                            let data = parse_plutus_data_json(datum_val)?;
+                            datums_cbor.extend_from_slice(&encode_plutus_data_to_cbor(&data));
+                        }
+                        if let Some(redeemer_val) = obj.get("redeemer") {
+                            let data = parse_plutus_data_json(redeemer_val)?;
+                            redeemers_cbor.extend_from_slice(&encode_plutus_data_to_cbor(&data));
+                        }
+                    }
+                } else {
+                    // Individual files
+                    if let Some(ref d_file) = datum_file {
+                        let content = std::fs::read_to_string(d_file)?;
+                        let json: serde_json::Value = serde_json::from_str(&content)?;
+                        let data = parse_plutus_data_json(&json)?;
+                        datums_cbor.extend_from_slice(&encode_plutus_data_to_cbor(&data));
+                    }
+                    if let Some(ref r_file) = redeemer_file {
+                        let content = std::fs::read_to_string(r_file)?;
+                        let json: serde_json::Value = serde_json::from_str(&content)?;
+                        let data = parse_plutus_data_json(&json)?;
+                        redeemers_cbor.extend_from_slice(&encode_plutus_data_to_cbor(&data));
+                    }
+                }
+
+                // Wrap in arrays and add language views
+                let mut redeemers_array = Vec::new();
+                {
+                    let mut enc = minicbor::Encoder::new(&mut redeemers_array);
+                    enc.array(redeemers_cbor.len() as u64).ok();
+                }
+                redeemers_array.extend_from_slice(&redeemers_cbor);
+
+                let mut datums_array = Vec::new();
+                {
+                    let mut enc = minicbor::Encoder::new(&mut datums_array);
+                    enc.array(datums_cbor.len() as u64).ok();
+                }
+                datums_array.extend_from_slice(&datums_cbor);
+
+                // Language views: empty map for offline computation
+                let language_views = vec![0xa0];
+
+                let mut preimage = Vec::new();
+                preimage.extend_from_slice(&redeemers_array);
+                preimage.extend_from_slice(&datums_array);
+                preimage.extend_from_slice(&language_views);
+
+                let hash = torsten_primitives::hash::blake2b_256(&preimage);
+                println!("{}", hex::encode(hash.as_bytes()));
                 Ok(())
             }
         }
@@ -3946,12 +4091,13 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
 
-        // [4, [map]]
+        // [6, [1, map]]
         enc.array(2).unwrap();
-        enc.u32(4).unwrap(); // MsgResult tag
+        enc.u32(6).unwrap(); // MsgResult tag
 
-        // HFC success wrapper: array(1)
-        enc.array(1).unwrap();
+        // HFC success wrapper: [1, result]
+        enc.array(2).unwrap();
+        enc.u64(1).unwrap(); // HFC success tag
 
         // UTxO map
         enc.map(entries.len() as u64).unwrap();
@@ -3982,8 +4128,9 @@ mod tests {
         let mut enc = minicbor::Encoder::new(&mut buf);
 
         enc.array(2).unwrap();
-        enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(1).unwrap(); // HFC wrapper
+        enc.u32(6).unwrap(); // MsgResult tag
+        enc.array(2).unwrap(); // HFC success wrapper
+        enc.u64(1).unwrap(); // HFC success tag
 
         enc.map(entries.len() as u64).unwrap();
         for (hash, index, lovelace, tokens) in entries {

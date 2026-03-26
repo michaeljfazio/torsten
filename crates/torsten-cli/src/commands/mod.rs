@@ -1,8 +1,10 @@
 pub mod address;
+pub mod genesis;
 pub mod governance;
 pub mod key;
 pub mod node;
 pub mod query;
 pub mod stake_address;
 pub mod stake_pool;
+pub mod text_view;
 pub mod transaction;

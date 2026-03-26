@@ -55,6 +55,11 @@ enum NodeSubcommand {
         #[arg(long)]
         operational_certificate_counter_file: PathBuf,
     },
+    /// Get the hash of a VRF verification key
+    KeyHashVrf {
+        #[arg(long)]
+        verification_key_file: PathBuf,
+    },
 }
 
 fn simple_cbor_wrap(data: &[u8]) -> Vec<u8> {
@@ -236,6 +241,26 @@ impl NodeCmd {
                     "Counter file: {}",
                     operational_certificate_counter_file.display()
                 );
+                Ok(())
+            }
+            NodeSubcommand::KeyHashVrf {
+                verification_key_file,
+            } => {
+                let content = std::fs::read_to_string(&verification_key_file)?;
+                let env: serde_json::Value = serde_json::from_str(&content)?;
+                let cbor_hex = env["cborHex"].as_str().ok_or_else(|| {
+                    anyhow::anyhow!("Missing cborHex in {}", verification_key_file.display())
+                })?;
+                let cbor = hex::decode(cbor_hex)?;
+                let vrf_key_bytes = if cbor.len() > 2 && cbor[0] == 0x58 {
+                    &cbor[2..]
+                } else if cbor.len() > 1 && (cbor[0] & 0xe0) == 0x40 {
+                    &cbor[1..]
+                } else {
+                    &cbor
+                };
+                let hash = torsten_primitives::hash::blake2b_256(vrf_key_bytes);
+                println!("{}", hex::encode(hash.as_bytes()));
                 Ok(())
             }
         }

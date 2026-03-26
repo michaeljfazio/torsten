@@ -200,6 +200,24 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
+    /// Query the ledger state (debug endpoint)
+    LedgerState {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        out_file: Option<PathBuf>,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
+    /// Query the protocol state (debug endpoint)
+    ProtocolState {
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        #[arg(long)]
+        out_file: Option<PathBuf>,
+        #[arg(long)]
+        testnet_magic: Option<u64>,
+    },
 }
 
 /// Convert an f64 active-slot coefficient to the nearest exact rational p/q.
@@ -1217,8 +1235,34 @@ impl QueryCmd {
 
                         let _ = client.monitor_done().await;
                     }
+                    "next-tx" => {
+                        let _slot = client
+                            .monitor_acquire()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Monitor acquire failed: {e}"))?;
+
+                        loop {
+                            match client.monitor_next_tx().await {
+                                Ok(Some((tx_hash, tx_cbor))) => {
+                                    println!("TxHash: {}", hex::encode(&tx_hash));
+                                    println!("CBOR size: {} bytes", tx_cbor.len());
+                                    println!("{}", hex::encode(&tx_cbor));
+                                    println!();
+                                }
+                                Ok(None) => {
+                                    println!("No more transactions in mempool");
+                                    break;
+                                }
+                                Err(e) => {
+                                    return Err(anyhow::anyhow!("next-tx failed: {e}"));
+                                }
+                            }
+                        }
+
+                        let _ = client.monitor_done().await;
+                    }
                     _ => {
-                        println!("Available subcommands: info, has-tx");
+                        println!("Available subcommands: info, has-tx, next-tx");
                     }
                 }
                 Ok(())
@@ -2086,6 +2130,51 @@ impl QueryCmd {
                     );
                 }
 
+                Ok(())
+            }
+            QuerySubcommand::LedgerState {
+                socket_path,
+                out_file,
+                testnet_magic,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let raw = client
+                    .query_ledger_state()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query ledger state: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                if let Some(out) = out_file {
+                    std::fs::write(&out, &raw)?;
+                    println!("Ledger state written to: {}", out.display());
+                } else {
+                    // Print as hex if no out_file
+                    println!("{}", hex::encode(&raw));
+                }
+                Ok(())
+            }
+            QuerySubcommand::ProtocolState {
+                socket_path,
+                out_file,
+                testnet_magic,
+            } => {
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                let raw = client
+                    .query_protocol_state()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query protocol state: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                if let Some(out) = out_file {
+                    std::fs::write(&out, &raw)?;
+                    println!("Protocol state written to: {}", out.display());
+                } else {
+                    println!("{}", hex::encode(&raw));
+                }
                 Ok(())
             }
         }

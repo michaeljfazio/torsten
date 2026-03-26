@@ -73,6 +73,11 @@ enum StakeAddressSubcommand {
         #[arg(long)]
         out_file: PathBuf,
     },
+    /// Get the hash of a stake verification key
+    KeyHash {
+        #[arg(long)]
+        stake_verification_key_file: PathBuf,
+    },
 }
 
 fn simple_cbor_wrap(data: &[u8]) -> Vec<u8> {
@@ -345,6 +350,13 @@ impl StakeAddressCmd {
                     "Vote delegation certificate written to: {}",
                     out_file.display()
                 );
+                Ok(())
+            }
+            StakeAddressSubcommand::KeyHash {
+                stake_verification_key_file,
+            } => {
+                let key_hash = load_key_hash(&stake_verification_key_file)?;
+                println!("{}", hex::encode(&key_hash));
                 Ok(())
             }
         }

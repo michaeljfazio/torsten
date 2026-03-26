@@ -29,6 +29,10 @@ enum Commands {
     Governance(commands::governance::GovernanceCmd),
     /// Node-related commands
     Node(commands::node::NodeCmd),
+    /// Genesis block commands
+    Genesis(commands::genesis::GenesisCmd),
+    /// Text-view file commands
+    TextView(commands::text_view::TextViewCmd),
 }
 
 fn main() -> Result<()> {
@@ -43,5 +47,7 @@ fn main() -> Result<()> {
         Commands::StakePool(cmd) => cmd.run(),
         Commands::Governance(cmd) => cmd.run(),
         Commands::Node(cmd) => cmd.run(),
+        Commands::Genesis(cmd) => cmd.run(),
+        Commands::TextView(cmd) => cmd.run(),
     }
 }

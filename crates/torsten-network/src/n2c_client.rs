@@ -408,6 +408,20 @@ impl N2CClient {
         self.send_shelley_query(29).await
     }
 
+    /// Query ledger state (`DebugLedgerState` -- Shelley query tag 4).
+    ///
+    /// Returns raw MsgResult CBOR payload.
+    pub async fn query_ledger_state(&mut self) -> Result<Vec<u8>, NetworkError> {
+        self.send_shelley_query(4).await
+    }
+
+    /// Query protocol state (`DebugProtocolState` -- Shelley query tag 8).
+    ///
+    /// Returns raw MsgResult CBOR payload.
+    pub async fn query_protocol_state(&mut self) -> Result<Vec<u8>, NetworkError> {
+        self.send_shelley_query(8).await
+    }
+
     /// Query ratification state (`GetRatifyState` -- Shelley query tag 32).
     ///
     /// Returns raw MsgResult CBOR payload.
@@ -428,6 +442,28 @@ impl N2CClient {
         enc.u32(2).map_err(cbor_err)?;
         enc.array(1).map_err(cbor_err)?;
         enc.u32(0).map_err(cbor_err)?;
+
+        self.send_query(buf).await?;
+        self.recv_query().await
+    }
+
+    /// Evaluate a transaction and return script execution costs (`EvaluateTx` -- Shelley query tag 36).
+    ///
+    /// This queries the node to evaluate the Plutus scripts in the given transaction
+    /// and return the actual execution units consumed by each script.
+    ///
+    /// The `tx_body_cbor` should be the raw CBOR-encoded transaction body.
+    /// Returns a CBOR-encoded evaluation result that can be parsed into script costs.
+    pub async fn evaluate_tx(&mut self, tx_body_cbor: &[u8]) -> Result<Vec<u8>, NetworkError> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).map_err(cbor_err)?;
+        enc.u32(3).map_err(cbor_err)?;
+        enc.array(2).map_err(cbor_err)?;
+        enc.u32(0).map_err(cbor_err)?;
+        enc.array(2).map_err(cbor_err)?;
+        enc.u32(36).map_err(cbor_err)?;
+        enc.bytes(tx_body_cbor).map_err(cbor_err)?;
 
         self.send_query(buf).await?;
         self.recv_query().await
@@ -536,6 +572,49 @@ impl N2CClient {
             .u32()
             .map_err(|e| protocol_err(format!("bad num_txs: {e}")))?;
         Ok((capacity, size, num_txs))
+    }
+
+    /// Get the next transaction from the mempool snapshot.
+    ///
+    /// Returns `Some((tx_hash, tx_cbor))` for the next transaction, or `None` if
+    /// there are no more transactions in the mempool.
+    pub async fn monitor_next_tx(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, NetworkError> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(1).map_err(cbor_err)?;
+        enc.u32(4).map_err(cbor_err)?; // MsgNextTx
+
+        self.tx_monitor_channel
+            .send(buf)
+            .await
+            .map_err(NetworkError::Mux)?;
+
+        let resp = self
+            .tx_monitor_channel
+            .recv()
+            .await
+            .map_err(NetworkError::Mux)?;
+        let mut dec = minicbor::Decoder::new(&resp);
+        let _ = dec.array();
+        let tag = dec
+            .u32()
+            .map_err(|e| protocol_err(format!("bad monitor next_tx: {e}")))?;
+
+        match tag {
+            5 => {
+                // MsgTxExists - no more transactions
+                Ok(None)
+            }
+            6 => {
+                // MsgReplyNextTx with transaction
+                let tx_hash = dec.bytes().unwrap_or(&[]).to_vec();
+                let tx_cbor = dec.bytes().unwrap_or(&[]).to_vec();
+                Ok(Some((tx_hash, tx_cbor)))
+            }
+            other => Err(protocol_err(format!(
+                "unexpected next_tx response tag: {other}"
+            ))),
+        }
     }
 
     /// Send `MsgDone` for the LocalTxMonitor protocol.
@@ -1183,9 +1262,10 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(4).unwrap();
-        enc.array(1).unwrap();
-        enc.array(2).unwrap();
+        enc.u32(6).unwrap(); // MsgResult tag
+        enc.array(2).unwrap(); // HFC wrapper [1, result]
+        enc.u64(1).unwrap(); // HFC success tag
+        enc.array(2).unwrap(); // [[slot, hash], block_no]
         enc.array(2).unwrap();
         enc.u64(12345).unwrap();
         enc.bytes(&[0xab; 32]).unwrap();
@@ -1202,8 +1282,9 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(4).unwrap();
-        enc.array(2).unwrap();
+        enc.u32(6).unwrap(); // MsgResult tag
+                             // No HFC wrapper — parser should handle unwrapped responses
+        enc.array(2).unwrap(); // [[slot, hash], block_no]
         enc.array(2).unwrap();
         enc.u64(12345).unwrap();
         enc.bytes(&[0xab; 32]).unwrap();
@@ -1220,8 +1301,9 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(4).unwrap();
-        enc.array(1).unwrap();
+        enc.u32(6).unwrap(); // MsgResult tag
+        enc.array(2).unwrap(); // HFC wrapper [1, result]
+        enc.u64(1).unwrap(); // HFC success tag
         enc.u64(42).unwrap();
 
         let result = parse_epoch_result(&buf).unwrap();
@@ -1239,8 +1321,9 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(4).unwrap();
-        enc.array(1).unwrap();
+        enc.u32(6).unwrap(); // MsgResult tag
+        enc.array(2).unwrap(); // HFC wrapper [1, result]
+        enc.u64(1).unwrap(); // HFC success tag
         enc.u64(999).unwrap();
 
         let result = parse_u64_result(&buf).unwrap();
