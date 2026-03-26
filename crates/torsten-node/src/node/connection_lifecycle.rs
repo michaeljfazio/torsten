@@ -269,6 +269,9 @@ impl ConnectionLifecycleManager {
 
         info!(%addr, "promoting cold -> warm: connecting");
 
+        // Time the TCP connect + handshake for RTT measurement.
+        let connect_start = std::time::Instant::now();
+
         // Establish TCP connection, create mux, run handshake.
         let mut conn = PeerConnection::connect(
             addr,
@@ -278,6 +281,10 @@ impl ConnectionLifecycleManager {
         )
         .await?;
 
+        // Record handshake RTT (includes TCP connect + mux setup + handshake exchange).
+        let rtt_ms = connect_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record_handshake_rtt(rtt_ms);
+
         // Start warm protocols (KeepAlive).
         let keepalive_fn = self.make_keepalive_task();
         conn.start_warm_protocols(keepalive_fn)?;
@@ -286,7 +293,7 @@ impl ConnectionLifecycleManager {
         peer_manager.peer_connected(&addr, ConnectionDirection::Outbound);
 
         self.connections.insert(addr, conn);
-        info!(%addr, "cold -> warm complete");
+        info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "cold -> warm complete");
         Ok(())
     }
 
@@ -435,9 +442,16 @@ impl ConnectionLifecycleManager {
 
         info!(%addr, "accepting inbound connection");
 
+        // Time the TCP accept + handshake for RTT measurement.
+        let accept_start = std::time::Instant::now();
+
         // Accept: create mux from stream, run handshake as server.
         let mut conn =
             PeerConnection::accept(stream, addr, self.network_magic, self.peer_sharing).await?;
+
+        // Record handshake RTT (includes mux setup + handshake exchange).
+        let rtt_ms = accept_start.elapsed().as_secs_f64() * 1000.0;
+        self.metrics.record_handshake_rtt(rtt_ms);
 
         // Start warm protocols (KeepAlive).
         let keepalive_fn = self.make_keepalive_task();
@@ -650,6 +664,7 @@ impl ConnectionLifecycleManager {
         // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
         let active_fetcher = self.active_fetcher.clone();
         let max_fetched_slot = self.max_fetched_slot.clone();
+        let metrics_clone = self.metrics.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
@@ -755,6 +770,10 @@ impl ConnectionLifecycleManager {
                                 let tx = fetched_blocks_tx.clone();
                                 let peer = addr;
 
+                                // Time the network round-trip for fetching a single block
+                                // (request + response + decode). This is the latency the
+                                // peer_block_fetch_ms histogram tracks.
+                                let fetch_start = std::time::Instant::now();
                                 match BlockFetchClient::fetch_range(
                                     &mut channel,
                                     from,
@@ -786,7 +805,11 @@ impl ConnectionLifecycleManager {
                                         Ok(())
                                     },
                                 ).await {
-                                    Ok(_count) => {}
+                                    Ok(_count) => {
+                                        // Record per-block fetch latency only on success.
+                                        let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
+                                        metrics_clone.record_block_fetch_latency(fetch_ms);
+                                    }
                                     Err(e) => {
                                         warn!(%addr, "BlockFetch error: {e}");
                                         // Release active fetcher so another peer can try.

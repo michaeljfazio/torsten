@@ -222,7 +222,6 @@ impl Histogram {
 
     /// Record an observation (value in milliseconds).
     /// Increments the first bucket whose upper bound >= value_ms.
-    #[allow(dead_code)] // used by networking rewrite
     pub fn observe(&self, value_ms: f64) {
         for (i, &bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
             if value_ms <= bound {
@@ -533,13 +532,11 @@ impl NodeMetrics {
     }
 
     /// Record a peer handshake latency observation.
-    #[allow(dead_code)] // used by networking rewrite
     pub fn record_handshake_rtt(&self, rtt_ms: f64) {
         self.peer_handshake_rtt_ms.observe(rtt_ms);
     }
 
     /// Record a per-block fetch latency observation.
-    #[allow(dead_code)] // used by networking rewrite
     pub fn record_block_fetch_latency(&self, ms_per_block: f64) {
         self.peer_block_fetch_ms.observe(ms_per_block);
     }
@@ -1492,6 +1489,29 @@ mod tests {
         assert!(output.contains("torsten_peer_handshake_rtt_ms_bucket"));
         assert!(output.contains("torsten_peer_block_fetch_ms_bucket"));
         assert!(output.contains("torsten_uptime_seconds"));
+    }
+
+    #[test]
+    fn test_handshake_rtt_records_to_histogram() {
+        let metrics = NodeMetrics::new();
+        metrics.record_handshake_rtt(42.0);
+        metrics.record_handshake_rtt(150.0);
+        let output = metrics.to_prometheus();
+        assert!(output.contains("torsten_peer_handshake_rtt_ms_count 2"));
+        // 42ms lands in le=50 bucket, 150ms lands in le=250 bucket
+        assert!(output.contains("peer_handshake_rtt_ms_bucket{le=\"50\"} 1"));
+        assert!(output.contains("peer_handshake_rtt_ms_bucket{le=\"250\"} 2"));
+    }
+
+    #[test]
+    fn test_block_fetch_latency_records_to_histogram() {
+        let metrics = NodeMetrics::new();
+        metrics.record_block_fetch_latency(25.0);
+        metrics.record_block_fetch_latency(300.0);
+        let output = metrics.to_prometheus();
+        assert!(output.contains("torsten_peer_block_fetch_ms_count 2"));
+        assert!(output.contains("peer_block_fetch_ms_bucket{le=\"25\"} 1"));
+        assert!(output.contains("peer_block_fetch_ms_bucket{le=\"500\"} 2"));
     }
 
     #[test]
