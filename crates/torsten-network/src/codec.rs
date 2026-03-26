@@ -85,8 +85,13 @@ pub fn encode_tip(enc: &mut Encoder<&mut Vec<u8>>, slot: u64, hash: &[u8; 32], b
 pub fn decode_tip(dec: &mut Decoder<'_>) -> Result<(u64, [u8; 32], u64), minicbor::decode::Error> {
     // Outer array: [point, block_number]
     dec.array()?;
-    // Inner point array: [slot, hash]
-    dec.array()?;
+    // Inner point: either [slot, hash] for Specific, or [] for Origin.
+    let arr_len = dec.array()?;
+    if arr_len == Some(0) {
+        // Origin tip — peer is at genesis with no blocks.
+        let block_number = dec.u64()?;
+        return Ok((0, [0u8; 32], block_number));
+    }
     let slot = dec.u64()?;
     let hash_bytes = dec.bytes()?;
     if hash_bytes.len() != 32 {

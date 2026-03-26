@@ -1537,6 +1537,7 @@ impl Node {
                         accept_result = tcp_listener.accept() => {
                             match accept_result {
                                 Ok((stream, peer_addr)) => {
+                                    info!(%peer_addr, "N2N inbound connection accepted");
                                     let conn_metrics = n2n_metrics.clone();
                                     conn_metrics
                                         .n2n_connections_total
@@ -1552,16 +1553,17 @@ impl Node {
                                     let ann_rx = n2n_block_ann_tx.subscribe();
                                     let magic = n2n_network_magic;
 
-                                    // Record inbound connection in peer manager
-                                    {
-                                        let mut pm_w = pm.write().await;
-                                        pm_w.peer_connected(
-                                            &peer_addr,
-                                            ConnectionDirection::Inbound,
-                                        );
-                                    }
-
+                                    // Record inbound connection in peer manager.
+                                    // Done inside the spawned task to avoid blocking
+                                    // the accept loop on the peer manager write lock.
                                     tokio::spawn(async move {
+                                        {
+                                            let mut pm_w = pm.write().await;
+                                            pm_w.peer_connected(
+                                                &peer_addr,
+                                                ConnectionDirection::Inbound,
+                                            );
+                                        }
                                         if let Err(e) = Self::handle_n2n_connection(
                                             stream, magic, bp, mp, pm.clone(),
                                             peer_addr, ann_rx,
@@ -2621,20 +2623,21 @@ impl Node {
         // Start the mux tasks
         let mux_handle = tokio::spawn(async move { mux.run().await });
 
-        // Run N2N handshake as server
+        // Run N2N handshake as server (responder)
+        info!(%peer_addr, "N2N inbound: starting handshake");
         let our_data = torsten_network::N2NVersionData::new(network_magic, true);
         let hs_result =
             torsten_network::handshake::run_n2n_handshake_server(&mut hs_ch, &our_data).await;
         match hs_result {
             Ok(r) => {
-                debug!(
+                info!(
                     %peer_addr,
                     version = r.version,
-                    "N2N handshake accepted"
+                    "N2N inbound handshake accepted"
                 );
             }
             Err(e) => {
-                debug!(%peer_addr, "N2N handshake failed: {e}");
+                warn!(%peer_addr, "N2N inbound handshake failed: {e}");
                 mux_handle.abort();
                 return Ok(());
             }
