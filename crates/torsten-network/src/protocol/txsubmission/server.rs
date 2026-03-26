@@ -58,11 +58,12 @@ impl TxSubmissionServer {
         // Set of tx IDs currently in-flight (requested but not yet received)
         let mut inflight: HashSet<[u8; 32]> = HashSet::new();
         let mut is_first_request = true;
+        // Total tx IDs ever received from the client. Used for blocking mode:
+        // the Haskell TxSubmission2 client only accepts a blocking request
+        // after it has returned at least one tx ID that we then acknowledge.
+        let mut total_tx_ids_received: u64 = 0;
 
         loop {
-            // Determine if we should use blocking mode:
-            // blocking=true only when we have zero unacknowledged tx IDs
-            let blocking = !is_first_request && unacked.is_empty();
             let ack_count = if is_first_request {
                 0 // First request: ack_count must be 0
             } else {
@@ -74,6 +75,14 @@ impl TxSubmissionServer {
                 }
                 ack
             };
+            // Use blocking mode only when:
+            // 1. Not the first request
+            // 2. We are acknowledging tx IDs (ack_count > 0), OR
+            //    we have previously received tx IDs and all are now acked
+            // The Haskell client rejects blocking=true if it has never
+            // returned any tx IDs (ProtocolErrorRequestNonBlocking).
+            let blocking = !is_first_request
+                && (ack_count > 0 || (total_tx_ids_received > 0 && unacked.is_empty()));
 
             // Request more tx IDs
             let req = encode_message(&TxSubmissionMessage::MsgRequestTxIds {
@@ -109,6 +118,7 @@ impl TxSubmissionServer {
                         unacked.push_back(id.clone());
                     }
                     stats.tx_ids_received += ids.len() as u64;
+                    total_tx_ids_received += ids.len() as u64;
 
                     if to_fetch.is_empty() {
                         continue;
@@ -234,14 +244,17 @@ mod tests {
         let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(vec![]));
         ingress_tx.send(Bytes::from(reply)).await.unwrap();
 
-        // Next request should be blocking (since unacked is empty)
+        // Next request should still be non-blocking because the client
+        // has never returned any tx IDs (total_tx_ids_received == 0).
+        // The Haskell TxSubmission2 client rejects blocking=true if it
+        // hasn't yielded any tx IDs yet (ProtocolErrorRequestNonBlocking).
         let (_, _, req2) = egress_rx.recv().await.unwrap();
         if let TxSubmissionMessage::MsgRequestTxIds { blocking, .. } =
             decode_message(&req2).unwrap()
         {
             assert!(
-                blocking,
-                "second request with no unacked should be blocking"
+                !blocking,
+                "second request must be non-blocking when no tx IDs have been received"
             );
         }
 

@@ -44,7 +44,7 @@ use torsten_network::{Governor, GovernorConfig, PeerTargets};
 
 use crate::node::n2c_query::QueryHandler;
 use crate::node::networking::{
-    ConnectionDirection, DiffusionMode, NodePeerManager, PeerManagerConfig, RollbackAnnouncement,
+    DiffusionMode, NodePeerManager, PeerManagerConfig, RollbackAnnouncement,
 };
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
@@ -1553,17 +1553,11 @@ impl Node {
                                     let ann_rx = n2n_block_ann_tx.subscribe();
                                     let magic = n2n_network_magic;
 
-                                    // Record inbound connection in peer manager.
-                                    // Done inside the spawned task to avoid blocking
-                                    // the accept loop on the peer manager write lock.
+                                    // Start the connection handler immediately without
+                                    // waiting for the peer manager lock — the handshake
+                                    // must complete within the Haskell timeout (10s).
+                                    // Peer registration happens after the handshake.
                                     tokio::spawn(async move {
-                                        {
-                                            let mut pm_w = pm.write().await;
-                                            pm_w.peer_connected(
-                                                &peer_addr,
-                                                ConnectionDirection::Inbound,
-                                            );
-                                        }
                                         if let Err(e) = Self::handle_n2n_connection(
                                             stream, magic, bp, mp, pm.clone(),
                                             peer_addr, ann_rx,
@@ -2623,7 +2617,8 @@ impl Node {
         // Start the mux tasks
         let mux_handle = tokio::spawn(async move { mux.run().await });
 
-        // Run N2N handshake as server (responder)
+        // Run N2N handshake as server (responder).
+        // This must complete quickly — the Haskell peer times out after 10 seconds.
         info!(%peer_addr, "N2N inbound: starting handshake");
         let our_data = torsten_network::N2NVersionData::new(network_magic, true);
         let hs_result =
@@ -2641,6 +2636,13 @@ impl Node {
                 mux_handle.abort();
                 return Ok(());
             }
+        }
+
+        // Register the peer in the peer manager (after handshake to avoid
+        // blocking the handshake on the write lock).
+        {
+            let mut pm_w = peer_manager.write().await;
+            pm_w.peer_connected(&peer_addr, crate::node::networking::ConnectionDirection::Inbound);
         }
 
         // ChainSync server
