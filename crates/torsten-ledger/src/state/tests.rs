@@ -8372,9 +8372,11 @@ fn test_block_does_not_connect_without_ebb_advance() {
         block_number: BlockNo(50),
     };
 
-    // Block whose prev_hash = EBB hash, NOT the current tip hash
+    // Block whose prev_hash = EBB hash, NOT the current tip hash.
+    // Use block_number 53 (not 51) so the sequence-number fallback doesn't
+    // mask the hash mismatch (apply_block accepts tip+1 regardless of hash).
     let ebb = test_ebb_hash(1);
-    let next_block = make_byron_block_ebb_test(21_601, 51, ebb);
+    let next_block = make_byron_block_ebb_test(21_601, 53, ebb);
 
     let result = state.apply_block(&next_block, BlockValidationMode::ApplyOnly);
     assert!(

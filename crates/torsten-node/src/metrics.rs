@@ -393,6 +393,10 @@ pub struct NodeMetrics {
     pub n2c_connections_total: AtomicU64,
     pub n2n_connections_active: AtomicU64,
     pub n2c_connections_active: AtomicU64,
+    // N2C LocalTxSubmission counters (from torsten-cli submit-tx)
+    pub n2c_txs_submitted: AtomicU64,
+    pub n2c_txs_accepted: AtomicU64,
+    pub n2c_txs_rejected: AtomicU64,
     /// Per-protocol-error-type counts (label → count).
     protocol_errors: std::sync::Mutex<HashMap<String, u64>>,
     /// Peer handshake RTT histogram (milliseconds)
@@ -486,6 +490,9 @@ impl NodeMetrics {
             n2c_connections_total: AtomicU64::new(0),
             n2n_connections_active: AtomicU64::new(0),
             n2c_connections_active: AtomicU64::new(0),
+            n2c_txs_submitted: AtomicU64::new(0),
+            n2c_txs_accepted: AtomicU64::new(0),
+            n2c_txs_rejected: AtomicU64::new(0),
             protocol_errors: std::sync::Mutex::new(HashMap::new()),
             peer_handshake_rtt_ms: Histogram::new(),
             peer_block_fetch_ms: Histogram::new(),
@@ -959,6 +966,21 @@ impl NodeMetrics {
                 "torsten_n2c_connections_active",
                 "Currently active N2C connections",
                 &self.n2c_connections_active,
+            ),
+            (
+                "torsten_n2c_txs_submitted_total",
+                "Total transactions submitted via N2C LocalTxSubmission",
+                &self.n2c_txs_submitted,
+            ),
+            (
+                "torsten_n2c_txs_accepted_total",
+                "Transactions accepted via N2C LocalTxSubmission",
+                &self.n2c_txs_accepted,
+            ),
+            (
+                "torsten_n2c_txs_rejected_total",
+                "Transactions rejected via N2C LocalTxSubmission",
+                &self.n2c_txs_rejected,
             ),
             (
                 "torsten_tip_age_seconds",

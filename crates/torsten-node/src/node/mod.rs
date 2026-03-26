@@ -1283,6 +1283,7 @@ impl Node {
                                     tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2c_connection(
                                             stream, magic, qh, bp, mp, tv, ledger, ann_rx,
+                                            metrics.clone(),
                                         )
                                         .await
                                         {
@@ -2336,6 +2337,11 @@ impl Node {
             self.mempool.remove_txs(&confirmed);
         }
 
+        // Refresh the N2C query handler snapshot so LocalStateQuery clients
+        // (e.g. `torsten-cli query tip`) see the latest ledger state immediately
+        // after each block rather than waiting for the 30-second periodic refresh.
+        self.update_query_state().await;
+
         // Run background maintenance (copy-to-immutable, GC, snapshot).
         // This matches the pattern from the old sync loop where these
         // operations run after each block application.
@@ -2382,6 +2388,7 @@ impl Node {
         tx_validator: Arc<serve::LedgerTxValidator>,
         ledger: Arc<RwLock<LedgerState>>,
         announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
+        metrics: Arc<crate::metrics::NodeMetrics>,
     ) -> Result<()> {
         use torsten_network::protocol;
 
@@ -2449,6 +2456,7 @@ impl Node {
         // LocalTxSubmission server
         let lts_validator = tx_validator;
         let lts_mempool = mempool.clone();
+        let lts_metrics = metrics.clone();
         let lts_task = tokio::spawn(async move {
             let on_accepted = |era_id: u16, tx_bytes: Vec<u8>| {
                 // Decode the transaction and add it to the mempool.
@@ -2473,6 +2481,16 @@ impl Node {
             .await
             {
                 Ok(stats) => {
+                    // Update N2C transaction metrics
+                    lts_metrics
+                        .n2c_txs_submitted
+                        .fetch_add(stats.submitted, std::sync::atomic::Ordering::Relaxed);
+                    lts_metrics
+                        .n2c_txs_accepted
+                        .fetch_add(stats.accepted, std::sync::atomic::Ordering::Relaxed);
+                    lts_metrics
+                        .n2c_txs_rejected
+                        .fetch_add(stats.rejected, std::sync::atomic::Ordering::Relaxed);
                     debug!(
                         submitted = stats.submitted,
                         accepted = stats.accepted,
