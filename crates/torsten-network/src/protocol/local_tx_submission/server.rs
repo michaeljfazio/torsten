@@ -71,6 +71,17 @@ impl LocalTxSubmissionServer {
                         protocol: "LocalTxSubmission",
                         reason: e.to_string(),
                     })?;
+                    // The tx may be wrapped in CBOR tag 24 (wrapCBORinCBOR).
+                    // Consume the tag if present, then read the raw bytes.
+                    let pos = dec.position();
+                    if let Ok(tag) = dec.tag() {
+                        if tag.as_u64() != 24 {
+                            dec.set_position(pos); // not tag 24, rewind
+                        }
+                        // tag 24 consumed, bytes follow
+                    } else {
+                        dec.set_position(pos); // no tag, rewind
+                    }
                     let tx_bytes = dec
                         .bytes()
                         .map_err(|e| ProtocolError::CborDecode {

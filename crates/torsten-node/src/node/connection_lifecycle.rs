@@ -40,9 +40,9 @@ use torsten_ledger::LedgerState;
 use torsten_primitives::block::Block;
 use torsten_storage::ChainDB;
 
-use crate::metrics::NodeMetrics;
 use super::networking::{ConnectionDirection, NodePeerManager};
 use super::peer_connection::{PeerConnection, PeerConnectionError, ProtocolTaskFn};
+use crate::metrics::NodeMetrics;
 
 // ─── Shared State Types ─────────────────────────────────────────────────────
 

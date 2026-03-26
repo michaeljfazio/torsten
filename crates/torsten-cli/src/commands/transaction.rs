@@ -1693,19 +1693,19 @@ pub(crate) fn calculate_change(
 fn sum_utxo_value(raw: &[u8]) -> Result<(u64, MultiAssetMap)> {
     let mut decoder = minicbor::Decoder::new(raw);
 
-    // Outer: MsgResult = [4, result]
+    // Outer: MsgResult = [6, result]
     let _ = decoder.array();
     let tag = decoder
         .u32()
         .map_err(|e| anyhow::anyhow!("Expected MsgResult tag: {e}"))?;
-    if tag != 4 {
-        bail!("Expected MsgResult(4), got {tag}");
+    if tag != 6 {
+        bail!("Expected MsgResult(6), got {tag}");
     }
 
-    // Strip HFC success wrapper: array(1) around the actual map
+    // Strip HFC success wrapper: [1, actual_result] (2-element array with success tag)
     let pos = decoder.position();
-    if let Ok(Some(1)) = decoder.array() {
-        // HFC wrapper consumed — nothing more to do here
+    if let Ok(Some(2)) = decoder.array() {
+        let _ = decoder.u64(); // consume HFC success tag (1)
     } else {
         decoder.set_position(pos);
     }
@@ -2025,15 +2025,11 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         };
 
         // Connect to the node.
-        let mut client = torsten_network::N2CClient::connect(sock)
+        let mut client = torsten_network::N2CClient::connect(sock, magic)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("Cannot connect to node socket '{}': {e}", sock.display())
             })?;
-        client
-            .handshake(magic)
-            .await
-            .map_err(|e| anyhow::anyhow!("Handshake failed: {e}"))?;
         client
             .acquire()
             .await
@@ -2372,15 +2368,10 @@ impl TransactionCmd {
                 // Submit via N2C socket
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async {
-                    let mut client = torsten_network::N2CClient::connect(&socket_path)
+                    let magic = testnet_magic.unwrap_or(764824073);
+                    let mut client = torsten_network::N2CClient::connect(&socket_path, magic)
                         .await
                         .map_err(|e| anyhow::anyhow!("Cannot connect to node socket: {e}"))?;
-
-                    let magic = testnet_magic.unwrap_or(764824073);
-                    client
-                        .handshake(magic)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Handshake failed: {e}"))?;
 
                     // Submit the transaction
                     client

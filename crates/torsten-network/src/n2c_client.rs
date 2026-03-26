@@ -52,9 +52,12 @@ pub struct N2CClient {
 impl N2CClient {
     /// Connect to a Cardano node via Unix domain socket.
     ///
-    /// Performs the N2C handshake and returns a connected client with
-    /// protocol channels ready for use.
-    pub async fn connect<P: AsRef<Path>>(socket_path: P) -> Result<Self, NetworkError> {
+    /// Performs the N2C handshake with the given `network_magic` and returns
+    /// a connected client with protocol channels ready for use.
+    pub async fn connect<P: AsRef<Path>>(
+        socket_path: P,
+        network_magic: u64,
+    ) -> Result<Self, NetworkError> {
         let stream = tokio::net::UnixStream::connect(socket_path.as_ref())
             .await
             .map_err(|e| NetworkError::Bearer(crate::error::BearerError::Io(e)))?;
@@ -72,8 +75,8 @@ impl N2CClient {
         // Start the mux
         let mux_handle = tokio::spawn(async move { mux.run().await });
 
-        // Run N2C handshake
-        let our_data = crate::handshake::n2c::N2CVersionData::new(0);
+        // Run N2C handshake with the provided network magic
+        let our_data = crate::handshake::n2c::N2CVersionData::new(network_magic);
         let handshake_result =
             crate::handshake::run_n2c_handshake_client(&mut handshake_channel, &our_data)
                 .await
@@ -128,28 +131,18 @@ impl N2CClient {
             .map_err(NetworkError::Mux)
     }
 
-    // ── Handshake (no-op, already done in connect) ───────────────────────
-
-    /// Perform the N2C handshake.
-    ///
-    /// This is a no-op because [`connect`](Self::connect) already performs the
-    /// handshake. Provided for API compatibility with callers that expect a
-    /// separate handshake step.
-    pub async fn handshake(&mut self, _network_magic: u64) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
     // ── LocalStateQuery: acquire / release / done ────────────────────────
 
     /// Acquire the ledger state at the volatile tip for subsequent queries.
     ///
-    /// Sends `MsgAcquire` (tag 0, no point = tip) on the LocalStateQuery
-    /// channel and waits for `MsgAcquired` (tag 1).
+    /// Sends `MsgAcquire` (tag 8) with VolatileTip target on the
+    /// LocalStateQuery channel and waits for `MsgAcquired` (tag 4).
     pub async fn acquire(&mut self) -> Result<(), NetworkError> {
+        // MsgAcquire VolatileTip = [8] (just the tag, no target payload)
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
+        enc.u32(8).map_err(cbor_err)?; // TAG_ACQUIRE (VolatileTip)
         self.send_query(buf).await?;
 
         let resp = self.recv_query().await?;
@@ -158,8 +151,9 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad acquire response: {e}")))?;
-        if tag != 1 {
-            return Err(protocol_err(format!("expected MsgAcquired(1), got {tag}")));
+        if tag != 4 {
+            // tag 4 = MsgAcquired, tag 5 = MsgFailure
+            return Err(protocol_err(format!("expected MsgAcquired(4), got {tag}")));
         }
         debug!("State acquired");
         Ok(())
@@ -172,16 +166,16 @@ impl N2CClient {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(7).map_err(cbor_err)?;
+        enc.u32(7).map_err(cbor_err)?; // TAG_RELEASE
         self.send_query(buf).await
     }
 
-    /// Send `MsgDone` (tag 9) to end the LocalStateQuery protocol.
+    /// Send `MsgDone` (tag 0) to end the LocalStateQuery protocol.
     pub async fn done(&mut self) -> Result<(), NetworkError> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(9).map_err(cbor_err)?;
+        enc.u32(0).map_err(cbor_err)?; // TAG_DONE
         self.send_query(buf).await
     }
 
@@ -203,11 +197,12 @@ impl N2CClient {
         parse_epoch_result(&result)
     }
 
-    /// Query the current era (`GetCurrentEra` -- top-level query tag 0).
+    /// Query the current era (`GetCurrentEra` -- QueryHardFork sub-tag 1).
     ///
-    /// This is a top-level (non-era-wrapped) HardFork query.
+    /// Wire format: `MsgQuery [3, [2, [1]]]` — QueryHardFork, GetCurrentEra.
+    /// Response is unwrapped (no HFC success envelope).
     pub async fn query_era(&mut self) -> Result<u32, NetworkError> {
-        let payload = encode_toplevel_query(0)?;
+        let payload = encode_hard_fork_query(1)?; // sub-tag 1 = GetCurrentEra
         self.send_query(payload).await?;
         let resp = self.recv_query().await?;
 
@@ -216,8 +211,8 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad MsgResult tag: {e}")))?;
-        if tag != 4 {
-            return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
+        if tag != 6 {
+            return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
         }
         let era = dec
             .u32()
@@ -225,11 +220,12 @@ impl N2CClient {
         Ok(era)
     }
 
-    /// Query the system start time (`GetSystemStart` -- top-level query tag 1).
+    /// Query the system start time (`GetEraStart` -- QueryAnytime sub-tag 0).
     ///
+    /// Wire format: `MsgQuery [3, [1, [0]]]` — QueryAnytime, GetEraStart.
     /// Returns an ISO-8601 UTC string, e.g. `"2022-10-25T00:00:00Z"`.
     pub async fn query_system_start(&mut self) -> Result<String, NetworkError> {
-        let payload = encode_toplevel_query(1)?;
+        let payload = encode_anytime_query(0)?; // sub-tag 0 = GetEraStart
         self.send_query(payload).await?;
         let resp = self.recv_query().await?;
 
@@ -238,8 +234,8 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad MsgResult tag: {e}")))?;
-        if tag != 4 {
-            return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
+        if tag != 6 {
+            return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
         }
         // SystemStart encoded as UTCTime: [year, day_of_year, pico_of_day]
         let _ = dec.array();
@@ -256,12 +252,13 @@ impl N2CClient {
         Ok(utctime_to_iso8601(year, day_of_year, pico_of_day))
     }
 
-    /// Query the chain block number (`GetChainBlockNo` -- top-level query tag 2).
+    /// Query the chain block number (`GetChainBlockNo` -- Shelley query tag 2).
+    ///
+    /// Note: Despite being conceptually top-level, this is encoded as a
+    /// Shelley BlockQuery tag 2 for Torsten compatibility.
     pub async fn query_block_no(&mut self) -> Result<u64, NetworkError> {
-        let payload = encode_toplevel_query(2)?;
-        self.send_query(payload).await?;
-        let resp = self.recv_query().await?;
-        parse_u64_result(&resp)
+        let result = self.send_shelley_query(2).await?;
+        parse_u64_result(&result)
     }
 
     /// Query protocol parameters (`GetCurrentPParams` -- Shelley query tag 3).
@@ -629,37 +626,69 @@ fn protocol_err(reason: String) -> NetworkError {
     })
 }
 
-/// Encode a top-level (non-era-wrapped) query: `MsgQuery [3, [tag]]`.
-fn encode_toplevel_query(tag: u32) -> Result<Vec<u8>, NetworkError> {
+/// Encode a QueryAnytime query: `MsgQuery [3, [1, [sub_tag]]]`.
+///
+/// Sub-tags: 0=GetEraStart, 2=GetCurrentEra.
+fn encode_anytime_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).map_err(cbor_err)?;
-    enc.u32(3).map_err(cbor_err)?;
+    enc.u32(3).map_err(cbor_err)?; // MsgQuery
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(1).map_err(cbor_err)?; // QueryAnytime
     enc.array(1).map_err(cbor_err)?;
-    enc.u32(tag).map_err(cbor_err)?;
+    enc.u32(sub_tag).map_err(cbor_err)?;
     Ok(buf)
 }
 
-/// Strip the `MsgResult [4, ...]` envelope from a response payload.
+/// Encode a QueryHardFork query: `MsgQuery [3, [2, [sub_tag]]]`.
+///
+/// Sub-tags: 0=GetInterpreter (EraHistory), 1=GetCurrentEra.
+fn encode_hard_fork_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(3).map_err(cbor_err)?; // MsgQuery
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(2).map_err(cbor_err)?; // QueryHardFork
+    enc.array(1).map_err(cbor_err)?;
+    enc.u32(sub_tag).map_err(cbor_err)?;
+    Ok(buf)
+}
+
+/// Strip the `MsgResult [6, ...]` envelope from a response payload.
 fn strip_msg_result(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError> {
     let _ = decoder.array();
     let tag = decoder.u32().unwrap_or(999);
-    if tag != 4 {
-        return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
+    if tag != 6 {
+        return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
     }
     Ok(())
 }
 
-/// Strip the HardFork Combinator success wrapper `[result]` (1-element array).
+/// Strip the HardFork Combinator success wrapper `[1, result]`.
 ///
-/// Handles both wrapped (from Haskell node) and unwrapped (from Torsten) responses.
+/// BlockQuery results from the server are wrapped: `[1, actual_result]`.
+/// After stripping, the decoder is positioned at `actual_result`.
+/// If the response is unwrapped, the position is reset so the caller
+/// can parse directly.
 fn strip_hfc_wrapper(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError> {
     let pos = decoder.position();
-    if let Ok(Some(1)) = decoder.array() {
-        Ok(())
-    } else {
-        decoder.set_position(pos);
-        Ok(())
+    match decoder.array() {
+        Ok(Some(2)) => {
+            // Read the HFC tag (should be 1 for success)
+            match decoder.u64() {
+                Ok(1) => Ok(()), // success — decoder is now at the actual result
+                _ => {
+                    decoder.set_position(pos);
+                    Ok(())
+                }
+            }
+        }
+        _ => {
+            decoder.set_position(pos);
+            Ok(())
+        }
     }
 }
 

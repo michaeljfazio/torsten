@@ -2242,7 +2242,7 @@ impl Node {
             };
             // Fallback: accept block_number == tip + 1 when hash doesn't
             // match (replay vs network serialization hash difference).
-            hash_match || (!hash_match && block_number.0 == tip_block + 1)
+            hash_match || block_number.0 == tip_block + 1
         };
 
         if !connects_to_tip {
