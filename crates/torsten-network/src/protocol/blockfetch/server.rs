@@ -54,8 +54,14 @@ use crate::BlockProvider;
 
 use super::{decode_message, encode_message, BlockFetchMessage, TAG_BLOCK};
 
-/// Maximum number of blocks per batch response.
-pub const MAX_BLOCKS_PER_BATCH: usize = 100;
+/// Safety limit on blocks pre-collected per batch response.
+///
+/// The Haskell BlockFetch client expects ALL blocks between from_point and
+/// to_point to be served in a single batch.  Sending fewer triggers
+/// `BlockFetchProtocolFailureTooFewBlocks`.  Typical ranges are 10–200
+/// blocks; in dense chain regions they can reach ~500.  We set a generous
+/// upper bound to prevent unbounded memory use from malicious requests.
+pub const MAX_BLOCKS_PER_BATCH: usize = 2000;
 
 /// BlockFetch server that serves block ranges to peers.
 pub struct BlockFetchServer;
@@ -77,6 +83,11 @@ impl BlockFetchServer {
 
             match msg {
                 BlockFetchMessage::MsgRequestRange { from, to } => {
+                    tracing::debug!(
+                        from = ?from,
+                        to = ?to,
+                        "blockfetch server: received MsgRequestRange"
+                    );
                     Self::handle_request_range(channel, block_provider, &from, &to).await?;
                 }
                 BlockFetchMessage::MsgClientDone => {
@@ -135,19 +146,28 @@ impl BlockFetchServer {
             return Ok(());
         }
 
-        // Collect blocks in the range.
-        let mut blocks: Vec<Vec<u8>> = Vec::new();
+        // Collect blocks in the range [from_slot, to_slot].
+        //
+        // The first lookup uses `get_block_at_or_after_slot` (>=) to include
+        // blocks AT from_slot (e.g. the Byron genesis EBB at slot 0).
+        // Subsequent lookups use `get_next_block_after_slot` (>) to advance.
+        let mut blocks: Vec<(u64, [u8; 32], Vec<u8>)> = Vec::new();
         let mut current_slot = from_slot;
+        let mut first_lookup = true;
 
         while current_slot <= to_slot && blocks.len() < MAX_BLOCKS_PER_BATCH {
-            if let Some((slot, _hash, cbor)) =
-                block_provider.get_next_block_after_slot(current_slot.saturating_sub(1))
-            {
+            let next = if first_lookup {
+                first_lookup = false;
+                block_provider.get_block_at_or_after_slot(current_slot)
+            } else {
+                block_provider.get_next_block_after_slot(current_slot)
+            };
+            if let Some((slot, hash, cbor)) = next {
                 if slot > to_slot {
                     break;
                 }
-                blocks.push(cbor);
-                current_slot = slot + 1;
+                current_slot = slot;
+                blocks.push((slot, hash, cbor));
             } else {
                 break;
             }
@@ -163,7 +183,14 @@ impl BlockFetchServer {
         let start = encode_message(&BlockFetchMessage::MsgStartBatch);
         channel.send(start).await.map_err(ProtocolError::from)?;
 
-        for block_cbor in &blocks {
+        for (slot, hash, block_cbor) in &blocks {
+            tracing::debug!(
+                slot,
+                hash = hex::encode(hash),
+                cbor_len = block_cbor.len(),
+                first_bytes = hex::encode(&block_cbor[..block_cbor.len().min(16)]),
+                "blockfetch server: serving block"
+            );
             // Encode MsgBlock: [4, tag(24) bstr(stored_block_cbor)].
             // The stored CBOR format [era_word, body] is identical to what
             // Haskell's encodeDiskHfcBlock produces, so it goes verbatim
@@ -184,6 +211,10 @@ impl BlockFetchServer {
             block_count = blocks.len(),
             from_slot,
             to_slot,
+            first_hash = blocks
+                .first()
+                .map(|(_, h, _)| hex::encode(h))
+                .unwrap_or_default(),
             "blockfetch server: served batch"
         );
 
@@ -394,7 +425,11 @@ mod tests {
         let mut dec = Decoder::new(&wire_bytes);
         let arr = dec.array().unwrap();
         assert_eq!(arr, Some(2), "outer array must have length 2");
-        assert_eq!(dec.u64().unwrap(), TAG_BLOCK, "first element must be MsgBlock tag (4)");
+        assert_eq!(
+            dec.u64().unwrap(),
+            TAG_BLOCK,
+            "first element must be MsgBlock tag (4)"
+        );
 
         // Second element MUST be tag(24) — the CBOR-in-CBOR wrapper.
         let tag = dec.tag().unwrap();
@@ -407,7 +442,8 @@ mod tests {
         // The bstr payload must be the original stored CBOR verbatim.
         let payload = dec.bytes().unwrap();
         assert_eq!(
-            payload, stored_cbor.as_slice(),
+            payload,
+            stored_cbor.as_slice(),
             "tag(24) payload must be the verbatim stored block CBOR"
         );
     }

@@ -48,7 +48,24 @@ pub trait BlockProvider: Send + Sync + 'static {
     fn get_tip(&self) -> TipInfo;
 
     /// Get the next block after a given slot. Returns `(slot, hash, cbor)` if found.
+    ///
+    /// Uses strict `>` comparison: only returns blocks with `slot > after_slot`.
     fn get_next_block_after_slot(&self, after_slot: u64) -> Option<(u64, [u8; 32], Vec<u8>)>;
+
+    /// Get the first block at or after a given slot. Returns `(slot, hash, cbor)`.
+    ///
+    /// Uses `>=` comparison, so `get_block_at_or_after_slot(0)` includes blocks
+    /// at slot 0 (e.g. Byron genesis EBB).  Used by ChainSync when the cursor is
+    /// at Origin and we must serve the very first block on the chain.
+    fn get_block_at_or_after_slot(&self, slot: u64) -> Option<(u64, [u8; 32], Vec<u8>)> {
+        // Default: fall back to strict-after lookup.  This is correct when
+        // slot > 0, but misses slot-0 blocks.  Implementations should override.
+        if slot == 0 {
+            self.get_next_block_after_slot(0)
+        } else {
+            self.get_next_block_after_slot(slot.saturating_sub(1))
+        }
+    }
 }
 
 /// Chain tip information returned by [`BlockProvider::get_tip`].

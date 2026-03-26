@@ -694,6 +694,24 @@ impl VolatileDB {
         None
     }
 
+    /// Get the first block at or after a given slot (inclusive `>=`).
+    ///
+    /// Unlike [`get_next_block_after_slot`] which uses strict `>`, this method
+    /// includes blocks at exactly `slot`.
+    pub fn get_block_at_or_after_slot(&self, slot: u64) -> Option<(u64, Hash32, &[u8])> {
+        let on_chain: HashSet<&Hash32> = self.selected_chain.iter().collect();
+        for (&s, hashes) in self.slot_index.range(slot..) {
+            for hash in hashes {
+                if on_chain.contains(hash) {
+                    if let Some(block) = self.blocks.get(hash) {
+                        return Some((s, *hash, &block.cbor));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get a block by block number.
     pub fn get_block_by_number(&self, block_no: u64) -> Option<(u64, Hash32, &[u8])> {
         let hash = self.block_no_index.get(&block_no)?;

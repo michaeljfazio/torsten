@@ -73,6 +73,21 @@ impl BlockProvider for ChainDBBlockProvider {
             }
         })
     }
+
+    fn get_block_at_or_after_slot(&self, slot: u64) -> Option<(u64, [u8; 32], Vec<u8>)> {
+        tokio::task::block_in_place(|| {
+            let db = self.chain_db.blocking_read();
+            let slot_no = torsten_primitives::time::SlotNo(slot);
+            match db.get_block_at_or_after_slot(slot_no) {
+                Ok(Some((s, hash, cbor))) => {
+                    let mut hash_arr = [0u8; 32];
+                    hash_arr.copy_from_slice(hash.as_bytes());
+                    Some((s.0, hash_arr, cbor))
+                }
+                _ => None,
+            }
+        })
+    }
 }
 
 // ─── LedgerUtxoProvider ──────────────────────────────────────────────────────

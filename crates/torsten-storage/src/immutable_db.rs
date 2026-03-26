@@ -840,6 +840,83 @@ impl ImmutableDB {
         None
     }
 
+    /// Get the first block at or after a given slot (inclusive `>=` comparison).
+    ///
+    /// Unlike [`get_next_block_after_slot`] which uses strict `>`, this method
+    /// includes blocks at exactly `slot`.  Used to serve the genesis EBB at
+    /// slot 0 when the ChainSync cursor is at Origin.
+    pub fn get_block_at_or_after_slot(&self, slot: u64) -> Option<(u64, Hash32, Vec<u8>)> {
+        // For slot 0, start from the very first chunk.
+        // For slot > 0, we can still use the partition_point optimisation but
+        // with a less-strict predicate: skip chunks whose last_slot < slot
+        // (not <=).
+        let start_idx = if slot == 0 {
+            0
+        } else {
+            self.chunks.partition_point(|c| c.last_slot < slot)
+        };
+
+        for chunk_meta in &self.chunks[start_idx..] {
+            let secondary_path = self
+                .dir
+                .join(format!("{:05}.secondary", chunk_meta.chunk_num));
+            let secondary_data = match fs::read(&secondary_path) {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+
+            let chunk_path = self.dir.join(format!("{:05}.chunk", chunk_meta.chunk_num));
+            let chunk_len = match chunk_path.metadata() {
+                Ok(m) => m.len(),
+                Err(_) => continue,
+            };
+
+            let mut pos = 0;
+            while pos + SECONDARY_ENTRY_SIZE <= secondary_data.len() {
+                let data = &secondary_data[pos..];
+                let block_offset = match read_be_u64(&data[0..8]) {
+                    Some(v) => v,
+                    None => {
+                        pos += SECONDARY_ENTRY_SIZE;
+                        continue;
+                    }
+                };
+                let mut header_hash = [0u8; 32];
+                header_hash.copy_from_slice(&data[16..48]);
+                let entry_slot = match read_be_u64(&data[48..56]) {
+                    Some(v) => v,
+                    None => {
+                        pos += SECONDARY_ENTRY_SIZE;
+                        continue;
+                    }
+                };
+
+                // Inclusive: entry_slot >= slot (not strict >).
+                if entry_slot >= slot {
+                    let next_pos = pos + SECONDARY_ENTRY_SIZE;
+                    let block_end = if next_pos + SECONDARY_ENTRY_SIZE <= secondary_data.len() {
+                        read_be_u64(&secondary_data[next_pos..next_pos + 8]).unwrap_or(chunk_len)
+                    } else {
+                        chunk_len
+                    };
+
+                    let loc = BlockLocation {
+                        chunk_num: chunk_meta.chunk_num,
+                        block_offset,
+                        block_end,
+                    };
+                    if let Some(cbor) = self.read_block_at(&loc) {
+                        return Some((entry_slot, Hash32::from_bytes(header_hash), cbor));
+                    }
+                }
+
+                pos += SECONDARY_ENTRY_SIZE;
+            }
+        }
+
+        None
+    }
+
     /// Get blocks in slot range `[from_slot, to_slot]` inclusive.
     ///
     /// Uses the batched [`ChunkReader::read_ranges`] API to read all

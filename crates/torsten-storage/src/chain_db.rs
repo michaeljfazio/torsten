@@ -418,6 +418,37 @@ impl ChainDB {
         }
     }
 
+    /// Get the first block at or after a given slot (inclusive `>=`).
+    ///
+    /// Checks both ImmutableDB and VolatileDB, returning the block with the
+    /// lowest slot that is `>= slot`.
+    pub fn get_block_at_or_after_slot(
+        &self,
+        slot: SlotNo,
+    ) -> Result<Option<(SlotNo, BlockHeaderHash, Vec<u8>)>, ChainDBError> {
+        let imm_result = self
+            .immutable
+            .get_block_at_or_after_slot(slot.0)
+            .map(|(s, h, cbor)| (SlotNo(s), h, cbor));
+
+        let vol_result = self
+            .volatile
+            .get_block_at_or_after_slot(slot.0)
+            .map(|(s, h, cbor)| (SlotNo(s), h, cbor.to_vec()));
+
+        match (imm_result, vol_result) {
+            (Some((is, ih, ic)), Some((vs, vh, vc))) => {
+                if is <= vs {
+                    Ok(Some((is, ih, ic)))
+                } else {
+                    Ok(Some((vs, vh, vc)))
+                }
+            }
+            (Some(r), None) | (None, Some(r)) => Ok(Some(r)),
+            (None, None) => Ok(None),
+        }
+    }
+
     // -- Chain history ------------------------------------------------------
 
     /// Walk backwards from the volatile tip through `prev_hash` links,
