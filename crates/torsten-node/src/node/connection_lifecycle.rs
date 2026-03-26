@@ -40,6 +40,7 @@ use torsten_ledger::LedgerState;
 use torsten_primitives::block::Block;
 use torsten_storage::ChainDB;
 
+use crate::metrics::NodeMetrics;
 use super::networking::{ConnectionDirection, NodePeerManager};
 use super::peer_connection::{PeerConnection, PeerConnectionError, ProtocolTaskFn};
 
@@ -166,6 +167,9 @@ pub struct ConnectionLifecycleManager {
     /// Highest slot that has been fetched or is being fetched.
     /// Used to skip duplicate fetches from other peers.
     max_fetched_slot: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Prometheus metrics for recording peer latencies.
+    metrics: Arc<NodeMetrics>,
 }
 
 /// Errors from lifecycle management operations.
@@ -211,6 +215,7 @@ impl ConnectionLifecycleManager {
     /// * `chain_db` — Shared ChainDB reference
     /// * `ledger_state` — Shared LedgerState reference
     /// * `byron_epoch_length` — Byron epoch length in slots
+    /// * `metrics` — Prometheus metrics handle for recording peer latencies
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
@@ -222,6 +227,7 @@ impl ConnectionLifecycleManager {
         chain_db: Arc<RwLock<ChainDB>>,
         ledger_state: Arc<RwLock<LedgerState>>,
         byron_epoch_length: u64,
+        metrics: Arc<NodeMetrics>,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -236,6 +242,7 @@ impl ConnectionLifecycleManager {
             byron_epoch_length,
             active_fetcher: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             max_fetched_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            metrics,
         }
     }
 

@@ -1777,6 +1777,7 @@ impl Node {
             self.chain_db.clone(),
             self.ledger_state.clone(),
             self.byron_epoch_length,
+            self.metrics.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
@@ -2284,6 +2285,17 @@ impl Node {
         // Update consensus tip.
         self.consensus.update_tip(block.tip());
 
+        // Log the new block at INFO level so operators can see chain advancement
+        let hash_hex = block.header.header_hash.to_hex();
+        info!(
+            era = %block.era,
+            slot = block_slot.0,
+            block = block_number.0,
+            txs = block.transactions.len(),
+            hash = %hash_hex,
+            "Chain extended",
+        );
+
         // Update metrics.
         self.metrics
             .blocks_received
@@ -2293,6 +2305,15 @@ impl Node {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.metrics.set_slot(block_slot.0);
         self.metrics.set_block_number(block_number.0);
+        // Update tip slot time so tip_age_seconds stays fresh
+        {
+            let ls = self.ledger_state.read().await;
+            let sc = &ls.slot_config;
+            let slot_time_ms =
+                sc.zero_time + block_slot.0.saturating_sub(sc.zero_slot) * sc.slot_length as u64;
+            self.metrics.set_tip_slot_time_ms(slot_time_ms);
+            self.metrics.set_epoch(ls.epoch.0);
+        }
 
         // Announce to downstream peers.
         if let Some(ref tx) = self.block_announcement_tx {
