@@ -4,16 +4,32 @@
 //! into SDU-sized chunks with proper headers, and writes them to the bearer in
 //! batches for efficiency.
 //!
+//! ## Per-protocol serialisation
+//!
+//! The Ouroboros mux delivers SDU payloads per-protocol in arrival order.
+//! A receiver accumulates bytes from successive SDUs until a complete CBOR
+//! message is formed.  If segments from two *different messages* on the
+//! *same protocol* are interleaved, the receiver concatenates them and the
+//! CBOR decoder sees corrupted input.
+//!
+//! Therefore: for each `(protocol_id, direction)` pair, a message's
+//! continuation segments **must** be fully sent before any segment of the
+//! *next* message on that same pair can start.  Messages from *different*
+//! protocols may still be interleaved freely (fairness).
+//!
 //! ## Fairness
-//! If a message exceeds one SDU, only one chunk is written per round. The remainder
-//! is re-enqueued so that other protocols get a turn (round-robin fairness). This
-//! prevents a large BlockFetch response from starving KeepAlive responses.
+//!
+//! Between continuation chunks of a large message, the egress serves one
+//! chunk from every other protocol that has pending data (round-robin).
+//! This prevents a large BlockFetch response from starving KeepAlive.
 //!
 //! ## Batching
+//!
 //! Multiple SDUs are accumulated up to `batch_size` bytes before a single
 //! `write_all()` + `flush()` call to the bearer, reducing syscall overhead.
 
 use bytes::Bytes;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 
 use crate::error::{BearerError, MuxError};
@@ -21,6 +37,9 @@ use crate::mux::segment::{current_timestamp, encode_header, Direction, SduHeader
 
 /// Maximum number of SDUs to accumulate in a single write batch.
 const MAX_SDUS_PER_BATCH: usize = 100;
+
+/// Key identifying a protocol channel: (protocol_id, direction).
+type ChannelKey = (u16, Direction);
 
 /// Egress task state. Created by the [`Mux`] and run as a spawned tokio task.
 pub struct EgressTask {
@@ -63,99 +82,89 @@ impl EgressTask {
                 Box<dyn std::future::Future<Output = Result<(), BearerError>> + Send>,
             > + Send,
     {
-        // Pending remainder from a message that was too large for one SDU.
-        // We re-process these before reading new messages (round-robin fairness).
-        let mut pending: Vec<(u16, Direction, Bytes)> = Vec::new();
+        // Per-channel message queue.  Each entry is a complete message or a
+        // continuation remainder.  For a given channel, only the FRONT item
+        // may have segments on the wire — new messages are queued BEHIND the
+        // current one so their bytes never interleave.
+        let mut queues: HashMap<ChannelKey, VecDeque<Bytes>> = HashMap::new();
+
         // Batch buffer for accumulating multiple SDUs before a single write.
         let mut batch_buf: Vec<u8> = Vec::with_capacity(self.batch_size);
 
         loop {
-            // First, process any pending remainders from previous round
-            let mut next_pending: Vec<(u16, Direction, Bytes)> = Vec::new();
+            // ── Phase 1: write one SDU per channel that has data ─────────
+            let mut made_progress = false;
+            let keys: Vec<ChannelKey> = queues.keys().copied().collect();
 
-            for (protocol_id, direction, data) in pending.drain(..) {
-                self.write_one_sdu(
-                    protocol_id,
-                    direction,
-                    data,
-                    &mut batch_buf,
-                    &mut next_pending,
-                );
+            for key in &keys {
+                let queue = match queues.get_mut(key) {
+                    Some(q) if !q.is_empty() => q,
+                    _ => continue,
+                };
 
-                // Flush batch if it's getting large
-                if batch_buf.len() >= self.batch_size || next_pending.len() >= MAX_SDUS_PER_BATCH {
-                    write_fn(&batch_buf).await.map_err(MuxError::Bearer)?;
-                    batch_buf.clear();
+                // Take the front item (the in-flight message for this channel).
+                let data = queue.pop_front().unwrap();
+                let chunk_len = data.len().min(self.sdu_size);
+
+                let header = SduHeader {
+                    timestamp: current_timestamp(),
+                    protocol_id: key.0,
+                    direction: key.1,
+                    payload_length: chunk_len as u16,
+                };
+                batch_buf.extend_from_slice(&encode_header(&header));
+                batch_buf.extend_from_slice(&data[..chunk_len]);
+                made_progress = true;
+
+                // If there's a remainder, push it BACK TO THE FRONT so it
+                // is sent before any queued successor message.
+                if chunk_len < data.len() {
+                    queue.push_front(data.slice(chunk_len..));
                 }
-            }
 
-            pending = next_pending;
-
-            // If we have pending remainders, try to drain more without blocking
-            if !pending.is_empty() {
-                // Flush what we have and continue the loop to process remainders
-                if !batch_buf.is_empty() {
-                    write_fn(&batch_buf).await.map_err(MuxError::Bearer)?;
-                    batch_buf.clear();
-                }
-                continue;
-            }
-
-            // Read new messages — block on first, then drain non-blocking
-            let first = self.rx.recv().await;
-            match first {
-                None => {
-                    // Channel closed — flush any remaining data and exit
-                    if !batch_buf.is_empty() {
-                        write_fn(&batch_buf).await.map_err(MuxError::Bearer)?;
-                    }
-                    return Ok(());
-                }
-                Some((pid, dir, data)) => {
-                    self.write_one_sdu(pid, dir, data, &mut batch_buf, &mut pending);
-                }
-            }
-
-            // Drain any additional messages without blocking
-            while let Ok((pid, dir, data)) = self.rx.try_recv() {
-                self.write_one_sdu(pid, dir, data, &mut batch_buf, &mut pending);
                 if batch_buf.len() >= self.batch_size {
-                    break;
+                    write_fn(&batch_buf).await.map_err(MuxError::Bearer)?;
+                    batch_buf.clear();
                 }
             }
 
-            // Flush the batch
+            // Remove empty queues.
+            queues.retain(|_, q| !q.is_empty());
+
+            // Flush whatever accumulated in this round.
             if !batch_buf.is_empty() {
                 write_fn(&batch_buf).await.map_err(MuxError::Bearer)?;
                 batch_buf.clear();
             }
-        }
-    }
 
-    /// Write one SDU-worth of a message to the batch buffer.
-    /// If the message is larger than `sdu_size`, only the first chunk is written
-    /// and the remainder is pushed to `pending` for the next round (fairness).
-    fn write_one_sdu(
-        &self,
-        protocol_id: u16,
-        direction: Direction,
-        data: Bytes,
-        batch_buf: &mut Vec<u8>,
-        pending: &mut Vec<(u16, Direction, Bytes)>,
-    ) {
-        let chunk_len = data.len().min(self.sdu_size);
-        let header = SduHeader {
-            timestamp: current_timestamp(),
-            protocol_id,
-            direction,
-            payload_length: chunk_len as u16,
-        };
-        batch_buf.extend_from_slice(&encode_header(&header));
-        batch_buf.extend_from_slice(&data[..chunk_len]);
+            // If we made progress, loop again to send more continuation
+            // chunks (or start the next queued message).
+            if made_progress {
+                // Non-blocking drain of any new messages that arrived while
+                // we were writing.
+                let mut sdu_count = 0;
+                while let Ok((pid, dir, data)) = self.rx.try_recv() {
+                    queues.entry((pid, dir)).or_default().push_back(data);
+                    sdu_count += 1;
+                    if sdu_count >= MAX_SDUS_PER_BATCH {
+                        break;
+                    }
+                }
+                continue;
+            }
 
-        // If there's a remainder, enqueue it for the next round
-        if chunk_len < data.len() {
-            pending.push((protocol_id, direction, data.slice(chunk_len..)));
+            // ── Phase 2: no pending data — block for the next message ────
+            match self.rx.recv().await {
+                None => return Ok(()),
+                Some((pid, dir, data)) => {
+                    queues.entry((pid, dir)).or_default().push_back(data);
+                }
+            }
+
+            // Non-blocking drain of any additional messages.
+            while let Ok((pid, dir, data)) = self.rx.try_recv() {
+                queues.entry((pid, dir)).or_default().push_back(data);
+            }
         }
     }
 }

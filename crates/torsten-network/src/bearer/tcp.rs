@@ -13,19 +13,11 @@ use tokio::net::TcpStream;
 use super::Bearer;
 use crate::error::BearerError;
 
-/// TCP SDU payload size (bytes).
+/// TCP SDU payload size (bytes). Matches Haskell's `SDUSize 12_288`.
 ///
-/// Haskell `makeSocketBearer` uses `SDUSize 12_288` and splits outgoing
-/// data at exactly that many payload bytes.  However, when Torsten uses
-/// 12,288 and a message spans multiple SDU segments, the Haskell peer's
-/// CBOR decoder intermittently reports `DeserialiseFailure` on blocks
-/// ≥ ~64 KB (e.g., Babbage blocks with Plutus scripts).  Using a single
-/// large SDU that fits the entire MsgBlock avoids the issue.
-///
-/// TODO: investigate the multi-segment reassembly mismatch with Haskell
-/// mux at 12,288 — likely an egress interleaving or direction-bit issue
-/// in continuation segments.
-pub const TCP_SDU_SIZE: usize = 65_535;
+/// Haskell's `BL.splitAt (fromIntegral sduSize) d` splits payload at
+/// exactly this many bytes.  The 8-byte mux header is added separately.
+pub const TCP_SDU_SIZE: usize = 12_288;
 
 /// TCP write batch size (bytes). Matches Haskell's batch of 131,072.
 pub const TCP_BATCH_SIZE: usize = 131_072;
