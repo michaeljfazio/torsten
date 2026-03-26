@@ -34,3 +34,4 @@ fuzz/target/
 epoch-snapshots/
 cstreamer-reference/
 *.bak
+.worktrees/

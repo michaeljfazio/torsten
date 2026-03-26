@@ -1606,8 +1606,9 @@ impl Node {
                 );
                 {
                     let pm = self.peer_manager.read().await;
+                    // Connected = warm + hot (both have live TCP connections).
                     self.metrics.peers_connected.store(
-                        pm.hot_peer_count() as u64,
+                        (pm.warm_peer_count() + pm.hot_peer_count()) as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     self.metrics.peers_outbound.store(
@@ -2012,6 +2013,12 @@ impl Node {
                         "Replay       complete ({} blocks in {}s, {} applied, {} skipped, {} blk/s)",
                         total, elapsed as u64, replayed, skipped, speed as u64,
                     );
+                    // Update metrics with final replay state
+                    let ls = ledger_state.blocking_read();
+                    let slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    metrics.set_slot(slot);
+                    metrics.set_block_number(ls.tip.block_number.0);
+                    metrics.set_epoch(ls.epoch.0);
                 }
                 Err(e) => {
                     // "shutdown requested" is not an error — it's a normal
@@ -2199,6 +2206,17 @@ impl Node {
             "Replay complete",
         );
 
+        // Update metrics with final replay state so they reflect the true
+        // ledger position immediately (the progress ticker only fires every
+        // 5 seconds and may miss the final state for short replays).
+        {
+            let ls = self.ledger_state.read().await;
+            let slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+            self.metrics.set_slot(slot);
+            self.metrics.set_block_number(ls.tip.block_number.0);
+            self.metrics.set_epoch(ls.epoch.0);
+        }
+
         // Re-enable WAL and address indexing after replay
         {
             let mut ls = self.ledger_state.write().await;
@@ -2244,10 +2262,35 @@ impl Node {
 /// For HFC-wrapped headers, the hash is computed over the entire wrapped
 /// envelope, matching how Haskell computes it.
 fn extract_hash_from_header(header_cbor: &[u8]) -> [u8; 32] {
-    let hash = torsten_primitives::hash::blake2b_256(header_cbor);
+    // The N2N ChainSync protocol sends headers as HFC-wrapped:
+    //   [era_tag, tag24(inner_header_bytes)]
+    // The Cardano block hash is blake2b_256 of the INNER header bytes
+    // (the bytes inside tag24), NOT the outer wrapper. Hashing the wrapper
+    // produces wrong hashes that BlockFetch cannot find.
+    let inner = unwrap_hfc_header(header_cbor).unwrap_or(header_cbor);
+    let hash = torsten_primitives::hash::blake2b_256(inner);
     let mut arr = [0u8; 32];
     arr.copy_from_slice(hash.as_ref());
     arr
+}
+
+/// Unwrap an HFC-wrapped header to get the inner header bytes.
+///
+/// N2N ChainSync headers are wrapped as `[era_tag, tag24(inner_bytes)]`.
+/// Returns the inner bytes, or `None` if the CBOR is not in HFC format.
+fn unwrap_hfc_header(header_cbor: &[u8]) -> Option<&[u8]> {
+    use minicbor::Decoder;
+    let mut dec = Decoder::new(header_cbor);
+    let arr_len = dec.array().ok()?;
+    if arr_len != Some(2) {
+        return None;
+    }
+    let _era_tag = dec.u64().ok()?;
+    let tag = dec.tag().ok()?;
+    if tag != minicbor::data::Tag::new(24) {
+        return None;
+    }
+    dec.bytes().ok()
 }
 
 /// Extract the slot number from a wrapped header CBOR.

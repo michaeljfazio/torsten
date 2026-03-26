@@ -43,7 +43,7 @@ impl LedgerState {
                     | GovAction::TreasuryWithdrawals { .. }
             );
             if disallowed {
-                warn!(
+                debug!(
                     tx = %tx_hash.to_hex(),
                     action_index,
                     action_type = ?std::mem::discriminant(&proposal.gov_action),
@@ -72,7 +72,7 @@ impl LedgerState {
             let can_follow = (*tgt_major == cur_major + 1 && *tgt_minor == 0)
                 || (*tgt_major == cur_major && *tgt_minor > cur_minor);
             if !can_follow {
-                warn!(
+                debug!(
                     tx = %tx_hash.to_hex(),
                     action_index,
                     cur_version = %format!("{cur_major}.{cur_minor}"),
@@ -108,7 +108,7 @@ impl LedgerState {
                 prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.governance);
             let in_flight = self.governance.proposals.contains_key(prev);
             if !valid_root && !in_flight {
-                warn!(
+                debug!(
                     tx = %tx_hash.to_hex(),
                     action_index,
                     prev_action = %prev.transaction_id.to_hex(),

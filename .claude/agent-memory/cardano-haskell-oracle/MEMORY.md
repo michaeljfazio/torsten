@@ -58,6 +58,7 @@
 
 ## N2N Connection Architecture
 - See [n2n-connection-architecture.md](n2n-connection-architecture.md) — MuxMode, DataFlow, bit-15 convention, protocol temperature, Hot/Warm/Cold, TxSubmission2 delay, error propagation
+- See [mux-connection-architecture.md](mux-connection-architecture.md) — Complete mux deep-dive: single TCP per peer, 3 core threads (muxer/demuxer/monitor), SDU framing, temperature lifecycle (Cold→Warm→Hot), all timeout values, BlockFetch decision loop, ingress queue limits
 
 ## TxSubmission2 Architecture
 - See [txsubmission2-architecture.md](txsubmission2-architecture.md) — Complete deep-dive: V1/V2 server, outbound client, governor lifecycle, decision logic, mempool sync, connection stability, Torsten gaps
@@ -121,6 +122,9 @@
 
 ## Genesis Initialization & Ledger State
 - See [genesis-initialization-ledger-state.md](genesis-initialization-ledger-state.md) — Byron→Shelley translation, genDelegs vs pool registrations, staking section, resetStakeDistribution, initial snapshots, preview testnet init sequence
+
+## BlockFetch Concurrency Architecture
+- See [blockfetch-concurrency-architecture.md](blockfetch-concurrency-architecture.md) — BulkSync=1 peer, Deadline=2 peers, decision pipeline, async ChainDB queue, out-of-order block support, per-block addFetchedBlock callback, 100 max in-flight per peer
 
 ## Test Vectors for Conformance
 - See [test-vectors-reference.md](test-vectors-reference.md) — Full catalog of test vectors from all Haskell repos

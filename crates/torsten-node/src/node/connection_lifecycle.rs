@@ -25,6 +25,7 @@
 //! that translates `GovernorAction` decisions into `PeerConnection` lifecycle calls.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -162,6 +163,9 @@ pub struct ConnectionLifecycleManager {
     /// port number of the active peer (0 = none active). Workers compete for
     /// this flag — the first to claim it becomes the sole fetcher.
     active_fetcher: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest slot that has been fetched or is being fetched.
+    /// Used to skip duplicate fetches from other peers.
+    max_fetched_slot: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Errors from lifecycle management operations.
@@ -231,6 +235,7 @@ impl ConnectionLifecycleManager {
             ledger_state,
             byron_epoch_length,
             active_fetcher: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            max_fetched_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -637,6 +642,7 @@ impl ConnectionLifecycleManager {
         // Shared flag: only ONE BlockFetch worker is active at a time.
         // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
         let active_fetcher = self.active_fetcher.clone();
+        let max_fetched_slot = self.max_fetched_slot.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
@@ -660,8 +666,12 @@ impl ConnectionLifecycleManager {
                         biased;
                         _ = cancel.cancelled() => {
                             // Release the active fetcher flag if we hold it.
+                            // Use hash of full SocketAddr (IP + port) for unique peer ID.
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            addr.hash(&mut hasher);
+                            let cancel_id = hasher.finish() | 1; // ensure non-zero
                             let _ = active_fetcher.compare_exchange(
-                                addr.port() as u64,
+                                cancel_id,
                                 0,
                                 std::sync::atomic::Ordering::SeqCst,
                                 std::sync::atomic::Ordering::SeqCst,
@@ -671,28 +681,44 @@ impl ConnectionLifecycleManager {
                         }
                         _ = poll_ticker.tick() => {
                             // Try to become the active fetcher.
-                            // Use port as a unique peer identifier (good enough).
-                            let my_id = addr.port() as u64;
+                            // Use hash of full SocketAddr for a unique non-zero peer ID.
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            addr.hash(&mut hasher);
+                            let my_id = hasher.finish() | 1; // ensure non-zero
+
+                            // Atomically claim the active fetcher slot using CAS to
+                            // prevent TOCTOU races where two workers both see 0 and
+                            // both store their ID (concurrent fetches).
+                            let claimed = active_fetcher.compare_exchange(
+                                0,
+                                my_id,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            ).is_ok();
+
+                            // Also allow re-entry if we already hold the slot.
                             let current = active_fetcher.load(std::sync::atomic::Ordering::SeqCst);
-                            if current != 0 && current != my_id {
+                            if !claimed && current != my_id {
                                 // Another worker is active — wait.
                                 continue;
                             }
-                            // Claim or re-claim the active fetcher slot.
-                            active_fetcher.store(my_id, std::sync::atomic::Ordering::SeqCst);
 
-                            // Take ALL pending headers from ALL peers (not just this one).
-                            // Since we're the sole fetcher, we pick the peer with the
-                            // most headers to fetch from.
+                            // Take pending headers from this peer, filtering out any
+                            // slots that have already been fetched by another peer.
                             let headers_to_fetch = {
                                 let mut chains = candidate_chains.write().await;
                                 if let Some(state) = chains.get_mut(&addr) {
-                                    let taken = std::mem::take(&mut state.pending_headers);
-                                    if taken.is_empty() {
+                                    let max_fetched = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
+                                    let all = std::mem::take(&mut state.pending_headers);
+                                    // Only fetch headers with slot > max_fetched_slot
+                                    let filtered: Vec<_> = all.into_iter()
+                                        .filter(|h| h.slot > max_fetched)
+                                        .collect();
+                                    if filtered.is_empty() {
                                         // Release active fetcher so another peer can try.
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                     }
-                                    taken
+                                    filtered
                                 } else {
                                     active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                     continue;
@@ -713,7 +739,9 @@ impl ConnectionLifecycleManager {
 
                             // Fetch blocks IN ORDER (headers are already sorted by slot
                             // since ChainSync delivers them sequentially).
+                            debug!(%addr, count = headers_to_fetch.len(), "BlockFetch: about to start fetch loop");
                             for header in &headers_to_fetch {
+                                debug!(%addr, slot = header.slot, "BlockFetch: fetching header");
                                 let from = CodecPoint::Specific(header.slot, header.hash);
                                 let to = CodecPoint::Specific(header.slot, header.hash);
 
@@ -730,7 +758,7 @@ impl ConnectionLifecycleManager {
                                         ) {
                                             Ok(block) => {
                                                 let slot = block.slot().0;
-                                                debug!(%addr, slot, "block decoded");
+                                                debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded, sending to run loop");
                                                 match tx.try_send(FetchedBlock {
                                                     peer,
                                                     block,
@@ -759,6 +787,11 @@ impl ConnectionLifecycleManager {
                                         return; // bearer died
                                     }
                                 }
+                            }
+
+                            // Update max_fetched_slot so other peers skip these blocks.
+                            if let Some(last) = headers_to_fetch.last() {
+                                max_fetched_slot.fetch_max(last.slot, std::sync::atomic::Ordering::SeqCst);
                             }
                         }
                     }

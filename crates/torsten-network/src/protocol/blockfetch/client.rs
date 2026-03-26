@@ -31,11 +31,20 @@ impl BlockFetchClient {
         F: FnMut(Vec<u8>) -> Result<(), ProtocolError>,
     {
         // Send MsgRequestRange
-        let req = encode_message(&BlockFetchMessage::MsgRequestRange { from, to });
+        let req = encode_message(&BlockFetchMessage::MsgRequestRange {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        tracing::debug!("blockfetch: sending MsgRequestRange");
         channel.send(req).await.map_err(ProtocolError::from)?;
+        tracing::debug!("blockfetch: MsgRequestRange sent, waiting for response");
 
         // Receive MsgStartBatch or MsgNoBlocks
         let response_bytes = channel.recv().await.map_err(ProtocolError::from)?;
+        tracing::debug!(
+            bytes = response_bytes.len(),
+            "blockfetch: received response"
+        );
         let response = decode_message(&response_bytes).map_err(|e| ProtocolError::CborDecode {
             protocol: "BlockFetch",
             reason: e,
@@ -43,13 +52,14 @@ impl BlockFetchClient {
 
         match response {
             BlockFetchMessage::MsgNoBlocks => {
-                tracing::debug!("blockfetch: range not available");
+                tracing::debug!("blockfetch: range not available (MsgNoBlocks)");
                 return Ok(0);
             }
             BlockFetchMessage::MsgStartBatch => {
-                // Stream blocks until MsgBatchDone
+                tracing::debug!("blockfetch: MsgStartBatch received, streaming blocks");
             }
             other => {
+                tracing::error!("blockfetch: unexpected response: {other:?}");
                 return Err(ProtocolError::StateViolation {
                     protocol: "BlockFetch",
                     expected: "MsgStartBatch or MsgNoBlocks".to_string(),
@@ -70,6 +80,11 @@ impl BlockFetchClient {
             match msg {
                 BlockFetchMessage::MsgBlock(data) => {
                     block_count += 1;
+                    tracing::debug!(
+                        block_count,
+                        data_len = data.len(),
+                        "blockfetch: MsgBlock received"
+                    );
                     on_block(data)?;
                 }
                 BlockFetchMessage::MsgBatchDone => {

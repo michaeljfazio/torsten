@@ -181,6 +181,116 @@ impl TextEnvelope {
     }
 }
 
+impl TextEnvelope {
+    /// Read a text envelope from a file path.
+    ///
+    /// Parses the JSON text envelope format used by cardano-cli for key and
+    /// certificate files (`{ "type": "...", "description": "...", "cborHex": "..." }`).
+    pub fn from_file(path: &std::path::Path) -> Result<Self, TextEnvelopeError> {
+        let content = std::fs::read_to_string(path).map_err(|e| TextEnvelopeError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        serde_json::from_str(&content).map_err(|e| TextEnvelopeError::Json {
+            path: path.display().to_string(),
+            source: e,
+        })
+    }
+
+    /// Decode the `cborHex` field and unwrap the outer CBOR byte string header,
+    /// returning the raw payload bytes.
+    pub fn raw_cbor_bytes(&self) -> Result<Vec<u8>, TextEnvelopeError> {
+        let cbor = hex::decode(&self.cbor_hex).map_err(TextEnvelopeError::Hex)?;
+        Ok(unwrap_cbor_bytestring(&cbor).to_vec())
+    }
+
+    /// Check that the envelope `type` field matches an expected value.
+    ///
+    /// Returns `Ok(())` on match, or a descriptive error on mismatch.
+    pub fn expect_type(&self, expected: &str) -> Result<(), TextEnvelopeError> {
+        if self.type_ == expected {
+            Ok(())
+        } else {
+            Err(TextEnvelopeError::TypeMismatch {
+                expected: expected.to_string(),
+                actual: self.type_.clone(),
+            })
+        }
+    }
+
+    /// Check that the envelope `type` field matches one of several expected values.
+    pub fn expect_type_one_of(&self, expected: &[&str]) -> Result<(), TextEnvelopeError> {
+        if expected.iter().any(|e| self.type_ == *e) {
+            Ok(())
+        } else {
+            Err(TextEnvelopeError::TypeMismatch {
+                expected: expected.join(" or "),
+                actual: self.type_.clone(),
+            })
+        }
+    }
+}
+
+/// Errors from text envelope parsing.
+#[derive(Debug)]
+pub enum TextEnvelopeError {
+    /// File I/O error.
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+    /// JSON parse error.
+    Json {
+        path: String,
+        source: serde_json::Error,
+    },
+    /// Hex decode error.
+    Hex(hex::FromHexError),
+    /// Envelope type doesn't match expected key type.
+    TypeMismatch { expected: String, actual: String },
+}
+
+impl std::fmt::Display for TextEnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "failed to read {path}: {source}"),
+            Self::Json { path, source } => {
+                write!(f, "invalid text envelope JSON in {path}: {source}")
+            }
+            Self::Hex(e) => write!(f, "invalid cborHex: {e}"),
+            Self::TypeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "wrong text envelope type: expected {expected}, got {actual}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TextEnvelopeError {}
+
+/// Unwrap a single CBOR byte string header, returning the inner payload.
+///
+/// Handles all CBOR major-type-2 length forms (tiny, 1-byte, 2-byte, 4-byte).
+/// If the data doesn't look like a CBOR byte string, returns it unchanged.
+fn unwrap_cbor_bytestring(data: &[u8]) -> &[u8] {
+    if data.is_empty() {
+        return data;
+    }
+    match data[0] {
+        // 1-byte length prefix (0x58 LL)
+        0x58 if data.len() > 2 => &data[2..],
+        // 2-byte length prefix (0x59 HH LL)
+        0x59 if data.len() > 3 => &data[3..],
+        // 4-byte length prefix (0x5a HH HH LL LL)
+        0x5a if data.len() > 5 => &data[5..],
+        // Tiny byte string (0x40..0x57 — length encoded in lower 5 bits)
+        b if (b & 0xe0) == 0x40 && data.len() > 1 => &data[1..],
+        _ => data,
+    }
+}
+
 /// Wrap raw key bytes in a simple CBOR byte string
 fn simple_cbor_wrap(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
