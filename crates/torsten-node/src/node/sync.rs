@@ -1368,6 +1368,15 @@ impl Node {
                 true
             });
             drop(ls);
+
+            // Update mempool metrics immediately after revalidation so Prometheus
+            // reflects tx removals (confirmed txs, TTL expiry, etc.) without
+            // waiting for the periodic 5-second metric refresh.
+            self.metrics.set_mempool_count(self.mempool.len() as u64);
+            self.metrics.mempool_bytes.store(
+                self.mempool.total_bytes() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         if let Some(last_block) = blocks.last() {
