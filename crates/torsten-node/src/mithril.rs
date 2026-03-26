@@ -254,6 +254,32 @@ pub async fn import_snapshot(
     }
 
     // Ledger state is not imported — the node rebuilds it via block replay.
+    //
+    // Step 7b: Clear stale UTxO store and ledger snapshots.
+    //
+    // The on-disk LSM UTxO store (utxo-store/) is separate from the immutable DB.
+    // After a Mithril import, the old UTxO store reflects a previous chain state
+    // that may not match the new immutable tip. If left in place, the node would
+    // have phantom UTxOs (entries that were consumed on-chain but not removed from
+    // the store), causing invalid transaction propagation.
+    //
+    // Similarly, old ledger snapshots reference the previous immutable tip and
+    // must be removed so the node replays from genesis or the Mithril snapshot.
+    let utxo_store_path = database_path.join("utxo-store");
+    if utxo_store_path.exists() {
+        info!("Removing stale UTxO store (will be rebuilt during replay)");
+        if let Err(e) = fs::remove_dir_all(&utxo_store_path) {
+            warn!(error = %e, "Failed to remove UTxO store directory");
+        }
+    }
+    for entry in fs::read_dir(database_path).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("ledger-snapshot") && name_str.ends_with(".bin") {
+            info!(file = %name_str, "Removing stale ledger snapshot");
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 
     // Step 8: Cleanup
     info!("Cleaning up temporary files");
