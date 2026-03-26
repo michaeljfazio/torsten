@@ -98,12 +98,13 @@ impl TxSubmissionServer {
                         continue;
                     }
 
-                    // Track new tx IDs, dedup against inflight
-                    let mut to_fetch: Vec<[u8; 32]> = Vec::new();
+                    // Track new tx IDs, dedup against inflight.
+                    // to_fetch carries (era_id, tx_hash) pairs for MsgRequestTxs.
+                    let mut to_fetch: Vec<(u8, [u8; 32])> = Vec::new();
                     for id in &ids {
                         if !inflight.contains(&id.tx_id) {
                             inflight.insert(id.tx_id);
-                            to_fetch.push(id.tx_id);
+                            to_fetch.push((id.era_id, id.tx_id));
                         }
                         unacked.push_back(id.clone());
                     }
@@ -113,7 +114,7 @@ impl TxSubmissionServer {
                         continue;
                     }
 
-                    // Request full tx bodies
+                    // Request full tx bodies — MsgRequestTxs carries (era_id, tx_hash) pairs.
                     let req_txs =
                         encode_message(&TxSubmissionMessage::MsgRequestTxs(to_fetch.clone()));
                     channel.send(req_txs).await.map_err(ProtocolError::from)?;
@@ -126,25 +127,26 @@ impl TxSubmissionServer {
                         })?;
 
                     if let TxSubmissionMessage::MsgReplyTxs(txs) = txs_reply {
-                        for (i, tx_bytes) in txs.into_iter().enumerate() {
+                        for (i, (_era_id, tx_bytes)) in txs.into_iter().enumerate() {
                             stats.txs_received += 1;
 
+                            // tx_id is the hash portion of the (era_id, hash) pair.
                             let tx_id = if i < to_fetch.len() {
-                                to_fetch[i]
+                                to_fetch[i].1
                             } else {
                                 [0; 32]
                             };
 
-                            // Pass to callback for validation and mempool admission
+                            // Pass raw tx bytes (era wrapper stripped) to the callback.
                             if on_tx(tx_id, tx_bytes) {
                                 stats.txs_accepted += 1;
                             } else {
                                 stats.txs_rejected += 1;
                             }
 
-                            // Remove from inflight
+                            // Remove from inflight using the hash component.
                             if i < to_fetch.len() {
-                                inflight.remove(&to_fetch[i]);
+                                inflight.remove(&to_fetch[i].1);
                             }
                         }
                     }
@@ -277,6 +279,7 @@ mod tests {
 
         // Reply with one tx ID
         let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(vec![TxIdAndSize {
+            era_id: 6,
             tx_id: [0xAA; 32],
             size_in_bytes: 100,
         }]));
@@ -289,8 +292,11 @@ mod tests {
             TxSubmissionMessage::MsgRequestTxs(_)
         ));
 
-        // Reply with tx body
-        let reply_txs = encode_message(&TxSubmissionMessage::MsgReplyTxs(vec![vec![0x01, 0x02]]));
+        // Reply with tx body — (era_id, tx_cbor) tuple
+        let reply_txs = encode_message(&TxSubmissionMessage::MsgReplyTxs(vec![(
+            6u8,
+            vec![0x01, 0x02],
+        )]));
         ingress_tx.send(Bytes::from(reply_txs)).await.unwrap();
 
         // Read next request (should have ack_count > 0)

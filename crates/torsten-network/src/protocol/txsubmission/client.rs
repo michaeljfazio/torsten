@@ -24,7 +24,11 @@ pub trait TxSource: Send + Sync {
     fn get_tx_ids(&self, ack_count: u16, max_count: u16) -> Vec<TxIdAndSize>;
 
     /// Get full transaction CBOR by their IDs.
-    fn get_txs(&self, tx_ids: &[[u8; 32]]) -> Vec<Vec<u8>>;
+    ///
+    /// Each element in `tx_ids` is `(era_id, tx_hash)` matching the HFC GenTxId
+    /// envelope from `MsgRequestTxs`.  Returns `(era_id, tx_cbor)` pairs for
+    /// `MsgReplyTxs`, preserving the era for the HFC GenTx envelope.
+    fn get_txs(&self, tx_ids: &[(u8, [u8; 32])]) -> Vec<(u8, Vec<u8>)>;
 
     /// Check if there are any pending transactions.
     fn has_pending(&self) -> bool;
@@ -44,6 +48,7 @@ impl TxSubmissionClient {
         // Send MsgInit
         let init = encode_message(&TxSubmissionMessage::MsgInit);
         channel.send(init).await.map_err(ProtocolError::from)?;
+        tracing::debug!("txsubmission2 client: MsgInit sent, awaiting server requests");
 
         loop {
             // Wait for server request
@@ -59,13 +64,37 @@ impl TxSubmissionClient {
                     ack_count,
                     req_count,
                 } => {
-                    let tx_ids = source.get_tx_ids(ack_count, req_count);
+                    let mut tx_ids = source.get_tx_ids(ack_count, req_count);
+                    tracing::debug!(
+                        blocking,
+                        ack_count,
+                        req_count,
+                        yielded = tx_ids.len(),
+                        "txsubmission2 client: MsgRequestTxIds received"
+                    );
 
                     if tx_ids.is_empty() && blocking {
-                        // No transactions and we're in blocking mode — send MsgDone
-                        let done = encode_message(&TxSubmissionMessage::MsgDone);
-                        channel.send(done).await.map_err(ProtocolError::from)?;
-                        return Ok(());
+                        // Blocking mode with empty mempool: wait for txs to appear.
+                        // Haskell's TxSubmission2 client blocks in the STM layer
+                        // until a tx is available. We poll the mempool with a short
+                        // sleep to avoid busy-waiting.
+                        tracing::debug!("txsubmission2 client: blocking — polling mempool for txs");
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tx_ids = source.get_tx_ids(0, req_count);
+                            if !tx_ids.is_empty() {
+                                tracing::info!(
+                                    count = tx_ids.len(),
+                                    "txsubmission2 client: mempool txs available, resuming"
+                                );
+                                break;
+                            }
+                            if source.has_pending() {
+                                tracing::warn!(
+                                    "txsubmission2 client: has_pending=true but get_tx_ids returned empty"
+                                );
+                            }
+                        }
                     }
 
                     let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(tx_ids));
@@ -73,6 +102,11 @@ impl TxSubmissionClient {
                 }
                 TxSubmissionMessage::MsgRequestTxs(tx_ids) => {
                     let txs = source.get_txs(&tx_ids);
+                    tracing::debug!(
+                        requested = tx_ids.len(),
+                        returned = txs.len(),
+                        "txsubmission2 client: MsgRequestTxs received"
+                    );
                     let reply = encode_message(&TxSubmissionMessage::MsgReplyTxs(txs));
                     channel.send(reply).await.map_err(ProtocolError::from)?;
                 }
@@ -108,14 +142,14 @@ mod tests {
                 .collect()
         }
 
-        fn get_txs(&self, tx_ids: &[[u8; 32]]) -> Vec<Vec<u8>> {
+        fn get_txs(&self, tx_ids: &[(u8, [u8; 32])]) -> Vec<(u8, Vec<u8>)> {
             tx_ids
                 .iter()
-                .filter_map(|id| {
+                .filter_map(|(era_id, id)| {
                     self.txs
                         .iter()
                         .find(|(tid, _)| tid == id)
-                        .map(|(_, data)| data.clone())
+                        .map(|(_, data)| (*era_id, data.clone()))
                 })
                 .collect()
         }
@@ -148,6 +182,7 @@ mod tests {
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let source = MockTxSource {
             tx_ids: vec![TxIdAndSize {
+                era_id: 6,
                 tx_id: [0xAA; 32],
                 size_in_bytes: 200,
             }],
@@ -181,14 +216,14 @@ mod tests {
             panic!("expected MsgReplyTxIds");
         }
 
-        // Send MsgRequestTxs
-        let req_txs = encode_message(&TxSubmissionMessage::MsgRequestTxs(vec![[0xAA; 32]]));
+        // Send MsgRequestTxs — each element is (era_id, tx_hash)
+        let req_txs = encode_message(&TxSubmissionMessage::MsgRequestTxs(vec![(6u8, [0xAA; 32])]));
         ingress_tx.send(Bytes::from(req_txs)).await.unwrap();
 
-        // Read MsgReplyTxs
+        // Read MsgReplyTxs — each element is (era_id, tx_cbor)
         let (_, _, reply_txs) = egress_rx.recv().await.unwrap();
         if let TxSubmissionMessage::MsgReplyTxs(txs) = decode_message(&reply_txs).unwrap() {
-            assert_eq!(txs, vec![vec![0x01, 0x02]]);
+            assert_eq!(txs, vec![(6u8, vec![0x01, 0x02])]);
         } else {
             panic!("expected MsgReplyTxs");
         }
@@ -199,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_sends_done_when_blocking_with_no_txs() {
+    async fn client_blocks_when_blocking_with_no_txs() {
         let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
         let source = MockTxSource {
             tx_ids: vec![],
@@ -220,13 +255,14 @@ mod tests {
         });
         ingress_tx.send(Bytes::from(req)).await.unwrap();
 
-        // Should receive MsgDone
-        let (_, _, done) = egress_rx.recv().await.unwrap();
-        assert!(matches!(
-            decode_message(&done).unwrap(),
-            TxSubmissionMessage::MsgDone
-        ));
+        // Client should block (polling mempool) rather than sending MsgDone.
+        // Verify no message arrives within 200ms.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), egress_rx.recv()).await;
+        assert!(result.is_err(), "client should block, not send MsgDone");
 
-        handle.await.unwrap().unwrap();
+        // Abort the client task (it's polling forever with empty mempool).
+        handle.abort();
+        let _ = handle.await;
     }
 }

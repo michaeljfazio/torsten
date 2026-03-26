@@ -37,6 +37,8 @@ use torsten_network::peer::governor::GovernorAction;
 use torsten_network::BlockAnnouncement;
 
 use torsten_ledger::LedgerState;
+use torsten_mempool::Mempool;
+use torsten_network::{TxIdAndSize, TxSource};
 use torsten_primitives::block::Block;
 use torsten_storage::ChainDB;
 
@@ -170,6 +172,9 @@ pub struct ConnectionLifecycleManager {
 
     /// Prometheus metrics for recording peer latencies.
     metrics: Arc<NodeMetrics>,
+
+    /// Shared mempool for TxSubmission2 tx relay to peers.
+    mempool: Arc<Mempool>,
 }
 
 /// Errors from lifecycle management operations.
@@ -216,6 +221,7 @@ impl ConnectionLifecycleManager {
     /// * `ledger_state` — Shared LedgerState reference
     /// * `byron_epoch_length` — Byron epoch length in slots
     /// * `metrics` — Prometheus metrics handle for recording peer latencies
+    /// * `mempool` — Shared mempool for TxSubmission2 tx relay
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
@@ -228,6 +234,7 @@ impl ConnectionLifecycleManager {
         ledger_state: Arc<RwLock<LedgerState>>,
         byron_epoch_length: u64,
         metrics: Arc<NodeMetrics>,
+        mempool: Arc<Mempool>,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -243,6 +250,7 @@ impl ConnectionLifecycleManager {
             active_fetcher: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             max_fetched_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             metrics,
+            mempool,
         }
     }
 
@@ -834,39 +842,112 @@ impl ConnectionLifecycleManager {
     ///
     /// The TxSubmission2 protocol relays transactions between peers. As the
     /// initiator, we respond to the server's requests for transaction IDs
-    /// and transaction bodies from our mempool.
-    ///
-    /// Real implementation will be provided in a later task.
+    /// and transaction bodies from our mempool via `TxSubmissionClient`.
     fn make_txsubmission_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
-        Box::new(move |channel, cancel| {
+        let mempool = self.mempool.clone();
+        Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // TxSubmission2 protocol: MUST send MsgInit immediately.
-                //
-                // The Haskell peer expects MsgInit (tag 6) as the first message
-                // on the TxSubmission2 channel. Without it, the peer's responder
-                // never starts and the connection may be closed for inactivity.
-                //
-                // After MsgInit, we enter a loop responding to server requests
-                // for tx IDs and tx bodies from our mempool.
-                use torsten_network::protocol::txsubmission::{
-                    encode_message, TxSubmissionMessage,
-                };
-
-                // Send MsgInit immediately
-                let init = encode_message(&TxSubmissionMessage::MsgInit);
-                if let Err(e) = channel.send(init).await {
-                    debug!(%addr, "txsubmission2: failed to send MsgInit: {e}");
-                    return;
+                let source = MempoolTxSource::new(mempool);
+                tokio::select! {
+                    result = torsten_network::TxSubmissionClient::run(&mut channel, &source) => {
+                        match result {
+                            Ok(()) => debug!(%addr, "txsubmission2 client completed"),
+                            Err(e) => debug!(%addr, "txsubmission2 client error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "txsubmission2 task cancelled");
+                    }
                 }
-                debug!(%addr, "txsubmission2: MsgInit sent");
-
-                // Wait for cancellation — full tx relay logic will be implemented
-                // in a follow-up task. For now, keeping the channel open with
-                // MsgInit sent is sufficient to prevent peer disconnection.
-                cancel.cancelled().await;
-                debug!(%addr, "txsubmission2 task cancelled");
             })
         })
+    }
+}
+
+// ─── MempoolTxSource ─────────────────────────────────────────────────────────
+
+/// Adapts `Mempool` to the `TxSource` trait for TxSubmission2 tx relay.
+///
+/// Tracks which tx IDs have been yielded to the remote peer via an internal
+/// cursor over the mempool's ordered tx list. `get_tx_ids` acknowledges
+/// previously sent IDs and returns the next batch.
+///
+/// Interior mutability via `Mutex` is used because `TxSource::get_tx_ids`
+/// takes `&self` but we need to update the outstanding queue. The mutex is
+/// uncontended — only the single TxSubmission2 client task accesses it.
+struct MempoolTxSource {
+    mempool: Arc<Mempool>,
+    /// Tx hashes that have been yielded but not yet acknowledged by the peer.
+    outstanding: std::sync::Mutex<std::collections::VecDeque<torsten_primitives::hash::Hash32>>,
+}
+
+impl MempoolTxSource {
+    fn new(mempool: Arc<Mempool>) -> Self {
+        Self {
+            mempool,
+            outstanding: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+}
+
+impl TxSource for MempoolTxSource {
+    fn get_tx_ids(&self, ack_count: u16, max_count: u16) -> Vec<TxIdAndSize> {
+        let mut outstanding = self.outstanding.lock().unwrap();
+
+        // Acknowledge previously yielded tx IDs.
+        for _ in 0..ack_count {
+            outstanding.pop_front();
+        }
+
+        // Collect the set of already-outstanding hashes for dedup.
+        let already_sent: std::collections::HashSet<torsten_primitives::hash::Hash32> =
+            outstanding.iter().copied().collect();
+
+        // Get ordered tx hashes from mempool and yield new ones.
+        let all_hashes = self.mempool.tx_hashes_ordered();
+        let mut result = Vec::new();
+        for hash in all_hashes {
+            if result.len() >= max_count as usize {
+                break;
+            }
+            if already_sent.contains(&hash) {
+                continue;
+            }
+            if let Some(size) = self.mempool.get_tx_size(&hash) {
+                outstanding.push_back(hash);
+                // Compute the full GenTx wire size including HFC envelope:
+                //   array(2)[1] + era_id[1] + tag(24)[2] + bytes_header[1-3] + cbor_data[N]
+                // bytes_header: 1 byte for size < 24, 2 bytes for < 256, 3 bytes for < 65536
+                let bytes_header_len = if size < 24 {
+                    1
+                } else if size < 256 {
+                    2
+                } else {
+                    3
+                };
+                let wire_size = 1 + 1 + 2 + bytes_header_len + size;
+                result.push(TxIdAndSize {
+                    era_id: 6, // Conway
+                    tx_id: *hash.as_bytes(),
+                    size_in_bytes: wire_size as u32,
+                });
+            }
+        }
+        result
+    }
+
+    fn get_txs(&self, tx_ids: &[(u8, [u8; 32])]) -> Vec<(u8, Vec<u8>)> {
+        tx_ids
+            .iter()
+            .filter_map(|(era_id, id)| {
+                let hash = torsten_primitives::hash::Hash32::from_bytes(*id);
+                self.mempool.get_tx_cbor(&hash).map(|cbor| (*era_id, cbor))
+            })
+            .collect()
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.mempool.is_empty()
     }
 }
 

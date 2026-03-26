@@ -45,9 +45,12 @@ pub enum TxSubmissionState {
 /// A transaction ID with its size (for flow control).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxIdAndSize {
+    /// HFC era index (Conway=6, Babbage=5, etc.). Used for N2N era wrapping.
+    pub era_id: u8,
     /// Transaction hash (32 bytes).
     pub tx_id: [u8; 32],
     /// Transaction size in bytes (used by the server for flow control).
+    /// Must include HFC envelope overhead (~4 bytes) for N2N compliance.
     pub size_in_bytes: u32,
 }
 
@@ -68,9 +71,11 @@ pub enum TxSubmissionMessage {
     /// Client replies with transaction IDs and sizes (tag 1).
     MsgReplyTxIds(Vec<TxIdAndSize>),
     /// Server requests full transaction bodies by ID (tag 2).
-    MsgRequestTxs(Vec<[u8; 32]>),
+    /// Each entry is (era_id, tx_hash).
+    MsgRequestTxs(Vec<(u8, [u8; 32])>),
     /// Client replies with full transaction CBOR bodies (tag 3).
-    MsgReplyTxs(Vec<Vec<u8>>),
+    /// Each entry is (era_id, tx_cbor). Encoded as [era_id, tag(24)(tx_cbor)].
+    MsgReplyTxs(Vec<(u8, Vec<u8>)>),
     /// Terminate the protocol (tag 4). Only valid in blocking StTxIds with no txs.
     MsgDone,
 }
@@ -106,13 +111,17 @@ pub fn encode_message(msg: &TxSubmissionMessage) -> Vec<u8> {
         TxSubmissionMessage::MsgReplyTxIds(ids) => {
             // Outer message array is definite-length (always 2 elements).
             // Inner txIdsAndSizes list uses indefinite-length per the CDDL spec:
-            //   MsgReplyTxIds = [1, [* [txid, word32]]]
+            //   MsgReplyTxIds = [1, [* [GenTxId, word32]]]
+            // GenTxId is HFC-wrapped: [era_id, txid_bytes]
             enc.array(2).expect("infallible");
             enc.u64(TAG_REPLY_TX_IDS).expect("infallible");
             enc.begin_array().expect("infallible");
             for id in ids {
-                // Each [txid, size] entry is a definite 2-element array.
+                // Each [GenTxId, size] entry is a definite 2-element array.
                 enc.array(2).expect("infallible");
+                // GenTxId = [era_id, txid_bytes] (HFC NS envelope)
+                enc.array(2).expect("infallible");
+                enc.u8(id.era_id).expect("infallible");
                 enc.bytes(&id.tx_id).expect("infallible");
                 enc.u32(id.size_in_bytes).expect("infallible");
             }
@@ -120,23 +129,32 @@ pub fn encode_message(msg: &TxSubmissionMessage) -> Vec<u8> {
         }
         TxSubmissionMessage::MsgRequestTxs(ids) => {
             // Inner txIdList uses indefinite-length per the CDDL spec:
-            //   MsgRequestTxs = [2, [* txid]]
+            //   MsgRequestTxs = [2, [* GenTxId]]
+            // GenTxId = [era_id, txid_bytes]
             enc.array(2).expect("infallible");
             enc.u64(TAG_REQUEST_TXS).expect("infallible");
             enc.begin_array().expect("infallible");
-            for id in ids {
+            for (era_id, id) in ids {
+                enc.array(2).expect("infallible");
+                enc.u8(*era_id).expect("infallible");
                 enc.bytes(id).expect("infallible");
             }
             enc.end().expect("infallible");
         }
         TxSubmissionMessage::MsgReplyTxs(txs) => {
             // Inner txList uses indefinite-length per the CDDL spec:
-            //   MsgReplyTxs = [3, [* tx]]
+            //   MsgReplyTxs = [3, [* GenTx]]
+            // GenTx = [era_id, tag(24)(tx_cbor)]  (HFC NS + CBOR-in-CBOR)
             enc.array(2).expect("infallible");
             enc.u64(TAG_REPLY_TXS).expect("infallible");
             enc.begin_array().expect("infallible");
-            for tx in txs {
-                enc.bytes(tx).expect("infallible");
+            for (era_id, tx_cbor) in txs {
+                // Each GenTx is a 2-element array: [era_id, tag(24)(bytes)]
+                enc.array(2).expect("infallible");
+                enc.u8(*era_id).expect("infallible");
+                // CBOR tag 24 = wrapCBORinCBOR per Haskell reference
+                enc.tag(minicbor::data::Tag::new(24)).expect("infallible");
+                enc.bytes(tx_cbor).expect("infallible");
             }
             enc.end().expect("infallible");
         }
@@ -169,6 +187,7 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
         TAG_REPLY_TX_IDS => {
             // Accept both definite and indefinite-length arrays per the CDDL spec.
             // Haskell nodes send indefinite-length; definite is also valid CBOR.
+            // Each entry is [GenTxId, word32] where GenTxId = [era_id, txid_bytes].
             let mut ids = Vec::new();
             match dec.datatype().map_err(|e| e.to_string())? {
                 Type::ArrayIndef => {
@@ -179,7 +198,11 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                             dec.skip().map_err(|e| e.to_string())?;
                             break;
                         }
+                        // Outer entry: [GenTxId, size]
                         dec.array().map_err(|e| e.to_string())?;
+                        // GenTxId = [era_id, txid_bytes]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
                         let tx_id_bytes = dec.bytes().map_err(|e| e.to_string())?;
                         if tx_id_bytes.len() != 32 {
                             return Err(format!(
@@ -191,6 +214,7 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                         tx_id.copy_from_slice(tx_id_bytes);
                         let size = dec.u32().map_err(|e| e.to_string())?;
                         ids.push(TxIdAndSize {
+                            era_id,
                             tx_id,
                             size_in_bytes: size,
                         });
@@ -204,7 +228,11 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                         .ok_or("expected definite array length")?;
                     ids.reserve(len as usize);
                     for _ in 0..len {
+                        // Outer entry: [GenTxId, size]
                         dec.array().map_err(|e| e.to_string())?;
+                        // GenTxId = [era_id, txid_bytes]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
                         let tx_id_bytes = dec.bytes().map_err(|e| e.to_string())?;
                         if tx_id_bytes.len() != 32 {
                             return Err(format!(
@@ -216,6 +244,7 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                         tx_id.copy_from_slice(tx_id_bytes);
                         let size = dec.u32().map_err(|e| e.to_string())?;
                         ids.push(TxIdAndSize {
+                            era_id,
                             tx_id,
                             size_in_bytes: size,
                         });
@@ -229,7 +258,8 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
         }
         TAG_REQUEST_TXS => {
             // Accept both definite and indefinite-length arrays.
-            let mut ids = Vec::new();
+            // Each element is a GenTxId = [era_id, txid_bytes] (HFC NS envelope).
+            let mut ids: Vec<(u8, [u8; 32])> = Vec::new();
             match dec.datatype().map_err(|e| e.to_string())? {
                 Type::ArrayIndef => {
                     dec.array().map_err(|e| e.to_string())?;
@@ -238,13 +268,16 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                             dec.skip().map_err(|e| e.to_string())?;
                             break;
                         }
+                        // GenTxId = [era_id, txid_bytes]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
                         let id_bytes = dec.bytes().map_err(|e| e.to_string())?;
                         if id_bytes.len() != 32 {
                             return Err(format!("tx_id must be 32 bytes, got {}", id_bytes.len()));
                         }
                         let mut id = [0u8; 32];
                         id.copy_from_slice(id_bytes);
-                        ids.push(id);
+                        ids.push((era_id, id));
                     }
                 }
                 Type::Array => {
@@ -254,13 +287,16 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                         .ok_or("expected definite array length")?;
                     ids.reserve(len as usize);
                     for _ in 0..len {
+                        // GenTxId = [era_id, txid_bytes]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
                         let id_bytes = dec.bytes().map_err(|e| e.to_string())?;
                         if id_bytes.len() != 32 {
                             return Err(format!("tx_id must be 32 bytes, got {}", id_bytes.len()));
                         }
                         let mut id = [0u8; 32];
                         id.copy_from_slice(id_bytes);
-                        ids.push(id);
+                        ids.push((era_id, id));
                     }
                 }
                 other => {
@@ -271,7 +307,8 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
         }
         TAG_REPLY_TXS => {
             // Accept both definite and indefinite-length arrays.
-            let mut txs = Vec::new();
+            // Each element is a GenTx = [era_id, tag(24)(tx_cbor)] (HFC NS + CBOR-in-CBOR).
+            let mut txs: Vec<(u8, Vec<u8>)> = Vec::new();
             match dec.datatype().map_err(|e| e.to_string())? {
                 Type::ArrayIndef => {
                     dec.array().map_err(|e| e.to_string())?;
@@ -280,7 +317,13 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                             dec.skip().map_err(|e| e.to_string())?;
                             break;
                         }
-                        txs.push(dec.bytes().map_err(|e| e.to_string())?.to_vec());
+                        // GenTx = [era_id, tag(24)(tx_cbor)]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
+                        // Consume tag(24) — wrapCBORinCBOR per Haskell reference
+                        let _tag = dec.tag().map_err(|e| e.to_string())?;
+                        let tx_cbor = dec.bytes().map_err(|e| e.to_string())?.to_vec();
+                        txs.push((era_id, tx_cbor));
                     }
                 }
                 Type::Array => {
@@ -290,7 +333,13 @@ pub fn decode_message(data: &[u8]) -> Result<TxSubmissionMessage, String> {
                         .ok_or("expected definite array length")?;
                     txs.reserve(len as usize);
                     for _ in 0..len {
-                        txs.push(dec.bytes().map_err(|e| e.to_string())?.to_vec());
+                        // GenTx = [era_id, tag(24)(tx_cbor)]
+                        dec.array().map_err(|e| e.to_string())?;
+                        let era_id = dec.u8().map_err(|e| e.to_string())?;
+                        // Consume tag(24) — wrapCBORinCBOR per Haskell reference
+                        let _tag = dec.tag().map_err(|e| e.to_string())?;
+                        let tx_cbor = dec.bytes().map_err(|e| e.to_string())?.to_vec();
+                        txs.push((era_id, tx_cbor));
                     }
                 }
                 other => {
@@ -344,10 +393,12 @@ mod tests {
     fn msg_reply_tx_ids_roundtrip() {
         let msg = TxSubmissionMessage::MsgReplyTxIds(vec![
             TxIdAndSize {
+                era_id: 6,
                 tx_id: [0xAA; 32],
                 size_in_bytes: 256,
             },
             TxIdAndSize {
+                era_id: 6,
                 tx_id: [0xBB; 32],
                 size_in_bytes: 512,
             },
@@ -356,8 +407,10 @@ mod tests {
         let decoded = decode_message(&encoded).unwrap();
         if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
             assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0].era_id, 6);
             assert_eq!(ids[0].tx_id, [0xAA; 32]);
             assert_eq!(ids[0].size_in_bytes, 256);
+            assert_eq!(ids[1].era_id, 6);
             assert_eq!(ids[1].tx_id, [0xBB; 32]);
             assert_eq!(ids[1].size_in_bytes, 512);
         } else {
@@ -367,11 +420,12 @@ mod tests {
 
     #[test]
     fn msg_request_txs_roundtrip() {
-        let msg = TxSubmissionMessage::MsgRequestTxs(vec![[0xCC; 32], [0xDD; 32]]);
+        // Each element is (era_id, tx_hash) — Conway era_id = 6.
+        let msg = TxSubmissionMessage::MsgRequestTxs(vec![(6, [0xCC; 32]), (6, [0xDD; 32])]);
         let encoded = encode_message(&msg);
         let decoded = decode_message(&encoded).unwrap();
         if let TxSubmissionMessage::MsgRequestTxs(ids) = decoded {
-            assert_eq!(ids, vec![[0xCC; 32], [0xDD; 32]]);
+            assert_eq!(ids, vec![(6u8, [0xCC; 32]), (6u8, [0xDD; 32])]);
         } else {
             panic!("expected MsgRequestTxs");
         }
@@ -379,11 +433,18 @@ mod tests {
 
     #[test]
     fn msg_reply_txs_roundtrip() {
-        let msg = TxSubmissionMessage::MsgReplyTxs(vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05]]);
+        // Each element is (era_id, tx_cbor) — Conway era_id = 6.
+        let msg = TxSubmissionMessage::MsgReplyTxs(vec![
+            (6, vec![0x01, 0x02, 0x03]),
+            (6, vec![0x04, 0x05]),
+        ]);
         let encoded = encode_message(&msg);
         let decoded = decode_message(&encoded).unwrap();
         if let TxSubmissionMessage::MsgReplyTxs(txs) = decoded {
-            assert_eq!(txs, vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05]]);
+            assert_eq!(
+                txs,
+                vec![(6u8, vec![0x01, 0x02, 0x03]), (6u8, vec![0x04, 0x05])]
+            );
         } else {
             panic!("expected MsgReplyTxs");
         }
@@ -441,6 +502,7 @@ mod tests {
     #[test]
     fn reply_tx_ids_uses_indefinite_inner_array() {
         let msg = TxSubmissionMessage::MsgReplyTxIds(vec![TxIdAndSize {
+            era_id: 6,
             tx_id: [0x11; 32],
             size_in_bytes: 100,
         }]);
@@ -464,7 +526,7 @@ mod tests {
 
     #[test]
     fn request_txs_uses_indefinite_inner_array() {
-        let msg = TxSubmissionMessage::MsgRequestTxs(vec![[0x22; 32]]);
+        let msg = TxSubmissionMessage::MsgRequestTxs(vec![(6, [0x22; 32])]);
         let encoded = encode_message(&msg);
         assert_eq!(encoded[0], 0x82, "outer array must be definite array(2)");
         assert_eq!(encoded[1], 0x02, "tag must be TAG_REQUEST_TXS = 2");
@@ -481,7 +543,7 @@ mod tests {
 
     #[test]
     fn reply_txs_uses_indefinite_inner_array() {
-        let msg = TxSubmissionMessage::MsgReplyTxs(vec![vec![0xDE, 0xAD, 0xBE, 0xEF]]);
+        let msg = TxSubmissionMessage::MsgReplyTxs(vec![(6, vec![0xDE, 0xAD, 0xBE, 0xEF])]);
         let encoded = encode_message(&msg);
         assert_eq!(encoded[0], 0x82, "outer array must be definite array(2)");
         assert_eq!(encoded[1], 0x03, "tag must be TAG_REPLY_TXS = 3");
@@ -497,29 +559,35 @@ mod tests {
     }
 
     /// Decode a MsgReplyTxIds message that was encoded with a definite-length
-    /// inner array, as Torsten previously produced.  Decoders must accept both.
+    /// inner array.  Each entry is [[era_id, txid_bytes], size] (HFC GenTxId envelope).
     #[test]
     fn reply_tx_ids_decodes_definite_inner_array() {
-        // Hand-craft: [1, [[h"AA…AA", 256], [h"BB…BB", 512]]]
+        // Hand-craft: [1, [[[6, h"AA…AA"], 256], [[6, h"BB…BB"], 512]]]
         // outer array(2) = 0x82, tag 1 = 0x01
         // inner array(2) = 0x82, entry array(2) = 0x82
-        // bytes(32) of 0xAA = 0x58 0x20 0xAA*32
-        // uint 256 = 0x19 0x01 0x00
+        // GenTxId array(2) = 0x82, era_id uint(6) = 0x06, bytes(32) 0xAA...
+        // size uint 256 = 0x19 0x01 0x00
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u64(1).unwrap(); // TAG_REPLY_TX_IDS
         enc.array(2).unwrap(); // definite inner array of 2 entries
         for byte_val in [0xAAu8, 0xBBu8] {
+            // Entry = [GenTxId, size]
             enc.array(2).unwrap();
+            // GenTxId = [era_id, txid_bytes]
+            enc.array(2).unwrap();
+            enc.u8(6).unwrap(); // Conway era_id
             enc.bytes(&[byte_val; 32]).unwrap();
             enc.u32(if byte_val == 0xAA { 256 } else { 512 }).unwrap();
         }
         let decoded = decode_message(&buf).unwrap();
         if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
             assert_eq!(ids.len(), 2);
+            assert_eq!(ids[0].era_id, 6);
             assert_eq!(ids[0].tx_id, [0xAA; 32]);
             assert_eq!(ids[0].size_in_bytes, 256);
+            assert_eq!(ids[1].era_id, 6);
             assert_eq!(ids[1].tx_id, [0xBB; 32]);
             assert_eq!(ids[1].size_in_bytes, 512);
         } else {
@@ -528,12 +596,14 @@ mod tests {
     }
 
     /// Decode a MsgReplyTxIds message that was encoded with an indefinite-length
-    /// inner array, as Haskell nodes send.
+    /// inner array, as Haskell nodes send.  Each entry is [[era_id, txid_bytes], size].
     #[test]
     fn reply_tx_ids_decodes_indefinite_inner_array() {
-        // Hand-craft the bytes directly: [1, [_ [h"CC…CC", 99]]]
+        // Hand-craft: [1, [_ [[6, h"CC…CC"], 99]]]
         // 0x82 = array(2), 0x01 = tag, 0x9F = begin_indef_array
-        // 0x82 = array(2), 0x58 0x20 0xCC*32 = bytes(32), 0x18 0x63 = uint(99)
+        // outer entry array(2) = 0x82
+        //   GenTxId array(2) = 0x82, era_id uint(6), bytes(32) 0xCC*32
+        //   size uint(99)
         // 0xFF = break
         let mut buf = Vec::new();
         {
@@ -541,7 +611,11 @@ mod tests {
             enc.array(2).unwrap();
             enc.u64(1).unwrap();
             enc.begin_array().unwrap();
+            // Entry = [GenTxId, size]
             enc.array(2).unwrap();
+            // GenTxId = [era_id, txid_bytes]
+            enc.array(2).unwrap();
+            enc.u8(6).unwrap(); // Conway era_id
             enc.bytes(&[0xCCu8; 32]).unwrap();
             enc.u32(99).unwrap();
             enc.end().unwrap();
@@ -551,6 +625,7 @@ mod tests {
         let decoded = decode_message(&buf).unwrap();
         if let TxSubmissionMessage::MsgReplyTxIds(ids) = decoded {
             assert_eq!(ids.len(), 1);
+            assert_eq!(ids[0].era_id, 6);
             assert_eq!(ids[0].tx_id, [0xCC; 32]);
             assert_eq!(ids[0].size_in_bytes, 99);
         } else {
@@ -559,6 +634,7 @@ mod tests {
     }
 
     /// Decode a MsgRequestTxs with an indefinite-length tx ID list.
+    /// Each element is a GenTxId = [era_id, txid_bytes].
     #[test]
     fn request_txs_decodes_indefinite_inner_array() {
         let mut buf = Vec::new();
@@ -567,6 +643,9 @@ mod tests {
             enc.array(2).unwrap();
             enc.u64(2).unwrap(); // TAG_REQUEST_TXS
             enc.begin_array().unwrap();
+            // GenTxId = [era_id, txid_bytes]
+            enc.array(2).unwrap();
+            enc.u8(6).unwrap(); // Conway era_id
             enc.bytes(&[0xDDu8; 32]).unwrap();
             enc.end().unwrap();
         }
@@ -574,13 +653,14 @@ mod tests {
         let decoded = decode_message(&buf).unwrap();
         if let TxSubmissionMessage::MsgRequestTxs(ids) = decoded {
             assert_eq!(ids.len(), 1);
-            assert_eq!(ids[0], [0xDDu8; 32]);
+            assert_eq!(ids[0], (6u8, [0xDDu8; 32]));
         } else {
             panic!("expected MsgRequestTxs");
         }
     }
 
     /// Decode a MsgReplyTxs with an indefinite-length tx body list.
+    /// Each element is a GenTx = [era_id, tag(24)(tx_cbor)].
     #[test]
     fn reply_txs_decodes_indefinite_inner_array() {
         let tx_body = vec![0x01u8, 0x02, 0x03, 0x04];
@@ -590,6 +670,10 @@ mod tests {
             enc.array(2).unwrap();
             enc.u64(3).unwrap(); // TAG_REPLY_TXS
             enc.begin_array().unwrap();
+            // GenTx = [era_id, tag(24)(tx_cbor)]
+            enc.array(2).unwrap();
+            enc.u8(6).unwrap(); // Conway era_id
+            enc.tag(minicbor::data::Tag::new(24)).unwrap();
             enc.bytes(&tx_body).unwrap();
             enc.end().unwrap();
         }
@@ -597,7 +681,7 @@ mod tests {
         let decoded = decode_message(&buf).unwrap();
         if let TxSubmissionMessage::MsgReplyTxs(txs) = decoded {
             assert_eq!(txs.len(), 1);
-            assert_eq!(txs[0], tx_body);
+            assert_eq!(txs[0], (6u8, tx_body));
         } else {
             panic!("expected MsgReplyTxs");
         }

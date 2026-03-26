@@ -1779,6 +1779,7 @@ impl Node {
             self.ledger_state.clone(),
             self.byron_epoch_length,
             self.metrics.clone(),
+            self.mempool.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);

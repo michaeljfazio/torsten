@@ -283,8 +283,9 @@ pub use protocol::keepalive::client::KeepAliveClient;
 pub use protocol::keepalive::server::KeepAliveServer;
 pub use protocol::local_state_query::server::QueryHandler;
 pub use protocol::peersharing::client::PeerSharingClient;
-pub use protocol::txsubmission::client::TxSubmissionClient;
+pub use protocol::txsubmission::client::{TxSource, TxSubmissionClient};
 pub use protocol::txsubmission::server::TxSubmissionServer;
+pub use protocol::txsubmission::TxIdAndSize;
 
 pub use peer::manager::{PeerInfo, PeerManager, PeerSource, PeerState};
 pub use peer::{Governor, GovernorConfig, PeerTargets};
