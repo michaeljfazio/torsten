@@ -160,6 +160,12 @@ impl LocalTxMonitorServer {
                     }
 
                     let has = snap.tx_set.contains(&tx_id);
+                    tracing::debug!(
+                        queried_txid = %hex::encode(tx_id),
+                        snapshot_size = snap.tx_hashes.len(),
+                        result = has,
+                        "LocalTxMonitor has-tx query"
+                    );
 
                     // MsgReplyHasTx(bool)
                     let mut buf = Vec::new();

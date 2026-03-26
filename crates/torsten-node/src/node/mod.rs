@@ -2464,9 +2464,16 @@ impl Node {
                 match torsten_serialization::decode_transaction(era_id, &tx_bytes) {
                     Ok(tx) => {
                         let tx_hash = tx.hash;
+                        debug!("N2C tx accepted, adding to mempool: {}", tx_hash);
                         if let Err(e) = lts_mempool.add_tx(tx_hash, tx, size_bytes) {
                             debug!("N2C tx accepted but mempool add failed: {e}");
                         }
+                        // Update mempool metrics immediately after accepting a transaction
+                        lts_metrics.set_mempool_count(lts_mempool.len() as u64);
+                        lts_metrics.mempool_bytes.store(
+                            lts_mempool.total_bytes() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                     Err(e) => {
                         debug!("N2C tx decode for mempool failed: {e}");

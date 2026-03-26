@@ -578,11 +578,14 @@ impl N2CClient {
     ///
     /// Returns `Some((tx_hash, tx_cbor))` for the next transaction, or `None` if
     /// there are no more transactions in the mempool.
+    ///
+    /// The server sends `[6, tx_cbor]` for a present tx, or `[6]` when exhausted.
+    /// The tx hash is computed from the returned CBOR (Blake2b-256).
     pub async fn monitor_next_tx(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, NetworkError> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(4).map_err(cbor_err)?; // MsgNextTx
+        enc.u32(5).map_err(cbor_err)?; // MsgNextTx (tag 5)
 
         self.tx_monitor_channel
             .send(buf)
@@ -595,21 +598,23 @@ impl N2CClient {
             .await
             .map_err(NetworkError::Mux)?;
         let mut dec = minicbor::Decoder::new(&resp);
-        let _ = dec.array();
+        let arr_len = dec.array();
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad monitor next_tx: {e}")))?;
 
         match tag {
-            5 => {
-                // MsgTxExists - no more transactions
-                Ok(None)
-            }
             6 => {
-                // MsgReplyNextTx with transaction
-                let tx_hash = dec.bytes().unwrap_or(&[]).to_vec();
-                let tx_cbor = dec.bytes().unwrap_or(&[]).to_vec();
-                Ok(Some((tx_hash, tx_cbor)))
+                // MsgReplyNextTx — array(1) means no tx, array(2) means tx present
+                let has_tx = matches!(arr_len, Ok(Some(n)) if n >= 2);
+                if has_tx {
+                    let tx_cbor = dec.bytes().unwrap_or(&[]).to_vec();
+                    // Compute tx hash from CBOR (Blake2b-256)
+                    let tx_hash = torsten_primitives::hash::blake2b_256(&tx_cbor);
+                    Ok(Some((tx_hash.as_ref().to_vec(), tx_cbor)))
+                } else {
+                    Ok(None)
+                }
             }
             other => Err(protocol_err(format!(
                 "unexpected next_tx response tag: {other}"
@@ -617,12 +622,25 @@ impl N2CClient {
         }
     }
 
-    /// Send `MsgDone` for the LocalTxMonitor protocol.
+    /// Send `MsgDone` (tag 0) for the LocalTxMonitor protocol — ends the session.
     pub async fn monitor_done(&mut self) -> Result<(), NetworkError> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
+        enc.u32(0).map_err(cbor_err)?; // TAG_DONE
+
+        self.tx_monitor_channel
+            .send(buf)
+            .await
+            .map_err(NetworkError::Mux)
+    }
+
+    /// Send `MsgRelease` (tag 3) for the LocalTxMonitor protocol — releases snapshot, returns to StIdle.
+    pub async fn monitor_release(&mut self) -> Result<(), NetworkError> {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(1).map_err(cbor_err)?;
+        enc.u32(3).map_err(cbor_err)?; // TAG_RELEASE
 
         self.tx_monitor_channel
             .send(buf)
