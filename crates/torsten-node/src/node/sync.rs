@@ -2821,11 +2821,28 @@ pub async fn chainsync_client_task(
                         // with MsgRollForward or MsgRollBackward.
                         if !at_tip {
                             at_tip = true;
-                            info!(
-                                %peer_addr,
-                                headers_received,
-                                "ChainSync at tip — awaiting new blocks",
-                            );
+                            // Only log the transition to "at tip" once per
+                            // sustained period.  When pipelined peers send
+                            // rapid RollForward+AwaitReply pairs, the at_tip
+                            // flag toggles on every block — logging each one
+                            // floods the log (1M+ entries observed).
+                            //
+                            // Log at most once per 60 seconds per peer.
+                            static LAST_LOG: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            let now_secs = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let prev = LAST_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                            if now_secs.saturating_sub(prev) >= 60 {
+                                LAST_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                                info!(
+                                    %peer_addr,
+                                    headers_received,
+                                    "ChainSync at tip — awaiting new blocks",
+                                );
+                            }
                         }
                     }
 
