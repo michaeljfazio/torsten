@@ -1,6 +1,7 @@
 # Tech Lead Agent Memory
 
 ## Critical Invariants & Bug Patterns
+- [Fork snapshot stall cascade](fork-snapshot-stall-fix.md) — 6-bug cascade: fork snapshot → bad intersection → deep rollback → UTxO corruption; all fixed (1ff9cbce)
 - [Cascade failure invariant](ledger-cascade-failure-invariant.md) — Never hard-return on confirmed blocks; log+self-correct for ledger-state-divergence checks
 - [Forge body size bug](forge-body-size-bug.md) — body_size miscalculation + epoch nonce not updated + KES expiry off-by-one
 - [RUPD snapshot position fix](ledger-rupd-snapshot-fix.md) — Use `set` snapshot (not `go`) in calculate_rewards(); stale treasury diagnostics
@@ -44,3 +45,7 @@
 
 ## Serialization
 - [Serialization test coverage](crypto-serialization-tests.md) — 133 tests, public API patterns, PPU extraction for integration tests
+
+## Soak Test Findings (2026-03-27)
+- [ChainSync log flood stall](soak-test-chainsync-log-flood.md) — Inbound Haskell syncer floods 1.2M INFO logs/10min → I/O stall; fix: downgrade to DEBUG
+- [CLI tx build change output](cli-tx-build-change-output.md) — --change-address computes change but doesn't append change output to tx body

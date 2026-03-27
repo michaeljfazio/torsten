@@ -75,6 +75,12 @@
 - See [newepoch-ordering-details.md](newepoch-ordering-details.md) — Exact NEWEPOCH operation order (applyRUpd→MIR→SNAP→POOLREAP→UPEC→record update), bprev source for RUPD (N-1 blocks), PP update timing (targeting epoch E applied at E-1→E boundary), incrBlocks uses post-TICK curPParams
 - See [reward-update-accounting.md](reward-update-accounting.md) — Complete deltaR/deltaT/deltaF formulas, sign conventions, conservation invariant (deltaT+deltaR+sum(rs)+deltaF=0), undistributed→reserves (NOT treasury), applyRUpd exact application, no-blocks behavior, d>=0.8 semantics, Torsten divergences
 
+## Mempool Revalidation After Block
+- See [mempool-revalidation-after-block.md](mempool-revalidation-after-block.md) — Full revalidation of ALL remaining txs via revalidateTxsFor/reapplyTxs; triggered by STM watcher on ledger tip change (NOT direct ChainSel call); reapplyTx skips crypto, runs UTxO/TTL/script checks; atomic metrics update
+
+## Fork Resolution / Chain Selection
+- [fork-resolution-chainsel.md](fork-resolution-chainsel.md) — Complete ChainSel algorithm: addBlock flow, preferAnchoredCandidate, Praos tiebreaker, rollback, tentative follower, candidate storage
+
 ## Topic Files
 - [pparams-group-classification.md](pparams-group-classification.md) - Conway PP group classification (Network/Economic/Technical/Gov/Security), threshold combination logic
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
@@ -135,3 +141,6 @@
 
 ## BlockFetch / ChainSync Wire Format
 - [blockfetch-hfc-wire-format.md](blockfetch-hfc-wire-format.md) — MsgBlock=tag(24) bstr(stored_cbor), NOT array[hfc_index,tag24(body)]; ChainSync headers use different encodeNS path
+
+## SDU Segmentation Size — CRITICAL
+- See [sdu-segmentation-critical.md](sdu-segmentation-critical.md) — SDUSize=12288 is PAYLOAD split point (NOT 12280); Haskell splits EXACTLY at sduSize bytes, NO -8 adjustment; ingress accepts any payload_length 0-65535

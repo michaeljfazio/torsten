@@ -51,6 +51,9 @@ Key fixes applied in commit 1a11d0d:
 6. multi_era.rs: Alonzo nonce_vrf_output pre-hashed to 32 bytes (eta = blake2b(vrf.0))
 7. SNAPSHOT_VERSION bumped to 4 (stability_window_3kf field added)
 
+## FIXED BUG: blocking_read() Panic (commit 6fa4886b, 2026-03-27)
+- connection_lifecycle.rs: moved chain_db.read().await BEFORE candidate_chains lock acquisition
+
 ## CRITICAL BUG #1: ScriptDataHash Ignores Reference Scripts (OPEN)
 - Tx hash: `370f8772f8cc63598f5ffd5355704af6633df4123cb84514ec8bbfe6c06c26bb`
 - Error: `ScriptDataHashMismatch { expected: "7482...", actual: "dfe1..." }`
@@ -82,9 +85,31 @@ Key fixes applied in commit 1a11d0d:
 - Memory at tip: ~19.7 GB RSS (11M UTxOs)
 - All 7 era transitions clean: Byron→Shelley(208)→Allegra(236)→Mary(251)→Alonzo(290)→Babbage(365)→Conway(394)
 
+## Soak Test Run #17 Findings (2026-03-27) — see soak-test-run17-findings.md
+- FIXED: blocking_read() panic in connection_lifecycle.rs (commit 6fa4886b)
+- OPEN: Node crashes after ~21 min at tip (no error logged — likely OOM or SIGKILL)
+- OPEN: 10-min sync stall post-crash — pending_blocks buffer starves when first connecting block delayed
+- Soak test: 43 cycles submitted, 35+ confirmed, avg ~25s confirmation time
+
+## Soak Test Run #18 Findings (2026-03-27) — Haskell ↔ Torsten Interop
+- Setup: Torsten block producer (SAND pool) + Haskell cardano-node syncing exclusively from Torsten
+- Two controlled SIGTERM restarts observed: 07:11:58 and 07:19:47 (external kill, not crashes)
+- Restart recovery: Torsten back at tip in **20 seconds** (01:58→02:18 from process start)
+- Haskell intersection reset to origin after restart (expected — volatileDB divergence)
+- CONFIRMED OPEN BUG: pending_blocks starvation stall at ~07:34 — 30 rollbacks in 7min, zero blocks fetched
+  - Pattern: peers rollback to slot AHEAD of our tip (107941003 > our 107940438), block fetch decision logic deadlocks
+  - Occurs after SIGTERM/restart cycle, persists until external intervention
+- Haskell sync: N2N v15 handshake OK, 2 MuxErrored events (INFO severity, both recovered automatically)
+- Haskell chainsync channel contention: "already taken" warning (1 occurrence) — race on channel acquisition
+- Txs: 19 submitted, 16 confirmed on-chain (3 pending at end, C7 lost on restart — expected)
+- No panics, no ERROR logs in either Torsten or Haskell during the soak period
+- Memory at tip: 1.4 GB RSS (fresh after restart, vs 3.7 GB before restart — LSM backend compacted)
+
 ## Operational Notes
 - Always `--testnet-magic 2` with CLI query tip for correct syncProgress
 - LSM backend snapshot ~80 MB; in-memory ~1.1 GB
 - Replay speed on preview: 20K blk/s when snapshot available for same epoch (much faster than cold start)
 - Replay speed slows at slot ~12M due to UTxO growth; recovers after slot ~15M
 - Debug epoch nonces: `RUST_LOG="torsten_ledger::state::epoch=debug"` shows per-epoch nonce values
+- After crash recovery: wait for "UTxO store attached (N entries)" before submitting txs
+- Use UTxOs from blocks 100+ before the snapshot point to avoid InputNotFound rejections

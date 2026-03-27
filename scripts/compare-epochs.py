@@ -122,8 +122,8 @@ def compare_snapshots_field(torsten_snaps, cstreamer_snaps):
         return diffs
 
     for snap_name in ["mark", "set", "go"]:
-        t_snap = (torsten_snaps or {}).get(snap_name, {})
-        c_snap = (cstreamer_snaps or {}).get(snap_name, {})
+        t_snap = (torsten_snaps or {}).get(snap_name) or {}
+        c_snap = (cstreamer_snaps or {}).get(snap_name) or {}
 
         # Compare high-level snapshot fields
         for field in ["blocks", "totalStake"]:
