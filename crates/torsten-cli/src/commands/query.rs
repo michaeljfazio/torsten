@@ -361,6 +361,50 @@ async fn release_and_done(client: &mut torsten_network::N2CClient) {
 /// --------------------------------------------------------------------------------------
 /// <64-char-hash>                                                        0        5000000 lovelace + TxOutDatumNone
 /// ```
+/// Drain a CBOR map entry by entry using a callback.
+///
+/// Handles both definite-length maps (`map_len = Some(n)`) and indefinite-length
+/// maps (`map_len = None`, terminated by a CBOR "break" code).  minicbor
+/// returns `None` from `decoder.map()` for indefinite-length maps; callers that
+/// use `unwrap_or(0)` silently skip all entries.  This helper encapsulates the
+/// correct iteration pattern for both cases.
+fn decode_map_entries<F>(decoder: &mut minicbor::Decoder, mut f: F) -> Result<()>
+where
+    F: FnMut(&mut minicbor::Decoder) -> Result<()>,
+{
+    match decoder.map()? {
+        Some(n) => {
+            // Definite-length map: iterate exactly n times.
+            for _ in 0..n {
+                f(decoder)?;
+            }
+        }
+        None => {
+            // Indefinite-length map: iterate until CBOR break (datatype Undefined
+            // signals the end in minicbor's streaming API).
+            //
+            // minicbor does not expose a "peek" API, so we detect the break by
+            // attempting to decode each key as a `u32` and stopping when a
+            // datatype error is returned (which happens on the break code 0xff).
+            loop {
+                let key_pos = decoder.position();
+                match decoder.datatype() {
+                    Ok(minicbor::data::Type::Break) => {
+                        decoder.skip().ok(); // consume the break byte
+                        break;
+                    }
+                    Ok(_) => {
+                        decoder.set_position(key_pos);
+                        f(decoder)?;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_utxo_result(raw: &[u8]) -> Result<()> {
     // Parse MsgResult [6, [1, map{...}]]
     let mut decoder = minicbor::Decoder::new(raw);
@@ -378,9 +422,6 @@ fn print_utxo_result(raw: &[u8]) -> Result<()> {
         decoder.set_position(pos);
     }
 
-    // UTxO result: CBOR Map<[tx_hash, index], TransactionOutput>
-    let map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-
     // cardano-cli header: TxHash is 64 chars wide, TxIx 4 chars, Amount fills the rest
     println!(
         "{:<64} {:<4}         Amount",
@@ -388,50 +429,59 @@ fn print_utxo_result(raw: &[u8]) -> Result<()> {
     );
     println!("{}", "-".repeat(86));
 
-    for _ in 0..map_len {
+    // UTxO result: CBOR Map<[tx_hash, index], TransactionOutput>
+    //
+    // Use decode_map_entries to handle both definite- and indefinite-length
+    // outer maps.  The Torsten N2C server currently emits definite-length maps,
+    // but a Haskell node may emit indefinite-length maps; both must work so
+    // `torsten-cli` is usable against either node.
+    decode_map_entries(&mut decoder, |dec| {
         // Key: [tx_hash_bytes, output_index]
-        let _ = decoder.array(); // consume array(2)
-        let tx_hash = hex::encode(decoder.bytes().unwrap_or(&[]));
-        let output_index = decoder.u32().unwrap_or(0);
+        let _ = dec.array(); // consume array(2)
+        let tx_hash = hex::encode(dec.bytes().unwrap_or(&[]));
+        let output_index = dec.u32().unwrap_or(0);
 
-        // Value: PostAlonzo TransactionOutput as CBOR map {0: addr, 1: value, 2: datum, 3: script_ref}
+        // Value: PostAlonzo TransactionOutput as CBOR map
+        // {0: address_bytes, 1: value, 2?: datum_option, 3?: script_ref}
+        // Value field 1: plain integer for ADA-only, [coin, multiasset_map] for multi-asset.
         let mut lovelace = 0u64;
         let mut has_datum = false;
-        let output_map_len = decoder.map().unwrap_or(Some(0)).unwrap_or(0);
-        for _ in 0..output_map_len {
-            let key = decoder.u32().unwrap_or(999);
+
+        decode_map_entries(dec, |inner| {
+            let key = inner.u32().unwrap_or(999);
             match key {
                 0 => {
                     // address bytes — skip
-                    decoder.skip().ok();
+                    inner.skip().ok();
                 }
                 1 => {
                     // value: either integer (ADA-only) or [coin, multiasset_map]
-                    let val_pos = decoder.position();
-                    if let Ok(coin) = decoder.u64() {
+                    let val_pos = inner.position();
+                    if let Ok(coin) = inner.u64() {
                         lovelace = coin;
                     } else {
-                        decoder.set_position(val_pos);
-                        if let Ok(Some(_)) = decoder.array() {
-                            lovelace = decoder.u64().unwrap_or(0);
-                            decoder.skip().ok(); // skip multiasset map
+                        inner.set_position(val_pos);
+                        if let Ok(Some(_)) = inner.array() {
+                            lovelace = inner.u64().unwrap_or(0);
+                            inner.skip().ok(); // skip multiasset map
                         }
                     }
                 }
                 2 => {
-                    // datum option
+                    // datum_option present
                     has_datum = true;
-                    decoder.skip().ok();
+                    inner.skip().ok();
                 }
                 3 => {
                     // script_ref
-                    decoder.skip().ok();
+                    inner.skip().ok();
                 }
                 _ => {
-                    decoder.skip().ok();
+                    inner.skip().ok();
                 }
             }
-        }
+            Ok(())
+        })?;
 
         // cardano-cli amount format: "<lovelace> lovelace + TxOutDatumNone"
         // (or "+ TxOutDatumInline ..." for inline datums)
@@ -441,7 +491,8 @@ fn print_utxo_result(raw: &[u8]) -> Result<()> {
             "+ TxOutDatumNone"
         };
         println!("{tx_hash:<64} {output_index:<4} {lovelace} lovelace {datum_suffix}");
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
