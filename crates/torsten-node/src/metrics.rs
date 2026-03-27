@@ -1216,24 +1216,68 @@ impl Default for NodeMetrics {
 }
 
 /// Start an HTTP metrics server on the given port.
+///
 /// Responds to any request with Prometheus-format metrics.
-/// Returns `Err` if the port cannot be bound (e.g. address already in use).
+///
+/// On node restart the previous process may have left the port in `TIME_WAIT`
+/// or another process may still be exiting.  Rather than failing immediately,
+/// we retry binding up to 5 times with a 1-second delay between attempts.
+/// This prevents the common "address already in use" startup failure when
+/// restarting the node quickly after a crash.
 pub async fn start_metrics_server(
     port: u16,
     metrics: Arc<NodeMetrics>,
 ) -> Result<(), std::io::Error> {
     let addr = format!("0.0.0.0:{port}");
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => {
-            info!(
-                url = format_args!("http://{addr}/metrics"),
-                "Metrics server started"
-            );
-            l
+
+    // Attempt to bind with retries to handle brief port-in-use windows on
+    // fast restarts (TIME_WAIT, or a previous instance still shutting down).
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let listener = {
+        let mut last_err = None;
+        let mut bound = None;
+        for attempt in 1..=MAX_RETRIES {
+            match TcpListener::bind(&addr).await {
+                Ok(l) => {
+                    bound = Some(l);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if attempt < MAX_RETRIES {
+                        tracing::warn!(
+                            port,
+                            attempt,
+                            max = MAX_RETRIES,
+                            "Metrics port in use, retrying in 1s"
+                        );
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                    last_err = Some(e);
+                }
+                Err(e) => {
+                    // Non-retryable error (permission denied, etc.)
+                    error!("Failed to start metrics server on {addr}: {e}");
+                    return Err(e);
+                }
+            }
         }
-        Err(e) => {
-            error!("Failed to start metrics server on {addr}: {e}");
-            return Err(e);
+        match bound {
+            Some(l) => {
+                info!(
+                    url = format_args!("http://{addr}/metrics"),
+                    "Metrics server started"
+                );
+                l
+            }
+            None => {
+                let e = last_err.unwrap();
+                error!(
+                    "Failed to start metrics server on {addr} after {MAX_RETRIES} attempts: {e}"
+                );
+                return Err(e);
+            }
         }
     };
 
