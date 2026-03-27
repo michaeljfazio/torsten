@@ -44,6 +44,7 @@ pub(crate) use collateral::redeemer_script_version_map;
 use std::collections::{HashMap, HashSet};
 
 use torsten_primitives::hash::{Hash28, Hash32};
+use torsten_primitives::network::NetworkId;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::Transaction;
 use torsten_primitives::value::Lovelace;
@@ -51,6 +52,95 @@ use tracing::{debug, trace, warn};
 
 use crate::plutus::{evaluate_plutus_scripts, SlotConfig};
 use crate::utxo::UtxoLookup;
+
+#[derive(Default)]
+pub struct ValidationContext {
+    pub registered_pools: Option<HashSet<Hash28>>,
+    pub current_treasury: Option<u64>,
+    pub reward_accounts: Option<HashMap<Hash32, Lovelace>>,
+    pub current_epoch: Option<u64>,
+    pub registered_dreps: Option<HashSet<Hash32>>,
+    pub registered_vrf_keys: Option<HashMap<Hash32, Hash28>>,
+    pub node_network: Option<NetworkId>,
+    pub committee_members: Option<HashSet<Hash32>>,
+    pub committee_resigned: Option<HashSet<Hash32>>,
+}
+
+impl ValidationContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_pools(mut self, pools: HashSet<Hash28>) -> Self {
+        self.registered_pools = Some(pools);
+        self
+    }
+
+    pub fn with_treasury(mut self, treasury: u64) -> Self {
+        self.current_treasury = Some(treasury);
+        self
+    }
+
+    pub fn with_reward_accounts(mut self, accounts: HashMap<Hash32, Lovelace>) -> Self {
+        self.reward_accounts = Some(accounts);
+        self
+    }
+
+    pub fn with_epoch(mut self, epoch: u64) -> Self {
+        self.current_epoch = Some(epoch);
+        self
+    }
+
+    pub fn with_dreps(mut self, dreps: HashSet<Hash32>) -> Self {
+        self.registered_dreps = Some(dreps);
+        self
+    }
+
+    pub fn with_vrf_keys(mut self, keys: HashMap<Hash32, Hash28>) -> Self {
+        self.registered_vrf_keys = Some(keys);
+        self
+    }
+
+    pub fn with_network(mut self, network: NetworkId) -> Self {
+        self.node_network = Some(network);
+        self
+    }
+
+    pub fn with_committee_members(mut self, members: HashSet<Hash32>) -> Self {
+        self.committee_members = Some(members);
+        self
+    }
+
+    pub fn with_committee_resigned(mut self, resigned: HashSet<Hash32>) -> Self {
+        self.committee_resigned = Some(resigned);
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_full_ledger_state(
+        mut self,
+        pools: HashSet<Hash28>,
+        treasury: u64,
+        accounts: HashMap<Hash32, Lovelace>,
+        epoch: u64,
+        dreps: HashSet<Hash32>,
+        vrf_keys: HashMap<Hash32, Hash28>,
+        network: NetworkId,
+        committee_members: HashSet<Hash32>,
+        committee_resigned: HashSet<Hash32>,
+    ) -> Self {
+        self.registered_pools = Some(pools);
+        self.current_treasury = Some(treasury);
+        self.reward_accounts = Some(accounts);
+        self.current_epoch = Some(epoch);
+        self.registered_dreps = Some(dreps);
+        self.registered_vrf_keys = Some(vrf_keys);
+        self.node_network = Some(network);
+        self.committee_members = Some(committee_members);
+        self.committee_resigned = Some(committee_resigned);
+        self
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public error type
@@ -477,6 +567,62 @@ pub fn validate_transaction(
         None,
         None,
         None,
+    )
+}
+
+/// Validate a transaction using a [`ValidationContext`] struct.
+///
+/// This is the preferred entry point for validation with full ledger state,
+/// replacing the many-parameter [`validate_transaction_with_pools`] function.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use torsten_ledger::validation::{ValidationContext, validate_transaction_with_context};
+///
+/// let context = ValidationContext::new()
+///     .with_pools(pool_ids)
+///     .with_treasury(treasury)
+///     .with_reward_accounts(accounts)
+///     .with_epoch(epoch)
+///     .with_dreps(drep_ids)
+///     .with_network(NetworkId::Mainnet);
+///
+/// let result = validate_transaction_with_context(
+///     &tx,
+///     &utxo_set,
+///     &params,
+///     current_slot,
+///     tx_size,
+///     slot_config,
+///     context,
+/// );
+/// ```
+pub fn validate_transaction_with_context(
+    tx: &Transaction,
+    utxo_set: &dyn UtxoLookup,
+    params: &ProtocolParameters,
+    current_slot: u64,
+    tx_size: u64,
+    slot_config: Option<&SlotConfig>,
+    context: ValidationContext,
+) -> Result<(), Vec<ValidationError>> {
+    validate_transaction_with_pools(
+        tx,
+        utxo_set,
+        params,
+        current_slot,
+        tx_size,
+        slot_config,
+        context.registered_pools.as_ref(),
+        context.current_treasury,
+        context.reward_accounts.as_ref(),
+        context.current_epoch,
+        context.registered_dreps.as_ref(),
+        context.registered_vrf_keys.as_ref(),
+        context.node_network,
+        context.committee_members.as_ref(),
+        context.committee_resigned.as_ref(),
     )
 }
 

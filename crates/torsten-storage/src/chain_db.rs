@@ -1995,4 +1995,220 @@ mod tests {
             "volatile should hold k canonical blocks plus the fork block"
         );
     }
+
+    #[test]
+    fn test_rollback_beyond_volatile_returns_to_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Put blocks in immutable
+        for i in 1..=3u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            db.put_blocks_batch(&[(SlotNo(i * 100), &hash, BlockNo(i), b"imm")])
+                .unwrap();
+        }
+
+        // Add volatile blocks on top
+        for i in 4..=6u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 100),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("vol_{}", i).into_bytes(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(db.tip_slot(), SlotNo(600));
+
+        // Rollback past all volatile blocks to origin
+        db.rollback_to_point(&Point::Origin).unwrap();
+
+        // Tip should be from immutable (block 3 at slot 300)
+        assert_eq!(db.tip_slot(), SlotNo(300));
+
+        // Volatile should be empty
+        assert_eq!(db.volatile_block_count(), 0);
+
+        // Immutable blocks should still be accessible
+        assert!(db.has_block(&make_hash(3)));
+        assert!(db.has_block(&make_hash(2)));
+    }
+
+    #[test]
+    fn test_rollback_partial_volatile_to_immutable_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Build chain: 1 <- 2 <- 3 <- 4 <- 5
+        for i in 1..=5u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 10),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("block{}", i).into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Rollback to block 3 (halfway)
+        let removed = db
+            .rollback_to_point(&Point::Specific(SlotNo(30), make_hash(3)))
+            .unwrap();
+
+        // Blocks 4 and 5 should be removed
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&make_hash(4)));
+        assert!(removed.contains(&make_hash(5)));
+
+        // Tip should be block 3
+        assert_eq!(db.tip_slot(), SlotNo(30));
+
+        // All blocks should still be accessible
+        assert!(db.has_block(&make_hash(1)));
+        assert!(db.has_block(&make_hash(2)));
+        assert!(db.has_block(&make_hash(3)));
+    }
+
+    #[test]
+    fn test_rollback_nonexistent_point_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        build_chain(&mut db, 3);
+
+        // Try to rollback to a point that doesn't exist
+        let nonexistent = Point::Specific(SlotNo(999), make_hash(99));
+        let removed = db.rollback_to_point(&nonexistent).unwrap();
+
+        // Should be a no-op
+        assert!(removed.is_empty());
+        assert_eq!(db.tip_slot(), SlotNo(3));
+    }
+
+    #[test]
+    fn test_rollback_with_flush_scenario() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Build chain: 1 <- 2 <- 3 <- 4 <- 5
+        for i in 1..=5u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 10),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("block{}", i).into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Flush to immutable
+        db.flush_to_immutable().unwrap();
+
+        // Add more blocks on top
+        for i in 6..=8u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 10),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("block{}", i).into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // Rollback to block 3
+        db.rollback_to_point(&Point::Specific(SlotNo(30), make_hash(3)))
+            .unwrap();
+
+        // Immutable blocks 1-3 should still be there
+        assert!(db.immutable.has_block(&make_hash(1)));
+        assert!(db.immutable.has_block(&make_hash(2)));
+        assert!(db.immutable.has_block(&make_hash(3)));
+
+        // Volatile blocks 4-8 should still be accessible (non-destructive)
+        assert!(db.has_block(&make_hash(4)));
+        assert!(db.has_block(&make_hash(8)));
+
+        // Tip should be block 3
+        assert_eq!(db.tip_slot(), SlotNo(30));
+    }
+
+    #[test]
+    fn test_rollback_point_at_different_block_no_same_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Two blocks at same slot but different block numbers
+        let hash_a = make_hash(1);
+        let hash_b = make_hash(2);
+
+        db.add_block(
+            hash_a,
+            SlotNo(100),
+            BlockNo(10),
+            make_hash(0),
+            b"block_a".to_vec(),
+        )
+        .unwrap();
+
+        db.add_block(
+            hash_b,
+            SlotNo(100), // same slot
+            BlockNo(11), // different block number
+            make_hash(0),
+            b"block_b".to_vec(),
+        )
+        .unwrap();
+
+        // Rollback to block_a specifically
+        let removed = db
+            .rollback_to_point(&Point::Specific(SlotNo(100), hash_a))
+            .unwrap();
+
+        // Block B should be removed
+        assert!(removed.contains(&hash_b));
+        assert!(!removed.contains(&hash_a));
+
+        // Block A should still be accessible
+        assert!(db.has_block(&hash_a));
+    }
+
+    #[test]
+    fn test_sequential_rollbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ChainDB::open(dir.path()).unwrap();
+
+        // Build chain: 1 <- 2 <- 3 <- 4 <- 5 <- 6
+        for i in 1..=6u8 {
+            db.add_block(
+                make_hash(i),
+                SlotNo(i as u64 * 10),
+                BlockNo(i as u64),
+                make_hash(i - 1),
+                format!("block{}", i).into_bytes(),
+            )
+            .unwrap();
+        }
+
+        // First rollback to block 4
+        db.rollback_to_point(&Point::Specific(SlotNo(40), make_hash(4)))
+            .unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(40));
+
+        // Second rollback to block 2
+        db.rollback_to_point(&Point::Specific(SlotNo(20), make_hash(2)))
+            .unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(20));
+
+        // All blocks still accessible
+        for i in 1..=6u8 {
+            assert!(db.has_block(&make_hash(i)));
+        }
+    }
 }

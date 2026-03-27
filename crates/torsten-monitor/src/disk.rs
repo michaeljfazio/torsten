@@ -57,8 +57,11 @@ fn query_impl(path: &str) -> Option<DiskStats> {
     // Convert the path to a C string for the statvfs(2) syscall.
     let c_path = CString::new(path).ok()?;
 
-    // SAFETY: `c_path` is a valid NUL-terminated path; `stat` is
-    // zero-initialised before being passed to the kernel.
+    // SAFETY: `mem::zeroed()` and `statvfs` are safe because:
+    // 1. `statvfs` is a syscall that writes all fields of the struct
+    // 2. `mem::zeroed()` is safe since we immediately call `statvfs` which fills it
+    // 3. The struct is not read before being written by the syscall
+    // 4. `c_path` is a valid NUL-terminated path (CString::new succeeded)
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
     if ret != 0 {
@@ -99,8 +102,11 @@ fn query_impl(path: &str) -> Option<DiskStats> {
     let mut total_bytes: u64 = 0;
     let mut free_bytes_total: u64 = 0;
 
-    // SAFETY: all pointers point to local u64 variables; the path is a valid
-    // NUL-terminated string.
+    // SAFETY: All pointers point to local u64 variables:
+    // 1. `free_bytes_caller`, `total_bytes`, `free_bytes_total` are local variables
+    // 2. `c_path` is a valid NUL-terminated string (CString::new succeeded)
+    // 3. `GetDiskFreeSpaceExA` writes to all output parameters
+    // 4. We check the return value for errors before using the values
     let ok = unsafe {
         libc::GetDiskFreeSpaceExA(
             c_path.as_ptr(),

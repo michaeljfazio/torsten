@@ -349,6 +349,17 @@ async fn process_add_block(
     // TODO (Subsystem 3): Run chain selection here.  For now every stored
     // block is `StoredNotAdopted`; the caller can inspect `chain_db` to see
     // the current tip.
+    //
+    // Implementation plan:
+    // 1. Query VolatileDB for all competing chain tips
+    // 2. Compare against current immutable tip
+    // 3. Select the chain with the highest aggregate score (length + total difficulty)
+    // 4. Return SelectedChain variant with the winning chain
+    //
+    // Note: This will be needed once block submission moves from chain sync to
+    // the block submission protocol (MUX mode).
+    //
+    // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
 
     AddBlockResult::StoredNotAdopted
 }

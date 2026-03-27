@@ -242,6 +242,8 @@ impl Node {
     /// TODO(subsystem-4): Replace callers with `LedgerSeq::rollback()` via
     /// the new startup recovery sequence.  Track in the migration plan under
     /// "Phase 5: Remove old fork recovery".
+    ///
+    /// Tracked in: https://github.com/torsten-project/torsten/issues/TODO
     #[allow(deprecated, dead_code)] // retained for networking rewrite
     async fn reset_ledger_and_replay(&self, target_slot: u64) {
         {
@@ -368,6 +370,12 @@ impl Node {
     ///
     /// TODO(subsystem-4): Delegate to `LedgerSeq::rollback()` once the seq is
     /// maintained as the primary ledger state representation.
+    ///
+    /// The current fast-path (DiffSeq) is the precursor to this. When LedgerSeq
+    /// is the authoritative state store, replace the diff-based rollback with:
+    ///   seq.rollback(rollback_slot)
+    ///
+    /// Tracked in: https://github.com/torsten-project/torsten/issues/TODO
     ///
     /// # Fast path — diff-based rollback
     ///
@@ -1258,6 +1266,10 @@ impl Node {
                                 // TODO(subsystem-4): advance LedgerSeq anchor here.
                                 // For now this is a no-op; the existing flush_to_immutable
                                 // path handles immutable promotion.
+                                // When LedgerSeq is fully integrated, call seq.push(delta)
+                                // here to maintain the anchor sequence.
+                                //
+                                // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
                             },
                         )
                         .unwrap_or_else(|e| {

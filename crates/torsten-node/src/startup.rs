@@ -571,6 +571,12 @@ pub fn recover_ledger_seq(
         // when first admitted. Re-validation would be redundant and slow.
         //
         // TODO(subsystem-4): Replace with apply_block_with_delta when available.
+        // Currently we use apply_block (mutates state) + manual delta extraction.
+        // When Subsystem 1's LedgerDelta production is wired in, replace with:
+        //   let (_, delta) = seq.apply_block_with_delta(&block, Skip)?;
+        //   seq.push(delta);
+        //
+        // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
         let current_tip_state = seq.tip_state();
         let mut scratch = current_tip_state;
         scratch

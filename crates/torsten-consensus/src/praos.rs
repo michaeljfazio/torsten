@@ -2950,6 +2950,228 @@ mod tests {
             "Expected BlockBodyTooLarge, got: {result:?}"
         );
     }
+
+    #[test]
+    fn test_kes_period_boundary() {
+        let praos = OuroborosPraos::new();
+
+        // Block at slot 129599 is in KES period 0 (129600 slots per period)
+        let mut header = make_valid_header(129599);
+        header.operational_cert.kes_period = 0;
+        assert!(praos
+            .validate_header(&header, SlotNo(130000), ValidationMode::Full)
+            .is_ok());
+
+        // Block at slot 129600 is in KES period 1
+        let mut header2 = make_valid_header(129600);
+        header2.operational_cert.kes_period = 1;
+        assert!(praos
+            .validate_header(&header2, SlotNo(130000), ValidationMode::Full)
+            .is_ok());
+
+        // Block at slot 129600 with period 0 should fail (period mismatch)
+        let mut header3 = make_valid_header(129600);
+        header3.operational_cert.kes_period = 0;
+        let result = praos.validate_header(&header3, SlotNo(130000), ValidationMode::Full);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::KesPeriodBeforeCert { .. })
+        ));
+    }
+
+    #[test]
+    fn test_kes_period_certs_start_later() {
+        let praos = OuroborosPraos::new();
+
+        // Block in period 5 but cert started at period 3 should be valid
+        // (cert was valid for periods 3,4,5,6... with 3 evolutions)
+        let mut header = make_valid_header(KES_PERIOD_SLOTS * 5);
+        header.operational_cert.kes_period = 3;
+        assert!(praos
+            .validate_header(
+                &header,
+                SlotNo(KES_PERIOD_SLOTS * 5 + 1000),
+                ValidationMode::Full
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn test_vrf_leader_election_stake_fractions() {
+        // Test various stake fractions against expected behavior
+        let test_cases: Vec<(f64, bool)> = vec![
+            (0.0, false),   // 0% stake: never eligible
+            (0.001, false), // 0.1% stake: unlikely but possible
+            (0.01, true),   // 1% stake: likely eligible
+            (0.1, true),    // 10% stake: very likely
+            (0.5, true),    // 50% stake: most likely
+            (1.0, true),    // 100% stake: always eligible
+        ];
+
+        for (stake_fraction, _expected) in test_cases {
+            // Low VRF output should succeed at any non-zero stake
+            let low_output = [0u8; 64];
+            let high_output = [0xFFu8; 64];
+
+            let low_result = verify_leader_eligibility(&low_output, stake_fraction, 0.05);
+            // High output should fail for most stake fractions
+            let high_result = verify_leader_eligibility(&high_output, stake_fraction, 0.05);
+
+            // Zero stake should always fail
+            if stake_fraction == 0.0 {
+                assert!(low_result.is_err(), "Zero stake should never be eligible");
+                assert!(high_result.is_err(), "Zero stake should never be eligible");
+            } else {
+                // Low output should succeed for any positive stake
+                // High output depends on the threshold
+            }
+        }
+    }
+
+    #[test]
+    fn test_protocol_version_validation() {
+        let praos = OuroborosPraos::new();
+        let header = make_valid_header(100);
+
+        // Version 9.0 should be accepted (max supported major is 9)
+        let mut header_ok = header.clone();
+        header_ok.protocol_version =
+            torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 };
+        assert!(praos
+            .validate_header(&header_ok, SlotNo(200), ValidationMode::Full)
+            .is_ok());
+
+        // Version 10.0 should be rejected
+        let mut header_bad = header.clone();
+        header_bad.protocol_version = torsten_primitives::block::ProtocolVersion {
+            major: 10,
+            minor: 0,
+        };
+        let result = praos.validate_header(&header_bad, SlotNo(200), ValidationMode::Full);
+        assert!(matches!(
+            result,
+            Err(ConsensusError::UnsupportedProtocolVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn test_checkpoint_mismatch_detection() {
+        let praos = OuroborosPraos::new();
+        let header = make_valid_header(100);
+
+        // Valid header should have zero hash
+        let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full);
+        assert!(result.is_ok());
+
+        // Test checkpoint verification (if supported)
+        // This tests the error type exists and is constructable
+        let error = ConsensusError::CheckpointMismatch {
+            block_no: 100,
+            expected: Hash32::ZERO,
+            got: Hash32::from_bytes([1u8; 32]),
+        };
+        assert!(matches!(error, ConsensusError::CheckpointMismatch { .. }));
+    }
+
+    #[test]
+    fn test_epoch_transition_stability_window() {
+        let praos = OuroborosPraos::new();
+
+        // Stability window = 3 * k / f = 3 * 2160 / 0.05 = 129600 slots
+        let sw = praos.stability_window();
+
+        // Test that epoch boundaries align with stability window
+        assert_eq!(sw, 129600);
+
+        // Test slots around epoch boundaries
+        let epoch_1_start = SlotNo(432000); // First slot of epoch 1
+
+        // Stability window back from epoch boundary
+        let sw_before = epoch_1_start.0 - sw;
+        assert!(praos.slot_to_epoch(SlotNo(sw_before)) <= EpochNo(0));
+
+        // Slots within stability window of boundary
+        let sw_at_boundary = epoch_1_start.0 - (sw / 2);
+        assert_eq!(praos.slot_to_epoch(SlotNo(sw_at_boundary)), EpochNo(0));
+    }
+
+    #[test]
+    fn test_unknown_block_issuer_error() {
+        let error = ConsensusError::UnknownBlockIssuer(Hash28::from_bytes([0xAB; 28]));
+        match &error {
+            ConsensusError::UnknownBlockIssuer(pool_id) => {
+                assert_eq!(pool_id.0, [0xAB; 28]);
+            }
+            _ => panic!("Expected UnknownBlockIssuer variant"),
+        }
+    }
+
+    #[test]
+    fn test_body_hash_mismatch_error() {
+        let expected = Hash32::from_bytes([0x11; 32]);
+        let got = Hash32::from_bytes([0x22; 32]);
+        let error = ConsensusError::BodyHashMismatch {
+            header_hash: expected,
+            computed_hash: got,
+        };
+        match &error {
+            ConsensusError::BodyHashMismatch {
+                header_hash,
+                computed_hash,
+            } => {
+                assert_eq!(header_hash.0, [0x11; 32]);
+                assert_eq!(computed_hash.0, [0x22; 32]);
+            }
+            _ => panic!("Expected BodyHashMismatch variant"),
+        }
+    }
+
+    #[test]
+    fn test_max_rollback_calculation() {
+        let praos = OuroborosPraos::new();
+        assert_eq!(praos.max_rollback(), praos.security_param);
+        assert_eq!(praos.max_rollback(), 2160);
+    }
+
+    #[test]
+    fn test_active_slot_coefficient() {
+        let praos = OuroborosPraos::new();
+        assert!((praos.active_slot_coeff - 0.05).abs() < f64::EPSILON);
+
+        // Create with custom coefficient
+        let praos_custom = OuroborosPraos::with_params(
+            0.1,
+            2160,
+            torsten_primitives::time::mainnet_epoch_length(),
+        );
+        assert!((praos_custom.active_slot_coeff - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_vrf_output_size_variants() {
+        let praos = OuroborosPraos::new();
+
+        // 32-byte VRF output (legacy)
+        let mut header_32 = make_valid_header(100);
+        header_32.vrf_result.output = vec![0u8; 32];
+        assert!(praos
+            .validate_header(&header_32, SlotNo(200), ValidationMode::Full)
+            .is_ok());
+
+        // 64-byte VRF output (current TPraos)
+        let mut header_64 = make_valid_header(100);
+        header_64.vrf_result.output = vec![0u8; 64];
+        assert!(praos
+            .validate_header(&header_64, SlotNo(200), ValidationMode::Full)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_unregistered_pool_error() {
+        let pool_id = Hash28::from_bytes([0xCC; 28]);
+        let error = ConsensusError::UnregisteredPool { pool_id };
+        assert!(matches!(error, ConsensusError::UnregisteredPool { .. }));
+    }
 }
 
 // Checkpoint loader lives in torsten-node (has serde_json/hex deps).

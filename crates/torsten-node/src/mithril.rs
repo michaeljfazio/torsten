@@ -226,6 +226,17 @@ pub async fn import_snapshot(
     // TODO: implement full STM certificate chain verification using the Mithril
     // client library once it stabilises or by implementing the STM protocol
     // directly against the aggregator's /certificate endpoint.
+    //
+    // Required steps:
+    // 1. Fetch the full certificate chain from /certificate endpoint
+    // 2. Verify each certificate's signature against the signing key at that epoch
+    // 3. Verify the aggregate signature on the snapshot using the participant keys
+    // 4. Ensure the certificate chain links back to genesis (or a known checkpoint)
+    //
+    // This is a security-critical feature for production deployments. Currently
+    // appropriate for testnet/development use only.
+    //
+    // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
     warn!(
         "Mithril STM certificate chain verification is NOT implemented. \
          Snapshot digest is trusted from the aggregator API without cryptographic \

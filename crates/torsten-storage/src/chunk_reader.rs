@@ -117,10 +117,13 @@ mod backend {
 
             // Slow path: cache miss — open+mmap the file, then insert.
             let file = fs::File::open(path).ok()?;
-            // SAFETY: The file is opened read-only.  Chunk files are sealed
-            // (append-only before the active chunk is finalized) and are never
-            // truncated or replaced while the node is running.  The Mmap stays
-            // valid as long as the Arc is live.
+
+            // SAFETY: The mmap is safe because:
+            // 1. File is opened read-only
+            // 2. Chunk files are sealed (append-only before finalization)
+            // 3. Files are never truncated or replaced while node is running
+            // 4. The Mmap lifetime is managed by Arc and kept alive by the cache
+            // 5. Chunk file format ensures fixed size, no growth during mmap
             let mmap = unsafe { Mmap::map(&file).ok()? };
             let entry: MmapEntry = Arc::new(mmap);
 
@@ -218,7 +221,10 @@ mod backend {
                 .build()
                 .user_data(0);
 
-            // Safety: the SQE references `buf` which outlives the submission.
+            // SAFETY: The SQE (Submission Queue Entry) references `buf`:
+            // 1. `buf` is allocated before the submission
+            // 2. `buf` outlives the io_uring submission (we wait for completion)
+            // 3. The buffer pointer is valid for the duration of the operation
             unsafe {
                 ring.submission().push(&read_op).ok()?;
             }
@@ -264,7 +270,10 @@ mod backend {
                         .build()
                         .user_data(i as u64);
 
-                    // Safety: bufs outlive the ring submission.
+                    // SAFETY: bufs outlive the ring submission:
+                    // 1. `bufs` is allocated before the submission loop
+                    // 2. `bufs` is dropped only after all completions are processed
+                    // 3. Buffer pointers are stable for the duration of the operation
                     unsafe {
                         if sq.push(&read_op).is_err() {
                             // SQ full — shouldn't happen since we sized it.

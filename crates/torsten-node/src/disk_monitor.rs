@@ -51,7 +51,17 @@ pub fn check_disk_total_used(path: &Path) -> Option<(u64, u64)> {
     {
         use std::ffi::CString;
         let c_path = CString::new(path.to_string_lossy().as_bytes()).ok()?;
+
+        // SAFETY: `mem::zeroed()` is safe here because:
+        // 1. `statvfs` is a system call that writes all fields of the struct
+        // 2. We immediately call `statvfs` which fills the struct before reading
+        // 3. The struct is not used before being written by the syscall
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+
+        // SAFETY: `statvfs(c_path.as_ptr(), &mut stat)` is safe because:
+        // 1. `c_path` is a valid C string (CString::new succeeded)
+        // 2. `stat` points to valid, aligned memory
+        // 3. `statvfs` writes to the struct and we check return value for errors
         let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
         if ret != 0 {
             return None;
