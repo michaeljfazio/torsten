@@ -1281,8 +1281,14 @@ pub async fn start_metrics_server(
         }
     };
 
+    // Connection timeout: if a client connects but does not send an HTTP
+    // request within this window, the task is dropped and the connection closed.
+    // Prevents an abandoned or slow client from blocking the metrics server
+    // (the old sequential loop had no timeout and no per-connection spawning).
+    const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     loop {
-        let (mut stream, _) = match listener.accept().await {
+        let (stream, _peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Metrics server accept error: {e}");
@@ -1290,65 +1296,81 @@ pub async fn start_metrics_server(
             }
         };
 
-        // Read the request to determine the path
-        let mut buf = [0u8; 1024];
-        let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
-            .await
-            .unwrap_or(0);
-        let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
+        // Spawn a task per connection so one slow scraper cannot block others.
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            // Apply a hard timeout so abandoned connections don't linger.
+            let _ = tokio::time::timeout(
+                READ_TIMEOUT,
+                handle_metrics_connection(stream, metrics_clone),
+            )
+            .await;
+        });
+    }
+}
 
-        let response = if request.starts_with("GET /ready") {
-            // Kubernetes readiness probe: 200 if synced, 503 if not
-            if metrics.is_ready() {
-                let body = r#"{"ready":true}"#;
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-            } else {
-                let sync_pct = metrics.sync_progress_pct.load(Ordering::Relaxed) as f64 / 100.0;
-                let body = format!("{{\"ready\":false,\"sync_progress\":{sync_pct:.2}}}");
-                format!(
-                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-            }
-        } else if request.starts_with("GET /health") {
-            let status = metrics.health_status();
-            let uptime = metrics.uptime_seconds();
-            let slot = metrics.slot_number.load(Ordering::Relaxed);
-            let block = metrics.block_number.load(Ordering::Relaxed);
-            let epoch = metrics.epoch_number.load(Ordering::Relaxed);
-            let sync_pct = metrics.sync_progress_pct.load(Ordering::Relaxed) as f64 / 100.0;
-            let peers = metrics.peers_connected.load(Ordering::Relaxed);
-            let last_block_ts = metrics.last_block_received_iso();
-            let last_block_json = match &last_block_ts {
-                Some(ts) => format!("\"{}\"", ts),
-                None => "null".to_string(),
-            };
-            let body = format!(
-                "{{\"status\":\"{status}\",\"uptime_seconds\":{uptime},\"slot_number\":{slot},\"block_number\":{block},\"epoch_number\":{epoch},\"sync_progress\":{sync_pct:.2},\"peers_connected\":{peers},\"last_block_received_at\":{last_block_json}}}"
-            );
+/// Handle a single HTTP request on the metrics server.
+///
+/// Reads the request line, generates the response, and writes it back.
+/// Called from a spawned task so that one slow or abandoned connection
+/// cannot block the accept loop from serving subsequent scrapers.
+async fn handle_metrics_connection(mut stream: tokio::net::TcpStream, metrics: Arc<NodeMetrics>) {
+    let mut buf = [0u8; 1024];
+    let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
+
+    let response = if request.starts_with("GET /ready") {
+        // Kubernetes readiness probe: 200 if synced, 503 if not
+        if metrics.is_ready() {
+            let body = r#"{"ready":true}"#;
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
         } else {
-            let body = metrics.to_prometheus();
+            let sync_pct = metrics.sync_progress_pct.load(Ordering::Relaxed) as f64 / 100.0;
+            let body = format!("{{\"ready\":false,\"sync_progress\":{sync_pct:.2}}}");
             format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
-        };
-
-        if let Err(e) = stream.write_all(response.as_bytes()).await {
-            error!("Metrics server write error: {e}");
         }
-    }
+    } else if request.starts_with("GET /health") {
+        let status = metrics.health_status();
+        let uptime = metrics.uptime_seconds();
+        let slot = metrics.slot_number.load(Ordering::Relaxed);
+        let block = metrics.block_number.load(Ordering::Relaxed);
+        let epoch = metrics.epoch_number.load(Ordering::Relaxed);
+        let sync_pct = metrics.sync_progress_pct.load(Ordering::Relaxed) as f64 / 100.0;
+        let peers = metrics.peers_connected.load(Ordering::Relaxed);
+        let last_block_ts = metrics.last_block_received_iso();
+        let last_block_json = match &last_block_ts {
+            Some(ts) => format!("\"{}\"", ts),
+            None => "null".to_string(),
+        };
+        let body = format!(
+            "{{\"status\":\"{status}\",\"uptime_seconds\":{uptime},\"slot_number\":{slot},\"block_number\":{block},\"epoch_number\":{epoch},\"sync_progress\":{sync_pct:.2},\"peers_connected\":{peers},\"last_block_received_at\":{last_block_json}}}"
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    } else {
+        let body = metrics.to_prometheus();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    };
+
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 
 #[cfg(test)]
