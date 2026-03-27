@@ -355,38 +355,47 @@ impl BlockFetchLogicTask {
         }
 
         // Send fetch requests to each peer's worker.
+        //
+        // In-flight tracking is only updated AFTER a successful dispatch.
+        // If the peer's channel is full, the blocks are NOT marked as
+        // in-flight, allowing them to be dispatched to a different peer
+        // on the next decision tick.  Without this, a full channel would
+        // lock the blocks in in-flight for 120 seconds with no actual
+        // download happening.
         let now = Instant::now();
         for (addr, peer_ranges) in dispatched {
-            // Mark ALL blocks that fall within these ranges as in-flight.
-            // The ranges are consecutive subsets of new_headers (sorted by slot),
-            // so we find the matching headers by slot/hash and mark each one.
-            for range in &peer_ranges {
-                let from_slot = match &range.from {
-                    Point::Specific(s, _) => *s,
-                    Point::Origin => 0,
-                };
-                let to_slot = match &range.to {
-                    Point::Specific(s, _) => *s,
-                    Point::Origin => 0,
-                };
-                for (_, header) in &new_headers {
-                    if header.slot >= from_slot && header.slot <= to_slot {
-                        self.in_flight.insert(header.hash, (addr, now));
-                    }
-                }
-            }
-
             if let Some(sender) = self.fetch_senders.get(&addr) {
                 let range_count = peer_ranges.len();
-                match sender.try_send(peer_ranges) {
+                match sender.try_send(peer_ranges.clone()) {
                     Ok(()) => {
                         debug!(%addr, range_count, "dispatched fetch ranges to peer");
+                        // Mark ALL blocks in the successfully dispatched ranges
+                        // as in-flight so they aren't re-dispatched on the next
+                        // decision tick.
+                        for range in &peer_ranges {
+                            let from_slot = match &range.from {
+                                Point::Specific(s, _) => *s,
+                                Point::Origin => 0,
+                            };
+                            let to_slot = match &range.to {
+                                Point::Specific(s, _) => *s,
+                                Point::Origin => 0,
+                            };
+                            for (_, header) in &new_headers {
+                                if header.slot >= from_slot && header.slot <= to_slot {
+                                    self.in_flight.insert(header.hash, (addr, now));
+                                }
+                            }
+                        }
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        warn!(
+                        // Channel full — do NOT mark as in-flight.  The blocks
+                        // will be re-dispatched to a different peer on the next
+                        // decision tick.
+                        debug!(
                             %addr,
                             range_count,
-                            "peer fetch channel full, skipping dispatch"
+                            "peer fetch channel full, will retry on another peer"
                         );
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
