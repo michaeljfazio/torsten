@@ -2821,13 +2821,23 @@ pub async fn chainsync_client_task(
                         // with MsgRollForward or MsgRollBackward.
                         if !at_tip {
                             at_tip = true;
-                            // Only log the transition to "at tip" once per
-                            // sustained period.  When pipelined peers send
-                            // rapid RollForward+AwaitReply pairs, the at_tip
-                            // flag toggles on every block — logging each one
-                            // floods the log (1M+ entries observed).
+                            // Rate-limit "at tip" logging to at most once per
+                            // 60 seconds globally across all peers.
                             //
-                            // Log at most once per 60 seconds per peer.
+                            // Rationale: when an inbound peer (e.g. a Haskell
+                            // node syncing the full chain from Torsten) sends
+                            // rapid MsgRollForward+MsgAwaitReply pairs, the
+                            // at_tip flag toggles false→true on every single
+                            // block — up to 1.2 million times in 10 minutes.
+                            // Each log event at INFO floods the log file,
+                            // filling 120MB in under 10 minutes and causing
+                            // measurable I/O contention that stalls the main
+                            // sync loop.
+                            //
+                            // Use compare_exchange (not load+store) so that
+                            // concurrent tasks racing on the same 60-second
+                            // window don't all win and each log once. Only the
+                            // task that successfully stores wins.
                             static LAST_LOG: std::sync::atomic::AtomicU64 =
                                 std::sync::atomic::AtomicU64::new(0);
                             let now_secs = std::time::SystemTime::now()
@@ -2835,9 +2845,19 @@ pub async fn chainsync_client_task(
                                 .unwrap_or_default()
                                 .as_secs();
                             let prev = LAST_LOG.load(std::sync::atomic::Ordering::Relaxed);
-                            if now_secs.saturating_sub(prev) >= 60 {
-                                LAST_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
-                                info!(
+                            if now_secs.saturating_sub(prev) >= 60
+                                && LAST_LOG
+                                    .compare_exchange(
+                                        prev,
+                                        now_secs,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                // Emit at DEBUG — "at tip waiting for new block"
+                                // is normal steady-state and does not warrant INFO.
+                                debug!(
                                     %peer_addr,
                                     headers_received,
                                     "ChainSync at tip — awaiting new blocks",
