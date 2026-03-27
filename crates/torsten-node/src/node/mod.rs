@@ -2355,6 +2355,7 @@ impl Node {
         );
 
         // Update metrics.
+        self.metrics.record_block_received();
         self.metrics
             .blocks_received
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
