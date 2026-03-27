@@ -286,6 +286,30 @@ fn build_logging_opts(log: &LogArgs) -> Result<logging::LoggingOpts> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install a panic hook that writes a structured message to stderr *and*
+    // emits a tracing ERROR event before the process aborts.
+    //
+    // The release profile uses `panic = "abort"` which normally kills the
+    // process immediately — bypassing any buffered log output — making silent
+    // crashes extremely difficult to diagnose. This hook ensures that at
+    // minimum the panic location and message are written to stderr, and gives
+    // the tracing subscriber a brief window to flush its internal buffer.
+    std::panic::set_hook(Box::new(|info| {
+        // Always write to stderr directly (bypasses any log buffering).
+        eprintln!("PANIC: {info}");
+
+        // Also emit through tracing so the message appears in structured log
+        // files / journald / file appenders if they are still live.
+        tracing::error!(panic_info = %info, "Node panicked — aborting");
+
+        // Give the subscriber a brief window to flush its internal buffer.
+        // We cannot call `shutdown_tracer()` here because the subscriber is not
+        // guaranteed to be a TracingSubscriber, and `tracing` itself does not
+        // expose a flush primitive. A short sleep is a best-effort approach;
+        // the subsequent `panic=abort` will terminate the process regardless.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }));
+
     let cli = Cli::parse();
 
     // Extract log args and initialize logging before any work
@@ -832,7 +856,35 @@ async fn run_node(args: RunArgs) -> Result<()> {
     })?;
 
     info!("");
-    node.run().await?;
+
+    // Run the node with a concurrent SIGTERM/SIGINT watcher so the process
+    // exits cleanly (flushing logs, releasing the LSM lock, etc.) when the
+    // service manager stops it.  Without this, `panic=abort` means SIGTERM is
+    // handled by the OS with no log flush or resource cleanup.
+    tokio::select! {
+        result = node.run() => {
+            result?;
+        }
+        _ = async {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm = signal(SignalKind::terminate())
+                    .expect("SIGTERM handler registration failed");
+                sigterm.recv().await;
+                info!("SIGTERM received — shutting down");
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c().await.ok();
+                info!("CTRL-C received — shutting down");
+            }
+        } => {}
+        _ = async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("CTRL-C received — shutting down");
+        } => {}
+    }
 
     Ok(())
 }
