@@ -667,6 +667,7 @@ impl ConnectionLifecycleManager {
     fn make_blockfetch_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let fetched_blocks_tx = self.fetched_blocks_tx.clone();
         let candidate_chains = self.candidate_chains.clone();
+        let chain_db_for_fetch = self.chain_db.clone();
         let bel = self.byron_epoch_length;
         // Shared flag: only ONE BlockFetch worker is active at a time.
         // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
@@ -710,28 +711,28 @@ impl ConnectionLifecycleManager {
                             break;
                         }
                         _ = poll_ticker.tick() => {
-                            // Try to become the active fetcher.
-                            // Use hash of full SocketAddr for a unique non-zero peer ID.
-                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            addr.hash(&mut hasher);
-                            let my_id = hasher.finish() | 1; // ensure non-zero
-
-                            // Atomically claim the active fetcher slot using CAS to
-                            // prevent TOCTOU races where two workers both see 0 and
-                            // both store their ID (concurrent fetches).
-                            let claimed = active_fetcher.compare_exchange(
+                            // Allow concurrent fetchers — each worker fetches from
+                            // its own peer independently.  The applied_slot filter
+                            // and max_fetched_slot prevent duplicate work.
+                            //
+                            // Previously only ONE worker could fetch at a time
+                            // (active_fetcher CAS), which created a bottleneck:
+                            // when the active worker finished, it released the slot,
+                            // another worker claimed it, but the cycle time caused
+                            // multi-minute gaps at the chain tip.
+                            let my_id: u64 = {
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                addr.hash(&mut hasher);
+                                hasher.finish() | 1
+                            };
+                            // Always claim — no contention check.
+                            let _claimed = active_fetcher.compare_exchange(
                                 0,
                                 my_id,
                                 std::sync::atomic::Ordering::SeqCst,
                                 std::sync::atomic::Ordering::SeqCst,
                             ).is_ok();
-
-                            // Also allow re-entry if we already hold the slot.
-                            let current = active_fetcher.load(std::sync::atomic::Ordering::SeqCst);
-                            if !claimed && current != my_id {
-                                // Another worker is active — wait.
-                                continue;
-                            }
+                            // CAS result unused — all workers proceed regardless.
 
                             // Take pending headers from this peer, filtering out any
                             // slots that have already been fetched by another peer.
@@ -740,16 +741,28 @@ impl ConnectionLifecycleManager {
                             // block_fetch_logic decision task doesn't re-dispatch
                             // them.  If fetching fails, the ChainSync task will
                             // re-populate the headers on the next rollback cycle.
+                            //
+                            // Read chain_db tip BEFORE acquiring candidate_chains lock
+                            // to avoid calling blocking_read() inside an async context
+                            // (which panics with "Cannot block the current thread from
+                            // within a runtime").
+                            let applied_slot = {
+                                let db = chain_db_for_fetch.read().await;
+                                db.tip_slot().0
+                            };
                             let headers_to_fetch = {
-                                let chains = candidate_chains.read().await;
-                                if let Some(state) = chains.get(&addr) {
-                                    let skip_below = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
-                                    let filtered: Vec<_> = state.pending_headers.iter()
-                                        .filter(|h| h.slot > skip_below)
-                                        .cloned()
+                                let mut chains = candidate_chains.write().await;
+                                if let Some(state) = chains.get_mut(&addr) {
+                                    // Drain pending_headers to prevent infinite re-fetch.
+                                    // Filter by applied_slot (from ChainDB) rather than
+                                    // max_fetched_slot — the latter jumps to the tip when
+                                    // any peer downloads tip blocks, which skips all gap
+                                    // blocks for every worker.
+                                    let all = std::mem::take(&mut state.pending_headers);
+                                    let filtered: Vec<_> = all.into_iter()
+                                        .filter(|h| h.slot > applied_slot)
                                         .collect();
                                     if filtered.is_empty() {
-                                        // Release active fetcher so another peer can try.
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     filtered

@@ -35,49 +35,8 @@ use crate::BlockProvider;
 
 use super::{decode_message, encode_message, ChainSyncMessage};
 
-// CBOR tag number for embedded CBOR (RFC 7049 §2.4.4.1 / RFC 8949 §3.4.5.1).
-const CBOR_TAG_EMBEDDED: u64 = 24;
-
-/// Convert a pallas/ImmutableDB block storage era tag to the HFC NS index used
-/// in the N2N ChainSync `MsgRollForward` header wire format.
-///
-/// These two numbering schemes differ:
-///
-/// | Era     | Storage tag (pallas) | HFC NS index (N2N ChainSync) |
-/// |---------|----------------------|------------------------------|
-/// | Byron   | 0 or 1               | 0                            |
-/// | Shelley | 2                    | 1                            |
-/// | Allegra | 3                    | 2                            |
-/// | Mary    | 4                    | 3                            |
-/// | Alonzo  | 5                    | 4                            |
-/// | Babbage | 6                    | 5                            |
-/// | Conway  | 7                    | 6                            |
-///
-/// The storage tag appears in the outer `[era_tag, block_body]` wrapper in
-/// ImmutableDB chunk files (and in pallas's `MultiEraBlock` decoding).  The
-/// HFC NS index is the 0-based position of the era in the type-level list
-/// `[ByronBlock, ShelleyBlock TPraos, ..., ShelleyBlock Praos ConwayEra]` and
-/// is what the Haskell `encodeNS`/`decodeNS` functions expect in the wire
-/// format `[hfc_index_u8, tag(24)(header_bytes)]`.
-///
-/// Sending the wrong index causes "decodeNS: invalid index" (for indices ≥ 7)
-/// or routes to the wrong era decoder (e.g. routing Conway headers to the
-/// Alonzo/TPraos decoder which expects 15 flat fields instead of 10).
-fn storage_era_tag_to_hfc_index(storage_era_tag: u64) -> Result<u8, String> {
-    match storage_era_tag {
-        // Byron: pallas uses both 0 and 1 depending on context; both map to HFC index 0.
-        0 | 1 => Ok(0),
-        2 => Ok(1), // Shelley
-        3 => Ok(2), // Allegra
-        4 => Ok(3), // Mary
-        5 => Ok(4), // Alonzo
-        6 => Ok(5), // Babbage
-        7 => Ok(6), // Conway
-        other => Err(format!(
-            "unknown storage era tag {other}: cannot convert to HFC index"
-        )),
-    }
-}
+// Re-use shared HFC helpers from the protocol module.
+use crate::protocol::{storage_era_tag_to_hfc_index, CBOR_TAG_EMBEDDED};
 
 /// Extract the block header from raw HFC-wrapped block CBOR and encode it as
 /// `[hfc_index, #6.24(bstr(header_cbor))]` ready for inlining into MsgRollForward.
@@ -167,6 +126,9 @@ pub struct ChainSyncServer {
     cursor_hash: [u8; 32],
     /// Whether the cursor has been initialized (via intersection or genesis).
     cursor_initialized: bool,
+    /// True when the cursor is at Origin — meaning no block has been served
+    /// yet and we must include blocks at slot 0 (e.g. Byron genesis EBB).
+    cursor_at_origin: bool,
 }
 
 impl ChainSyncServer {
@@ -176,6 +138,7 @@ impl ChainSyncServer {
             cursor_slot: 0,
             cursor_hash: [0; 32],
             cursor_initialized: false,
+            cursor_at_origin: false,
         }
     }
 
@@ -242,6 +205,7 @@ impl ChainSyncServer {
                     self.cursor_slot = 0;
                     self.cursor_hash = [0; 32];
                     self.cursor_initialized = true;
+                    self.cursor_at_origin = true;
 
                     let response = encode_message(&ChainSyncMessage::MsgIntersectFound {
                         point: Point::Origin,
@@ -257,6 +221,7 @@ impl ChainSyncServer {
                         self.cursor_slot = *slot;
                         self.cursor_hash = *hash;
                         self.cursor_initialized = true;
+                        self.cursor_at_origin = false;
 
                         let response = encode_message(&ChainSyncMessage::MsgIntersectFound {
                             point: point.clone(),
@@ -289,9 +254,17 @@ impl ChainSyncServer {
         announcement_rx: &mut broadcast::Receiver<BlockAnnouncement>,
     ) -> Result<(), ProtocolError> {
         // Try to find the next block after our cursor.
-        if let Some((slot, hash, block_cbor)) =
+        //
+        // When cursor_at_origin is true, we use the inclusive `>=` lookup so
+        // that blocks at slot 0 (e.g. Byron genesis EBB) are not skipped.
+        // The strict `>` lookup would miss them since cursor_slot is 0.
+        let next_block = if self.cursor_at_origin {
+            block_provider.get_block_at_or_after_slot(0)
+        } else {
             block_provider.get_next_block_after_slot(self.cursor_slot)
-        {
+        };
+
+        if let Some((slot, hash, block_cbor)) = next_block {
             // Extract the block header and encode it as the HFC-wrapped header
             // payload expected by N2N ChainSync: [era_id, #6.24(bstr(header_cbor))].
             let hfc_header = extract_header_for_chainsync(&block_cbor).map_err(|reason| {
@@ -313,6 +286,7 @@ impl ChainSyncServer {
             // Advance cursor to the block we just served.
             self.cursor_slot = slot;
             self.cursor_hash = hash;
+            self.cursor_at_origin = false;
             return Ok(());
         }
 
