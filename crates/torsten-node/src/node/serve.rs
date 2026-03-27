@@ -88,6 +88,78 @@ impl BlockProvider for ChainDBBlockProvider {
             }
         })
     }
+
+    /// Collect blocks in [`from_slot`, `to_slot`] with chunked lock acquisition.
+    ///
+    /// # Why this override is critical
+    ///
+    /// The default trait implementation calls `get_next_block_after_slot()` in a
+    /// loop, each of which does `block_in_place(|| chain_db.blocking_read())`.
+    /// For a batch of N blocks that means N separate lock-acquire/release cycles —
+    /// each one parks the calling tokio worker thread until the lock is available.
+    /// When `ChainSelQueue` holds `chain_db.write()` during block storage, all N
+    /// parked threads stack up and starve the async worker pool, freezing the
+    /// metrics endpoint and slowing the main run loop.
+    ///
+    /// # Chunked locking strategy
+    ///
+    /// We do NOT hold the lock for the entire batch because
+    /// `ImmutableDB::get_next_block_after_slot()` performs synchronous disk I/O
+    /// (reads `.secondary` index + `.chunk` data files).  Holding the read lock
+    /// for 2000 sequential disk reads would block `ChainSelQueue.write()` for
+    /// seconds and stall the main sync loop.
+    ///
+    /// Instead, we acquire the read lock in chunks of `BATCH_CHUNK_SIZE` blocks.
+    /// This reduces lock overhead by ~50× compared to per-block locking while
+    /// keeping the critical section short enough (≈50 disk reads ≈ a few ms)
+    /// for the writer to make progress between chunks.
+    fn get_blocks_in_range(
+        &self,
+        from_slot: u64,
+        to_slot: u64,
+        limit: usize,
+    ) -> Vec<(u64, [u8; 32], Vec<u8>)> {
+        /// Number of blocks to collect per lock acquisition.  Each block read
+        /// may hit disk (ImmutableDB), so keep this small enough that the
+        /// ChainSelQueue writer is never starved for more than a few ms.
+        const BATCH_CHUNK_SIZE: usize = 50;
+
+        tokio::task::block_in_place(|| {
+            let mut blocks = Vec::new();
+            let mut current_slot = from_slot;
+            let mut first = true;
+
+            while current_slot <= to_slot && blocks.len() < limit {
+                // Acquire the read lock for a chunk of blocks.
+                let db = self.chain_db.blocking_read();
+                let chunk_limit = BATCH_CHUNK_SIZE.min(limit - blocks.len());
+
+                for _ in 0..chunk_limit {
+                    if current_slot > to_slot {
+                        break;
+                    }
+                    let slot_no = torsten_primitives::time::SlotNo(current_slot);
+                    let result = if first {
+                        first = false;
+                        db.get_block_at_or_after_slot(slot_no)
+                    } else {
+                        db.get_next_block_after_slot(slot_no)
+                    };
+                    match result {
+                        Ok(Some((s, hash, cbor))) if s.0 <= to_slot => {
+                            let mut hash_arr = [0u8; 32];
+                            hash_arr.copy_from_slice(hash.as_bytes());
+                            current_slot = s.0;
+                            blocks.push((s.0, hash_arr, cbor));
+                        }
+                        _ => return blocks, // No more blocks — done
+                    }
+                }
+                // Read lock dropped here; ChainSelQueue writer can proceed.
+            }
+            blocks
+        })
+    }
 }
 
 // ─── LedgerUtxoProvider ──────────────────────────────────────────────────────
