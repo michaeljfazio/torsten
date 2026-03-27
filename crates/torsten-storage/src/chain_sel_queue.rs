@@ -75,17 +75,35 @@ pub enum ChainSelMessage {
 pub enum AddBlockResult {
     /// The block was stored and chain selection chose it as the new tip.
     ///
-    /// Set by chain selection once Subsystem 3 is wired in.  In the current
-    /// stub implementation this variant is **not** returned — all new blocks
-    /// yield [`StoredNotAdopted`].
+    /// Returned when the newly-stored block extends the currently-selected
+    /// chain (i.e. it is a direct successor of the current tip).
     AdoptedAsTip,
     /// The block was stored in the VolatileDB but a different chain remains
-    /// preferred, or chain selection has not yet been wired in.
+    /// preferred.  The block is a fork block that did not win chain selection.
     StoredNotAdopted,
     /// The block failed validation.  The reason string is human-readable.
     Invalid(String),
     /// The block was already present in either the VolatileDB or ImmutableDB.
     AlreadyKnown,
+    /// Chain selection detected a strictly-longer competing fork and switched
+    /// to it.  The caller must perform a ledger rollback and replay.
+    ///
+    /// This corresponds to Haskell's `ChainDB.switchFork` result — returned
+    /// when a fork tip with a higher block number than the current chain tip
+    /// is found in the VolatileDB after storing this block.
+    ///
+    /// The fields describe the chain switch needed:
+    ///   - `rollback`: hashes to un-apply from the current tip, newest-first.
+    ///   - `apply`: hashes to apply on the new fork, oldest-first.
+    ///
+    /// Invariant: `rollback` and `apply` share a common ancestor (the
+    /// intersection block is NOT included in either list).
+    SwitchedToFork {
+        /// Hashes of blocks to roll back from the old chain (newest-first).
+        rollback: Vec<BlockHeaderHash>,
+        /// Hashes of blocks to apply from the new chain (oldest-first).
+        apply: Vec<BlockHeaderHash>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -345,21 +363,71 @@ async fn process_add_block(
         }
     }
 
-    // --- Step 4: Chain selection -------------------------------------------
-    // TODO (Subsystem 3): Run chain selection here.  For now every stored
-    // block is `StoredNotAdopted`; the caller can inspect `chain_db` to see
-    // the current tip.
+    // --- Step 4: Chain selection (Haskell `chainSelectionForBlock`) ---------
     //
-    // Implementation plan:
-    // 1. Query VolatileDB for all competing chain tips
-    // 2. Compare against current immutable tip
-    // 3. Select the chain with the highest aggregate score (length + total difficulty)
-    // 4. Return SelectedChain variant with the winning chain
+    // Query the VolatileDB for all competing fork tips — leaf blocks that are
+    // NOT on the currently-selected chain.  If any has a strictly-higher block
+    // number than the current selected-chain tip, we switch to that fork.
     //
-    // Note: This will be needed once block submission moves from chain sync to
-    // the block submission protocol (MUX mode).
+    // This matches Haskell's `constructPreferableCandidates` + `switchFork`
+    // in `ChainSel.hs`:
+    //   1. `maximalCandidates` → our `get_all_fork_tips()`
+    //   2. `preferAnchoredCandidate` (longest-chain rule) → block_no comparison
+    //   3. `switchFork` → `switch_to_fork()`
     //
-    // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
+    // The "strictly preferred" invariant (block_no MUST be strictly greater)
+    // matches Haskell's `preferCandidate` which requires the candidate to be
+    // "at least as long and at least as heavy" — we use strict length (block_no)
+    // for correctness in the simple case; tiebreaking via VRF / density will
+    // be added when headers are available in this path.
+    //
+    // NOTE: This check is performed AFTER writing to VolatileDB so the new
+    // block is visible when computing fork tips.
+    {
+        let mut db = chain_db.write().await;
+
+        // Current selected-chain tip block_no. If 0 / unknown there is
+        // nothing to compare against and no fork is possible yet.
+        let current_tip_block_no: u64 = db
+            .get_tip_info()
+            .map(|(_slot, _hash, bn)| bn.0)
+            .unwrap_or(0);
+
+        // Enumerate all competing fork tips.
+        let fork_tips = db.get_all_fork_tips();
+
+        // Find the fork tip (if any) that is STRICTLY longer than the current
+        // selected-chain tip.  If multiple forks qualify, pick the one with the
+        // highest block_no (i.e. the longest chain).
+        let best_fork = fork_tips
+            .into_iter()
+            .filter(|(_h, bn, _slot)| bn.0 > current_tip_block_no)
+            .max_by_key(|(_h, bn, _slot)| bn.0);
+
+        if let Some((fork_hash, fork_bn, fork_slot)) = best_fork {
+            // A strictly-preferred fork exists — switch to it.
+            debug!(
+                fork_hash = %fork_hash.to_hex(),
+                fork_block_no = fork_bn.0,
+                fork_slot = fork_slot.0,
+                current_tip_block_no,
+                "chain_sel: switching to longer fork"
+            );
+
+            if let Some(plan) = db.switch_to_fork(&fork_hash) {
+                return AddBlockResult::SwitchedToFork {
+                    rollback: plan.rollback,
+                    apply: plan.apply,
+                };
+            }
+            // `switch_to_fork` returned None: the fork hash was not reachable
+            // (should not happen, but guard defensively).
+            warn!(
+                fork_hash = %fork_hash.to_hex(),
+                "chain_sel: switch_to_fork returned None for reachable fork tip"
+            );
+        }
+    }
 
     AddBlockResult::StoredNotAdopted
 }
@@ -558,7 +626,149 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 3. InvalidBlockCache: insert / lookup / TTL
+    // 3. Chain selection: SwitchedToFork returned for longer competing fork
+    // -----------------------------------------------------------------------
+
+    /// Verify that submitting two competing forks causes chain selection to
+    /// return `SwitchedToFork` for the block that makes the fork strictly longer.
+    ///
+    /// Chain layout:
+    ///
+    ///   common → a2 → a3          (selected chain, block_nos 2, 3)
+    ///          ↘ b2 → b3 → b4    (fork, block_nos 2, 3, 4 — strictly longer)
+    ///
+    /// When b4 arrives, chain selection should switch to the b-fork and return
+    /// `SwitchedToFork { rollback: [a3, a2], apply: [b2, b3, b4] }`.
+    #[tokio::test]
+    async fn test_chain_selection_switches_to_longer_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner = tokio::spawn(runner);
+
+        // All hashes use a fixed high byte to stay far from ZERO.
+        let common = Hash32::from_bytes([0xC0; 32]);
+        let a2 = Hash32::from_bytes([0xA2; 32]);
+        let a3 = Hash32::from_bytes([0xA3; 32]);
+        let b2 = Hash32::from_bytes([0xB2; 32]);
+        let b3 = Hash32::from_bytes([0xB3; 32]);
+        let b4 = Hash32::from_bytes([0xB4; 32]);
+
+        // Build main (a) chain.
+        let r = handle
+            .submit_block(common, SlotNo(100), BlockNo(1), Hash32::ZERO, fake_cbor(&common))
+            .await
+            .unwrap();
+        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+
+        let r = handle
+            .submit_block(a2, SlotNo(200), BlockNo(2), common, fake_cbor(&a2))
+            .await
+            .unwrap();
+        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+
+        let r = handle
+            .submit_block(a3, SlotNo(300), BlockNo(3), a2, fake_cbor(&a3))
+            .await
+            .unwrap();
+        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+
+        // Build competing (b) fork starting from common.
+        // b2 and b3 have the same block_nos as a2/a3 — no switch yet.
+        let r = handle
+            .submit_block(b2, SlotNo(200), BlockNo(2), common, fake_cbor(&b2))
+            .await
+            .unwrap();
+        // b2 is a fork tip with block_no=2, but selected chain tip is a3 at
+        // block_no=3, so b2 does NOT trigger a switch.
+        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+
+        let r = handle
+            .submit_block(b3, SlotNo(300), BlockNo(3), b2, fake_cbor(&b3))
+            .await
+            .unwrap();
+        // b3 block_no=3 == current tip a3 block_no=3.
+        // Strictly-greater check: 3 > 3 is false → no switch.
+        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+
+        // b4 extends the fork to block_no=4, strictly longer than a3 (3).
+        let r = handle
+            .submit_block(b4, SlotNo(400), BlockNo(4), b3, fake_cbor(&b4))
+            .await
+            .unwrap();
+
+        match r {
+            AddBlockResult::SwitchedToFork { rollback, apply } => {
+                // Rollback should un-apply the a-chain blocks above common.
+                assert!(
+                    rollback.contains(&a3) && rollback.contains(&a2),
+                    "rollback should include a3 and a2, got: {rollback:?}"
+                );
+                // Apply should bring in the b-chain blocks.
+                assert!(
+                    apply.contains(&b2) && apply.contains(&b3) && apply.contains(&b4),
+                    "apply should include b2, b3, b4, got: {apply:?}"
+                );
+                // common should NOT appear in either list.
+                assert!(
+                    !rollback.contains(&common) && !apply.contains(&common),
+                    "intersection block should not appear in rollback/apply"
+                );
+            }
+            other => panic!("expected SwitchedToFork but got: {other:?}"),
+        }
+
+        // After the switch, the VolatileDB tip should be b4.
+        let db = chain_db.read().await;
+        let tip = db.get_tip_info().expect("should have a tip");
+        assert_eq!(tip.2.0, 4, "tip block_no should be 4 (b4)");
+    }
+
+    /// Verify that equal-length chains do NOT trigger a fork switch.
+    ///
+    /// Haskell invariant: chain selection only switches to a STRICTLY-preferred
+    /// candidate (block_no > current tip). Equal block_no is not sufficient.
+    #[tokio::test]
+    async fn test_chain_selection_no_switch_equal_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner = tokio::spawn(runner);
+
+        let common = Hash32::from_bytes([0xC0; 32]);
+        let a2 = Hash32::from_bytes([0xA2; 32]);
+        let b2 = Hash32::from_bytes([0xB2; 32]);
+
+        handle
+            .submit_block(common, SlotNo(100), BlockNo(1), Hash32::ZERO, fake_cbor(&common))
+            .await
+            .unwrap();
+        handle
+            .submit_block(a2, SlotNo(200), BlockNo(2), common, fake_cbor(&a2))
+            .await
+            .unwrap();
+
+        // b2 has the same block_no as a2 — no switch should occur.
+        let r = handle
+            .submit_block(b2, SlotNo(200), BlockNo(2), common, fake_cbor(&b2))
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            AddBlockResult::StoredNotAdopted,
+            "equal-length fork must not trigger a switch"
+        );
+
+        // Selected chain tip is still a2.
+        let db = chain_db.read().await;
+        let tip = db.get_tip_info().expect("should have a tip");
+        assert_eq!(tip.2.0, 2, "selected-chain tip block_no should still be 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. InvalidBlockCache: insert / lookup / TTL
     // -----------------------------------------------------------------------
 
     #[test]
@@ -700,8 +910,11 @@ mod tests {
 
         for i in 0..N {
             let h = handle.clone();
+            // Use i+1 so that no block hash collides with Hash32::ZERO
+            // (which is used as prev_hash for all blocks).  If hash == ZERO
+            // == prev_hash, walk_chain_back() would loop forever.
             let mut hash_bytes = [0u8; 32];
-            hash_bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            hash_bytes[..8].copy_from_slice(&((i as u64) + 1).to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
             let cbor = fake_cbor(&hash);
 
@@ -719,18 +932,27 @@ mod tests {
         }
 
         let mut stored = 0usize;
+        let mut switched = 0usize;
         let mut already_known = 0usize;
 
         for task in tasks {
             match task.await.unwrap() {
                 AddBlockResult::StoredNotAdopted => stored += 1,
                 AddBlockResult::AlreadyKnown => already_known += 1,
+                // Each block has a unique block_no so chain selection may
+                // switch to a longer fork as blocks arrive out of order.
+                AddBlockResult::SwitchedToFork { .. } => switched += 1,
                 other => panic!("unexpected result: {other:?}"),
             }
         }
 
-        // All N hashes are distinct, so all must be stored exactly once.
-        assert_eq!(stored, N, "all unique blocks should be stored");
+        // All N hashes are distinct; every block must be either stored or
+        // trigger a fork switch (both outcomes mean the block is in storage).
+        assert_eq!(
+            stored + switched,
+            N,
+            "all unique blocks should be stored (stored={stored}, switched={switched})"
+        );
         assert_eq!(already_known, 0, "no duplicates submitted");
 
         // Verify VolatileDB contains exactly N blocks.

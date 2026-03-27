@@ -573,6 +573,20 @@ impl ChainDB {
         Ok(removed)
     }
 
+    /// Return all competing fork tips from the VolatileDB.
+    ///
+    /// A fork tip is a leaf block (no successors) that is NOT on the currently
+    /// selected chain. Chain selection queries these candidates to decide whether
+    /// to switch to a longer (or otherwise preferred) fork.
+    ///
+    /// This is the ChainDB wrapper around `VolatileDB::get_all_fork_tips()`,
+    /// which implements the Haskell `maximalCandidates` equivalent.
+    ///
+    /// Returns `(hash, block_no, slot)` tuples for each competing tip.
+    pub fn get_all_fork_tips(&self) -> Vec<(BlockHeaderHash, BlockNo, SlotNo)> {
+        self.volatile.get_all_fork_tips()
+    }
+
     /// Switch the selected chain to a new tip.
     pub fn switch_to_fork(
         &mut self,

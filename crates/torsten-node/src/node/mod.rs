@@ -1843,6 +1843,12 @@ impl Node {
             Arc::new(RwLock::new(HashMap::new()));
 
         let connect_timeout = Duration::from_secs(5);
+        // Read security_param from genesis config; fall back to mainnet default.
+        let security_param = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.security_param)
+            .unwrap_or(2160);
         let lifecycle = ConnectionLifecycleManager::new(
             self.network_magic,
             /* peer_sharing */ true,
@@ -1856,6 +1862,7 @@ impl Node {
             self.chain_db.clone(),
             self.ledger_state.clone(),
             self.byron_epoch_length,
+            security_param,
             self.metrics.clone(),
             self.mempool.clone(),
         );
@@ -2332,6 +2339,20 @@ impl Node {
                 Some(torsten_storage::AddBlockResult::AdoptedAsTip)
                 | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
                 | Some(torsten_storage::AddBlockResult::AlreadyKnown) => true,
+                Some(torsten_storage::AddBlockResult::SwitchedToFork { rollback, apply }) => {
+                    // Chain selection detected a longer competing fork.
+                    // Log the switch; the ledger rollback + replay is handled
+                    // by the existing peer-driven MsgRollBackward path once
+                    // the peer that holds the fork advances.  The VolatileDB
+                    // has already been switched atomically by the queue runner.
+                    info!(
+                        slot = block_slot.0,
+                        rollback_count = rollback.len(),
+                        apply_count = apply.len(),
+                        "ChainSelQueue: switched to longer fork"
+                    );
+                    true
+                }
                 Some(torsten_storage::AddBlockResult::Invalid(reason)) => {
                     warn!(
                         slot = block_slot.0,
@@ -3161,6 +3182,24 @@ impl Node {
                         Some(torsten_storage::AddBlockResult::AdoptedAsTip)
                         | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
                         | Some(torsten_storage::AddBlockResult::AlreadyKnown) => true,
+                        Some(torsten_storage::AddBlockResult::SwitchedToFork {
+                            rollback,
+                            apply,
+                        }) => {
+                            // A fork switch was triggered by storing our own
+                            // forged block.  This is theoretically impossible
+                            // (a freshly-forged block extends our own tip), but
+                            // handle it defensively.  The VolatileDB is already
+                            // switched; log and proceed — the ledger apply below
+                            // will restore consistency on the next sync round.
+                            warn!(
+                                slot = next_slot.0,
+                                rollback_count = rollback.len(),
+                                apply_count = apply.len(),
+                                "Unexpected fork switch when storing forged block"
+                            );
+                            true
+                        }
                         Some(torsten_storage::AddBlockResult::Invalid(reason)) => {
                             // The forged block itself was rejected by storage.
                             // This is highly unusual and indicates a bug — log

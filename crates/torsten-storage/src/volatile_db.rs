@@ -40,6 +40,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use torsten_primitives::hash::Hash32;
+use torsten_primitives::time::{BlockNo, SlotNo};
 use tracing::{debug, info, warn};
 
 /// WAL entry magic bytes: "TWAL"
@@ -1102,10 +1103,21 @@ impl VolatileDB {
 
     /// Walk backwards from `tip_hash` through `prev_hash` links.
     /// Returns oldest-to-newest order.
+    ///
+    /// Includes cycle detection: if a block's `prev_hash` points to a block
+    /// already in the walk (including itself), the walk stops.  This guards
+    /// against degenerate cases such as `hash == prev_hash`.  In a valid
+    /// Cardano chain, cycles cannot occur because block hashes are a
+    /// cryptographic commitment to the block body including prev_hash.
     pub fn walk_chain_back(&self, tip_hash: &Hash32) -> Vec<Hash32> {
         let mut chain = Vec::new();
+        let mut visited = HashSet::new();
         let mut current = *tip_hash;
         while let Some(block) = self.blocks.get(&current) {
+            if !visited.insert(current) {
+                // Already visited this hash — cycle detected. Stop walking.
+                break;
+            }
             chain.push(current);
             if self.blocks.contains_key(&block.prev_hash) {
                 current = block.prev_hash;
@@ -1127,6 +1139,44 @@ impl VolatileDB {
                     .is_none_or(|succs| succs.is_empty())
             })
             .map(|(hash, block)| (*hash, block.slot, block.block_no))
+            .collect()
+    }
+
+    /// Find all competing fork tips: leaf blocks that are NOT on the
+    /// currently-selected chain.
+    ///
+    /// This is the Rust equivalent of Haskell's `maximalCandidates` —
+    /// it returns every chain-tip in the VolatileDB that could potentially
+    /// be preferred over the current selection.
+    ///
+    /// A block is a "fork tip" when:
+    ///   1. It has no successors (it is a leaf in the block DAG), AND
+    ///   2. Its hash does not appear in `selected_chain` (it is not the
+    ///      current tip, nor an ancestor of it on the selected chain).
+    ///
+    /// The selected-chain tip itself is excluded because chain selection
+    /// only needs to consider *alternatives* to the current selection.
+    ///
+    /// Returns `(hash, block_no, slot)` tuples, one per competing tip.
+    /// The list may be empty when there are no forks.
+    pub fn get_all_fork_tips(&self) -> Vec<(Hash32, BlockNo, SlotNo)> {
+        // Build a fast-lookup set from the selected chain.
+        // Selected-chain blocks are NOT fork candidates.
+        let selected_set: std::collections::HashSet<&Hash32> = self.selected_chain.iter().collect();
+
+        self.blocks
+            .iter()
+            .filter(|(hash, _block)| {
+                // Condition 1: not on the selected chain.
+                if selected_set.contains(*hash) {
+                    return false;
+                }
+                // Condition 2: no successors (leaf in the DAG).
+                self.successors
+                    .get(*hash)
+                    .is_none_or(|succs| succs.is_empty())
+            })
+            .map(|(hash, block)| (*hash, BlockNo(block.block_no), SlotNo(block.slot)))
             .collect()
     }
 
@@ -2124,6 +2174,114 @@ mod tests {
         assert_eq!(db.get_leaf_tips().len(), 1);
         db.add_block(h(3), 200, 20, h(1), b"b3_fork".to_vec());
         assert_eq!(db.get_leaf_tips().len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_all_fork_tips tests
+    // -----------------------------------------------------------------------
+
+    /// Empty DB has no fork tips.
+    #[test]
+    fn test_get_all_fork_tips_empty() {
+        let db = VolatileDB::new();
+        assert!(db.get_all_fork_tips().is_empty());
+    }
+
+    /// A single linear chain has no fork tips.
+    #[test]
+    fn test_get_all_fork_tips_linear_chain() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+
+        // Selected chain: [h1, h2, h3] — no competing forks.
+        let tips = db.get_all_fork_tips();
+        assert!(
+            tips.is_empty(),
+            "linear chain has no fork tips but got: {tips:?}"
+        );
+    }
+
+    /// One fork block produces one fork tip.
+    #[test]
+    fn test_get_all_fork_tips_one_fork() {
+        let mut db = VolatileDB::new();
+        // Main chain: h1 → h2 → h3
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        // Fork at h1: h4 (same block_no=20 as h2, different hash)
+        db.add_block(h(4), 200, 20, h(1), b"b4_fork".to_vec());
+
+        // Selected chain is [h1, h2, h3] (first to arrive wins).
+        // h4 is NOT on selected chain and has no successors → fork tip.
+        let tips = db.get_all_fork_tips();
+        assert_eq!(tips.len(), 1, "expected 1 fork tip, got: {tips:?}");
+        let (tip_hash, tip_bn, _) = tips[0];
+        assert_eq!(tip_hash, h(4));
+        assert_eq!(tip_bn.0, 20);
+    }
+
+    /// A fork that extends to be longer than the selected chain appears as
+    /// a single fork tip at its leaf.
+    #[test]
+    fn test_get_all_fork_tips_longer_fork() {
+        let mut db = VolatileDB::new();
+        // Main chain: h1 → h2 → h3 (block_nos 10, 20, 30)
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        // Longer fork: h1 → h4 → h5 → h6 (block_nos 20, 30, 40)
+        db.add_block(h(4), 200, 20, h(1), b"b4".to_vec());
+        db.add_block(h(5), 300, 30, h(4), b"b5".to_vec());
+        db.add_block(h(6), 400, 40, h(5), b"b6".to_vec());
+
+        // Only h6 is the fork tip — h4 and h5 have successors.
+        let tips = db.get_all_fork_tips();
+        assert_eq!(tips.len(), 1, "expected 1 fork tip, got: {tips:?}");
+        assert_eq!(tips[0].0, h(6), "fork tip should be h6");
+        assert_eq!(tips[0].1 .0, 40, "fork tip should have block_no=40");
+    }
+
+    /// After a chain switch, the old chain's tip becomes a fork tip.
+    #[test]
+    fn test_get_all_fork_tips_after_switch() {
+        let mut db = VolatileDB::new();
+        // Build a fork that is longer.
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        db.add_block(h(4), 200, 20, h(1), b"b4".to_vec());
+        db.add_block(h(5), 300, 30, h(4), b"b5".to_vec());
+        db.add_block(h(6), 400, 40, h(5), b"b6".to_vec());
+
+        // Switch to the longer fork.
+        db.switch_chain(&h(6));
+
+        // After the switch, selected_chain = [h1, h4, h5, h6].
+        // h3 has no successors and is NOT on selected_chain → fork tip.
+        // h2 has no successors... wait: h2 IS NOT a leaf (h3 extends it).
+        // Actually h3 is a leaf and not on selected chain.
+        let tips = db.get_all_fork_tips();
+        assert_eq!(tips.len(), 1, "expected 1 fork tip (h3), got: {tips:?}");
+        assert_eq!(tips[0].0, h(3), "the old tip h3 should be the fork tip");
+    }
+
+    /// Cycle detection in walk_chain_back does not hang.
+    ///
+    /// This is a degenerate case (hash == prev_hash) that cannot occur in
+    /// real Cardano blocks but should not cause an infinite loop.
+    #[test]
+    fn test_walk_chain_back_cycle_detection() {
+        let mut db = VolatileDB::new();
+        // Block with hash == prev_hash (self-referential — degenerate).
+        let self_ref = h(7);
+        db.add_block(self_ref, 100, 10, self_ref, b"self_ref".to_vec());
+
+        // walk_chain_back should return [self_ref] without looping forever.
+        let chain = db.walk_chain_back(&self_ref);
+        assert_eq!(chain, vec![self_ref], "should return only the block itself");
     }
 
     #[test]
