@@ -1,0 +1,21 @@
+coverage:
+  status:
+    project:
+      default:
+        # Don't fail the build on coverage changes — the project has
+        # extensive property tests and conformance tests that are hard
+        # to measure with line coverage.
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "condensed_header, condensed_files, condensed_footer"
+  require_changes: true
+
+ignore:
+  - "crates/torsten-node/src/main.rs"
+  - "tests/**"
+  - "scripts/**"
+  - "benches/**"
