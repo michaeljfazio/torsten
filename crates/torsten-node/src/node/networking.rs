@@ -23,8 +23,9 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use torsten_network::peer::manager::MAX_COLD_PEER_FAILURES;
 use torsten_network::{PeerManager, PeerSource, PeerState};
 
 // ─── Configuration Types ─────────────────────────────────────────────────────
@@ -250,8 +251,6 @@ pub struct NodePeerManager {
     connections: HashMap<SocketAddr, ConnectionDirection>,
     /// Whether each connection is duplex.
     duplex: HashMap<SocketAddr, bool>,
-    /// Last connection attempt times (for rate limiting).
-    last_attempt: HashMap<SocketAddr, Instant>,
     /// Our own listen address (to prevent self-connections).
     local_addr: Option<SocketAddr>,
     /// Configured local root peer groups.
@@ -268,7 +267,6 @@ impl NodePeerManager {
             config,
             connections: HashMap::new(),
             duplex: HashMap::new(),
-            last_attempt: HashMap::new(),
             local_addr: None,
             local_root_groups: Vec::new(),
             big_ledger_peers: std::collections::HashSet::new(),
@@ -353,14 +351,37 @@ impl NodePeerManager {
     }
 
     /// Record a connection failure.
+    ///
+    /// Applies exponential backoff via `PeerInfo::record_failure()`. For
+    /// non-root peers (Ledger, PeerSharing), permanently removes the peer
+    /// after `MAX_COLD_PEER_FAILURES` consecutive failures, matching Haskell's
+    /// `policyMaxConnectionRetries = 5` forget policy.
+    ///
+    /// Topology and Dns peers are never forgotten — they are retried
+    /// indefinitely at the 160s backoff cap (matching Haskell local/public
+    /// root peer behaviour).
     pub fn peer_failed(&mut self, addr: &SocketAddr) {
+        // Check whether this failure pushes the peer over the forget threshold.
+        // We read failure_count *before* calling record_failure() (+1 below).
+        let should_forget = self.inner.get_peer(addr).is_some_and(|p| {
+            p.failure_count + 1 >= MAX_COLD_PEER_FAILURES
+                && !matches!(p.source, PeerSource::Topology | PeerSource::Dns)
+        });
+
         if let Some(peer) = self.inner.get_peer_mut(addr) {
             peer.record_failure();
         }
-        self.inner.demote_to_cold(addr);
+
         self.connections.remove(addr);
         self.duplex.remove(addr);
-        self.last_attempt.insert(*addr, Instant::now());
+
+        if should_forget {
+            // Non-root peer exceeded max retries — remove from known set entirely.
+            // It will only re-appear if re-discovered via ledger or peer sharing.
+            self.inner.remove_peer(addr);
+        } else {
+            self.inner.demote_to_cold(addr);
+        }
     }
 
     /// Mark a connection as duplex.
@@ -459,29 +480,6 @@ impl NodePeerManager {
                     && self.duplex.get(addr).copied().unwrap_or(false)
             })
             .map(|(addr, _)| *addr)
-    }
-
-    /// Check whether a connection attempt should be made to this peer.
-    #[allow(dead_code)] // used by networking rewrite
-    pub fn should_attempt_connection(&self, addr: &SocketAddr) -> bool {
-        if let Some(last) = self.last_attempt.get(addr) {
-            if last.elapsed() < Duration::from_secs(30) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Get peers eligible for new outbound connections.
-    #[allow(dead_code)] // used by networking rewrite
-    pub fn peers_to_connect(&self, count: usize) -> Vec<SocketAddr> {
-        self.inner
-            .peers_in_state(PeerState::Cold)
-            .into_iter()
-            .filter(|addr| self.should_attempt_connection(addr))
-            .filter(|addr| self.local_addr.as_ref() != Some(addr))
-            .take(count)
-            .collect()
     }
 
     /// Summary statistics.

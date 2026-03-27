@@ -254,6 +254,11 @@ struct DumpSnapshotArgs {
     #[arg(long)]
     output: Option<PathBuf>,
 
+    /// Output directory for per-epoch JSON files. If set, writes one {epoch}.json
+    /// file per epoch instead of NDJSON to --output/stdout.
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+
     #[command(flatten)]
     log: LogArgs,
 }
@@ -330,6 +335,77 @@ async fn main() -> Result<()> {
         Command::MithrilImport(args) => run_mithril_import(args).await,
         Command::DumpSnapshot(args) => run_dump_snapshot(args).await,
         Command::Db(args) => run_db_command(args).await,
+    }
+}
+
+/// Ledger state captured BEFORE `apply_block` is called for a given block.
+///
+/// At epoch transitions the NEW epoch's state is already in `LedgerState` by
+/// the time we detect `current_epoch > last_epoch`, so we snapshot the fields
+/// we need from the PREVIOUS epoch here and pass them to `build_epoch_snapshot`
+/// instead of reading from `ledger` directly.
+struct PreApplyState {
+    /// Reserves balance (lovelace) at end of the previous epoch.
+    reserves: u64,
+    /// Treasury balance (lovelace) at end of the previous epoch.
+    treasury: u64,
+    /// Epoch nonce (32 bytes) as of the previous epoch.
+    epoch_nonce: [u8; 32],
+    /// Era name at end of the previous epoch.
+    era_name: String,
+    /// Protocol parameters (serialised to JSON once) at end of previous epoch.
+    protocol_params_json: serde_json::Value,
+    /// Number of registered pools.
+    total_pools: usize,
+    /// Number of registered reward accounts.
+    reward_account_count: usize,
+    /// Number of registered DReps.
+    drep_count: usize,
+    /// Key deposit (lovelace) for deposit accounting.
+    key_deposit: u64,
+    /// Pool deposit (lovelace) for deposit accounting.
+    pool_deposit: u64,
+    /// DRep deposit (lovelace) for deposit accounting.
+    drep_deposit: u64,
+    /// Epoch snapshots — cheap clone because all large fields are `Arc`.
+    snapshots: torsten_ledger::state::EpochSnapshots,
+    /// Pending reward update (almost always `None` under the corrected RUPD path).
+    pending_reward_update: Option<torsten_ledger::state::PendingRewardUpdate>,
+}
+
+impl PreApplyState {
+    /// Capture the state we need for epoch-snapshot generation from the current
+    /// ledger state, BEFORE `apply_block` is called.
+    fn capture(ledger: &torsten_ledger::LedgerState) -> Self {
+        let pp = &ledger.protocol_params;
+        let protocol_params_json = serde_json::json!({
+            "a0":  { "numerator": pp.a0.numerator,  "denominator": pp.a0.denominator  },
+            "d":   { "numerator": pp.d.numerator,   "denominator": pp.d.denominator   },
+            "rho": { "numerator": pp.rho.numerator, "denominator": pp.rho.denominator },
+            "tau": { "numerator": pp.tau.numerator, "denominator": pp.tau.denominator },
+            "nOpt": pp.n_opt,
+            "minPoolCost": pp.min_pool_cost.0,
+            "protocolVersion": {
+                "major": pp.protocol_version_major,
+                "minor": pp.protocol_version_minor,
+            },
+        });
+
+        PreApplyState {
+            reserves: ledger.reserves.0,
+            treasury: ledger.treasury.0,
+            epoch_nonce: ledger.epoch_nonce.0,
+            era_name: format!("{}", ledger.era),
+            protocol_params_json,
+            total_pools: ledger.pool_params.len(),
+            reward_account_count: ledger.reward_accounts.len(),
+            drep_count: ledger.governance.dreps.len(),
+            key_deposit: pp.key_deposit.0,
+            pool_deposit: pp.pool_deposit.0,
+            drep_deposit: pp.drep_deposit.0,
+            snapshots: ledger.snapshots.clone(),
+            pending_reward_update: ledger.pending_reward_update.clone(),
+        }
     }
 }
 
@@ -459,17 +535,34 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         );
     }
 
-    // Open output (file or stdout)
+    // Open output (file or stdout) for NDJSON mode (used when --output-dir is not set).
     let mut output: Box<dyn Write> = match &args.output {
         Some(path) => Box::new(std::io::BufWriter::new(std::fs::File::create(path)?)),
         None => Box::new(std::io::stdout().lock()),
     };
 
+    // Create the per-epoch output directory if requested.
+    if let Some(ref dir) = args.output_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    // Extract max_lovelace_supply from Shelley genesis for correct totalStake
+    // computation (RC2): cstreamer defines totalStake = maxLovelaceSupply - reserves,
+    // not the sum of pool stakes from the set snapshot.
+    let max_lovelace_supply = shelley_genesis_opt
+        .as_ref()
+        .map(|sg| sg.max_lovelace_supply)
+        .unwrap_or(45_000_000_000_000_000u64);
+
     let stop_slot = args.stop_slot.unwrap_or(u64::MAX);
     let mut last_epoch = u64::MAX;
     let mut epoch_fees: u64 = 0;
     let mut blocks_applied = 0u64;
+    let mut epochs_written = 0u64;
     let start_time = std::time::Instant::now();
+    // Pre-apply state for the previous epoch — updated before every apply_block.
+    // Initialised to genesis state; overwritten on the first real block.
+    let mut pre_state = PreApplyState::capture(&ledger);
 
     info!("Replaying blocks from ImmutableDB...");
 
@@ -487,6 +580,10 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
 
         let block_fees: u64 = block.transactions.iter().map(|tx| tx.body.fee.0).sum();
 
+        // RC1: Capture the ledger state BEFORE apply_block so that epoch-boundary
+        // snapshots reflect the completed epoch's state, not the new epoch's state.
+        pre_state = PreApplyState::capture(&ledger);
+
         if let Err(e) = ledger.apply_block(&block, torsten_ledger::BlockValidationMode::ApplyOnly) {
             if !format!("{e}").contains("Block does not connect") {
                 tracing::warn!(slot = block_slot, "Block apply failed: {e}");
@@ -494,77 +591,41 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             return Ok(());
         }
 
-        epoch_fees += block_fees;
         blocks_applied += 1;
 
         let current_epoch = ledger.epoch.0;
 
-        // Dump state at each epoch transition
+        // Dump state at each epoch transition.
+        // RC1: use pre_state (captured before apply_block above), which holds the
+        //      ledger values from the epoch that just completed.
+        // RC3: accumulate epoch_fees AFTER the transition check so that the first
+        //      block of a new epoch's fees go into the new epoch's bucket, not the
+        //      old one.
         if last_epoch != u64::MAX && current_epoch > last_epoch {
-            let total_stake: u64 = ledger
-                .pool_params
-                .keys()
-                .filter_map(|pool_id| {
-                    ledger
-                        .snapshots
-                        .set
-                        .as_ref()
-                        .and_then(|s| s.pool_stake.get(pool_id))
-                        .map(|s| s.0)
-                })
-                .sum();
+            let snapshot =
+                build_epoch_snapshot(&pre_state, last_epoch, epoch_fees, max_lovelace_supply);
 
-            let pool_distribution: Vec<serde_json::Value> = ledger
-                .pool_params
-                .iter()
-                .filter_map(|(pool_id, _)| {
-                    let stake = ledger
-                        .snapshots
-                        .set
-                        .as_ref()
-                        .and_then(|s| s.pool_stake.get(pool_id))
-                        .map(|s| s.0)
-                        .unwrap_or(0);
-                    if stake > 0 {
-                        Some(serde_json::json!({
-                            "poolId": hex::encode(pool_id.as_bytes()),
-                            "stake": stake,
-                        }))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            write_epoch_snapshot(&snapshot, last_epoch, &args.output_dir, &mut output)
+                .map_err(|e| anyhow::anyhow!("Snapshot write error: {e}"))?;
 
-            let era_name = format!("{}", ledger.era);
-            let snapshot = serde_json::json!({
-                "epoch": current_epoch,
-                "epochFees": epoch_fees,
-                "reserves": ledger.reserves.0,
-                "treasury": ledger.treasury.0,
-                "totalStake": total_stake,
-                "totalPools": ledger.pool_params.len(),
-                "poolDistribution": pool_distribution,
-                "snapshotEraName": era_name,
-            });
-
-            serde_json::to_writer(&mut output, &snapshot)
-                .map_err(|e| anyhow::anyhow!("JSON write error: {e}"))?;
-            writeln!(output).map_err(|e| anyhow::anyhow!("Write error: {e}"))?;
-
+            epochs_written += 1;
             info!(
-                epoch = current_epoch,
-                treasury = ledger.treasury.0,
-                reserves = ledger.reserves.0,
-                pools = ledger.pool_params.len(),
+                epoch = last_epoch,
+                treasury = pre_state.treasury,
+                reserves = pre_state.reserves,
+                pools = pre_state.total_pools,
                 fees = epoch_fees,
-                era = %era_name,
+                era = %pre_state.era_name,
                 "Epoch snapshot dumped"
             );
 
+            // RC3: Reset fee accumulator BEFORE adding this block's fees so the
+            // triggering block (first block of the new epoch) goes into the new bucket.
             epoch_fees = 0;
         }
 
+        // RC3: Accumulate fees into the current epoch AFTER the transition check.
+        epoch_fees += block_fees;
         last_epoch = current_epoch;
         Ok(())
     })
@@ -576,48 +637,329 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         }
     })?;
 
-    // Dump final epoch
+    // Dump final epoch (the current in-progress epoch at the stop point).
+    // Pool distribution is omitted here because we have no full epoch data.
     if blocks_applied > 0 && last_epoch != u64::MAX {
-        let total_stake: u64 = ledger
-            .pool_params
-            .keys()
-            .filter_map(|pool_id| {
-                ledger
-                    .snapshots
-                    .set
-                    .as_ref()
-                    .and_then(|s| s.pool_stake.get(pool_id))
-                    .map(|s| s.0)
-            })
-            .sum();
+        // For the final (incomplete) epoch we use the current ledger state since
+        // there is no subsequent epoch transition to trigger the pre-apply capture.
+        let final_pre = PreApplyState::capture(&ledger);
+        let snapshot =
+            build_epoch_snapshot(&final_pre, last_epoch, epoch_fees, max_lovelace_supply);
 
-        let snapshot = serde_json::json!({
-            "epoch": last_epoch,
-            "epochFees": epoch_fees,
-            "reserves": ledger.reserves.0,
-            "treasury": ledger.treasury.0,
-            "totalStake": total_stake,
-            "totalPools": ledger.pool_params.len(),
-            "poolDistribution": [],
-            "snapshotEraName": format!("{}", ledger.era),
-        });
-
-        serde_json::to_writer(&mut output, &snapshot)?;
-        writeln!(output)?;
+        write_epoch_snapshot(&snapshot, last_epoch, &args.output_dir, &mut output)?;
+        epochs_written += 1;
     }
 
     let elapsed = start_time.elapsed();
     info!(
         blocks = blocks_applied,
-        epochs = if last_epoch == u64::MAX {
-            0
-        } else {
-            last_epoch + 1
-        },
+        epochs_written,
         elapsed_secs = elapsed.as_secs(),
         "dump-snapshot complete"
     );
 
+    Ok(())
+}
+
+/// Serialise one mark/set/go `StakeSnapshot` into the cstreamer JSON format.
+///
+/// Cstreamer includes full delegation maps, pool parameters, individual stake, and
+/// per-pool block counts so that the cross-validation script can catch divergences in
+/// snapshot rotation, staking, and pool parameter tracking.
+fn serialize_stake_snapshot(
+    name: &str,
+    snapshot: &torsten_ledger::state::StakeSnapshot,
+) -> serde_json::Value {
+    use torsten_primitives::transaction::Relay;
+
+    // delegations: credential hash → pool ID
+    // Key format matches cstreamer: "keyHash-{64_hex_chars}" (full 32-byte hash).
+    let delegations: serde_json::Map<String, serde_json::Value> = snapshot
+        .delegations
+        .iter()
+        .map(|(cred, pool_id)| {
+            let key = format!("keyHash-{}", hex::encode(cred.as_bytes()));
+            let val = serde_json::Value::String(hex::encode(pool_id.as_bytes()));
+            (key, val)
+        })
+        .collect();
+
+    // poolParams: pool_id hex → rich pool params object
+    let pool_params: serde_json::Map<String, serde_json::Value> = snapshot
+        .pool_params
+        .iter()
+        .map(|(pool_id, reg)| {
+            let key = hex::encode(pool_id.as_bytes());
+
+            // Owners: list of 28-byte key hash hex strings
+            let owners: Vec<serde_json::Value> = reg
+                .owners
+                .iter()
+                .map(|o| serde_json::Value::String(hex::encode(o.as_bytes())))
+                .collect();
+
+            // margin as f64 ratio
+            let margin = if reg.margin_denominator == 0 {
+                0.0f64
+            } else {
+                reg.margin_numerator as f64 / reg.margin_denominator as f64
+            };
+
+            // rewardAccount: decode the raw bytes (byte 0 = header, bytes 1..29 = cred hash)
+            let reward_account_json = if reg.reward_account.len() >= 29 {
+                let header = reg.reward_account[0];
+                let network = if header & 0x0F == 1 {
+                    "Mainnet"
+                } else {
+                    "Testnet"
+                };
+                let cred_hex = hex::encode(&reg.reward_account[1..29]);
+                serde_json::json!({
+                    "credential": { "keyHash": cred_hex },
+                    "network": network,
+                })
+            } else {
+                serde_json::Value::Null
+            };
+
+            // relays
+            let relays: Vec<serde_json::Value> = reg
+                .relays
+                .iter()
+                .map(|r| match r {
+                    Relay::SingleHostAddr { port, ipv4, ipv6 } => serde_json::json!({
+                        "type": "SingleHostAddr",
+                        "port": port,
+                        "ipv4": ipv4.map(|ip| format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])),
+                        "ipv6": ipv6.map(hex::encode),
+                    }),
+                    Relay::SingleHostName { port, dns_name } => serde_json::json!({
+                        "type": "SingleHostName",
+                        "port": port,
+                        "dnsName": dns_name,
+                    }),
+                    Relay::MultiHostName { dns_name } => serde_json::json!({
+                        "type": "MultiHostName",
+                        "dnsName": dns_name,
+                    }),
+                })
+                .collect();
+
+            let val = serde_json::json!({
+                "publicKey": hex::encode(reg.pool_id.as_bytes()),
+                "owners": owners,
+                "pledge": reg.pledge.0,
+                "cost": reg.cost.0,
+                "margin": margin,
+                "rewardAccount": reward_account_json,
+                "vrf": hex::encode(reg.vrf_keyhash.as_bytes()),
+                "relays": relays,
+                "metadata": reg.metadata_url.as_ref().map(|url| serde_json::json!({
+                    "url": url,
+                    "hash": reg.metadata_hash.as_ref().map(|h| hex::encode(h.as_bytes())),
+                })),
+            });
+
+            (key, val)
+        })
+        .collect();
+
+    // stake: per-credential lovelace
+    // Key format: "keyHash-{64_hex_chars}" (same as delegations).
+    let stake: serde_json::Map<String, serde_json::Value> = snapshot
+        .stake_distribution
+        .iter()
+        .map(|(cred, lovelace)| {
+            let key = format!("keyHash-{}", hex::encode(cred.as_bytes()));
+            let val = serde_json::Value::Number(lovelace.0.into());
+            (key, val)
+        })
+        .collect();
+
+    // blocks: per-pool block production count for this snapshot epoch
+    let blocks: serde_json::Map<String, serde_json::Value> = snapshot
+        .epoch_blocks_by_pool
+        .iter()
+        .map(|(pool_id, count)| {
+            let key = hex::encode(pool_id.as_bytes());
+            let val = serde_json::Value::Number((*count).into());
+            (key, val)
+        })
+        .collect();
+
+    serde_json::json!({
+        "name": name,
+        "epoch": snapshot.epoch.0,
+        "delegations": delegations,
+        "poolParams": pool_params,
+        "stake": stake,
+        "blocks": blocks,
+    })
+}
+
+/// Build the richer epoch-snapshot JSON object from the pre-apply ledger state.
+///
+/// This is called at every epoch transition (using the pre-apply state captured
+/// BEFORE `apply_block` ran the epoch transition) and for the final in-progress
+/// epoch.  Fields match the cstreamer reference format so that
+/// `scripts/compare-epochs.py` can cross-validate them without false divergences.
+fn build_epoch_snapshot(
+    pre: &PreApplyState,
+    epoch: u64,
+    epoch_fees: u64,
+    max_lovelace_supply: u64,
+) -> serde_json::Value {
+    // RC2: cstreamer computes totalStake = maxLovelaceSupply - reserves.
+    // Summing pool_stake from the set snapshot differs from this because it
+    // omits unregistered/non-delegated stake.  Use the same formula.
+    let total_stake = max_lovelace_supply.saturating_sub(pre.reserves);
+
+    // Active stake from the "go" snapshot (used for reward distribution).
+    let active_stake: u64 = pre
+        .snapshots
+        .go
+        .as_ref()
+        .map(|s| s.pool_stake.values().map(|v| v.0).sum())
+        .unwrap_or(0);
+
+    // Pool distribution: only pools with non-zero stake from the "set" snapshot.
+    // RC2: include stakeLovelace, stakePercent, and stake-as-fraction fields to
+    // match the extended cstreamer PoolDistr format.
+    let total_active_stake = pre
+        .snapshots
+        .set
+        .as_ref()
+        .map(|s| s.pool_stake.values().map(|v| v.0).sum::<u64>())
+        .unwrap_or(0);
+
+    let pool_distribution: Vec<serde_json::Value> = pre
+        .snapshots
+        .set
+        .as_ref()
+        .map(|s| {
+            s.pool_stake
+                .iter()
+                .filter(|(_, stake)| stake.0 > 0)
+                .map(|(pool_id, stake_lovelace)| {
+                    let stake_lovelace_val = stake_lovelace.0;
+                    let stake_percent = if total_active_stake > 0 {
+                        stake_lovelace_val as f64 / total_active_stake as f64
+                    } else {
+                        0.0
+                    };
+                    serde_json::json!({
+                        "poolId": hex::encode(pool_id.as_bytes()),
+                        // Fraction representation (denominator = total active stake)
+                        "stake": {
+                            "numerator": stake_lovelace_val,
+                            "denominator": total_active_stake,
+                        },
+                        "stakeLovelace": stake_lovelace_val,
+                        "stakePercent": stake_percent,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Deposit accounting (based on pre-apply counts and deposits).
+    let deposit_stake_key = pre.reward_account_count as u64 * pre.key_deposit;
+    let deposit_pool = pre.total_pools as u64 * pre.pool_deposit;
+    let deposit_drep = pre.drep_count as u64 * pre.drep_deposit;
+    let deposit_proposal: u64 = 0;
+    let deposit_total = deposit_stake_key + deposit_pool + deposit_drep + deposit_proposal;
+
+    // Pending reward update (almost always None under the corrected RUPD path,
+    // but serialised here for forward-compatibility with the cstreamer schema).
+    let rupd_next: serde_json::Value = match &pre.pending_reward_update {
+        None => serde_json::Value::Null,
+        Some(pu) => {
+            let total_distributed: u64 = pu.rewards.values().map(|v| v.0).sum();
+            serde_json::json!({
+                "deltaR1": pu.delta_reserves,
+                "deltaT1": pu.delta_treasury,
+                "totalDistributed": total_distributed,
+            })
+        }
+    };
+
+    // RC4: Serialise the full mark/set/go stake snapshots so that the
+    // cross-validation script can verify delegation maps, pool parameters,
+    // individual stake, and per-pool block counts.
+    let snap_mark = pre
+        .snapshots
+        .mark
+        .as_ref()
+        .map(|s| serialize_stake_snapshot("mark", s))
+        .unwrap_or(serde_json::Value::Null);
+    let snap_set = pre
+        .snapshots
+        .set
+        .as_ref()
+        .map(|s| serialize_stake_snapshot("set", s))
+        .unwrap_or(serde_json::Value::Null);
+    let snap_go = pre
+        .snapshots
+        .go
+        .as_ref()
+        .map(|s| serialize_stake_snapshot("go", s))
+        .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "epoch": epoch,
+        "epochFees": epoch_fees,
+        // RC1: use pre-apply reserves/treasury (completed epoch's end state)
+        "reserves": pre.reserves,
+        "treasury": pre.treasury,
+        // RC2: totalStake = maxLovelaceSupply - reserves
+        "totalStake": total_stake,
+        "activeStake": active_stake,
+        "totalPools": pre.total_pools,
+        "poolDistribution": pool_distribution,
+        "snapshotEraName": pre.era_name,
+        "epochNonce": hex::encode(pre.epoch_nonce),
+        "deposits": {
+            "stakeKey": deposit_stake_key,
+            "pool": deposit_pool,
+            "dRep": deposit_drep,
+            "proposal": deposit_proposal,
+            "total": deposit_total,
+        },
+        "protocolParams": pre.protocol_params_json,
+        "rupdNext": rupd_next,
+        // RC4: full mark/set/go snapshots for cross-validation
+        "snapshots": {
+            "mark": snap_mark,
+            "set": snap_set,
+            "go": snap_go,
+        },
+    })
+}
+
+/// Write an epoch snapshot either to a per-epoch file in `output_dir` (when set)
+/// or as an NDJSON line to the shared `output` writer (fallback).
+fn write_epoch_snapshot(
+    snapshot: &serde_json::Value,
+    epoch: u64,
+    output_dir: &Option<std::path::PathBuf>,
+    output: &mut Box<dyn std::io::Write>,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    if let Some(dir) = output_dir {
+        // Write {epoch}.json — pretty-printed for human readability.
+        let path = dir.join(format!("{epoch}.json"));
+        let file = std::fs::File::create(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot create {}: {e}", path.display()))?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, snapshot)
+            .map_err(|e| anyhow::anyhow!("JSON serialise error: {e}"))?;
+    } else {
+        // NDJSON: one compact JSON object per line.
+        serde_json::to_writer(&mut *output, snapshot)
+            .map_err(|e| anyhow::anyhow!("JSON write error: {e}"))?;
+        writeln!(output).map_err(|e| anyhow::anyhow!("Write error: {e}"))?;
+    }
     Ok(())
 }
 

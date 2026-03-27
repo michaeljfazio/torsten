@@ -92,10 +92,12 @@ impl Governor {
         let hot_count = peer_manager.count_by_state(PeerState::Hot);
         let cold_count = peer_manager.count_by_state(PeerState::Cold);
 
-        // Promote cold → warm if below target
+        // Promote cold → warm if below target.
+        // Only select peers whose exponential backoff window has elapsed
+        // (matches Haskell `availableToConnect` filtered by `nextConnectTimes`).
         if warm_count + hot_count < self.config.targets.target_warm {
             let needed = self.config.targets.target_warm - (warm_count + hot_count);
-            let cold_peers = peer_manager.peers_in_state(PeerState::Cold);
+            let cold_peers = peer_manager.peers_eligible_to_connect();
             for &addr in cold_peers.iter().take(needed) {
                 actions.push(GovernorAction::PromoteToWarm(addr));
             }

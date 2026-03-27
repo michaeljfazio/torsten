@@ -346,6 +346,17 @@ fn praos_tiebreak(
         if apply_vrf_comparison {
             // Compare VRF output values lexicographically.
             // Lower value = block had "luckier" VRF draw = preferred.
+            //
+            // Field correctness: `vrf_result.output` is the VRF output bytes
+            // (NOT the proof).  In pallas, `VrfCert` is `(output, proof)`:
+            //   - `.0` = output (64 bytes for TPraos, 64 bytes for Praos)
+            //   - `.1` = proof
+            // During deserialization (`torsten-serialization/src/multi_era.rs`):
+            //   - Babbage/Conway: `vrf_result.output = hb.vrf_result.0`
+            //   - Shelley-Alonzo: `vrf_result.output = hb.leader_vrf.0`
+            // Both branches set `.output` to the raw VRF output bytes, matching
+            // Haskell's `ptvTieBreakVRF = certifiedOutput vrf` which is the
+            // `VRF.OutputVRF` value — not the VRF proof/certificate.
             vrf_tiebreak(&current.vrf_result.output, &candidate.vrf_result.output)
         } else {
             // Slot distance exceeds window in Conway: keep current selection.

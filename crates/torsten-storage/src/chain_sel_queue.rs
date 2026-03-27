@@ -657,7 +657,13 @@ mod tests {
 
         // Build main (a) chain.
         let r = handle
-            .submit_block(common, SlotNo(100), BlockNo(1), Hash32::ZERO, fake_cbor(&common))
+            .submit_block(
+                common,
+                SlotNo(100),
+                BlockNo(1),
+                Hash32::ZERO,
+                fake_cbor(&common),
+            )
             .await
             .unwrap();
         assert_eq!(r, AddBlockResult::StoredNotAdopted);
@@ -722,7 +728,7 @@ mod tests {
         // After the switch, the VolatileDB tip should be b4.
         let db = chain_db.read().await;
         let tip = db.get_tip_info().expect("should have a tip");
-        assert_eq!(tip.2.0, 4, "tip block_no should be 4 (b4)");
+        assert_eq!(tip.2 .0, 4, "tip block_no should be 4 (b4)");
     }
 
     /// Verify that equal-length chains do NOT trigger a fork switch.
@@ -742,7 +748,13 @@ mod tests {
         let b2 = Hash32::from_bytes([0xB2; 32]);
 
         handle
-            .submit_block(common, SlotNo(100), BlockNo(1), Hash32::ZERO, fake_cbor(&common))
+            .submit_block(
+                common,
+                SlotNo(100),
+                BlockNo(1),
+                Hash32::ZERO,
+                fake_cbor(&common),
+            )
             .await
             .unwrap();
         handle
@@ -764,7 +776,7 @@ mod tests {
         // Selected chain tip is still a2.
         let db = chain_db.read().await;
         let tip = db.get_tip_info().expect("should have a tip");
-        assert_eq!(tip.2.0, 2, "selected-chain tip block_no should still be 2");
+        assert_eq!(tip.2 .0, 2, "selected-chain tip block_no should still be 2");
     }
 
     // -----------------------------------------------------------------------

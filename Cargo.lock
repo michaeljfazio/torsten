@@ -3643,6 +3643,7 @@ dependencies = [
  "num-bigint",
  "parking_lot",
  "proptest",
+ "rand 0.8.5",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",

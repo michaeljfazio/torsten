@@ -21,6 +21,7 @@ hickory-resolver = { workspace = true }
 socket2 = { workspace = true }
 num-bigint = { workspace = true }
 hex = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 parking_lot = { workspace = true }

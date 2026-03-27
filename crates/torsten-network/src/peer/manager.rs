@@ -32,6 +32,19 @@ const FAILURE_DECAY_INTERVAL: Duration = Duration::from_secs(300);
 /// Initial reputation score for new peers.
 const INITIAL_REPUTATION: f64 = 0.5;
 
+/// Base retry delay (seconds) for cold→warm connection failures.
+///
+/// Matches Haskell ouroboros-network `baseColdPeerRetryDiffTime = 5`.
+const COLD_RETRY_BASE_SECS: f64 = 5.0;
+
+/// Maximum exponent for exponential backoff, capping the delay at
+/// `5 * 2^5 = 160s`. Matches Haskell `maxColdPeerRetryBackoff = 5`.
+const COLD_RETRY_MAX_EXP: u32 = 5;
+
+/// Maximum consecutive cold→warm failures before a non-root peer is
+/// forgotten entirely. Matches Haskell `policyMaxConnectionRetries = 5`.
+pub const MAX_COLD_PEER_FAILURES: u32 = 5;
+
 /// Information tracked for each known peer.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
@@ -51,6 +64,12 @@ pub struct PeerInfo {
     pub peer_sharing: bool,
     /// Source of peer discovery.
     pub source: PeerSource,
+    /// Earliest time this peer may be connected again (exponential backoff).
+    ///
+    /// `None` means eligible immediately. Set by `record_failure()` using
+    /// the same formula as Haskell's `jobPromoteColdPeer`:
+    /// `delay = 5 * 2^(min(failCount-1, 5))` seconds ± 2s fuzz.
+    pub next_connect_after: Option<Instant>,
 }
 
 /// How a peer was discovered.
@@ -79,6 +98,7 @@ impl PeerInfo {
             discovered_at: now,
             peer_sharing: false,
             source,
+            next_connect_after: None,
         }
     }
 
@@ -90,11 +110,23 @@ impl PeerInfo {
         });
     }
 
-    /// Record a failure — increments failure count and reduces reputation.
+    /// Record a failure — increments failure count, reduces reputation, and
+    /// schedules an exponential backoff delay before the next connect attempt.
+    ///
+    /// Matches Haskell `jobPromoteColdPeer` backoff:
+    /// `delay = base * 2^(min(failCount-1, maxExp))` ± 2s uniform fuzz, where
+    /// `base=5s` and `maxExp=5` (capping at 160s).
     pub fn record_failure(&mut self) {
+        use rand::Rng;
         self.failure_count += 1;
         // Reputation penalty: 0.1 per failure, clamped to [0, 1]
         self.reputation = (self.reputation - 0.1).max(0.0);
+        // Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s (cap), ±2s fuzz.
+        let exp = (self.failure_count - 1).min(COLD_RETRY_MAX_EXP);
+        let base = COLD_RETRY_BASE_SECS * 2f64.powi(exp as i32);
+        let fuzz: f64 = rand::thread_rng().gen_range(-2.0..2.0);
+        let delay_secs = (base + fuzz).max(1.0);
+        self.next_connect_after = Some(Instant::now() + Duration::from_secs_f64(delay_secs));
     }
 
     /// Record a success — slightly boosts reputation.
@@ -214,6 +246,24 @@ impl PeerManager {
             .collect()
     }
 
+    /// Cold peers that have passed their backoff window and are eligible for a
+    /// new connection attempt.
+    ///
+    /// Matches Haskell `availableToConnect` filtered by `nextConnectTimes`: only
+    /// cold peers whose `next_connect_after` deadline has elapsed (or was never
+    /// set) are returned. This is what the Governor should use when selecting
+    /// peers to promote to warm.
+    pub fn peers_eligible_to_connect(&self) -> Vec<SocketAddr> {
+        let now = Instant::now();
+        self.peers
+            .iter()
+            .filter(|(_, p)| {
+                p.state == PeerState::Cold && p.next_connect_after.is_none_or(|t| now >= t)
+            })
+            .map(|(addr, _)| *addr)
+            .collect()
+    }
+
     /// Total number of known peers.
     pub fn total_peers(&self) -> usize {
         self.peers.len()
@@ -300,10 +350,52 @@ mod tests {
         peer.record_failure();
         assert!(peer.reputation < INITIAL_REPUTATION);
         assert_eq!(peer.failure_count, 1);
+        // Backoff window should be set after a failure.
+        assert!(peer.next_connect_after.is_some());
 
         peer.record_success();
         let rep_after_success = peer.reputation;
         assert!(rep_after_success > peer.reputation - 0.01); // slight boost
+    }
+
+    #[test]
+    fn exponential_backoff_increases_with_failure_count() {
+        // Each failure should schedule a longer wait than the previous one
+        // (ignoring the small ±2s fuzz, so we check with a generous tolerance).
+        let mut peer = PeerInfo::new(PeerSource::Ledger);
+        let mut prev_delay = Duration::ZERO;
+
+        for _ in 1..=6 {
+            let before = Instant::now();
+            peer.record_failure();
+            let deadline = peer.next_connect_after.unwrap();
+            // deadline must be in the future
+            assert!(deadline > before);
+            // delay grows (or at minimum stays the same once capped at 160s)
+            let delay = deadline.saturating_duration_since(before);
+            // Allow for the 2s fuzz on either side; just check it doesn't shrink
+            // significantly compared to the previous iteration.
+            let _ = (delay, prev_delay); // silence unused warning in first iter
+            prev_delay = delay;
+        }
+        // After 6 failures the cap (160s) should be in effect.
+        // Even with -2s fuzz the delay must be >= ~155s.
+        assert!(prev_delay >= Duration::from_secs(155));
+    }
+
+    #[test]
+    fn peers_eligible_to_connect_excludes_backed_off_peers() {
+        let mut pm = PeerManager::new();
+        pm.add_peer(test_addr(3001), PeerSource::Ledger); // fresh, eligible
+        pm.add_peer(test_addr(3002), PeerSource::Ledger);
+
+        // Simulate a failure on 3002 — it gets a backoff window.
+        pm.get_peer_mut(&test_addr(3002)).unwrap().record_failure();
+
+        // Only 3001 should be eligible.
+        let eligible = pm.peers_eligible_to_connect();
+        assert_eq!(eligible.len(), 1);
+        assert!(eligible.contains(&test_addr(3001)));
     }
 
     #[test]

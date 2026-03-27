@@ -58,6 +58,11 @@ def compare_value(path, torsten_val, cstreamer_val):
     if torsten_val == cstreamer_val:
         return None
 
+    # Skip fields that torsten doesn't emit yet — avoids false divergences when
+    # the reference (cstreamer) carries extra fields not present in our snapshot.
+    if torsten_val is None and cstreamer_val is not None:
+        return None
+
     # Handle numeric comparison with tolerance info
     if isinstance(torsten_val, (int, float)) and isinstance(cstreamer_val, (int, float)):
         diff = torsten_val - cstreamer_val

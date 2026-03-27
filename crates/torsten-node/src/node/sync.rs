@@ -3264,11 +3264,7 @@ mod chainsync_task_tests {
 
     /// Compute the rollback depth in slots and compare against the threshold.
     /// Returns `true` if the rollback EXCEEDS the k-limit (should disconnect).
-    fn rollback_exceeds_k_limit(
-        ledger_slot: u64,
-        rollback_slot: u64,
-        security_param: u64,
-    ) -> bool {
+    fn rollback_exceeds_k_limit(ledger_slot: u64, rollback_slot: u64, security_param: u64) -> bool {
         if ledger_slot > rollback_slot {
             let depth_slots = ledger_slot - rollback_slot;
             let threshold = security_param.saturating_mul(2);
