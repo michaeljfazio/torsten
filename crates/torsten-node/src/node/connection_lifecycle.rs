@@ -823,12 +823,27 @@ impl ConnectionLifecycleManager {
 
                             debug!(%addr, ranges = ranges.len(), headers = headers_to_fetch.len(), "BlockFetch: fetching in batched ranges");
                             for (from, to) in ranges {
-                                let tx = fetched_blocks_tx.clone();
                                 let peer = addr;
                                 let range_to_slot = match &to {
                                     CodecPoint::Specific(s, _) => *s,
                                     CodecPoint::Origin => 0,
                                 };
+
+                                // Collect decoded blocks in a local Vec inside the
+                                // sync callback, then send them via `.send().await`
+                                // after `fetch_range` returns.
+                                //
+                                // IMPORTANT: Do NOT call `tx.blocking_send()` inside
+                                // the callback.  `fetch_range` takes a *synchronous*
+                                // `FnMut` callback and calls it from within the tokio
+                                // async runtime.  `blocking_send` panics with
+                                // "Cannot block the current thread from within a
+                                // runtime" whenever the channel is full and it tries
+                                // to park the calling thread — exactly the crash we
+                                // observed.  Collecting into a Vec and awaiting the
+                                // sends outside the callback avoids the panic while
+                                // preserving ordering and backpressure.
+                                let mut decoded_blocks: Vec<FetchedBlock> = Vec::new();
 
                                 let fetch_start = std::time::Instant::now();
                                 match BlockFetchClient::fetch_range(
@@ -841,25 +856,14 @@ impl ConnectionLifecycleManager {
                                         ) {
                                             Ok(block) => {
                                                 let slot = block.slot().0;
-                                                debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded, sending to run loop");
-                                                // MUST use blocking_send, NOT try_send.
-                                                // try_send silently drops blocks when the
-                                                // channel is full, but the block hash is
-                                                // still added to fetched_hashes — making
-                                                // the block permanently unfetchable and
-                                                // creating an unrecoverable chain gap.
-                                                // blocking_send applies backpressure to
-                                                // the fetcher until the run loop drains
-                                                // the channel.
-                                                if let Err(e) = tx.blocking_send(FetchedBlock {
+                                                debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded");
+                                                decoded_blocks.push(FetchedBlock {
                                                     peer,
                                                     block,
                                                     tip_slot: range_to_slot,
                                                     tip_hash: [0u8; 32],
                                                     tip_block_number: 0,
-                                                }) {
-                                                    warn!(%addr, slot, "send to run loop failed (channel closed): {e}");
-                                                }
+                                                });
                                             }
                                             Err(e) => {
                                                 warn!(%addr, "block decode error: {e}");
@@ -875,6 +879,20 @@ impl ConnectionLifecycleManager {
                                     }
                                     Err(e) => {
                                         warn!(%addr, "BlockFetch error: {e}");
+                                        active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
+                                        return;
+                                    }
+                                }
+
+                                // Send all blocks collected for this range using
+                                // `.send().await` — which correctly yields to the
+                                // scheduler instead of blocking the thread.
+                                for fetched in decoded_blocks {
+                                    let slot = fetched.block.slot().0;
+                                    if let Err(e) = fetched_blocks_tx.send(fetched).await {
+                                        warn!(%addr, slot, "send to run loop failed (channel closed): {e}");
+                                        // Channel closed means the run loop exited.
+                                        // Release the active fetcher and stop.
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
                                         return;
                                     }
