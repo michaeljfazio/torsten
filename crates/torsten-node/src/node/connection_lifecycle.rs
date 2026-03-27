@@ -767,20 +767,39 @@ impl ConnectionLifecycleManager {
                                 "BlockFetch: active fetcher, downloading blocks",
                             );
 
-                            // Fetch blocks IN ORDER (headers are already sorted by slot
-                            // since ChainSync delivers them sequentially).
-                            debug!(%addr, count = headers_to_fetch.len(), "BlockFetch: about to start fetch loop");
-                            for header in &headers_to_fetch {
-                                debug!(%addr, slot = header.slot, "BlockFetch: fetching header");
-                                let from = CodecPoint::Specific(header.slot, header.hash);
-                                let to = CodecPoint::Specific(header.slot, header.hash);
+                            // Batch headers into ranges for efficient fetching.
+                            // A single MsgRequestRange(from, to) fetches all blocks
+                            // between two points, avoiding per-block round-trips.
+                            let ranges: Vec<(CodecPoint, CodecPoint)> = {
+                                let mut result = Vec::new();
+                                let mut i = 0;
+                                while i < headers_to_fetch.len() {
+                                    let start = i;
+                                    // Batch up to 100 consecutive headers per range
+                                    let end = (i + 100).min(headers_to_fetch.len()) - 1;
+                                    let from = CodecPoint::Specific(
+                                        headers_to_fetch[start].slot,
+                                        headers_to_fetch[start].hash,
+                                    );
+                                    let to = CodecPoint::Specific(
+                                        headers_to_fetch[end].slot,
+                                        headers_to_fetch[end].hash,
+                                    );
+                                    result.push((from, to));
+                                    i = end + 1;
+                                }
+                                result
+                            };
 
+                            debug!(%addr, ranges = ranges.len(), headers = headers_to_fetch.len(), "BlockFetch: fetching in batched ranges");
+                            for (from, to) in ranges {
                                 let tx = fetched_blocks_tx.clone();
                                 let peer = addr;
+                                let range_to_slot = match &to {
+                                    CodecPoint::Specific(s, _) => *s,
+                                    CodecPoint::Origin => 0,
+                                };
 
-                                // Time the network round-trip for fetching a single block
-                                // (request + response + decode). This is the latency the
-                                // peer_block_fetch_ms histogram tracks.
                                 let fetch_start = std::time::Instant::now();
                                 match BlockFetchClient::fetch_range(
                                     &mut channel,
@@ -796,8 +815,8 @@ impl ConnectionLifecycleManager {
                                                 match tx.try_send(FetchedBlock {
                                                     peer,
                                                     block,
-                                                    tip_slot: header.slot,
-                                                    tip_hash: header.hash,
+                                                    tip_slot: range_to_slot,
+                                                    tip_hash: [0u8; 32],
                                                     tip_block_number: 0,
                                                 }) {
                                                     Ok(()) => {}
@@ -807,22 +826,21 @@ impl ConnectionLifecycleManager {
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!(%addr, slot = header.slot, "block decode error: {e}");
+                                                warn!(%addr, "block decode error: {e}");
                                             }
                                         }
                                         Ok(())
                                     },
                                 ).await {
-                                    Ok(_count) => {
-                                        // Record per-block fetch latency only on success.
+                                    Ok(count) => {
                                         let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
                                         metrics_clone.record_block_fetch_latency(fetch_ms);
+                                        debug!(%addr, count, fetch_ms, "BlockFetch: range complete");
                                     }
                                     Err(e) => {
                                         warn!(%addr, "BlockFetch error: {e}");
-                                        // Release active fetcher so another peer can try.
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
-                                        return; // bearer died
+                                        return;
                                     }
                                 }
                             }
