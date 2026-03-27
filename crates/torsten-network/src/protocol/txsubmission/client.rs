@@ -75,12 +75,19 @@ impl TxSubmissionClient {
 
                     if tx_ids.is_empty() && blocking {
                         // Blocking mode with empty mempool: wait for txs to appear.
-                        // Haskell's TxSubmission2 client blocks in the STM layer
-                        // until a tx is available. We poll the mempool with a short
-                        // sleep to avoid busy-waiting.
+                        //
+                        // The initial get_tx_ids(ack_count, req_count) already
+                        // acknowledged previously-outstanding tx IDs.  Subsequent
+                        // polls must NOT re-acknowledge (ack_count=0) but the
+                        // outstanding set was already drained by the first call.
+                        //
+                        // Poll every 500ms until new txs appear or the cancel
+                        // token fires.
                         tracing::debug!("txsubmission2 client: blocking — polling mempool for txs");
                         loop {
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            // ack_count=0: the first call already acknowledged.
+                            // req_count stays the same — peer wants up to this many.
                             tx_ids = source.get_tx_ids(0, req_count);
                             if !tx_ids.is_empty() {
                                 tracing::info!(
@@ -88,11 +95,6 @@ impl TxSubmissionClient {
                                     "txsubmission2 client: mempool txs available, resuming"
                                 );
                                 break;
-                            }
-                            if source.has_pending() {
-                                tracing::warn!(
-                                    "txsubmission2 client: has_pending=true but get_tx_ids returned empty"
-                                );
                             }
                         }
                     }

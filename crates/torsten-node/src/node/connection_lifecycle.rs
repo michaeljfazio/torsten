@@ -842,17 +842,23 @@ impl ConnectionLifecycleManager {
                                             Ok(block) => {
                                                 let slot = block.slot().0;
                                                 debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded, sending to run loop");
-                                                match tx.try_send(FetchedBlock {
+                                                // MUST use blocking_send, NOT try_send.
+                                                // try_send silently drops blocks when the
+                                                // channel is full, but the block hash is
+                                                // still added to fetched_hashes — making
+                                                // the block permanently unfetchable and
+                                                // creating an unrecoverable chain gap.
+                                                // blocking_send applies backpressure to
+                                                // the fetcher until the run loop drains
+                                                // the channel.
+                                                if let Err(e) = tx.blocking_send(FetchedBlock {
                                                     peer,
                                                     block,
                                                     tip_slot: range_to_slot,
                                                     tip_hash: [0u8; 32],
                                                     tip_block_number: 0,
                                                 }) {
-                                                    Ok(()) => {}
-                                                    Err(e) => {
-                                                        warn!(%addr, slot, "send to run loop failed: {e}");
-                                                    }
+                                                    warn!(%addr, slot, "send to run loop failed (channel closed): {e}");
                                                 }
                                             }
                                             Err(e) => {
@@ -954,6 +960,12 @@ impl TxSource for MempoolTxSource {
         for _ in 0..ack_count {
             outstanding.pop_front();
         }
+
+        // Prune outstanding entries for txs no longer in the mempool
+        // (included in a block or expired).  Without this, txs that
+        // leave the mempool stay in `outstanding` permanently, blocking
+        // re-announcement if the same tx is resubmitted.
+        outstanding.retain(|h| self.mempool.get_tx_size(h).is_some());
 
         // Collect the set of already-outstanding hashes for dedup.
         let already_sent: std::collections::HashSet<torsten_primitives::hash::Hash32> =

@@ -2724,6 +2724,19 @@ pub async fn chainsync_client_task(
                                 hash,
                                 header_cbor: header,
                             });
+
+                            // Cap pending_headers to prevent unbounded growth.
+                            // At tip, new headers arrive every ~20s; during catch-up,
+                            // thousands accumulate.  Keep only the most recent 2000
+                            // so the blockfetch worker's O(n) scan stays fast.
+                            // Older headers are safe to drop — they've either been
+                            // fetched already or are below the applied chain tip.
+                            const MAX_PENDING_HEADERS: usize = 2000;
+                            if entry.pending_headers.len() > MAX_PENDING_HEADERS + 500 {
+                                // Drain with hysteresis to avoid re-allocating every push
+                                let excess = entry.pending_headers.len() - MAX_PENDING_HEADERS;
+                                entry.pending_headers.drain(..excess);
+                            }
                         }
 
                         // Log progress periodically.
