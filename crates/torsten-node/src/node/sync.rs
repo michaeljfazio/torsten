@@ -248,11 +248,21 @@ impl Node {
     async fn reset_ledger_and_replay(&self, target_slot: u64) {
         {
             let mut ls = self.ledger_state.write().await;
-            let utxo_store = ls.utxo_set.detach_store();
+            // Drop the stale fork UTxO store — do NOT re-attach it.
+            //
+            // When called after a deep rollback or fork-snapshot recovery, the
+            // UTxO store was built against a fork chain.  Re-attaching it
+            // permanently corrupts state: genesis-replayed UTxOs coexist with
+            // stale fork UTxOs, causing every subsequent apply_block to fail
+            // silently (inputs not found, duplicate outputs, 0 blocks applied
+            // forever).
+            //
+            // The genesis replay that follows builds a correct in-memory UTxO
+            // set from scratch.  A fresh LSM snapshot is saved after replay
+            // completes so subsequent restarts can use the canonical store.
+            let _stale_store = ls.utxo_set.detach_store(); // drops the stale fork store
             *ls = torsten_ledger::LedgerState::new(ls.protocol_params.clone());
-            if let Some(store) = utxo_store {
-                ls.attach_utxo_store(store);
-            }
+            // No re-attach: replay proceeds with a clean in-memory UTxO set only.
         }
 
         // Replay ImmutableDB blocks from genesis up to target_slot so the
@@ -270,6 +280,7 @@ impl Node {
             // async runtime — chunk I/O is synchronous and CPU-bound.
             let ledger_state = self.ledger_state.clone();
             let bel = self.byron_epoch_length;
+            let database_path = self.database_path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let replay_start = std::time::Instant::now();
                 let mut replayed = 0u64;
@@ -333,6 +344,30 @@ impl Node {
                     let mut ls = ledger_state.blocking_write();
                     ls.utxo_set.set_indexing_enabled(true);
                     ls.utxo_set.set_wal_enabled(true);
+                }
+
+                // Save a fresh canonical snapshot so the next restart can load
+                // it instead of re-running genesis replay again.  This is
+                // especially important because we just dropped the stale fork
+                // UTxO store — without saving here the LSM store on disk still
+                // reflects the fork chain, and the next restart would have to
+                // do another full genesis replay.
+                {
+                    let mut ls = ledger_state.blocking_write();
+                    let snapshot_path = database_path.join("ledger-snapshot.bin");
+                    let snap_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    if let Err(e) = ls.save_utxo_snapshot() {
+                        tracing::warn!(snap_slot, "reset_ledger_and_replay: failed to save UTxO snapshot: {e}");
+                    }
+                    if let Err(e) = ls.save_snapshot(&snapshot_path) {
+                        tracing::warn!(snap_slot, "reset_ledger_and_replay: failed to save ledger snapshot: {e}");
+                    } else {
+                        tracing::info!(
+                            snap_slot,
+                            "reset_ledger_and_replay: post-reset snapshot saved — next restart \
+                             will skip genesis replay"
+                        );
+                    }
                 }
 
                 let elapsed = replay_start.elapsed().as_secs_f64();
@@ -504,7 +539,13 @@ impl Node {
             // Find the best ledger snapshot at or before the rollback point.
             // Try epoch-numbered snapshots first (newest that's <= rollback_slot),
             // then fall back to the latest snapshot.
-            let best_snapshot = self.find_best_snapshot_for_rollback(rollback_slot);
+            // Pass the ChainDB to verify that candidate snapshots are on the
+            // canonical chain — fork snapshots must not be used as rollback
+            // base states (they would corrupt UTxO state permanently).
+            let best_snapshot = {
+                let db = self.chain_db.read().await;
+                self.find_best_snapshot_for_rollback(rollback_slot, Some(&*db))
+            };
 
             if let Some(snapshot_path) = best_snapshot {
                 match torsten_ledger::LedgerState::load_snapshot(&snapshot_path) {
@@ -674,8 +715,51 @@ impl Node {
                     }
                 }
             } else {
-                warn!("No suitable ledger snapshot found for rollback to slot {rollback_slot}, resetting ledger state");
-                self.reset_ledger_and_replay(rollback_slot).await;
+                // No suitable ledger snapshot found for rollback.
+                //
+                // Per Ouroboros, a rollback of more than k=2160 blocks should never
+                // happen in normal operation.  Calling reset_ledger_and_replay() is
+                // dangerous when the UTxO store on disk is from a fork chain — doing
+                // so re-attaches the stale fork store (now fixed in Fix 2) but also
+                // triggers a multi-hour genesis replay that masks the root cause.
+                //
+                // When no canonical snapshot exists before the rollback target, the
+                // most likely cause is that ALL retained epoch snapshots were saved on
+                // a fork chain (RC4 in the cascade analysis).  In this case:
+                //   1. Fix 1 (fork snapshot detection at startup) should have prevented
+                //      the fork snapshot from loading in the first place.
+                //   2. Fix 3 (ImmutableDB tip as intersection candidate) should have
+                //      prevented the 97K-slot rollback from occurring at all.
+                //
+                // If we somehow reach here without a canonical snapshot, warn loudly
+                // and return without corrupting state.  The ChainSync task will
+                // disconnect; on reconnect, the corrected intersection logic (Fix 3)
+                // will negotiate from the ImmutableDB tip instead.
+                //
+                // Note: reset_ledger_and_replay() itself is now safer (Fix 2) but
+                // a full genesis replay is still extremely expensive and masks bugs.
+                // Prefer the "warn and disconnect" path here so the operator can
+                // diagnose the root cause (usually: restart the node to trigger Fix 1).
+                let ledger_slot = self
+                    .ledger_state
+                    .read()
+                    .await
+                    .tip
+                    .point
+                    .slot()
+                    .map(|s| s.0)
+                    .unwrap_or(0);
+                warn!(
+                    rollback_slot,
+                    ledger_slot,
+                    "Deep rollback: no canonical snapshot found before rollback target. \
+                     Refusing genesis reset to prevent state corruption. \
+                     This node likely started with a fork snapshot — restart the node \
+                     to trigger fork-snapshot detection and canonical replay. \
+                     ChainSync will disconnect and retry from the ImmutableDB tip."
+                );
+                // Do NOT call reset_ledger_and_replay here.
+                return;
             }
         }
 
@@ -2113,7 +2197,18 @@ impl Node {
         }
     }
 
-    /// Fallback replay: read blocks from LSM tree by block number.
+    /// Fallback replay: read blocks from ChainDB using slot-based iteration.
+    ///
+    /// Uses `get_next_block_after_slot()` which queries both ImmutableDB and
+    /// VolatileDB, making it correct after restart even when blocks have been
+    /// flushed from the VolatileDB WAL into ImmutableDB chunk files.
+    ///
+    /// The previous implementation used `get_block_by_number()` (block-number
+    /// index) which only queried the VolatileDB in-memory index.  After a
+    /// clean restart the VolatileDB WAL is empty, so any blocks that had been
+    /// flushed to ImmutableDB were invisible to the replay — resulting in
+    /// "Block not found in ChainDB during replay block_no=NNNN" and 0 blocks
+    /// applied, leaving the ledger stuck at the fork snapshot tip.
     async fn replay_from_lsm(
         &mut self,
         db_tip: torsten_primitives::block::Tip,
@@ -2124,21 +2219,48 @@ impl Node {
         let mut last_log = std::time::Instant::now();
         let snapshot_path = self.database_path.join("ledger-snapshot.bin");
 
-        let start_block_no = {
+        // Determine the slot range to replay: from the current ledger tip to
+        // the ChainDB tip.  Use slots rather than block numbers — block numbers
+        // are only indexed in the VolatileDB (which is empty after restart),
+        // but slot-based lookup (get_next_block_after_slot) queries both
+        // ImmutableDB and VolatileDB and so works correctly at all times.
+        let (start_slot, end_slot) = {
             let mut ls = self.ledger_state.write().await;
             ls.utxo_set.set_indexing_enabled(false);
             ls.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
             ls.needs_stake_rebuild = false;
-            ls.tip.block_number.0 + 1
+            let start = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
+            let end = db_tip.point.slot().map(|s| s.0).unwrap_or(0);
+            (start, end)
         };
-        let end_block_no = db_tip.block_number.0;
 
-        for block_no in start_block_no..=end_block_no {
+        if start_slot >= end_slot {
+            info!(
+                start_slot,
+                end_slot, "LSM replay: nothing to replay (ledger tip >= ChainDB tip)"
+            );
+        } else {
+            info!(
+                ledger_slot = start_slot,
+                db_tip_slot = end_slot,
+                blocks_behind = {
+                    // Rough estimate — block_number not available until we replay
+                    db_tip
+                        .block_number
+                        .0
+                        .saturating_sub(self.ledger_state.read().await.tip.block_number.0)
+                },
+                "Replaying ledger from ChainDB (slot-based)",
+            );
+        }
+
+        let mut current_slot = start_slot;
+        loop {
             // Check shutdown every 1000 blocks
-            if block_no.is_multiple_of(1000) && *shutdown_rx.borrow() {
+            if replayed.is_multiple_of(1000) && replayed > 0 && *shutdown_rx.borrow() {
                 info!(
-                    block_no,
-                    "Shutdown requested during LSM replay, saving snapshot"
+                    replayed,
+                    current_slot, "Shutdown requested during LSM replay, saving snapshot"
                 );
                 let ls = self.ledger_state.write().await;
                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
@@ -2149,11 +2271,16 @@ impl Node {
 
             let block_data = {
                 let db = self.chain_db.read().await;
-                db.get_block_by_number(torsten_primitives::time::BlockNo(block_no))
+                db.get_next_block_after_slot(torsten_primitives::time::SlotNo(current_slot))
             };
 
             match block_data {
-                Ok(Some((slot, _hash, cbor))) => {
+                Ok(Some((next_slot, _hash, cbor))) => {
+                    // Stop once we have replayed up to and including the target slot.
+                    if next_slot.0 > end_slot {
+                        break;
+                    }
+
                     // Minimal decode: LSM replay always uses ApplyOnly mode;
                     // witness-set fields are never accessed.
                     match torsten_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
@@ -2162,33 +2289,36 @@ impl Node {
                     ) {
                         Ok(block) => {
                             let mut ls = self.ledger_state.write().await;
+                            let block_no = ls.tip.block_number.0 + 1;
                             if let Err(e) = ls.apply_block(&block, BlockValidationMode::ApplyOnly) {
                                 warn!(
-                                    "Replay       ledger apply failed at slot {} block {}: {e}",
-                                    slot.0, block_no
+                                    slot = next_slot.0,
+                                    "Replay ledger apply failed: {e}"
                                 );
                             }
                             replayed += 1;
+                            current_slot = next_slot.0;
                             self.snapshot_policy.record_blocks(1);
 
                             if last_log.elapsed().as_secs() >= 5 {
                                 let elapsed = start.elapsed().as_secs_f64();
                                 let speed = replayed as f64 / elapsed;
-                                let pct = if end_block_no > 0 {
-                                    block_no as f64 / end_block_no as f64 * 100.0
+                                let pct = if end_slot > start_slot {
+                                    (next_slot.0 - start_slot) as f64
+                                        / (end_slot - start_slot) as f64
+                                        * 100.0
                                 } else {
-                                    0.0
+                                    100.0
                                 };
                                 // Update Prometheus metric so TUI/monitoring can track replay progress
                                 self.metrics.set_sync_progress(pct);
-                                self.metrics.set_slot(slot.0);
+                                self.metrics.set_slot(next_slot.0);
                                 self.metrics.set_block_number(block_no);
                                 self.metrics.set_epoch(ls.epoch.0);
                                 info!(
                                     progress = format_args!("{pct:>6.2}%"),
-                                    block = block_no,
-                                    total = end_block_no,
-                                    slot = slot.0,
+                                    slot = next_slot.0,
+                                    end_slot,
                                     speed = format_args!("{speed:.0} blk/s"),
                                     utxos = ls.utxo_set.len(),
                                     "Replay",
@@ -2211,16 +2341,21 @@ impl Node {
                             }
                         }
                         Err(e) => {
-                            warn!(block_no, "Failed to decode block during replay: {e}");
+                            warn!(slot = next_slot.0, "Failed to decode block during replay: {e}");
+                            // Advance past the undecodable slot to avoid an infinite loop.
+                            current_slot = next_slot.0;
                         }
                     }
                 }
                 Ok(None) => {
-                    warn!(block_no, "Block not found in ChainDB during replay");
+                    // No more blocks after current_slot — replay complete.
                     break;
                 }
                 Err(e) => {
-                    warn!(block_no, "Failed to read from ChainDB during replay: {e}");
+                    warn!(
+                        current_slot,
+                        "Failed to read from ChainDB during replay: {e}"
+                    );
                     break;
                 }
             }
@@ -2512,16 +2647,41 @@ pub async fn chainsync_client_task(
             known_points.push(ledger_tip.clone());
         }
     } else if chain_diverged {
-        // ChainDB has contaminated blocks — offer only deep historical
-        // points from older ImmutableDB chunks.
+        // ChainDB volatile blocks do not connect to the ledger tip (fork
+        // divergence).  We must offer only *canonical* intersection points
+        // from the ImmutableDB.  The ImmutableDB tip is the single most
+        // important candidate: it is finalized, on the canonical chain, and
+        // guaranteed to be known by all peers.
+        //
+        // Haskell behaviour after startup with an empty VolatileDB: the node
+        // offers exactly [ImmutableDB tip] as the intersection candidate,
+        // since that is the LedgerDB anchor point.
+        //
+        // Without this fix, the code sent only 8 deep-historical sparse points
+        // (e.g. slot 107857439) instead of the ImmutableDB tip (107957082),
+        // causing a 97K-slot / ~4980-block rollback on every restart after a
+        // fork snapshot.
         let db = chain_db.read().await;
+
+        // 1. ImmutableDB tip — always offered first (canonical, finalized anchor).
+        if let Some(imm_tip) = db.get_immutable_tip_point() {
+            if imm_tip != Point::Origin && !known_points.contains(&imm_tip) {
+                known_points.push(imm_tip);
+            }
+        }
+
+        // 2. Deep historical sparse points from older ImmutableDB chunks
+        //    (fallback for peers that have rolled back past the current imm tip).
         for (slot, hash) in db.get_immutable_historical_points(8) {
             let p = Point::Specific(torsten_primitives::time::SlotNo(slot), hash);
             if !known_points.contains(&p) {
                 known_points.push(p);
             }
         }
-        // If no historical points found, fall back to ledger tip.
+
+        // 3. If no ImmutableDB points found at all, fall back to ledger tip
+        //    (last-chance candidate; peer will reject if it is on a fork, which
+        //    is harmless — we'll fall back to Origin and resync from genesis).
         if known_points.is_empty() && ledger_tip != Point::Origin {
             known_points.push(ledger_tip.clone());
         }

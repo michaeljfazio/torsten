@@ -306,6 +306,18 @@ impl ChainDB {
         }
     }
 
+    /// Get the ImmutableDB tip as a `Point`.
+    ///
+    /// Returns `None` when the ImmutableDB is empty.  Used for:
+    /// - Fork snapshot detection on startup (canonicality check)
+    /// - ChainSync intersection negotiation when fork divergence is detected
+    ///   (the ImmutableDB tip is a finalized canonical anchor guaranteed to be
+    ///   known by all peers on the correct network)
+    pub fn get_immutable_tip_point(&self) -> Option<Point> {
+        self.immutable_tip
+            .map(|(slot, hash, _block_no)| Point::Specific(slot, hash))
+    }
+
     /// Return minimal `BlockHeader` stubs for the current volatile selected
     /// chain, ordered oldest → newest (same order as the selected chain).
     ///

@@ -461,14 +461,20 @@ impl Node {
                         state.protocol_params = protocol_params.clone();
                     }
                     {
-                        // Validate snapshot tip is within the ChainDB's slot range.
-                        // We check by hash first (exact match), then fall back to slot
-                        // proximity.  Hash mismatches can occur when ImmutableDB blocks
-                        // have been contaminated by an orphan fork flush — the snapshot
-                        // may point to a canonical block whose hash is computed slightly
-                        // differently (e.g. by pallas vs cardano-node).  As long as the
-                        // snapshot slot is within the ChainDB range, the snapshot is
-                        // usable; the chunk replay will handle any gap.
+                        // Validate snapshot tip canonicality.
+                        //
+                        // A snapshot whose tip is *within the ImmutableDB slot range*
+                        // must match the canonical hash at that slot.  If it does not,
+                        // the snapshot was saved on a fork chain and must be discarded.
+                        //
+                        // Root cause context: Torsten snapshots at the volatile ledger
+                        // tip, which can be a fork block.  Haskell only snapshots at
+                        // the ImmutableDB-confirmed anchor, so fork snapshots cannot
+                        // occur there.  This check aligns our behaviour with Haskell.
+                        //
+                        // If the snapshot tip is *ahead* of the ImmutableDB tip (in
+                        // the volatile region), we cannot verify canonicality yet —
+                        // accept it and let the normal startup path handle divergence.
                         let snapshot_valid = match state.tip.point {
                             Point::Origin => true,
                             Point::Specific(snapshot_slot, ref hash) => {
@@ -476,30 +482,106 @@ impl Node {
                                     Ok(db) => {
                                         let exists = db.has_block(hash);
                                         if exists {
+                                            // Hash found in ChainDB (volatile or ImmutableDB) — canonical.
                                             true
                                         } else {
+                                            let imm_tip = db.get_immutable_tip();
+                                            let imm_tip_slot =
+                                                imm_tip.point.slot().map(|s| s.0).unwrap_or(0);
                                             let db_tip = db.get_tip();
                                             let db_tip_slot =
                                                 db_tip.point.slot().map(|s| s.0).unwrap_or(0);
+
                                             if snapshot_slot.0 > db_tip_slot {
-                                                // Snapshot is genuinely ahead of storage
+                                                // Snapshot is genuinely ahead of all storage —
+                                                // crash before ChainDB persist.
                                                 warn!(
-                                                    "Ledger snapshot is ahead of ChainDB (snapshot={}, chaindb={}); \
-                                                     node may have crashed before ChainDB persist — discarding snapshot, \
-                                                     will replay from storage",
+                                                    "Ledger snapshot is ahead of ChainDB \
+                                                     (snapshot={}, chaindb={}); node may have \
+                                                     crashed before ChainDB persist — discarding \
+                                                     snapshot, will replay from storage",
                                                     state.tip, db_tip,
                                                 );
                                                 false
+                                            } else if snapshot_slot.0 <= imm_tip_slot {
+                                                // Snapshot slot is within the finalized ImmutableDB
+                                                // range, but the hash is not in ChainDB.  This means
+                                                // the snapshot tip is on a fork chain that was never
+                                                // written to the ImmutableDB canonical chain.
+                                                //
+                                                // Verify by checking what hash the ImmutableDB
+                                                // actually has at this slot.  If it differs, the
+                                                // snapshot is a fork snapshot and must be rejected
+                                                // to prevent replay with a corrupted base state.
+                                                let canonical_at_slot = db
+                                                    .get_immutable_tip_point()
+                                                    .and_then(|p| match p {
+                                                        Point::Specific(s, h)
+                                                            if s.0 == snapshot_slot.0 =>
+                                                        {
+                                                            Some(h)
+                                                        }
+                                                        _ => None,
+                                                    });
+                                                let is_fork = match canonical_at_slot {
+                                                    Some(canonical_hash) => canonical_hash != *hash,
+                                                    // Can't verify exact slot — use block-at-or-after
+                                                    None => {
+                                                        match db.get_block_at_or_after_slot(
+                                                            snapshot_slot,
+                                                        ) {
+                                                            Ok(Some((
+                                                                found_slot,
+                                                                found_hash,
+                                                                _,
+                                                            ))) if found_slot.0
+                                                                == snapshot_slot.0 =>
+                                                            {
+                                                                found_hash != *hash
+                                                            }
+                                                            // No block at that slot (empty slot or
+                                                            // slot beyond what can be verified) —
+                                                            // can't confirm fork, accept with warning.
+                                                            _ => false,
+                                                        }
+                                                    }
+                                                };
+
+                                                if is_fork {
+                                                    warn!(
+                                                        snapshot_slot = snapshot_slot.0,
+                                                        imm_tip_slot,
+                                                        "Ledger snapshot tip is on a fork (hash not \
+                                                         in canonical ImmutableDB chain at slot {}). \
+                                                         Discarding fork snapshot to prevent UTxO \
+                                                         corruption — will replay from genesis.",
+                                                        snapshot_slot.0,
+                                                    );
+                                                    false
+                                                } else {
+                                                    // Hash mismatch but can't confirm fork — could be
+                                                    // hash computation difference (pallas vs cardano-node).
+                                                    // Accept and let the chunk replay handle the gap.
+                                                    warn!(
+                                                        "Ledger snapshot hash not found in ChainDB \
+                                                         but slot {} <= ImmutableDB tip {} — \
+                                                         accepting snapshot (hash mismatch may be \
+                                                         due to hash computation difference)",
+                                                        snapshot_slot.0, imm_tip_slot,
+                                                    );
+                                                    true
+                                                }
                                             } else {
-                                                // Snapshot slot is within ChainDB range but
-                                                // hash not found (likely ImmutableDB contamination
-                                                // or hash computation mismatch). Accept the
-                                                // snapshot — the chunk replay will skip ahead
-                                                // to the correct slot.
-                                                warn!(
-                                                    "Ledger snapshot hash not found in ChainDB but slot {} <= ChainDB tip {} — \
-                                                     accepting snapshot (hash mismatch likely due to fork recovery)",
-                                                    snapshot_slot.0, db_tip_slot,
+                                                // snapshot_slot is in the volatile range (between
+                                                // imm_tip and db_tip).  Hash is not in VolatileDB
+                                                // (WAL may have been empty on restart).  Accept —
+                                                // the chunk replay will catch up to the correct point.
+                                                debug!(
+                                                    snapshot_slot = snapshot_slot.0,
+                                                    imm_tip_slot,
+                                                    db_tip_slot,
+                                                    "Snapshot tip in volatile range, hash not in WAL \
+                                                     — accepting (will replay from chunk files)"
                                                 );
                                                 true
                                             }
@@ -2394,6 +2476,54 @@ impl Node {
         if !confirmed.is_empty() {
             self.mempool.remove_txs(&confirmed);
         }
+
+        // Sweep remaining mempool transactions for invalidity after the new block.
+        // Catches double-spends (consumed inputs), TTL expiry, and orphaned chained
+        // txs whose parent was confirmed. Mirrors process_forward_blocks() sync.rs:1355.
+        //
+        // Note: This uses a heuristic closure, not full validate_transaction().
+        // Full reapplyTx-style revalidation is tracked as future work.
+        if !self.mempool.is_empty() {
+            let consumed_inputs: std::collections::HashSet<_> = block
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.body.inputs.iter().cloned())
+                .collect();
+            let tip_slot = block_slot; // already captured at top of apply_fetched_block
+            let ls = self.ledger_state.read().await;
+            self.mempool.revalidate_all(|tx| {
+                // Evict if any input was consumed by this block (double-spend).
+                if tx.body.inputs.iter().any(|i| consumed_inputs.contains(i)) {
+                    return false;
+                }
+                // Evict if TTL has expired (half-open: slot >= ttl means expired).
+                if let Some(ttl) = tx.body.ttl {
+                    if tip_slot.0 >= ttl.0 {
+                        return false;
+                    }
+                }
+                // Evict if any input is absent from both on-chain UTxO and mempool
+                // virtual UTxO (catches orphaned chained txs whose parent was removed).
+                for input in &tx.body.inputs {
+                    if !ls.utxo_set.contains(input)
+                        && self.mempool.lookup_virtual_utxo(input).is_none()
+                    {
+                        return false;
+                    }
+                }
+                true
+            });
+            drop(ls); // Release read lock before update_query_state() acquires it.
+        }
+
+        // Update mempool metrics so Prometheus reflects confirmed-tx removal
+        // immediately. Placed unconditionally so the metric reaches 0 even
+        // when the mempool is empty after remove_txs().
+        self.metrics.set_mempool_count(self.mempool.len() as u64);
+        self.metrics.mempool_bytes.store(
+            self.mempool.total_bytes() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Refresh the N2C query handler snapshot so LocalStateQuery clients
         // (e.g. `torsten-cli query tip`) see the latest ledger state immediately

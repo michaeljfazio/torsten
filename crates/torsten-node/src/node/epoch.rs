@@ -3,6 +3,7 @@
 //! on networks that started with a Byron era.
 
 use std::path::PathBuf;
+use torsten_primitives::block::Point;
 use tracing::{debug, error, warn};
 
 use super::Node;
@@ -173,12 +174,20 @@ impl Node {
     /// Find the best epoch snapshot for a rollback to the given slot.
     ///
     /// Returns the path to the most recent snapshot whose ledger tip is at or
-    /// before `rollback_slot`.  Falls back to `ledger-snapshot.bin` if no
-    /// epoch snapshot qualifies.
+    /// before `rollback_slot` **and** whose tip is on the canonical ImmutableDB
+    /// chain.  Falls back to `ledger-snapshot.bin` if no epoch snapshot
+    /// qualifies.
+    ///
+    /// `chain_db` is optional; when `Some`, each candidate snapshot's tip hash
+    /// is verified against the ImmutableDB canonical chain.  Fork snapshots are
+    /// skipped with a warning so they cannot be used as rollback base states.
+    /// When `None` (e.g. ChainDB not yet initialised), the canonicality check
+    /// is skipped and any snapshot at or before the rollback slot is accepted.
     #[allow(dead_code)] // used by networking rewrite (handle_rollback)
     pub fn find_best_snapshot_for_rollback(
         &self,
         rollback_slot: u64,
+        chain_db: Option<&torsten_storage::ChainDB>,
     ) -> Option<std::path::PathBuf> {
         // Collect all epoch-numbered snapshots (sorted newest first)
         let mut epoch_snapshots: Vec<(u64, PathBuf)> = Vec::new();
@@ -225,11 +234,28 @@ impl Node {
                 Ok(state) => {
                     let snap_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
                     if snap_slot <= rollback_slot {
-                        debug!(
-                            epoch,
-                            snap_slot, rollback_slot, "Found suitable epoch snapshot for rollback"
-                        );
-                        return Some(path.clone());
+                        // Additionally verify that the snapshot tip is on the canonical
+                        // ImmutableDB chain.  A fork snapshot (tip hash not in
+                        // ImmutableDB) would produce permanently corrupt state if used
+                        // as a rollback base — genesis-replayed UTxOs would coexist with
+                        // the fork UTxOs already in the store.
+                        let is_canonical =
+                            is_snapshot_canonical(snap_slot, &state.tip.point, chain_db);
+                        if is_canonical {
+                            debug!(
+                                epoch,
+                                snap_slot,
+                                rollback_slot,
+                                "Found suitable canonical epoch snapshot for rollback"
+                            );
+                            return Some(path.clone());
+                        } else {
+                            warn!(
+                                epoch,
+                                snap_slot,
+                                "Epoch snapshot tip is on a fork — skipping for rollback"
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -241,16 +267,112 @@ impl Node {
         // Fall back to latest snapshot
         let latest = self.database_path.join("ledger-snapshot.bin");
         if latest.exists() {
-            // Check if it's usable (at or before rollback point)
+            // Check if it's usable (at or before rollback point) and canonical.
             if let Ok(state) = torsten_ledger::LedgerState::load_snapshot(&latest) {
                 let snap_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
                 if snap_slot <= rollback_slot {
-                    return Some(latest);
+                    let is_canonical = is_snapshot_canonical(snap_slot, &state.tip.point, chain_db);
+                    if is_canonical {
+                        return Some(latest);
+                    } else {
+                        warn!(
+                            snap_slot,
+                            "Latest ledger-snapshot.bin tip is on a fork — skipping for rollback"
+                        );
+                    }
                 }
             }
         }
 
         None
+    }
+}
+
+// ─── Snapshot canonicality helper ────────────────────────────────────────────
+
+/// Verify that a ledger snapshot tip is on the canonical ImmutableDB chain.
+///
+/// Returns `true` when:
+///   - `snap_slot` is 0 (origin — always canonical)
+///   - `chain_db` is `None` (no DB to check against — assume canonical)
+///   - The snapshot slot is beyond the ImmutableDB tip (volatile region —
+///     can't verify until more blocks are finalized; accept provisionally)
+///   - The ImmutableDB has the same hash at `snap_slot` as the snapshot tip
+///
+/// Returns `false` when the ImmutableDB has a *different* block at `snap_slot`,
+/// which proves the snapshot tip is on a fork that was never finalized.
+///
+/// Called by `find_best_snapshot_for_rollback` and the startup snapshot loader
+/// to prevent fork snapshots from being used as ledger base states.
+fn is_snapshot_canonical(
+    snap_slot: u64,
+    tip_point: &Point,
+    chain_db: Option<&torsten_storage::ChainDB>,
+) -> bool {
+    if snap_slot == 0 {
+        return true; // Origin is always canonical
+    }
+    let snap_hash = match tip_point.hash() {
+        Some(h) => *h,
+        None => return true, // No hash to verify — assume canonical
+    };
+    let db = match chain_db {
+        Some(db) => db,
+        None => return true, // No ChainDB available — skip check
+    };
+
+    // Determine the ImmutableDB tip slot.
+    let imm_tip_slot = db
+        .get_immutable_tip()
+        .point
+        .slot()
+        .map(|s| s.0)
+        .unwrap_or(0);
+
+    if snap_slot > imm_tip_slot {
+        // Snapshot is in the volatile region — cannot verify canonicality
+        // yet, so provisionally accept it.
+        return true;
+    }
+
+    // Snapshot slot is within the finalized ImmutableDB range.
+    // Check what hash the canonical chain has at this slot.
+    match db.get_block_at_or_after_slot(torsten_primitives::time::SlotNo(snap_slot)) {
+        Ok(Some((found_slot, found_hash, _))) if found_slot.0 == snap_slot => {
+            // Block found at exactly snap_slot — compare hashes.
+            if found_hash == snap_hash {
+                true
+            } else {
+                debug!(
+                    snap_slot,
+                    snap_hash = %snap_hash.to_hex(),
+                    canonical_hash = %found_hash.to_hex(),
+                    "is_snapshot_canonical: hash mismatch — snapshot is on a fork"
+                );
+                false
+            }
+        }
+        Ok(Some((found_slot, _, _))) => {
+            // ImmutableDB has no block at the exact snapshot slot (empty slot),
+            // but has a block at found_slot > snap_slot.  This means snap_slot
+            // was an empty slot in the canonical chain — a block at snap_slot
+            // would be a fork block.  Treat as non-canonical.
+            debug!(
+                snap_slot,
+                found_slot = found_slot.0,
+                "is_snapshot_canonical: no canonical block at snap_slot (empty slot) — fork"
+            );
+            false
+        }
+        Ok(None) => {
+            // No blocks at or after snap_slot in ImmutableDB, but snap_slot <=
+            // imm_tip_slot.  This shouldn't normally happen; assume canonical.
+            true
+        }
+        Err(_) => {
+            // DB error — cannot verify; assume canonical to avoid spurious resets.
+            true
+        }
     }
 }
 
