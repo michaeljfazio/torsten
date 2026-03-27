@@ -983,6 +983,7 @@ fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDel
 
     if et.pending_pp_updates_cleared {
         state.pending_pp_updates.clear();
+        state.future_pp_updates.clear();
     }
 
     // Apply reward credits.

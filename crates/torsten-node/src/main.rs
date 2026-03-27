@@ -600,6 +600,16 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     Ok(())
 }
 
+/// Greatest common divisor (Euclidean algorithm).
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 /// Serialise one mark/set/go `StakeSnapshot` into the cstreamer JSON format.
 ///
 /// Cstreamer includes full delegation maps, pool parameters, individual stake, and
@@ -608,16 +618,18 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
 fn serialize_stake_snapshot(
     name: &str,
     snapshot: &torsten_ledger::state::StakeSnapshot,
+    override_blocks: Option<&std::collections::HashMap<torsten_primitives::hash::Hash28, u64>>,
 ) -> serde_json::Value {
     use torsten_primitives::transaction::Relay;
 
     // delegations: credential hash → pool ID
-    // Key format matches cstreamer: "keyHash-{64_hex_chars}" (full 32-byte hash).
+    // Key format matches cstreamer: "keyHash-{56_hex_chars}" (28-byte hash).
+    // Torsten stores credentials as Hash32 (padded), so trim to 28 bytes.
     let delegations: serde_json::Map<String, serde_json::Value> = snapshot
         .delegations
         .iter()
         .map(|(cred, pool_id)| {
-            let key = format!("keyHash-{}", hex::encode(cred.as_bytes()));
+            let key = format!("keyHash-{}", hex::encode(&cred.as_bytes()[..28]));
             let val = serde_json::Value::String(hex::encode(pool_id.as_bytes()));
             (key, val)
         })
@@ -704,36 +716,42 @@ fn serialize_stake_snapshot(
         .collect();
 
     // stake: per-credential lovelace
-    // Key format: "keyHash-{64_hex_chars}" (same as delegations).
+    // Key format: "keyHash-{56_hex_chars}" (28-byte hash, trimmed from Hash32).
     let stake: serde_json::Map<String, serde_json::Value> = snapshot
         .stake_distribution
         .iter()
         .map(|(cred, lovelace)| {
-            let key = format!("keyHash-{}", hex::encode(cred.as_bytes()));
+            let key = format!("keyHash-{}", hex::encode(&cred.as_bytes()[..28]));
             let val = serde_json::Value::Number(lovelace.0.into());
             (key, val)
         })
         .collect();
 
-    // blocks: per-pool block production count for this snapshot epoch
-    let blocks: serde_json::Map<String, serde_json::Value> = snapshot
-        .epoch_blocks_by_pool
-        .iter()
-        .map(|(pool_id, count)| {
-            let key = hex::encode(pool_id.as_bytes());
-            let val = serde_json::Value::Number((*count).into());
-            (key, val)
-        })
-        .collect();
-
-    serde_json::json!({
+    // blocks: per-pool block production count.
+    // Cstreamer uses Haskell's nesBcur/nesBprev (tracked separately from snapshots):
+    //   - mark.blocks = nesBcur (blocks produced in current epoch so far)
+    //   - go.blocks   = nesBprev (blocks from previous epoch)
+    //   - set.blocks   = not included (None/omitted)
+    // Callers pass the appropriate block source, or None to omit.
+    let mut result = serde_json::json!({
         "name": name,
         "epoch": snapshot.epoch.0,
         "delegations": delegations,
         "poolParams": pool_params,
         "stake": stake,
-        "blocks": blocks,
-    })
+    });
+    if let Some(block_map) = override_blocks {
+        let blocks: serde_json::Map<String, serde_json::Value> = block_map
+            .iter()
+            .map(|(pool_id, count)| {
+                let key = hex::encode(pool_id.as_bytes());
+                let val = serde_json::Value::Number((*count).into());
+                (key, val)
+            })
+            .collect();
+        result["blocks"] = serde_json::Value::Object(blocks);
+    }
+    result
 }
 
 /// Build the richer epoch-snapshot JSON object from the current ledger state.
@@ -778,13 +796,20 @@ fn build_epoch_snapshot(
                 .map(|(pool_id, stake_lovelace)| {
                     let lv = stake_lovelace.0;
                     let pct = if total_active_stake > 0 {
-                        lv as f64 / total_active_stake as f64
+                        lv as f64 / total_active_stake as f64 * 100.0
                     } else {
                         0.0
                     };
+                    // Reduce the stake fraction to simplest form (matching cstreamer).
+                    let (num, den) = if total_active_stake > 0 && lv > 0 {
+                        let g = gcd(lv, total_active_stake);
+                        (lv / g, total_active_stake / g)
+                    } else {
+                        (lv, total_active_stake)
+                    };
                     serde_json::json!({
                         "poolId": hex::encode(pool_id.as_bytes()),
-                        "stake": { "numerator": lv, "denominator": total_active_stake },
+                        "stake": { "numerator": num, "denominator": den },
                         "stakeLovelace": lv,
                         "stakePercent": pct,
                     })
@@ -802,16 +827,20 @@ fn build_epoch_snapshot(
     let deposit_total = deposit_stake_key + deposit_pool + deposit_drep + deposit_proposal;
 
     // Protocol params summary.
+    // Use prev_protocol_params (esPrevPp) to match cstreamer's convention:
+    // cstreamer dumps the params that governed the PREVIOUS epoch, not the
+    // post-UPEC params for the current epoch.
+    let prev_pp = &ledger.prev_protocol_params;
     let protocol_params = serde_json::json!({
-        "a0": { "numerator": pp.a0.numerator, "denominator": pp.a0.denominator },
-        "d":  { "numerator": pp.d.numerator,  "denominator": pp.d.denominator  },
-        "rho": { "numerator": pp.rho.numerator, "denominator": pp.rho.denominator },
-        "tau": { "numerator": pp.tau.numerator, "denominator": pp.tau.denominator },
-        "nOpt": pp.n_opt,
-        "minPoolCost": pp.min_pool_cost.0,
+        "a0": { "numerator": prev_pp.a0.numerator, "denominator": prev_pp.a0.denominator },
+        "d":  { "numerator": prev_pp.d.numerator,  "denominator": prev_pp.d.denominator  },
+        "rho": { "numerator": prev_pp.rho.numerator, "denominator": prev_pp.rho.denominator },
+        "tau": { "numerator": prev_pp.tau.numerator, "denominator": prev_pp.tau.denominator },
+        "nOpt": prev_pp.n_opt,
+        "minPoolCost": prev_pp.min_pool_cost.0,
         "protocolVersion": {
-            "major": pp.protocol_version_major,
-            "minor": pp.protocol_version_minor,
+            "major": prev_pp.protocol_version_major,
+            "minor": prev_pp.protocol_version_minor,
         },
     });
 
@@ -829,24 +858,50 @@ fn build_epoch_snapshot(
     };
 
     // RC4: full mark/set/go stake snapshots for cross-validation.
+    // Block counts match Haskell's nesBcur/nesBprev (tracked outside snapshots):
+    //   mark → nesBcur (blocks produced so far in current epoch)
+    //   set  → no blocks (not a Haskell concept)
+    //   go   → nesBprev (blocks from previous epoch)
     let snap_mark = ledger
         .snapshots
         .mark
         .as_ref()
-        .map(|s| serialize_stake_snapshot("mark", s))
+        .map(|s| serialize_stake_snapshot("mark", s, Some(ledger.epoch_blocks_by_pool.as_ref())))
         .unwrap_or(serde_json::Value::Null);
     let snap_set = ledger
         .snapshots
         .set
         .as_ref()
-        .map(|s| serialize_stake_snapshot("set", s))
+        .map(|s| serialize_stake_snapshot("set", s, None))
         .unwrap_or(serde_json::Value::Null);
-    let snap_go = ledger
-        .snapshots
-        .go
-        .as_ref()
-        .map(|s| serialize_stake_snapshot("go", s))
-        .unwrap_or(serde_json::Value::Null);
+    let snap_go = if let Some(s) = ledger.snapshots.go.as_ref() {
+        serialize_stake_snapshot(
+            "go",
+            s,
+            Some(ledger.snapshots.bprev_blocks_by_pool.as_ref()),
+        )
+    } else {
+        // In Haskell, snapshots are never null — empty SnapShot with nesBprev blocks.
+        let bprev_blocks: serde_json::Map<String, serde_json::Value> = ledger
+            .snapshots
+            .bprev_blocks_by_pool
+            .iter()
+            .map(|(pool_id, count)| {
+                (
+                    hex::encode(pool_id.as_bytes()),
+                    serde_json::Value::Number((*count).into()),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "name": "go",
+            "epoch": 0,
+            "delegations": {},
+            "poolParams": {},
+            "stake": {},
+            "blocks": bprev_blocks,
+        })
+    };
 
     serde_json::json!({
         "epoch": epoch,
@@ -855,7 +910,7 @@ fn build_epoch_snapshot(
         "treasury": ledger.treasury.0,
         "totalStake": total_stake,
         "activeStake": active_stake,
-        "totalPools": ledger.pool_params.len(),
+        "totalPools": pool_distribution.len(),
         "poolDistribution": pool_distribution,
         "snapshotEraName": format!("{}", ledger.era),
         "epochNonce": hex::encode(ledger.epoch_nonce.0),

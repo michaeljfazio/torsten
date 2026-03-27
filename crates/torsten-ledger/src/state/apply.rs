@@ -1021,21 +1021,37 @@ impl LedgerState {
                 }
             }
 
-            // Collect pre-Conway protocol parameter update proposals
+            // Collect pre-Conway protocol parameter update proposals.
+            //
+            // Haskell's PPUP rule separates proposals into current vs future:
+            //   - ppupEpoch == currentEpoch  → sgsCurProposals (apply at this boundary)
+            //   - ppupEpoch == currentEpoch+1 → sgsFutureProposals (promote next boundary)
+            //
+            // We mirror this: current → pending_pp_updates, future → future_pp_updates.
             if let Some(ref update) = tx.body.update {
+                let is_future = update.epoch > self.epoch.0;
                 for (genesis_hash, ppu) in &update.proposed_updates {
                     debug!(
                         genesis_hash = %genesis_hash.to_hex(),
                         target_epoch = update.epoch,
+                        current_epoch = self.epoch.0,
+                        kind = if is_future { "future" } else { "current" },
                         protocol_version = ?ppu.protocol_version_major.zip(ppu.protocol_version_minor),
                         d = ?ppu.d,
                         n_opt = ?ppu.n_opt,
                         "Collected protocol parameter update proposal"
                     );
-                    self.pending_pp_updates
-                        .entry(EpochNo(update.epoch))
-                        .or_default()
-                        .push((*genesis_hash, ppu.clone()));
+                    if is_future {
+                        self.future_pp_updates
+                            .entry(EpochNo(update.epoch))
+                            .or_default()
+                            .push((*genesis_hash, ppu.clone()));
+                    } else {
+                        self.pending_pp_updates
+                            .entry(EpochNo(update.epoch))
+                            .or_default()
+                            .push((*genesis_hash, ppu.clone()));
+                    }
                 }
             }
         }

@@ -13286,8 +13286,10 @@ fn expected_delta_treasury_no_pools(
 /// correct rate without any double-counting.
 ///
 /// Setup: no pools, no delegations (pure treasury accumulation scenario).
-/// Expected: treasury is 0 after the first boundary (0→1, set=None → no RUPD),
-/// then non-zero from the second boundary (1→2, set=mark1 → RUPD fires) onward.
+/// Expected: treasury is non-zero after every boundary (including 0→1, where the
+/// initial RUPD fires with empty GO/bprev/fees — pure monetary expansion via
+/// rho × reserves with tau fraction going to treasury, matching Haskell's TICK
+/// rule which pulses the reward computation during epoch 0).
 /// Each epoch's RUPD applies once and exactly once (no deferred double-application).
 #[test]
 fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
@@ -13321,17 +13323,17 @@ fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
 
     // Epoch boundaries we will cross: epoch 0→1, 1→2, ... 9→10.
     //
-    // Corrected RUPD timing: RUPD uses the SET snapshot (old mark = epoch just ended).
-    // Rotation happens FIRST, then RUPD fires from the new set.
+    // RUPD fires at EVERY boundary, including 0→1 (matching Haskell's TICK rule).
+    // At 0→1: GO=empty, bprev=empty, ss_fee=0.  Pure monetary expansion with
+    // tau fraction going to treasury.  No pool rewards (empty GO).
     //
     // Timeline:
-    //   0→1: rotate: go=None, set=None; no RUPD (set=None); build mark1(fees=F,blocks=B)
-    //   1→2: rotate: go=None, set=mark1; RUPD fires from set=mark1 (fees=F) → treasury += Δ1
-    //   2→3: rotate: go=mark1, set=mark2; RUPD fires from set=mark2 (fees=F) → treasury += Δ2
-    //   3→4: rotate: go=mark2, set=mark3; RUPD fires from set=mark3 (fees=F) → treasury += Δ3
+    //   0→1: RUPD fires (GO=empty, fees=0) → treasury += Δ0; rotate; build mark1
+    //   1→2: RUPD fires (GO=None, bprev=epoch0, ss_fee=epoch0_fees) → treasury += Δ1
+    //   2→3: RUPD fires (GO=None, bprev=epoch1, ss_fee=epoch1_fees) → treasury += Δ2
     //   ...
     //
-    // First treasury increase happens at epoch 1→2 (set=mark1 has epoch0 fees).
+    // First treasury increase happens at epoch 0→1 (initial RUPD).
     let mut treasury_history = vec![state.treasury.0]; // epoch 0
 
     for epoch_idx in 1..=9u32 {
@@ -13347,18 +13349,19 @@ fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
         );
     }
 
-    // With the corrected RUPD timing (RUPD uses set = old mark = epoch just ended),
-    // treasury is 0 ONLY after the first boundary (0→1, set=None → no RUPD).
-    // From the second boundary (1→2, set=mark1 → RUPD fires) onward, treasury > 0.
-    assert_eq!(
-        treasury_history[1], 0,
-        "Treasury should be 0 after epoch boundary 0→1 (set=None → no RUPD): was {}",
+    // RUPD fires at EVERY boundary including 0→1 (matching Haskell).
+    // At 0→1: expansion = floor(rho * reserves), treasury_cut = floor(tau * expansion).
+    // No pool rewards (empty GO), so treasury gets the treasury_cut.
+    assert!(
+        treasury_history[1] > 0,
+        "Treasury should be non-zero after epoch boundary 0→1 (initial RUPD fires with \
+         empty GO: pure monetary expansion → tau fraction to treasury): was {}",
         treasury_history[1]
     );
-    // From boundary 1→2 onward, RUPD fires every epoch (set has epoch-just-ended data).
+    // Subsequent boundaries also fire RUPD.
     assert!(
-        treasury_history[2] > 0,
-        "Treasury should be non-zero after epoch boundary 1→2 (RUPD fires from set=mark1)"
+        treasury_history[2] > treasury_history[1],
+        "Treasury should grow after epoch boundary 1→2 (RUPD fires with bprev data)"
     );
 
     // Verify no double-counting: each epoch transition should add roughly the same
@@ -13451,17 +13454,16 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
         );
     }
 
-    // With immediate RUPD application:
-    // history[1] = unchanged (epoch 0→1: go=None → no RUPD)
-    // history[2] = increased (epoch 1→2: go=set from prior rotation, RUPD computed+applied)
-    assert_eq!(
-        treasury_history[1], treasury_history[0],
-        "Treasury should be unchanged after epoch 0→1 (no go snapshot yet)"
-    );
-    // From epoch 1→2 onward, treasury should grow (RUPD applied immediately)
+    // With immediate RUPD application including at 0→1 (matching Haskell):
+    // history[1] = increased (epoch 0→1: initial RUPD with empty GO, pure expansion)
+    // history[2] = further increased (epoch 1→2: RUPD with bprev and ss_fee data)
     assert!(
-        treasury_history[2] > treasury_history[0],
-        "Treasury should increase at epoch 1→2 (RUPD applied immediately)"
+        treasury_history[1] > treasury_history[0],
+        "Treasury should grow after epoch 0→1 (initial RUPD fires with empty GO)"
+    );
+    assert!(
+        treasury_history[2] > treasury_history[1],
+        "Treasury should continue growing at epoch 1→2"
     );
 
     // Simulate a treasury_value snap at epoch 5 = current treasury at that point.
@@ -13761,29 +13763,27 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     let epoch0_fees = 100_000_000u64;
     let actual_blocks = 2578u64;
 
-    // Boundary 0→1: with epoch_fees=epoch0_fees.
-    // After rotation: go=None, set=None (initial state — no prior mark).
-    // New mark1 built with epoch0 data (epoch0_fees, actual_blocks).
-    // RUPD: rupd_ready=false → skipped entirely.
-    // Note: epoch_blocks_by_pool must be populated because the RUPD uses
-    // sum(epoch_blocks_by_pool) for actual_blocks (not epoch_block_count).
-    // With proto >= 7, prev_d becomes 0.0 after this boundary, and the eta
-    // calculation (actual_blocks / expected_blocks) is used for expansion.
+    // Boundary 0→1: initial RUPD fires (GO=empty, bprev=empty, ss_fee=0).
+    // prev_d=1.0 → d >= 0.8 → eta=1 → full expansion.
+    // epoch0_fees are captured in ss_fee at SNAP rotation AFTER the RUPD, so they
+    // do NOT contribute to this RUPD (ss_fee was 0 from genesis).
     state.epoch_fees = Lovelace(epoch0_fees);
     state.epoch_block_count = actual_blocks;
     let mut blocks_by_pool = HashMap::new();
     blocks_by_pool.insert(Hash28::from_bytes([0x01; 28]), actual_blocks);
     state.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.treasury.0, 0, "No RUPD yet at epoch 0→1 (set=None)");
-    assert!(
-        state.pending_reward_update.is_none(),
-        "pending should be None after 0→1"
+    let initial_reserves = 8_000_000_000_000_000u64;
+    let initial_expansion = (3u128 * initial_reserves as u128 / 1000) as u64;
+    let initial_tc = (2u128 * initial_expansion as u128 / 10) as u64;
+    assert_eq!(
+        state.treasury.0, initial_tc,
+        "Treasury after 0→1 should be tau*rho*reserves (initial RUPD, no fees)"
     );
+    let reserves_after_01 = initial_reserves - initial_tc;
 
     // Boundary 1→2: no new fees.
-    // After rotation: go=None, set=mark1 (epoch0_fees, actual_blocks).
-    // RUPD fires immediately using set=mark1.
+    // RUPD fires using bprev=epoch0's blocks (2578), ss_fee=epoch0_fees (captured at 0→1 SNAP).
     // This is the FIRST and ONLY time epoch0_fees contribute to treasury.
     state.epoch_fees = Lovelace(0);
     state.epoch_block_count = 0;
@@ -13794,26 +13794,27 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     );
 
     // Calculate expected delta_treasury for the RUPD at 1→2.
-    // Reserves = initial at this point (no previous RUPD fired).
-    let initial_reserves = 8_000_000_000_000_000u64;
+    // Reserves = reserves_after_01 (reduced by initial RUPD).
     let expected_blocks = ((0.05f64 * 21600f64).floor() as u64).max(1); // 1080
     let effective_blocks = actual_blocks.min(expected_blocks); // min(2578, 1080) = 1080
-    let expansion = (3u128 * initial_reserves as u128 * effective_blocks as u128)
+    let expansion = (3u128 * reserves_after_01 as u128 * effective_blocks as u128)
         / (1000u128 * expected_blocks as u128);
     let total = expansion as u64 + epoch0_fees;
     // No pools → undistributed rewards stay in reserves. Only treasury_cut goes to treasury.
     let expected_delta = (2u128 * total as u128 / 10) as u64; // floor(tau * total)
 
     let treasury_after_epoch2 = state.treasury.0;
-    let diff = (treasury_after_epoch2 as i128 - expected_delta as i128).unsigned_abs();
+    let expected_treasury_after_epoch2 = initial_tc + expected_delta;
+    let diff =
+        (treasury_after_epoch2 as i128 - expected_treasury_after_epoch2 as i128).unsigned_abs();
     assert!(
         diff <= 2,
-        "Treasury after epoch 1→2 should be ~{expected_delta} (epoch0 fees counted once), \
-         got {treasury_after_epoch2}. diff={diff}"
+        "Treasury after epoch 1→2 should be ~{expected_treasury_after_epoch2} \
+         (initial_tc + epoch0 fees counted once), got {treasury_after_epoch2}. diff={diff}"
     );
     assert!(
-        treasury_after_epoch2 > 0,
-        "Treasury must be positive after first RUPD at 1→2"
+        treasury_after_epoch2 > initial_tc,
+        "Treasury must grow at 1→2 (fees contribute to RUPD)"
     );
 
     // Boundary 2→3: no new fees.
@@ -13932,59 +13933,65 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
     state.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
 
     // Boundary 0→1:
-    // rupd_ready=false → RUPD skipped. Snapshot rotation captures bprev from
-    // epoch0 (4320 blocks). After this, prev_d becomes 0.0 (proto >= 7).
+    // RUPD fires with GO=empty, bprev=empty, ss_fee=0.  Matching Haskell:
+    // the TICK rule pulses the reward computation during epoch 0 and NEWEPOCH
+    // applies it at the 0→1 boundary.  With empty GO (no pools), only the
+    // monetary expansion's treasury cut (tau × expansion) is distributed.
+    //
+    // prev_d=1.0 (genesis) → d >= 0.8 → eta=1 → full expansion.
+    // expansion0 = floor(0.003 * 15T) = 45,000,000,000,000
+    // treasury_cut0 = floor(0.2 * 45B) = 9,000,000,000,000
     state.process_epoch_transition(EpochNo(1));
+
+    let expansion0 = 45_000_000_000_000u64; // floor(0.003 * 15T)
+    let tc0 = Rat::new(2, 10)
+        .mul(&Rat::new(expansion0 as i128, 1))
+        .floor_u64();
+    assert_eq!(tc0, 9_000_000_000_000);
+
     assert_eq!(
-        state.treasury.0, 0,
-        "Treasury must be 0 after 0→1: set=None means no RUPD fires"
+        state.treasury.0, tc0,
+        "Treasury after 0→1 must equal tau*expansion (initial RUPD with \
+         empty GO: pure monetary expansion). Got {}",
+        state.treasury.0
+    );
+
+    let r0 = 15_000_000_000_000_000u64 - tc0;
+    assert_eq!(
+        state.reserves.0, r0,
+        "Reserves after 0→1 must be initial - treasury_cut: \
+         expected={r0}, got={}",
+        state.reserves.0
     );
 
     // Boundary 1→2:
-    // After rotation: go=None, set=mark1 (4320 blocks, 0 fees) → RUPD fires.
-    // expansion = floor(0.003 × 15_000_000_000_000_000 × 4320/4320) = 45_000_000_000_000
-    // No pools → all rewards undistributed → delta_treasury = expansion = 45_000_000_000_000
-    // (In the real chain with active pools, delta_treasury ≈ tau * expansion = 9B,
-    //  since ~36B gets distributed to stakers.  No-pool path is simpler to test.)
+    // RUPD fires with GO=None, bprev=epoch0's blocks (4320).  Snapshot
+    // rotation captured bprev at 0→1.  prev_d=0.0 (proto >= 7), so
+    // eta = actual/expected = 4320/4320 = 1.0.
+    // expansion1 = floor(0.003 * r0) = floor(0.003 * 14,991,000,000,000,000)
+    // No pools → treasury_cut1 = floor(0.2 * expansion1)
     state.epoch_block_count = 0;
     state.epoch_fees = Lovelace(0);
     state.process_epoch_transition(EpochNo(2));
 
-    // Expected monetary expansion at epoch 0→(applied 1→2):
-    // floor(rho * reserves * eta) = floor(0.003 * 15T * 1.0) = 45_000_000_000_000
-    const CANONICAL_EXPANSION: u64 = 45_000_000_000_000;
-
-    // No-pool case: undistributed rewards stay in reserves. Only treasury_cut
-    // (tau * expansion) goes to treasury. delta_reserves = delta_treasury = treasury_cut.
-    // treasury_cut = floor(0.2 * 45B) = 9_000_000_000_000
-    let expected_treasury_cut = Rat::new(2, 10)
-        .mul(&Rat::new(CANONICAL_EXPANSION as i128, 1))
-        .floor_u64();
-    assert_eq!(expected_treasury_cut, 9_000_000_000_000);
-
+    let expansion1 = (3u128 * r0 as u128 / 1000) as u64;
+    let tc1 = (2u128 * expansion1 as u128 / 10) as u64;
     assert_eq!(
-        state.treasury.0, expected_treasury_cut,
-        "Treasury after epoch 1→2 (no-pool): must equal treasury_cut=9B. \
-         Got {} — if 0 the RUPD was skipped (set=None/go=None bug).",
+        state.treasury.0,
+        tc0 + tc1,
+        "Treasury after 1→2 must be tc0({tc0}) + tc1({tc1}), got {}",
         state.treasury.0
     );
-    assert!(
-        state.treasury.0 > 0,
-        "RUPD must have fired: treasury must be non-zero after first epoch"
-    );
-
-    // Reserves decrease by treasury_cut only (undistributed stays in reserves).
-    let expected_reserves = 15_000_000_000_000_000u64 - expected_treasury_cut;
     assert_eq!(
-        state.reserves.0, expected_reserves,
-        "Reserves after first RUPD must be initial - treasury_cut: \
-         expected={expected_reserves}, got={}",
+        state.reserves.0,
+        r0 - tc1,
+        "Reserves after 1→2 must be r0({r0}) - tc1({tc1}), got {}",
         state.reserves.0
     );
 }
 
-/// Verify multi-epoch treasury accumulation: 3 full epochs should produce
-/// compounding treasury growth matching the geometric series.
+/// Verify multi-epoch treasury accumulation: 4 boundaries (0→1 through 3→4)
+/// should produce compounding treasury growth matching the geometric series.
 ///
 /// Preview params: rho=0.003, tau=0.2, full blocks each epoch, no active pools.
 ///
@@ -13992,11 +13999,11 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
 /// (tau * expansion) goes to treasury. delta_reserves = delta_treasury = treasury_cut.
 ///
 /// Formula (no-pool case):
-///   epoch 1→2: expansion1 = floor(0.003 * R0) = 45B; tc1 = floor(0.2 * 45B) = 9B;
-///              treasury += 9B; R1 = R0 - 9B
-///   epoch 2→3: expansion2 = floor(0.003 * R1); tc2 = floor(0.2 * expansion2);
-///              treasury += tc2; R2 = R1 - tc2
-///   epoch 3→4: expansion3 = floor(0.003 * R2); tc3 = floor(0.2 * expansion3); etc.
+///   epoch 0→1: expansion0 = floor(0.003 * R_init); tc0 = floor(0.2 * expansion0);
+///              treasury += tc0; R0 = R_init - tc0
+///   epoch 1→2: expansion1 = floor(0.003 * R0); tc1 = floor(0.2 * expansion1);
+///              treasury += tc1; R1 = R0 - tc1
+///   epoch 2→3: expansion2 = floor(0.003 * R1); tc2 = floor(0.2 * expansion2); etc.
 #[test]
 fn test_rupd_compounding_treasury_over_three_epochs() {
     let mut params = ProtocolParameters::mainnet_defaults();
@@ -14029,39 +14036,54 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
         Arc::new(m)
     };
 
-    // Epoch 0 (full blocks): sets up bprev with epoch0 block data.
+    // Epoch 0→1: initial RUPD fires (GO=empty, bprev=empty, ss_fee=0).
+    // prev_d=1.0 → d >= 0.8 → eta=1 → full expansion.
+    // expansion0 = floor(0.003 * 15T) = 45,000,000,000,000
+    // tc0 = floor(0.2 * expansion0) = 9,000,000,000,000
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.treasury.0, 0, "No RUPD at 0→1 (rupd_ready=false)");
+    let t0 = state.treasury.0;
+    let r0 = state.reserves.0;
+    let expansion0 = (3u128 * initial_reserves as u128 / 1000) as u64;
+    let tc0 = (2u128 * expansion0 as u128 / 10) as u64;
+    assert_eq!(
+        t0, tc0,
+        "Treasury after 0→1 (initial RUPD, no-pool): tc0={tc0}, got {t0}"
+    );
+    assert_eq!(
+        r0,
+        initial_reserves - tc0,
+        "Reserves after 0→1 should be initial - tc0"
+    );
 
-    // Epoch 1 (full blocks) → first RUPD fires.
-    // bprev has epoch0's 4320 blocks, prev_d=0.0 → eta = 4320/4320 = 1.
-    // expansion1 = floor(0.003 * 15T * 1) = 45_000_000_000_000
-    // No-pool case: only treasury_cut goes to treasury, undistributed stays in reserves.
-    // treasury_cut1 = floor(0.2 * 45B) = 9_000_000_000_000
+    // Epoch 1→2: RUPD fires with bprev=epoch0 blocks (4320), prev_d=0.0.
+    // eta = 4320/4320 = 1.0.
+    // expansion1 = floor(0.003 * r0)
+    // tc1 = floor(0.2 * expansion1)
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(2));
     let t1 = state.treasury.0;
     let r1 = state.reserves.0;
-    let expansion1 = 45_000_000_000_000u64; // floor(0.003 * 15T)
-    let tc1 = (2u128 * expansion1 as u128 / 10) as u64; // floor(0.2 * expansion1)
+    let expansion1 = (3u128 * r0 as u128 / 1000) as u64;
+    let tc1 = (2u128 * expansion1 as u128 / 10) as u64;
     assert_eq!(
-        t1, tc1,
-        "Treasury after epoch 1 (no-pool): treasury_cut={tc1} flows to treasury"
+        t1,
+        t0 + tc1,
+        "Treasury after 1→2: t0({t0}) + tc1({tc1}), got {t1}"
     );
     assert_eq!(
         r1,
-        initial_reserves - tc1,
-        "Reserves after epoch 1 should be initial - treasury_cut1"
+        r0 - tc1,
+        "Reserves after 1→2 should be r0({r0}) - tc1({tc1})"
     );
 
-    // Epoch 2 (full blocks) → second RUPD fires.
+    // Epoch 2→3: RUPD fires.
     // expansion2 = floor(0.003 * r1)
-    // treasury_cut2 = floor(0.2 * expansion2)
+    // tc2 = floor(0.2 * expansion2)
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.epoch_blocks_by_pool = make_blocks(full_blocks);
@@ -14082,7 +14104,7 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
         "Reserves after epoch 2 should be r1({r1}) - tc2({tc2}), got {r2}"
     );
 
-    // Epoch 3 (full blocks) → third RUPD fires.
+    // Epoch 3→4: RUPD fires.
     state.epoch_block_count = full_blocks;
     state.epoch_fees = Lovelace(0);
     state.epoch_blocks_by_pool = make_blocks(full_blocks);

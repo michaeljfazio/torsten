@@ -78,10 +78,13 @@ impl LedgerState {
         // here in NEWEPOCH. We compute it now using the CURRENT GO snapshot and
         // ss_fee — these represent what Haskell's mid-epoch RUPD would have used.
         //
-        // At genesis (first boundary), Haskell's nesRu = SNothing: no reward update
-        // to apply. We skip RUPD until the first snapshot rotation has captured
-        // bprev/ss_fee data from an actual epoch (rupd_ready = true).
-        if self.snapshots.rupd_ready {
+        // At genesis (first boundary, 0→1), Haskell's TICK rule still computes the
+        // reward update during epoch 0: GO=empty, bprev=empty, ss_fee=0.  With no
+        // pools in GO the monetary expansion (rho × reserves) still fires and the
+        // treasury cut (tau × expansion) moves reserves → treasury.  No individual
+        // rewards are distributed (no pools).  We must replicate this — skipping it
+        // creates a permanent reserves/treasury offset.
+        {
             // Haskell's startStep uses THREE separate data sources:
             //   1. ssStakeGo: stake/pool/delegation data (2 epochs ago)
             //   2. nesBprev (BlocksMade): block production from previous epoch
@@ -89,6 +92,8 @@ impl LedgerState {
             //
             // GO provides stake distribution. Block counts come from bprev
             // (= nesBprev = previous epoch's blocks, separate from snapshot rotation).
+            // At the very first boundary (0→1) all three are empty/zero, which is
+            // correct: the RUPD yields pure monetary expansion with no pool rewards.
             let go_snapshot = self
                 .snapshots
                 .go
@@ -452,13 +457,23 @@ impl LedgerState {
                 );
             }
         }
-        // Clean up proposals targeting past epochs (already applied above).
-        // Keep proposals with key >= new_epoch-1 since we look up key = N-1
-        // at boundary new_epoch = N. Proposals already consumed are removed
-        // by the `remove` call above. Retain proposals that may be needed at
-        // the next boundary or later.
+        // Clean up current proposals targeting past epochs.
         self.pending_pp_updates
             .retain(|epoch, _| *epoch >= lookup_epoch);
+
+        // Promote future proposals → current (Haskell's updatePpup: sgsCur = sgsFuture).
+        // After evaluating sgsCur, future proposals become current for the next boundary.
+        // This ensures proposals with ppupEpoch = E+1 (submitted during epoch E as future)
+        // are promoted at E→E+1 and applied at E+1→E+2 — matching the two-step cycle.
+        if !self.future_pp_updates.is_empty() {
+            let promoted = std::mem::take(&mut self.future_pp_updates);
+            for (epoch, proposals) in promoted {
+                self.pending_pp_updates
+                    .entry(epoch)
+                    .or_default()
+                    .extend(proposals);
+            }
+        }
 
         // Ratify governance proposals that have met their voting thresholds
         self.ratify_proposals();

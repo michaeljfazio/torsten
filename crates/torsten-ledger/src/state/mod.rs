@@ -201,9 +201,16 @@ pub struct LedgerState {
     first_block_hash_of_epoch: Option<Hash32>,
     #[serde(default)]
     prev_epoch_first_block_hash: Option<Hash32>,
-    /// Pending protocol parameter update proposals (pre-Conway):
+    /// Current protocol parameter update proposals (pre-Conway, sgsCurProposals):
+    /// proposals where ppupEpoch == currentEpoch at submission time.
     /// Maps target_epoch -> [(genesis_delegate_hash, proposed_update)]
     pub pending_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
+    /// Future protocol parameter update proposals (pre-Conway, sgsFutureProposals):
+    /// proposals where ppupEpoch == currentEpoch + 1 at submission time.
+    /// Promoted to `pending_pp_updates` at each epoch boundary (matching Haskell's
+    /// `updatePpup` which moves sgsFuture → sgsCur after evaluating sgsCur).
+    #[serde(default)]
+    pub future_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
     /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
     #[serde(default = "default_update_quorum")]
     pub update_quorum: u64,
@@ -614,6 +621,7 @@ impl LedgerState {
             first_block_hash_of_epoch: None,
             prev_epoch_first_block_hash: None,
             pending_pp_updates: BTreeMap::new(),
+            future_pp_updates: BTreeMap::new(),
             update_quorum: default_update_quorum(),
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
