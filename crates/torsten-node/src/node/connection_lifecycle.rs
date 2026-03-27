@@ -735,14 +735,18 @@ impl ConnectionLifecycleManager {
 
                             // Take pending headers from this peer, filtering out any
                             // slots that have already been fetched by another peer.
+                            //
+                            // We drain the headers from candidate_chains so the
+                            // block_fetch_logic decision task doesn't re-dispatch
+                            // them.  If fetching fails, the ChainSync task will
+                            // re-populate the headers on the next rollback cycle.
                             let headers_to_fetch = {
-                                let mut chains = candidate_chains.write().await;
-                                if let Some(state) = chains.get_mut(&addr) {
-                                    let max_fetched = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
-                                    let all = std::mem::take(&mut state.pending_headers);
-                                    // Only fetch headers with slot > max_fetched_slot
-                                    let filtered: Vec<_> = all.into_iter()
-                                        .filter(|h| h.slot > max_fetched)
+                                let chains = candidate_chains.read().await;
+                                if let Some(state) = chains.get(&addr) {
+                                    let skip_below = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
+                                    let filtered: Vec<_> = state.pending_headers.iter()
+                                        .filter(|h| h.slot > skip_below)
+                                        .cloned()
                                         .collect();
                                     if filtered.is_empty() {
                                         // Release active fetcher so another peer can try.
