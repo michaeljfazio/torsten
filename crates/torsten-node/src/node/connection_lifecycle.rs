@@ -687,6 +687,16 @@ impl ConnectionLifecycleManager {
                 use torsten_network::codec::Point as CodecPoint;
                 use torsten_network::protocol::blockfetch::client::BlockFetchClient;
 
+                // Per-worker dedup set: tracks block hashes successfully downloaded
+                // in this worker's lifetime.  We do NOT drain `pending_headers` from
+                // `candidate_chains` because that would permanently lose headers if
+                // the connection drops mid-fetch (the ChainSync task will not
+                // re-populate already-streamed headers until a rollback, causing
+                // multi-minute sync stalls).  Instead we read headers in-place and
+                // skip any whose hash is already in this set.
+                let mut fetched_hashes: std::collections::HashSet<[u8; 32]> =
+                    std::collections::HashSet::new();
+
                 info!(%addr, "blockfetch worker started (waiting for turn)");
 
                 let mut poll_ticker = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -729,13 +739,16 @@ impl ConnectionLifecycleManager {
                                 continue;
                             }
 
-                            // Take pending headers from this peer, filtering out any
-                            // slots that have already been fetched by another peer.
+                            // Build the list of headers to fetch from this peer.
                             //
-                            // We drain the headers from candidate_chains so the
-                            // block_fetch_logic decision task doesn't re-dispatch
-                            // them.  If fetching fails, the ChainSync task will
-                            // re-populate the headers on the next rollback cycle.
+                            // KEY INVARIANT: we do NOT drain `pending_headers`.
+                            // Headers remain in `candidate_chains` so they survive
+                            // a mid-fetch connection drop.  Instead we skip any
+                            // header whose hash is already in `fetched_hashes`
+                            // (downloaded by this worker in an earlier iteration)
+                            // or whose slot is <= max_fetched_slot (downloaded by
+                            // another peer's worker).  This prevents both re-fetch
+                            // loops and stalls caused by lost headers.
                             //
                             // Read chain_db tip BEFORE acquiring candidate_chains lock
                             // to avoid calling blocking_read() inside an async context
@@ -747,15 +760,19 @@ impl ConnectionLifecycleManager {
                                 db.tip_slot().0
                             };
                             let headers_to_fetch = {
-                                let mut chains = candidate_chains.write().await;
-                                if let Some(state) = chains.get_mut(&addr) {
-                                    // Drain pending_headers to prevent infinite re-fetch.
-                                    // Filter by max_fetched_slot to skip blocks already
-                                    // downloaded (even if not yet applied to the ledger).
+                                // Read-only access is sufficient — we never modify
+                                // pending_headers here.
+                                let chains = candidate_chains.read().await;
+                                if let Some(state) = chains.get(&addr) {
+                                    // Filter by the cross-worker slot watermark AND
+                                    // by the per-worker hash dedup set.
                                     let max_fetched = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
-                                    let all = std::mem::take(&mut state.pending_headers);
-                                    let filtered: Vec<_> = all.into_iter()
-                                        .filter(|h| h.slot > max_fetched)
+                                    let filtered: Vec<_> = state.pending_headers.iter()
+                                        .filter(|h| {
+                                            h.slot > max_fetched
+                                                && !fetched_hashes.contains(&h.hash)
+                                        })
+                                        .cloned()
                                         .collect();
                                     if filtered.is_empty() {
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -857,7 +874,15 @@ impl ConnectionLifecycleManager {
                                 }
                             }
 
-                            // Update max_fetched_slot so other peers skip these blocks.
+                            // Record all fetched hashes in the per-worker dedup set
+                            // so subsequent iterations of this worker's loop skip
+                            // them without consulting the candidate_chains lock.
+                            for h in &headers_to_fetch {
+                                fetched_hashes.insert(h.hash);
+                            }
+
+                            // Update the cross-worker slot watermark so *other*
+                            // peers' workers skip these slots on their next poll.
                             if let Some(last) = headers_to_fetch.last() {
                                 max_fetched_slot.fetch_max(last.slot, std::sync::atomic::Ordering::SeqCst);
                             }
