@@ -711,28 +711,23 @@ impl ConnectionLifecycleManager {
                             break;
                         }
                         _ = poll_ticker.tick() => {
-                            // Allow concurrent fetchers — each worker fetches from
-                            // its own peer independently.  The applied_slot filter
-                            // and max_fetched_slot prevent duplicate work.
-                            //
-                            // Previously only ONE worker could fetch at a time
-                            // (active_fetcher CAS), which created a bottleneck:
-                            // when the active worker finished, it released the slot,
-                            // another worker claimed it, but the cycle time caused
-                            // multi-minute gaps at the chain tip.
+                            // Only ONE worker fetches at a time to prevent duplicate
+                            // downloads (matching Haskell's bfcMaxConcurrencyBulkSync=1).
                             let my_id: u64 = {
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                                 addr.hash(&mut hasher);
                                 hasher.finish() | 1
                             };
-                            // Always claim — no contention check.
-                            let _claimed = active_fetcher.compare_exchange(
+                            let claimed = active_fetcher.compare_exchange(
                                 0,
                                 my_id,
                                 std::sync::atomic::Ordering::SeqCst,
                                 std::sync::atomic::Ordering::SeqCst,
                             ).is_ok();
-                            // CAS result unused — all workers proceed regardless.
+                            let current = active_fetcher.load(std::sync::atomic::Ordering::SeqCst);
+                            if !claimed && current != my_id {
+                                continue;
+                            }
 
                             // Take pending headers from this peer, filtering out any
                             // slots that have already been fetched by another peer.
@@ -746,7 +741,8 @@ impl ConnectionLifecycleManager {
                             // to avoid calling blocking_read() inside an async context
                             // (which panics with "Cannot block the current thread from
                             // within a runtime").
-                            let applied_slot = {
+                            // applied_slot reserved for future use
+                            let _applied_slot = {
                                 let db = chain_db_for_fetch.read().await;
                                 db.tip_slot().0
                             };
@@ -754,13 +750,12 @@ impl ConnectionLifecycleManager {
                                 let mut chains = candidate_chains.write().await;
                                 if let Some(state) = chains.get_mut(&addr) {
                                     // Drain pending_headers to prevent infinite re-fetch.
-                                    // Filter by applied_slot (from ChainDB) rather than
-                                    // max_fetched_slot — the latter jumps to the tip when
-                                    // any peer downloads tip blocks, which skips all gap
-                                    // blocks for every worker.
+                                    // Filter by max_fetched_slot to skip blocks already
+                                    // downloaded (even if not yet applied to the ledger).
+                                    let max_fetched = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
                                     let all = std::mem::take(&mut state.pending_headers);
                                     let filtered: Vec<_> = all.into_iter()
-                                        .filter(|h| h.slot > applied_slot)
+                                        .filter(|h| h.slot > max_fetched)
                                         .collect();
                                     if filtered.is_empty() {
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
