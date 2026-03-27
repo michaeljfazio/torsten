@@ -25,6 +25,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use torsten_network::connection::state::{
+    ConnectionManagerCounters, ConnectionState, DataFlow, Provenance,
+};
 use torsten_network::peer::manager::MAX_COLD_PEER_FAILURES;
 use torsten_network::{PeerManager, PeerSource, PeerState};
 
@@ -239,18 +242,23 @@ impl std::error::Error for DuplexError {}
 
 /// Node-level peer manager wrapping the network crate's PeerManager.
 ///
-/// Adds connection direction tracking, big ledger peer classification,
-/// local root group management, diffusion mode, rate limiting, and
-/// other node-specific peer management concerns.
+/// Adds connection state tracking (matching Haskell's `ConnectionManager`),
+/// big ledger peer classification, local root group management, diffusion
+/// mode, rate limiting, and other node-specific peer management concerns.
+///
+/// Each connection is tracked via a `ConnectionState` from the network crate,
+/// enabling correct `ConnectionManagerCounters` computation that matches
+/// the Haskell `connectionStateToCounters` behaviour.
 pub struct NodePeerManager {
     /// The underlying protocol-level peer manager.
     pub inner: PeerManager,
     /// Configuration.
     pub config: PeerManagerConfig,
-    /// Connection direction tracking for connected peers.
-    connections: HashMap<SocketAddr, ConnectionDirection>,
-    /// Whether each connection is duplex.
-    duplex: HashMap<SocketAddr, bool>,
+    /// Per-connection state machine (Haskell ConnectionManager state).
+    ///
+    /// Tracks the lifecycle state of each connection. Used to compute
+    /// `ConnectionManagerCounters` via `to_counters()`.
+    conn_states: HashMap<SocketAddr, ConnectionState>,
     /// Our own listen address (to prevent self-connections).
     local_addr: Option<SocketAddr>,
     /// Configured local root peer groups.
@@ -265,8 +273,7 @@ impl NodePeerManager {
         Self {
             inner: PeerManager::new(),
             config,
-            connections: HashMap::new(),
-            duplex: HashMap::new(),
+            conn_states: HashMap::new(),
             local_addr: None,
             local_root_groups: Vec::new(),
             big_ledger_peers: std::collections::HashSet::new(),
@@ -330,6 +337,10 @@ impl NodePeerManager {
     }
 
     /// Mark a peer as connected.
+    ///
+    /// Sets the connection state to `OutboundIdle(Duplex)` or
+    /// `InboundIdle(Duplex)` depending on direction. All N2N P2P
+    /// connections negotiate `Duplex` data flow.
     pub fn peer_connected(&mut self, addr: &SocketAddr, direction: ConnectionDirection) {
         if self.inner.get_peer(addr).is_none() {
             let source = match direction {
@@ -339,15 +350,17 @@ impl NodePeerManager {
             self.inner.add_peer(*addr, source);
         }
         self.inner.promote_to_warm(addr);
-        self.connections.insert(*addr, direction);
-        self.duplex.insert(*addr, false);
+        let state = match direction {
+            ConnectionDirection::Outbound => ConnectionState::OutboundIdle(DataFlow::Duplex),
+            ConnectionDirection::Inbound => ConnectionState::InboundIdle(DataFlow::Duplex),
+        };
+        self.conn_states.insert(*addr, state);
     }
 
     /// Mark a peer as disconnected.
     pub fn peer_disconnected(&mut self, addr: &SocketAddr) {
         self.inner.demote_to_cold(addr);
-        self.connections.remove(addr);
-        self.duplex.remove(addr);
+        self.conn_states.remove(addr);
     }
 
     /// Record a connection failure.
@@ -372,8 +385,7 @@ impl NodePeerManager {
             peer.record_failure();
         }
 
-        self.connections.remove(addr);
-        self.duplex.remove(addr);
+        self.conn_states.remove(addr);
 
         if should_forget {
             // Non-root peer exceeded max retries — remove from known set entirely.
@@ -384,10 +396,97 @@ impl NodePeerManager {
         }
     }
 
-    /// Mark a connection as duplex.
-    #[allow(dead_code)] // used by networking rewrite
+    /// Mark a connection as duplex (both initiator and responder active).
+    ///
+    /// Called during simultaneous open detection — an inbound connection arrives
+    /// while we already have an outbound connection to the same peer. The
+    /// connection transitions to `DuplexConn` matching Haskell's `DuplexState`.
     pub fn mark_peer_duplex(&mut self, addr: &SocketAddr) {
-        self.duplex.insert(*addr, true);
+        if self.conn_states.contains_key(addr) {
+            self.conn_states.insert(*addr, ConnectionState::DuplexConn);
+        }
+    }
+
+    /// Transition an outbound idle connection to active (initiator protocols running).
+    ///
+    /// Called when promoting warm → hot on an outbound connection.
+    /// `OutboundIdle(Duplex)` → `OutboundDup`, `OutboundIdle(Unidirectional)` → `OutboundUni`.
+    pub fn mark_outbound_active(&mut self, addr: &SocketAddr) {
+        if let Some(state) = self.conn_states.get(addr) {
+            let new_state = match state {
+                ConnectionState::OutboundIdle(DataFlow::Duplex) => ConnectionState::OutboundDup,
+                ConnectionState::OutboundIdle(DataFlow::Unidirectional) => {
+                    ConnectionState::OutboundUni
+                }
+                // Already active or duplex — leave unchanged.
+                _ => return,
+            };
+            self.conn_states.insert(*addr, new_state);
+        }
+    }
+
+    /// Transition an active outbound connection back to idle.
+    ///
+    /// Called when demoting hot → warm on an outbound connection.
+    /// `OutboundDup` → `OutboundIdle(Duplex)`, `OutboundUni` → `OutboundIdle(Unidirectional)`.
+    pub fn mark_outbound_idle(&mut self, addr: &SocketAddr) {
+        if let Some(state) = self.conn_states.get(addr) {
+            let new_state = match state {
+                ConnectionState::OutboundDup => ConnectionState::OutboundIdle(DataFlow::Duplex),
+                ConnectionState::OutboundUni => {
+                    ConnectionState::OutboundIdle(DataFlow::Unidirectional)
+                }
+                _ => return,
+            };
+            self.conn_states.insert(*addr, new_state);
+        }
+    }
+
+    /// Transition an inbound idle connection to active (responder protocols running).
+    ///
+    /// Called when promoting warm → hot on an inbound connection.
+    /// `InboundIdle(df)` → `InboundState(df)`.
+    pub fn mark_inbound_active(&mut self, addr: &SocketAddr) {
+        if let Some(state) = self.conn_states.get(addr) {
+            let new_state = match state {
+                ConnectionState::InboundIdle(df) => ConnectionState::InboundState(*df),
+                _ => return,
+            };
+            self.conn_states.insert(*addr, new_state);
+        }
+    }
+
+    /// Transition an active inbound connection back to idle.
+    ///
+    /// Called when demoting hot → warm on an inbound connection.
+    /// `InboundState(df)` → `InboundIdle(df)`.
+    pub fn mark_inbound_idle(&mut self, addr: &SocketAddr) {
+        if let Some(state) = self.conn_states.get(addr) {
+            let new_state = match state {
+                ConnectionState::InboundState(df) => ConnectionState::InboundIdle(*df),
+                _ => return,
+            };
+            self.conn_states.insert(*addr, new_state);
+        }
+    }
+
+    /// Transition a connection to terminating state.
+    ///
+    /// Called before `conn.shutdown()` during demotion to cold or cleanup.
+    /// The connection will be removed via `peer_disconnected()` after shutdown.
+    pub fn mark_terminating(&mut self, addr: &SocketAddr) {
+        if self.conn_states.contains_key(addr) {
+            self.conn_states
+                .insert(*addr, ConnectionState::TerminatingConn);
+        }
+    }
+
+    /// Check if a connection is inbound (for directing state transitions).
+    pub fn is_inbound(&self, addr: &SocketAddr) -> bool {
+        self.conn_states
+            .get(addr)
+            .and_then(|s| s.provenance())
+            .is_some_and(|p| p == Provenance::Inbound)
     }
 
     /// Record a handshake RTT measurement.
@@ -423,20 +522,47 @@ impl NodePeerManager {
     pub fn hot_peer_count(&self) -> usize {
         self.inner.count_by_state(PeerState::Hot)
     }
+    /// Count outbound connections (including DuplexConn, which counts as both).
     pub fn outbound_peer_count(&self) -> usize {
-        self.connections
+        self.conn_states
             .values()
-            .filter(|d| **d == ConnectionDirection::Outbound)
+            .filter(|s| {
+                matches!(
+                    s,
+                    ConnectionState::OutboundIdle(_)
+                        | ConnectionState::OutboundUni
+                        | ConnectionState::OutboundDup
+                        | ConnectionState::DuplexConn
+                )
+            })
             .count()
     }
+    /// Count inbound connections (including DuplexConn, which counts as both).
     pub fn inbound_peer_count(&self) -> usize {
-        self.connections
+        self.conn_states
             .values()
-            .filter(|d| **d == ConnectionDirection::Inbound)
+            .filter(|s| {
+                matches!(
+                    s,
+                    ConnectionState::InboundIdle(_)
+                        | ConnectionState::InboundState(_)
+                        | ConnectionState::DuplexConn
+                )
+            })
             .count()
     }
+    /// Count duplex connections (negotiated Duplex DataFlow or in DuplexConn state).
     pub fn duplex_peer_count(&self) -> usize {
-        self.duplex.values().filter(|&&d| d).count()
+        self.conn_states
+            .values()
+            .filter(|s| s.data_flow() == Some(DataFlow::Duplex))
+            .count()
+    }
+
+    /// Compute aggregated connection manager counters matching Haskell's
+    /// `ConnectionManagerCounters`.
+    pub fn connection_manager_counters(&self) -> ConnectionManagerCounters {
+        self.conn_states.values().map(|s| s.to_counters()).sum()
     }
     pub fn active_big_ledger_peer_count(&self) -> usize {
         self.big_ledger_peers
@@ -451,7 +577,7 @@ impl NodePeerManager {
 
     /// Get connected peer addresses.
     pub fn connected_peer_addrs(&self) -> Vec<SocketAddr> {
-        self.connections.keys().copied().collect()
+        self.conn_states.keys().copied().collect()
     }
 
     /// Get the category of a peer.
@@ -472,12 +598,16 @@ impl NodePeerManager {
     /// Find an inbound duplex connection from the same IP.
     #[allow(dead_code)] // used by networking rewrite
     pub fn find_inbound_duplex_by_ip(&self, ip: std::net::IpAddr) -> Option<SocketAddr> {
-        self.connections
+        self.conn_states
             .iter()
-            .find(|(addr, dir)| {
+            .find(|(addr, state)| {
                 addr.ip() == ip
-                    && **dir == ConnectionDirection::Inbound
-                    && self.duplex.get(addr).copied().unwrap_or(false)
+                    && matches!(
+                        state,
+                        ConnectionState::InboundIdle(DataFlow::Duplex)
+                            | ConnectionState::InboundState(DataFlow::Duplex)
+                            | ConnectionState::DuplexConn
+                    )
             })
             .map(|(addr, _)| *addr)
     }

@@ -1790,31 +1790,30 @@ impl Node {
                     );
 
                     // Connection manager counters (Haskell ConnectionManagerCounters compat).
-                    let duplex_count = pm.duplex_peer_count() as u64;
-                    let outbound_count = pm.outbound_peer_count() as u64;
-                    let inbound_count_cm = pm.inbound_peer_count() as u64;
-                    // full_duplex: same as duplex for now (no separate full-duplex tracking yet).
-                    self.metrics
-                        .conn_full_duplex
-                        .store(duplex_count, std::sync::atomic::Ordering::Relaxed);
+                    // Uses per-connection state machine to compute overlapping counters
+                    // matching Haskell's connectionStateToCounters exactly.
+                    let cm_counters = pm.connection_manager_counters();
+                    self.metrics.conn_full_duplex.store(
+                        cm_counters.full_duplex,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     self.metrics
                         .conn_duplex
-                        .store(duplex_count, std::sync::atomic::Ordering::Relaxed);
-                    // unidirectional: outbound connections that are not duplex.
+                        .store(cm_counters.duplex, std::sync::atomic::Ordering::Relaxed);
                     self.metrics.conn_unidirectional.store(
-                        outbound_count.saturating_sub(duplex_count),
+                        cm_counters.unidirectional,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     self.metrics
                         .conn_inbound
-                        .store(inbound_count_cm, std::sync::atomic::Ordering::Relaxed);
+                        .store(cm_counters.inbound, std::sync::atomic::Ordering::Relaxed);
                     self.metrics
                         .conn_outbound
-                        .store(outbound_count, std::sync::atomic::Ordering::Relaxed);
-                    // terminating: always 0 for now (no connection teardown tracking).
-                    self.metrics
-                        .conn_terminating
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                        .store(cm_counters.outbound, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics.conn_terminating.store(
+                        cm_counters.terminating,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 self.metrics.delegation_count.store(
                     ls.delegations.len() as u64,

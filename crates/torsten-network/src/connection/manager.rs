@@ -91,7 +91,10 @@ impl ConnectionManager {
                     e.state,
                     ConnectionState::ReservedOutbound
                         | ConnectionState::OutboundIdle(_)
+                        | ConnectionState::OutboundUni
+                        | ConnectionState::OutboundDup
                         | ConnectionState::UnnegotiatedConn(Provenance::Outbound)
+                        | ConnectionState::DuplexConn
                 )
             })
             .count();
@@ -150,7 +153,9 @@ impl ConnectionManager {
                 matches!(
                     e.state,
                     ConnectionState::InboundIdle(_)
+                        | ConnectionState::InboundState(_)
                         | ConnectionState::UnnegotiatedConn(Provenance::Inbound)
+                        | ConnectionState::DuplexConn
                 )
             })
             .count();

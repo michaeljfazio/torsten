@@ -425,6 +425,13 @@ impl ConnectionLifecycleManager {
         // Update peer manager: warm -> hot.
         peer_manager.inner.promote_to_hot(&addr);
 
+        // Update connection state: idle → active (outbound or inbound).
+        if peer_manager.is_inbound(&addr) {
+            peer_manager.mark_inbound_active(&addr);
+        } else {
+            peer_manager.mark_outbound_active(&addr);
+        }
+
         info!(%addr, "warm -> hot complete");
         Ok(())
     }
@@ -461,6 +468,13 @@ impl ConnectionLifecycleManager {
         // Update peer manager: hot -> warm.
         peer_manager.inner.demote_to_warm(&addr);
 
+        // Update connection state: active → idle (outbound or inbound).
+        if peer_manager.is_inbound(&addr) {
+            peer_manager.mark_inbound_idle(&addr);
+        } else {
+            peer_manager.mark_outbound_idle(&addr);
+        }
+
         info!(%addr, "hot -> warm complete");
         Ok(())
     }
@@ -486,6 +500,9 @@ impl ConnectionLifecycleManager {
 
         info!(%addr, "demoting warm -> cold: closing connection");
 
+        // Mark connection as terminating before shutdown (for metrics).
+        peer_manager.mark_terminating(&addr);
+
         conn.shutdown().await;
 
         // Clear candidate chain state.
@@ -494,7 +511,7 @@ impl ConnectionLifecycleManager {
             chains.remove(&addr);
         }
 
-        // Update peer manager.
+        // Update peer manager — removes connection state entirely.
         peer_manager.peer_disconnected(&addr);
 
         info!(%addr, "warm -> cold complete");
@@ -586,6 +603,7 @@ impl ConnectionLifecycleManager {
                     warn!(%addr, error = %e, "failed to promote warm -> hot");
                     // Demote back to cold on hot promotion failure — the connection
                     // may be in a bad state.
+                    peer_manager.mark_terminating(&addr);
                     if let Some(mut conn) = self.connections.remove(&addr) {
                         conn.shutdown().await;
                     }
@@ -633,6 +651,9 @@ impl ConnectionLifecycleManager {
         info!(count = dead_addrs.len(), "cleaning up dead connections");
 
         for addr in dead_addrs {
+            // Mark connection as terminating before shutdown (for metrics).
+            peer_manager.mark_terminating(&addr);
+
             if let Some(mut conn) = self.connections.remove(&addr) {
                 // Best-effort shutdown (mux is already dead, but clean up tasks).
                 conn.shutdown().await;

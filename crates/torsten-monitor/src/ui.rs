@@ -671,16 +671,14 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     let inbound = app.metrics.get_u64("torsten_peers_inbound");
     let outbound = app.metrics.get_u64("torsten_peers_outbound");
     let duplex = app.metrics.get_u64("torsten_peers_duplex");
-    let half_duplex = (outbound + inbound).saturating_sub(duplex);
     let cold = app.metrics.get_u64("torsten_peers_cold");
     let warm = app.metrics.get_u64("torsten_peers_warm");
     let hot = app.metrics.get_u64("torsten_peers_hot");
-    // Unidirectional = outbound-only connections (we dialled, they have not connected back).
-    // Bidirectional  = inbound-only connections (they dialled us).
-    // Duplex         = outbound + inbound (total peers with bidirectional capability);
-    //                  populated by the node when running in InitiatorAndResponder mode.
-    // Note: torsten_peers_outbound/inbound/duplex metrics exist but we use
-    // the already-fetched outbound/inbound values above for the summary row.
+
+    // Connection manager counters (Haskell ConnectionManagerCounters compat).
+    // These are computed per-connection via ConnectionState::to_counters(),
+    // matching Haskell's connectionStateToCounters exactly.
+    let conn_unidirectional = app.metrics.get_u64("torsten_conn_unidirectional");
 
     let p2p_enabled = outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0;
     let p2p_color = if p2p_enabled {
@@ -732,8 +730,8 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
         ),
         kv_aligned(
             "Uni-Direct",
-            App::format_number(half_duplex),
-            if half_duplex > 0 {
+            App::format_number(conn_unidirectional),
+            if conn_unidirectional > 0 {
                 theme.warning
             } else {
                 theme.muted
@@ -744,9 +742,9 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     ];
 
     // Connection manager counters (Haskell ConnectionManagerCounters compat).
+    // Always shown — these are now correctly computed from per-connection state.
     let conn_full_duplex = app.metrics.get_u64("torsten_conn_full_duplex");
     let conn_duplex = app.metrics.get_u64("torsten_conn_duplex");
-    let conn_unidirectional = app.metrics.get_u64("torsten_conn_unidirectional");
     let conn_inbound = app.metrics.get_u64("torsten_conn_inbound");
     let conn_outbound = app.metrics.get_u64("torsten_conn_outbound");
     let conn_terminating = app.metrics.get_u64("torsten_conn_terminating");

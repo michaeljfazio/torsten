@@ -49,8 +49,8 @@ pub const PANEL_NODE_H: u16 = 10;
 /// Chain panel: epoch bar (1) + 8 data rows + mempool gauge (1) + 2 borders = 12.
 /// The epoch progress bar lives here (not in the header).
 pub const PANEL_CHAIN_H: u16 = 12;
-/// Connections panel: P2P + Inbound + Outbound + Cold/Warm/Hot + Uni/Bi/Duplex = 5 content rows + 2 borders = 7
-pub const PANEL_CONNECTIONS_H: u16 = 7;
+/// Connections panel: P2P + Cold/Warm/Hot + Inbound + Outbound + Duplex + Uni-Direct = 6 content rows + 2 borders = 8
+pub const PANEL_CONNECTIONS_H: u16 = 8;
 /// Resources panel: CPU + Mem live + Mem RSS + mem bar + sparkline = 5 content rows + 2 borders = 7
 pub const PANEL_RESOURCES_H: u16 = 7;
 /// Peers panel: RTT bar + 2 band rows + Low/Avg/High = 4 content rows + 2 borders = 6

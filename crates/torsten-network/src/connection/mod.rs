@@ -14,4 +14,4 @@ pub mod state;
 
 pub use handler::ConnectionHandler;
 pub use manager::ConnectionManager;
-pub use state::ConnectionState;
+pub use state::{ConnectionManagerCounters, ConnectionState, DataFlow, Provenance};
