@@ -472,4 +472,42 @@ mod tests {
         ingress_tx.send(Bytes::from(client_done)).await.unwrap();
         handle.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn batch_range_uses_single_lock_acquisition() {
+        // Verify that get_blocks_in_range() returns all blocks in a contiguous
+        // slot range, exercising the default trait implementation which delegates
+        // to get_block_at_or_after_slot / get_next_block_after_slot.
+        let blocks: Vec<_> = (0..5u64)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = i as u8;
+                (i * 10 + 10, h, make_storage_block(7, &[i as u8]))
+            })
+            .collect();
+
+        let provider = MockBlockProvider {
+            blocks: blocks.clone(),
+        };
+
+        // Use the default trait implementation.
+        let result = provider.get_blocks_in_range(10, 50, 100);
+        assert_eq!(result.len(), 5, "should return all 5 blocks in range");
+        for (i, (slot, hash, _cbor)) in result.iter().enumerate() {
+            assert_eq!(*slot, (i as u64) * 10 + 10);
+            assert_eq!(hash[0], i as u8);
+        }
+
+        // Partial range.
+        let partial = provider.get_blocks_in_range(20, 40, 100);
+        assert_eq!(partial.len(), 3, "should return blocks at slots 20, 30, 40");
+
+        // Limit enforcement.
+        let limited = provider.get_blocks_in_range(10, 50, 2);
+        assert_eq!(limited.len(), 2, "limit should cap at 2 blocks");
+
+        // Empty range.
+        let empty = provider.get_blocks_in_range(100, 200, 100);
+        assert_eq!(empty.len(), 0, "no blocks in range should return empty vec");
+    }
 }

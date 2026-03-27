@@ -66,6 +66,43 @@ pub trait BlockProvider: Send + Sync + 'static {
             self.get_next_block_after_slot(slot.saturating_sub(1))
         }
     }
+
+    /// Collect multiple blocks in a contiguous slot range [`from_slot`, `to_slot`].
+    ///
+    /// Returns up to `limit` blocks as `(slot, hash, cbor)` tuples in ascending
+    /// slot order.  Implementations SHOULD acquire the storage lock **once** for
+    /// the entire batch rather than once per block — this is the primary purpose
+    /// of this method.
+    ///
+    /// The default implementation delegates to [`get_block_at_or_after_slot`] and
+    /// [`get_next_block_after_slot`] in a loop.  Concrete implementations backed
+    /// by a real storage layer MUST override this with a single lock acquisition.
+    fn get_blocks_in_range(
+        &self,
+        from_slot: u64,
+        to_slot: u64,
+        limit: usize,
+    ) -> Vec<(u64, [u8; 32], Vec<u8>)> {
+        let mut blocks = Vec::new();
+        let mut current_slot = from_slot;
+        let mut first = true;
+        while current_slot <= to_slot && blocks.len() < limit {
+            let next = if first {
+                first = false;
+                self.get_block_at_or_after_slot(current_slot)
+            } else {
+                self.get_next_block_after_slot(current_slot)
+            };
+            match next {
+                Some((slot, hash, cbor)) if slot <= to_slot => {
+                    current_slot = slot;
+                    blocks.push((slot, hash, cbor));
+                }
+                _ => break,
+            }
+        }
+        blocks
+    }
 }
 
 /// Chain tip information returned by [`BlockProvider::get_tip`].
