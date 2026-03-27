@@ -387,11 +387,13 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     }
 
     let mut shelley_genesis_opt: Option<genesis::ShelleyGenesis> = None;
+    let mut shelley_genesis_hash: Option<torsten_primitives::hash::Hash32> = None;
     if let Some(ref genesis_path) = node_config.shelley_genesis_file {
         let genesis_path = config_dir.join(genesis_path);
-        if let Ok((genesis, _hash)) = genesis::ShelleyGenesis::load_with_hash(&genesis_path) {
+        if let Ok((genesis, hash)) = genesis::ShelleyGenesis::load_with_hash(&genesis_path) {
             genesis.apply_to_protocol_params(&mut protocol_params);
             info!(epoch_len = genesis.epoch_length, "Shelley genesis loaded");
+            shelley_genesis_hash = Some(hash);
             shelley_genesis_opt = Some(genesis);
         }
     }
@@ -416,9 +418,15 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     let mut ledger = torsten_ledger::LedgerState::new(protocol_params);
 
     // Apply Shelley genesis configuration (epoch length, slot config, reserves)
+    // Must use set_epoch_length() (not direct field assignment) to compute the
+    // correct stability windows (3k/f for Alonzo/Babbage, 4k/f for Conway+)
+    // from the network's security parameter k.  With direct assignment the
+    // windows default to mainnet values, which are larger than preview's epoch
+    // length and cause candidate_nonce to never update.
     if let Some(ref sg) = shelley_genesis_opt {
-        ledger.slot_config = sg.slot_config();
-        ledger.epoch_length = sg.epoch_length;
+        ledger.set_slot_config(sg.slot_config());
+        ledger.set_epoch_length(sg.epoch_length, sg.security_param);
+        ledger.update_quorum = sg.update_quorum;
         // reserves = maxLovelaceSupply - initial fund distribution (Byron genesis)
         // The Byron nonAvvmBalances are distributed at genesis and enter
         // circulation immediately, reducing the reserve pool.
@@ -433,6 +441,14 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         );
     }
 
+    // Seed the nonce state machine from the Shelley genesis hash (matching
+    // the running node path in Node::init_ledger_state). Without this,
+    // evolving/candidate/epoch nonces all start as ZERO and the entire
+    // nonce evolution chain diverges from the Haskell reference.
+    if let Some(hash) = shelley_genesis_hash {
+        ledger.set_genesis_hash(hash);
+    }
+
     // NOTE: Byron genesis UTxOs are NOT seeded here (unlike the running node).
     // The genesis transaction's inputs will show "not found" warnings but
     // outputs are still created. This produces the correct Shelley UTxO set
@@ -445,8 +461,14 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     // directly in Alonzo. On mainnet, transition = 208 (Byron epochs 0-207).
     // The default LedgerState uses mainnet values (208/21600) which would
     // produce incorrect epoch boundaries for other networks.
-    let network_magic = node_config
-        .network_magic
+    // Derive network magic from the Shelley genesis (most reliable source),
+    // falling back to node config.  The cstreamer-compatible config files
+    // often lack an explicit networkMagic field, which caused the fallback
+    // to return mainnet magic (764824073) and completely wrong epoch offsets.
+    let network_magic = shelley_genesis_opt
+        .as_ref()
+        .map(|sg| sg.network_magic)
+        .or(node_config.network_magic)
         .unwrap_or_else(|| node_config.network.magic());
     let shelley_transition_epoch =
         crate::node::epoch::shelley_transition_epoch_for_magic(network_magic);
@@ -520,20 +542,21 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         // The epoch transition (NEWEPOCH rule: reward distribution, nonce rotation,
         // snapshot rotation, protocol param updates) fires inside apply_block when
         // processing the first block of the new epoch.  Cstreamer captures state
-        // AFTER the transition, so we read from `ledger` (post-apply).
+        // AFTER the transition, so we read from `ledger` (post-apply) and label
+        // with the NEW epoch (current_epoch), matching cstreamer's convention.
         //
         // RC3: accumulate epoch_fees AFTER the transition check so the first block
         //      of a new epoch's fees go into the new epoch's bucket, not the old one.
         if last_epoch != u64::MAX && current_epoch > last_epoch {
             let snapshot =
-                build_epoch_snapshot(&ledger, last_epoch, epoch_fees, max_lovelace_supply);
+                build_epoch_snapshot(&ledger, current_epoch, epoch_fees, max_lovelace_supply);
 
-            write_epoch_snapshot(&snapshot, last_epoch, &args.output_dir, &mut output)
+            write_epoch_snapshot(&snapshot, current_epoch, &args.output_dir, &mut output)
                 .map_err(|e| anyhow::anyhow!("Snapshot write error: {e}"))?;
 
             epochs_written += 1;
             info!(
-                epoch = last_epoch,
+                epoch = current_epoch,
                 treasury = ledger.treasury.0,
                 reserves = ledger.reserves.0,
                 pools = ledger.pool_params.len(),

@@ -16,6 +16,7 @@ keys/
 docs/book/
 checkpoints.json
 .monitoring-data/
+.dump/
 .claude/worktrees/
 .DS_Store
 
