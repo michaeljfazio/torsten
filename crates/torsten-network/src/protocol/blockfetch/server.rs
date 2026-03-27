@@ -146,32 +146,13 @@ impl BlockFetchServer {
             return Ok(());
         }
 
-        // Collect blocks in the range [from_slot, to_slot].
-        //
-        // The first lookup uses `get_block_at_or_after_slot` (>=) to include
-        // blocks AT from_slot (e.g. the Byron genesis EBB at slot 0).
-        // Subsequent lookups use `get_next_block_after_slot` (>) to advance.
-        let mut blocks: Vec<(u64, [u8; 32], Vec<u8>)> = Vec::new();
-        let mut current_slot = from_slot;
-        let mut first_lookup = true;
-
-        while current_slot <= to_slot && blocks.len() < MAX_BLOCKS_PER_BATCH {
-            let next = if first_lookup {
-                first_lookup = false;
-                block_provider.get_block_at_or_after_slot(current_slot)
-            } else {
-                block_provider.get_next_block_after_slot(current_slot)
-            };
-            if let Some((slot, hash, cbor)) = next {
-                if slot > to_slot {
-                    break;
-                }
-                current_slot = slot;
-                blocks.push((slot, hash, cbor));
-            } else {
-                break;
-            }
-        }
+        // Collect blocks in [from_slot, to_slot] via a single batched call.
+        // ChainDBBlockProvider overrides get_blocks_in_range() to acquire
+        // chain_db.read() in chunks of 50 blocks, preventing the per-block
+        // block_in_place / blocking_read pattern from exhausting the tokio
+        // async worker thread pool when the Haskell relay is syncing rapidly
+        // with pipelined batch requests.
+        let blocks = block_provider.get_blocks_in_range(from_slot, to_slot, MAX_BLOCKS_PER_BATCH);
 
         if blocks.is_empty() {
             let no_blocks = encode_message(&BlockFetchMessage::MsgNoBlocks);
