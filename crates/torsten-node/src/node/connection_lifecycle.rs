@@ -672,7 +672,7 @@ impl ConnectionLifecycleManager {
         // Shared flag: only ONE BlockFetch worker is active at a time.
         // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
         let active_fetcher = self.active_fetcher.clone();
-        let max_fetched_slot = self.max_fetched_slot.clone();
+        let _max_fetched_slot = self.max_fetched_slot.clone();
         let metrics_clone = self.metrics.clone();
 
         Box::new(move |mut channel, cancel| {
@@ -754,22 +754,23 @@ impl ConnectionLifecycleManager {
                             // to avoid calling blocking_read() inside an async context
                             // (which panics with "Cannot block the current thread from
                             // within a runtime").
-                            // applied_slot reserved for future use
-                            let _applied_slot = {
+                            // Use ChainDB applied tip to filter — NOT max_fetched_slot.
+                            // max_fetched_slot jumps to the chain tip when any worker
+                            // downloads tip blocks, filtering out all gap blocks for
+                            // every worker and causing 10+ minute sync stalls.
+                            // The applied tip only advances when blocks are actually
+                            // applied to the ledger in order, so gap blocks are never
+                            // filtered out.
+                            let applied_slot = {
                                 let db = chain_db_for_fetch.read().await;
                                 db.tip_slot().0
                             };
                             let headers_to_fetch = {
-                                // Read-only access is sufficient — we never modify
-                                // pending_headers here.
                                 let chains = candidate_chains.read().await;
                                 if let Some(state) = chains.get(&addr) {
-                                    // Filter by the cross-worker slot watermark AND
-                                    // by the per-worker hash dedup set.
-                                    let max_fetched = max_fetched_slot.load(std::sync::atomic::Ordering::SeqCst);
                                     let filtered: Vec<_> = state.pending_headers.iter()
                                         .filter(|h| {
-                                            h.slot > max_fetched
+                                            h.slot > applied_slot
                                                 && !fetched_hashes.contains(&h.hash)
                                         })
                                         .cloned()
@@ -881,11 +882,11 @@ impl ConnectionLifecycleManager {
                                 fetched_hashes.insert(h.hash);
                             }
 
-                            // Update the cross-worker slot watermark so *other*
-                            // peers' workers skip these slots on their next poll.
-                            if let Some(last) = headers_to_fetch.last() {
-                                max_fetched_slot.fetch_max(last.slot, std::sync::atomic::Ordering::SeqCst);
-                            }
+                            // Note: we do NOT update max_fetched_slot here.
+                            // Per-worker dedup uses fetched_hashes (hash-based).
+                            // Cross-worker dedup uses the applied ChainDB tip.
+                            // max_fetched_slot caused sync stalls by jumping to
+                            // the chain tip and filtering out all gap blocks.
                         }
                     }
                 }
