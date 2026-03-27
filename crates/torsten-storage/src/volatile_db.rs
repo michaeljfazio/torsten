@@ -1008,7 +1008,7 @@ impl VolatileDB {
         self.tip
     }
 
-    /// Number of blocks stored.
+    /// Number of blocks stored (including GC-pending orphans off the selected chain).
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
@@ -1016,6 +1016,15 @@ impl VolatileDB {
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// Number of blocks on the active selected chain.
+    ///
+    /// Unlike `len()`, this excludes blocks that have been displaced by a
+    /// rollback but not yet garbage-collected. Use this to check whether the
+    /// canonical chain window is empty after a rollback.
+    pub fn selected_chain_len(&self) -> usize {
+        self.selected_chain.len()
     }
 
     /// Compact the WAL by rewriting it with only the current volatile blocks.
@@ -1267,11 +1276,6 @@ impl VolatileDB {
             }
         }
         count
-    }
-
-    /// Get the selected chain length.
-    pub fn selected_chain_len(&self) -> usize {
-        self.selected_chain.len()
     }
 
     /// Get the number of orphaned blocks pending GC.

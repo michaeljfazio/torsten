@@ -103,6 +103,13 @@ pub struct FetchedBlock {
     pub tip_block_number: u64,
 }
 
+/// Result of a background cold->warm connection attempt.
+///
+/// Sent from `spawn_connect` background tasks to the main run loop via an `mpsc`
+/// channel. `Ok` carries the ready `PeerConnection` and measured handshake RTT;
+/// `Err` carries the peer address and a human-readable error string.
+pub type ConnectResult = Result<(SocketAddr, PeerConnection, f64), (SocketAddr, String)>;
+
 // ─── Lifecycle Manager ──────────────────────────────────────────────────────
 
 /// Manages per-peer connections and temperature transitions.
@@ -302,6 +309,74 @@ impl ConnectionLifecycleManager {
 
         self.connections.insert(addr, conn);
         info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "cold -> warm complete");
+        Ok(())
+    }
+
+    /// Spawn a background task that performs the TCP connect + handshake for `addr`.
+    ///
+    /// This is the non-blocking alternative to `promote_to_warm`. The slow I/O
+    /// (TCP connect + N2N handshake, up to `connect_timeout`) runs in a separate
+    /// Tokio task rather than inside the main `select!` loop.  When the task
+    /// completes it sends a [`ConnectResult`] on `tx`; the main loop receives
+    /// it and calls [`Self::register_warm_connection`] (on success) or marks the
+    /// peer as failed (on error).
+    ///
+    /// The caller is responsible for tracking in-flight addresses to avoid
+    /// spawning duplicate tasks for the same peer.
+    pub fn spawn_connect(&self, addr: SocketAddr, tx: mpsc::Sender<ConnectResult>) {
+        let network_magic = self.network_magic;
+        let peer_sharing = self.peer_sharing;
+        let connect_timeout = self.connect_timeout;
+        let metrics = Arc::clone(&self.metrics);
+
+        tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            match PeerConnection::connect(addr, network_magic, peer_sharing, Some(connect_timeout))
+                .await
+            {
+                Ok(conn) => {
+                    let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    metrics.record_handshake_rtt(rtt_ms);
+                    // Ignore send errors — the main loop may have shut down.
+                    let _ = tx.send(Ok((addr, conn, rtt_ms))).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err((addr, e.to_string()))).await;
+                }
+            }
+        });
+    }
+
+    /// Register a peer that connected successfully in a background task as warm.
+    ///
+    /// This is the fast, synchronous post-connect step: starts the KeepAlive
+    /// warm protocol on the ready connection and updates the peer manager.
+    /// It must be called from the main run loop after receiving an `Ok` result
+    /// from a [`Self::spawn_connect`] task.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LifecycleError::AlreadyConnected` if a connection for `addr`
+    /// was registered in the meantime (e.g., from a concurrent inbound connect).
+    /// The caller should silently discard the duplicate `PeerConnection` in that
+    /// case — it will be dropped and the mux will close gracefully.
+    pub fn register_warm_connection(
+        &mut self,
+        addr: SocketAddr,
+        mut conn: PeerConnection,
+        rtt_ms: f64,
+        peer_manager: &mut NodePeerManager,
+    ) -> Result<(), LifecycleError> {
+        if self.connections.contains_key(&addr) {
+            return Err(LifecycleError::AlreadyConnected(addr));
+        }
+
+        let keepalive_fn = self.make_keepalive_task();
+        conn.start_warm_protocols(keepalive_fn)?;
+
+        peer_manager.peer_connected(&addr, ConnectionDirection::Outbound);
+        self.connections.insert(addr, conn);
+        info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "cold -> warm complete (background)");
         Ok(())
     }
 

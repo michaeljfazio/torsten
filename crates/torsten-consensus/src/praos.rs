@@ -359,6 +359,25 @@ impl OuroborosPraos {
             return Err(ConsensusError::EmptyVrfKey);
         }
 
+        // Protocol version check — reject blocks from unsupported protocol versions.
+        // Currently we support up to protocol version 10 (Conway). This is the same
+        // check performed in validate_header_full; duplicated here so that callers
+        // using the lightweight validate_header path also get version rejection.
+        const MAX_SUPPORTED_PROTOCOL_MAJOR: u64 = 10;
+        if header.protocol_version.major > MAX_SUPPORTED_PROTOCOL_MAJOR {
+            warn!(
+                slot = header.slot.0,
+                major = header.protocol_version.major,
+                minor = header.protocol_version.minor,
+                "Praos: block uses unsupported protocol version"
+            );
+            return Err(ConsensusError::UnsupportedProtocolVersion {
+                major: header.protocol_version.major,
+                minor: header.protocol_version.minor,
+                max_major: MAX_SUPPORTED_PROTOCOL_MAJOR,
+            });
+        }
+
         // Validate KES period (always — cheap structural check)
         self.validate_kes_period(header)?;
 
@@ -2969,9 +2988,10 @@ mod tests {
             .validate_header(&header2, SlotNo(130000), ValidationMode::Full)
             .is_ok());
 
-        // Block at slot 129600 with period 0 should fail (period mismatch)
+        // Block at slot 129600 is in KES period 1, but cert says period 2.
+        // block_period (1) < cert_period (2) → KesPeriodBeforeCert.
         let mut header3 = make_valid_header(129600);
-        header3.operational_cert.kes_period = 0;
+        header3.operational_cert.kes_period = 2;
         let result = praos.validate_header(&header3, SlotNo(130000), ValidationMode::Full);
         assert!(matches!(
             result,
@@ -3033,18 +3053,20 @@ mod tests {
         let praos = OuroborosPraos::new();
         let header = make_valid_header(100);
 
-        // Version 9.0 should be accepted (max supported major is 9)
+        // Version 10.0 should be accepted (max supported major is 10 — Conway)
         let mut header_ok = header.clone();
-        header_ok.protocol_version =
-            torsten_primitives::block::ProtocolVersion { major: 9, minor: 0 };
+        header_ok.protocol_version = torsten_primitives::block::ProtocolVersion {
+            major: 10,
+            minor: 0,
+        };
         assert!(praos
             .validate_header(&header_ok, SlotNo(200), ValidationMode::Full)
             .is_ok());
 
-        // Version 10.0 should be rejected
+        // Version 11.0 should be rejected (max supported major is 10, so 11 is unsupported)
         let mut header_bad = header.clone();
         header_bad.protocol_version = torsten_primitives::block::ProtocolVersion {
-            major: 10,
+            major: 11,
             minor: 0,
         };
         let result = praos.validate_header(&header_bad, SlotNo(200), ValidationMode::Full);

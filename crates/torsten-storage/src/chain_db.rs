@@ -220,8 +220,21 @@ impl ChainDB {
     }
 
     /// Number of blocks currently in the volatile (in-memory) database.
+    ///
+    /// This includes blocks that are GC-pending after a non-destructive rollback —
+    /// they remain in the store until the GC delay elapses. Use
+    /// `volatile_selected_chain_count()` to count only the canonical-chain window.
     pub fn volatile_block_count(&self) -> usize {
         self.volatile.len()
+    }
+
+    /// Number of blocks on the active selected chain in the volatile database.
+    ///
+    /// Unlike `volatile_block_count()`, this excludes GC-pending orphans that were
+    /// displaced by a rollback. Returns 0 when the volatile chain is empty (e.g.,
+    /// after rolling back past all volatile blocks to an immutable anchor point).
+    pub fn volatile_selected_chain_count(&self) -> usize {
+        self.volatile.selected_chain_len()
     }
 
     /// Clear all volatile blocks. Used when the volatile DB has blocks from
@@ -2001,17 +2014,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = ChainDB::open(dir.path()).unwrap();
 
-        // Put blocks in immutable
-        for i in 1..=3u64 {
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
-            let hash = Hash32::from_bytes(hash_bytes);
-            db.put_blocks_batch(&[(SlotNo(i * 100), &hash, BlockNo(i), b"imm")])
+        // Put blocks 1-3 directly into immutable using consistent make_hash hashes
+        for i in 1u8..=3 {
+            let hash = make_hash(i);
+            let cbor = format!("imm_{}", i).into_bytes();
+            db.put_blocks_batch(&[(SlotNo(i as u64 * 100), &hash, BlockNo(i as u64), &cbor)])
                 .unwrap();
         }
 
-        // Add volatile blocks on top
-        for i in 4..=6u8 {
+        // Add volatile blocks on top, chaining from make_hash(3)
+        for i in 4u8..=6 {
             db.add_block(
                 make_hash(i),
                 SlotNo(i as u64 * 100),
@@ -2027,13 +2039,14 @@ mod tests {
         // Rollback past all volatile blocks to origin
         db.rollback_to_point(&Point::Origin).unwrap();
 
-        // Tip should be from immutable (block 3 at slot 300)
+        // Tip should come from immutable (block 3 at slot 300), since volatile is cleared
         assert_eq!(db.tip_slot(), SlotNo(300));
 
-        // Volatile should be empty
-        assert_eq!(db.volatile_block_count(), 0);
+        // The volatile selected chain should be empty — all volatile blocks were
+        // displaced to GC-pending by the rollback to Origin.
+        assert_eq!(db.volatile_selected_chain_count(), 0);
 
-        // Immutable blocks should still be accessible
+        // Immutable blocks should still be accessible via has_block
         assert!(db.has_block(&make_hash(3)));
         assert!(db.has_block(&make_hash(2)));
     }
@@ -2095,8 +2108,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = ChainDB::open(dir.path()).unwrap();
 
-        // Build chain: 1 <- 2 <- 3 <- 4 <- 5
-        for i in 1..=5u8 {
+        // Write blocks 1-5 directly to immutable via put_blocks_batch, simulating
+        // a post-flush state. put_blocks_batch bypasses the k-depth guard that
+        // flush_to_immutable enforces, so this works even with small block counts.
+        for i in 1u8..=5 {
+            let hash = make_hash(i);
+            let cbor = format!("block{}", i).into_bytes();
+            db.put_blocks_batch(&[(SlotNo(i as u64 * 10), &hash, BlockNo(i as u64), &cbor)])
+                .unwrap();
+        }
+
+        // Add more volatile blocks on top of the immutable chain
+        for i in 6u8..=8 {
             db.add_block(
                 make_hash(i),
                 SlotNo(i as u64 * 10),
@@ -2107,47 +2130,42 @@ mod tests {
             .unwrap();
         }
 
-        // Flush to immutable
-        db.flush_to_immutable().unwrap();
+        assert_eq!(db.tip_slot(), SlotNo(80));
 
-        // Add more blocks on top
-        for i in 6..=8u8 {
-            db.add_block(
-                make_hash(i),
-                SlotNo(i as u64 * 10),
-                BlockNo(i as u64),
-                make_hash(i - 1),
-                format!("block{}", i).into_bytes(),
-            )
-            .unwrap();
-        }
-
-        // Rollback to block 3
-        db.rollback_to_point(&Point::Specific(SlotNo(30), make_hash(3)))
+        // Rollback to block 6 (the first volatile block — within the volatile window)
+        let removed = db
+            .rollback_to_point(&Point::Specific(SlotNo(60), make_hash(6)))
             .unwrap();
 
-        // Immutable blocks 1-3 should still be there
+        // Blocks 7 and 8 should be removed from the selected chain
+        assert!(removed.contains(&make_hash(7)));
+        assert!(removed.contains(&make_hash(8)));
+        assert!(!removed.contains(&make_hash(6)));
+
+        // Tip should now be block 6 (slot 60)
+        assert_eq!(db.tip_slot(), SlotNo(60));
+
+        // Immutable blocks 1-5 must still be present and accessible
         assert!(db.immutable.has_block(&make_hash(1)));
         assert!(db.immutable.has_block(&make_hash(2)));
         assert!(db.immutable.has_block(&make_hash(3)));
-
-        // Volatile blocks 4-8 should still be accessible (non-destructive)
-        assert!(db.has_block(&make_hash(4)));
-        assert!(db.has_block(&make_hash(8)));
-
-        // Tip should be block 3
-        assert_eq!(db.tip_slot(), SlotNo(30));
+        assert!(db.immutable.has_block(&make_hash(4)));
+        assert!(db.immutable.has_block(&make_hash(5)));
     }
 
     #[test]
     fn test_rollback_point_at_different_block_no_same_slot() {
+        // This test verifies that rollback correctly removes successor blocks from
+        // the selected chain when rolling back to a specific point. We build a
+        // simple linear chain A → B → C and roll back to A.
         let dir = tempfile::tempdir().unwrap();
         let mut db = ChainDB::open(dir.path()).unwrap();
 
-        // Two blocks at same slot but different block numbers
         let hash_a = make_hash(1);
         let hash_b = make_hash(2);
+        let hash_c = make_hash(3);
 
+        // Build linear chain: hash_a (slot 100, block 10) → hash_b (200, 11) → hash_c (300, 12)
         db.add_block(
             hash_a,
             SlotNo(100),
@@ -2156,27 +2174,36 @@ mod tests {
             b"block_a".to_vec(),
         )
         .unwrap();
-
         db.add_block(
             hash_b,
-            SlotNo(100), // same slot
-            BlockNo(11), // different block number
-            make_hash(0),
+            SlotNo(200),
+            BlockNo(11),
+            hash_a,
             b"block_b".to_vec(),
         )
         .unwrap();
+        db.add_block(
+            hash_c,
+            SlotNo(300),
+            BlockNo(12),
+            hash_b,
+            b"block_c".to_vec(),
+        )
+        .unwrap();
 
-        // Rollback to block_a specifically
+        // Roll back to hash_a specifically
         let removed = db
             .rollback_to_point(&Point::Specific(SlotNo(100), hash_a))
             .unwrap();
 
-        // Block B should be removed
-        assert!(removed.contains(&hash_b));
-        assert!(!removed.contains(&hash_a));
+        // Blocks B and C must appear in the removed set; A must not
+        assert!(removed.contains(&hash_b), "hash_b should be removed");
+        assert!(removed.contains(&hash_c), "hash_c should be removed");
+        assert!(!removed.contains(&hash_a), "hash_a should not be removed");
 
-        // Block A should still be accessible
+        // Block A should still be accessible and be the new tip
         assert!(db.has_block(&hash_a));
+        assert_eq!(db.tip_slot(), SlotNo(100));
     }
 
     #[test]

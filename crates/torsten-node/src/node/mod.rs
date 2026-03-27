@@ -33,7 +33,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::node::block_fetch_logic::BlockFetchLogicTask;
 use crate::node::connection_lifecycle::{
-    CandidateChainState, ConnectionLifecycleManager, FetchedBlock,
+    CandidateChainState, ConnectResult, ConnectionLifecycleManager, FetchedBlock, LifecycleError,
 };
 
 use torsten_consensus::chain_fragment::ChainFragment;
@@ -1879,7 +1879,22 @@ impl Node {
         // Governor evaluation every 2 seconds — matches Haskell's warm-promotion
         // check frequency for responsive peer lifecycle management.
         let mut governor_ticker = tokio::time::interval(Duration::from_secs(2));
+        // Skip mode: if the main loop was busy (e.g. applying blocks), we do NOT
+        // want to burst-fire all missed governor ticks — one evaluation per interval
+        // is sufficient and avoids multiple simultaneous peer-connect waves.
+        governor_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         governor_ticker.tick().await; // skip first immediate tick
+
+        // Channel for background cold->warm connection results.
+        // The governor spawns connect tasks instead of awaiting them inline;
+        // completed results arrive here for registration in the main loop.
+        let (connect_result_tx, mut connect_result_rx) = mpsc::channel::<ConnectResult>(64);
+
+        // Peers currently being connected in background tasks.
+        // Prevents duplicate spawns when the governor fires repeatedly before
+        // a slow TCP connect (up to connect_timeout) finishes.
+        let mut in_flight_connects: std::collections::HashSet<std::net::SocketAddr> =
+            std::collections::HashSet::new();
 
         // Take the fetched_blocks_rx out of self so we can use it in the select! loop
         // without holding a mutable borrow on self for the entire duration.
@@ -2004,32 +2019,31 @@ impl Node {
 
                     if !actions.is_empty() {
                         if let Some(ref mut lifecycle) = self.connection_lifecycle {
-                            let mut pm = peer_manager.write().await;
-
-                            // Process all actions. For Connect actions, immediately
-                            // follow up with Promote (Cold→Warm→Hot atomically).
+                            // PromoteToWarm: spawn background tasks so TCP
+                            // connect + handshake never blocks the main loop.
+                            // Each connect can take up to connect_timeout (default
+                            // 10s); doing them sequentially here would starve
+                            // fetched_blocks_rx for that entire duration.
                             for action in &actions {
                                 if let torsten_network::peer::governor::GovernorAction::PromoteToWarm(addr) = action {
-                                    // Cold→Warm→Hot atomically per peer.
-                                    // Each connect takes ~600ms (TCP+handshake),
-                                    // but we must do it sequentially because
-                                    // lifecycle needs &mut self.
-                                    if let Err(e) = lifecycle.promote_to_warm(*addr, &mut pm).await {
-                                        warn!(%addr, "Cold→Warm failed: {e}");
-                                        pm.peer_failed(addr);
+                                    // Skip peers that are already connected or
+                                    // already have an in-flight background task.
+                                    if lifecycle.has_connection(addr)
+                                        || in_flight_connects.contains(addr)
+                                    {
                                         continue;
                                     }
-                                    // Immediately promote to Hot on the SAME connection.
-                                    if let Err(e) = lifecycle.promote_to_hot(*addr, &mut pm).await {
-                                        warn!(%addr, "Warm→Hot failed: {e}");
-                                    }
+                                    in_flight_connects.insert(*addr);
+                                    lifecycle.spawn_connect(*addr, connect_result_tx.clone());
                                 }
                             }
 
-                            // Process non-connect actions.
+                            // Non-connect actions (demote, disconnect, etc.) are
+                            // still handled inline — they are fast O(1) operations.
+                            let mut pm = peer_manager.write().await;
                             for action in actions {
                                 match action {
-                                    torsten_network::peer::governor::GovernorAction::PromoteToWarm(_) => {} // already handled
+                                    torsten_network::peer::governor::GovernorAction::PromoteToWarm(_) => {} // handled above
                                     other => {
                                         lifecycle.handle_governor_action(other, &mut pm).await;
                                     }
@@ -2053,6 +2067,52 @@ impl Node {
 
                         // Update metrics after removing dead connections.
                         self.update_peer_metrics(&pm);
+                    }
+                }
+
+                // ── Background cold->warm connection results ─────────────
+                //
+                // The governor spawns `PeerConnection::connect()` in background
+                // tasks (see `spawn_connect`) so TCP timeouts never block this
+                // loop. Results arrive here; on success we register the peer as
+                // warm and immediately promote to hot.
+                Some(result) = connect_result_rx.recv() => {
+                    match result {
+                        Ok((addr, conn, rtt_ms)) => {
+                            in_flight_connects.remove(&addr);
+                            if let Some(ref mut lifecycle) = self.connection_lifecycle {
+                                let mut pm = peer_manager.write().await;
+                                match lifecycle.register_warm_connection(
+                                    addr, conn, rtt_ms, &mut pm,
+                                ) {
+                                    Ok(()) => {
+                                        // Promote straight to hot (matching
+                                        // Haskell's established→active path).
+                                        if let Err(e) =
+                                            lifecycle.promote_to_hot(addr, &mut pm).await
+                                        {
+                                            warn!(%addr, "Warm→Hot failed after background connect: {e}");
+                                        }
+                                        self.update_peer_metrics(&pm);
+                                    }
+                                    Err(LifecycleError::AlreadyConnected(_)) => {
+                                        // A concurrent inbound connection beat us;
+                                        // discard the duplicate — it drops cleanly.
+                                        debug!(%addr, "background connect raced inbound; discarding duplicate");
+                                    }
+                                    Err(e) => {
+                                        warn!(%addr, "register_warm_connection failed: {e}");
+                                        pm.peer_failed(&addr);
+                                    }
+                                }
+                            }
+                        }
+                        Err((addr, error)) => {
+                            in_flight_connects.remove(&addr);
+                            warn!(%addr, "background cold->warm failed: {error}");
+                            let mut pm = peer_manager.write().await;
+                            pm.peer_failed(&addr);
+                        }
                     }
                 }
 
