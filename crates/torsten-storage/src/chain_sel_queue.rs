@@ -96,12 +96,18 @@ pub enum AddBlockResult {
     ///   - `rollback`: hashes to un-apply from the current tip, newest-first.
     ///   - `apply`: hashes to apply on the new fork, oldest-first.
     ///
-    /// Invariant: `rollback` and `apply` share a common ancestor (the
-    /// intersection block is NOT included in either list).
+    /// The `rollback` list is newest-first so that each element can be passed
+    /// directly to ledger rollback primitives in order.  The intersection block
+    /// is NOT included in either list.
+    ///
+    /// This variant corresponds to Haskell's `SwitchedToFork` result from
+    /// `ChainSelection.switchTo` in `ouroboros-consensus ChainSel.hs`.
     SwitchedToFork {
-        /// Hashes of blocks to roll back from the old chain (newest-first).
+        /// Common ancestor of the old and new chains (the fork point).
+        intersection_hash: BlockHeaderHash,
+        /// Hashes of blocks on the old chain to roll back, newest-first.
         rollback: Vec<BlockHeaderHash>,
-        /// Hashes of blocks to apply from the new chain (oldest-first).
+        /// Hashes of blocks on the new chain to apply, oldest-first.
         apply: Vec<BlockHeaderHash>,
     },
 }
@@ -416,6 +422,7 @@ async fn process_add_block(
 
             if let Some(plan) = db.switch_to_fork(&fork_hash) {
                 return AddBlockResult::SwitchedToFork {
+                    intersection_hash: plan.intersection,
                     rollback: plan.rollback,
                     apply: plan.apply,
                 };
@@ -705,7 +712,11 @@ mod tests {
             .unwrap();
 
         match r {
-            AddBlockResult::SwitchedToFork { rollback, apply } => {
+            AddBlockResult::SwitchedToFork {
+                intersection_hash: _,
+                rollback,
+                apply,
+            } => {
                 // Rollback should un-apply the a-chain blocks above common.
                 assert!(
                     rollback.contains(&a3) && rollback.contains(&a2),

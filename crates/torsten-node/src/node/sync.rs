@@ -1048,19 +1048,20 @@ impl Node {
                             // Block stored — proceed to ledger apply below.
                         }
                         Some(torsten_storage::AddBlockResult::SwitchedToFork {
+                            intersection_hash,
                             rollback,
                             apply,
                         }) => {
                             // Chain selection switched to a longer fork.  The
                             // VolatileDB is already on the new chain; log the
-                            // event.  The ledger will be brought into alignment
-                            // by the subsequent peer-driven MsgRollBackward /
-                            // MsgRollForward exchange.
+                            // event.  Phase 3 will wire the full ledger rollback
+                            // + replay here.
                             info!(
+                                intersection = %intersection_hash.to_hex(),
                                 slot = slot.0,
                                 rollback_count = rollback.len(),
                                 apply_count = apply.len(),
-                                "ChainSelQueue: switched to longer fork during sync"
+                                "Chain selection: fork switch during sync (Phase 3 pending)"
                             );
                             // Block is stored; continue to the ledger apply below.
                         }

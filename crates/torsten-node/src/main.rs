@@ -338,77 +338,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Ledger state captured BEFORE `apply_block` is called for a given block.
-///
-/// At epoch transitions the NEW epoch's state is already in `LedgerState` by
-/// the time we detect `current_epoch > last_epoch`, so we snapshot the fields
-/// we need from the PREVIOUS epoch here and pass them to `build_epoch_snapshot`
-/// instead of reading from `ledger` directly.
-struct PreApplyState {
-    /// Reserves balance (lovelace) at end of the previous epoch.
-    reserves: u64,
-    /// Treasury balance (lovelace) at end of the previous epoch.
-    treasury: u64,
-    /// Epoch nonce (32 bytes) as of the previous epoch.
-    epoch_nonce: [u8; 32],
-    /// Era name at end of the previous epoch.
-    era_name: String,
-    /// Protocol parameters (serialised to JSON once) at end of previous epoch.
-    protocol_params_json: serde_json::Value,
-    /// Number of registered pools.
-    total_pools: usize,
-    /// Number of registered reward accounts.
-    reward_account_count: usize,
-    /// Number of registered DReps.
-    drep_count: usize,
-    /// Key deposit (lovelace) for deposit accounting.
-    key_deposit: u64,
-    /// Pool deposit (lovelace) for deposit accounting.
-    pool_deposit: u64,
-    /// DRep deposit (lovelace) for deposit accounting.
-    drep_deposit: u64,
-    /// Epoch snapshots — cheap clone because all large fields are `Arc`.
-    snapshots: torsten_ledger::state::EpochSnapshots,
-    /// Pending reward update (almost always `None` under the corrected RUPD path).
-    pending_reward_update: Option<torsten_ledger::state::PendingRewardUpdate>,
-}
-
-impl PreApplyState {
-    /// Capture the state we need for epoch-snapshot generation from the current
-    /// ledger state, BEFORE `apply_block` is called.
-    fn capture(ledger: &torsten_ledger::LedgerState) -> Self {
-        let pp = &ledger.protocol_params;
-        let protocol_params_json = serde_json::json!({
-            "a0":  { "numerator": pp.a0.numerator,  "denominator": pp.a0.denominator  },
-            "d":   { "numerator": pp.d.numerator,   "denominator": pp.d.denominator   },
-            "rho": { "numerator": pp.rho.numerator, "denominator": pp.rho.denominator },
-            "tau": { "numerator": pp.tau.numerator, "denominator": pp.tau.denominator },
-            "nOpt": pp.n_opt,
-            "minPoolCost": pp.min_pool_cost.0,
-            "protocolVersion": {
-                "major": pp.protocol_version_major,
-                "minor": pp.protocol_version_minor,
-            },
-        });
-
-        PreApplyState {
-            reserves: ledger.reserves.0,
-            treasury: ledger.treasury.0,
-            epoch_nonce: ledger.epoch_nonce.0,
-            era_name: format!("{}", ledger.era),
-            protocol_params_json,
-            total_pools: ledger.pool_params.len(),
-            reward_account_count: ledger.reward_accounts.len(),
-            drep_count: ledger.governance.dreps.len(),
-            key_deposit: pp.key_deposit.0,
-            pool_deposit: pp.pool_deposit.0,
-            drep_deposit: pp.drep_deposit.0,
-            snapshots: ledger.snapshots.clone(),
-            pending_reward_update: ledger.pending_reward_update.clone(),
-        }
-    }
-}
-
 /// Replay blocks from ImmutableDB and dump ledger state at epoch boundaries.
 ///
 /// Produces JSON output compatible with cardano-streamer's `dump-snapshot`
@@ -560,10 +489,6 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     let mut blocks_applied = 0u64;
     let mut epochs_written = 0u64;
     let start_time = std::time::Instant::now();
-    // Pre-apply state for the previous epoch — updated before every apply_block.
-    // Initialised to genesis state; overwritten on the first real block.
-    let mut pre_state = PreApplyState::capture(&ledger);
-
     info!("Replaying blocks from ImmutableDB...");
 
     mithril::replay_from_chunk_files(&immutable_dir, |cbor| {
@@ -580,10 +505,6 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
 
         let block_fees: u64 = block.transactions.iter().map(|tx| tx.body.fee.0).sum();
 
-        // RC1: Capture the ledger state BEFORE apply_block so that epoch-boundary
-        // snapshots reflect the completed epoch's state, not the new epoch's state.
-        pre_state = PreApplyState::capture(&ledger);
-
         if let Err(e) = ledger.apply_block(&block, torsten_ledger::BlockValidationMode::ApplyOnly) {
             if !format!("{e}").contains("Block does not connect") {
                 tracing::warn!(slot = block_slot, "Block apply failed: {e}");
@@ -596,14 +517,16 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         let current_epoch = ledger.epoch.0;
 
         // Dump state at each epoch transition.
-        // RC1: use pre_state (captured before apply_block above), which holds the
-        //      ledger values from the epoch that just completed.
-        // RC3: accumulate epoch_fees AFTER the transition check so that the first
-        //      block of a new epoch's fees go into the new epoch's bucket, not the
-        //      old one.
+        // The epoch transition (NEWEPOCH rule: reward distribution, nonce rotation,
+        // snapshot rotation, protocol param updates) fires inside apply_block when
+        // processing the first block of the new epoch.  Cstreamer captures state
+        // AFTER the transition, so we read from `ledger` (post-apply).
+        //
+        // RC3: accumulate epoch_fees AFTER the transition check so the first block
+        //      of a new epoch's fees go into the new epoch's bucket, not the old one.
         if last_epoch != u64::MAX && current_epoch > last_epoch {
             let snapshot =
-                build_epoch_snapshot(&pre_state, last_epoch, epoch_fees, max_lovelace_supply);
+                build_epoch_snapshot(&ledger, last_epoch, epoch_fees, max_lovelace_supply);
 
             write_epoch_snapshot(&snapshot, last_epoch, &args.output_dir, &mut output)
                 .map_err(|e| anyhow::anyhow!("Snapshot write error: {e}"))?;
@@ -611,20 +534,18 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             epochs_written += 1;
             info!(
                 epoch = last_epoch,
-                treasury = pre_state.treasury,
-                reserves = pre_state.reserves,
-                pools = pre_state.total_pools,
+                treasury = ledger.treasury.0,
+                reserves = ledger.reserves.0,
+                pools = ledger.pool_params.len(),
                 fees = epoch_fees,
-                era = %pre_state.era_name,
+                era = %format!("{}", ledger.era),
                 "Epoch snapshot dumped"
             );
 
-            // RC3: Reset fee accumulator BEFORE adding this block's fees so the
-            // triggering block (first block of the new epoch) goes into the new bucket.
             epoch_fees = 0;
         }
 
-        // RC3: Accumulate fees into the current epoch AFTER the transition check.
+        // Accumulate fees into the current epoch AFTER the transition check.
         epoch_fees += block_fees;
         last_epoch = current_epoch;
         Ok(())
@@ -638,13 +559,8 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     })?;
 
     // Dump final epoch (the current in-progress epoch at the stop point).
-    // Pool distribution is omitted here because we have no full epoch data.
     if blocks_applied > 0 && last_epoch != u64::MAX {
-        // For the final (incomplete) epoch we use the current ledger state since
-        // there is no subsequent epoch transition to trigger the pre-apply capture.
-        let final_pre = PreApplyState::capture(&ledger);
-        let snapshot =
-            build_epoch_snapshot(&final_pre, last_epoch, epoch_fees, max_lovelace_supply);
+        let snapshot = build_epoch_snapshot(&ledger, last_epoch, epoch_fees, max_lovelace_supply);
 
         write_epoch_snapshot(&snapshot, last_epoch, &args.output_dir, &mut output)?;
         epochs_written += 1;
@@ -797,42 +713,38 @@ fn serialize_stake_snapshot(
     })
 }
 
-/// Build the richer epoch-snapshot JSON object from the pre-apply ledger state.
+/// Build the richer epoch-snapshot JSON object from the current ledger state.
 ///
-/// This is called at every epoch transition (using the pre-apply state captured
-/// BEFORE `apply_block` ran the epoch transition) and for the final in-progress
-/// epoch.  Fields match the cstreamer reference format so that
-/// `scripts/compare-epochs.py` can cross-validate them without false divergences.
+/// Called at every epoch transition (the ledger already reflects the NEWEPOCH
+/// rule — reward distribution, nonce rotation, snapshot rotation, protocol
+/// param updates) and for the final in-progress epoch.  Fields match the
+/// cstreamer reference format for cross-validation.
 fn build_epoch_snapshot(
-    pre: &PreApplyState,
+    ledger: &torsten_ledger::LedgerState,
     epoch: u64,
     epoch_fees: u64,
     max_lovelace_supply: u64,
 ) -> serde_json::Value {
-    // RC2: cstreamer computes totalStake = maxLovelaceSupply - reserves.
-    // Summing pool_stake from the set snapshot differs from this because it
-    // omits unregistered/non-delegated stake.  Use the same formula.
-    let total_stake = max_lovelace_supply.saturating_sub(pre.reserves);
+    // RC2: totalStake = maxLovelaceSupply - reserves (matches cstreamer).
+    let total_stake = max_lovelace_supply.saturating_sub(ledger.reserves.0);
 
     // Active stake from the "go" snapshot (used for reward distribution).
-    let active_stake: u64 = pre
+    let active_stake: u64 = ledger
         .snapshots
         .go
         .as_ref()
         .map(|s| s.pool_stake.values().map(|v| v.0).sum())
         .unwrap_or(0);
 
-    // Pool distribution: only pools with non-zero stake from the "set" snapshot.
-    // RC2: include stakeLovelace, stakePercent, and stake-as-fraction fields to
-    // match the extended cstreamer PoolDistr format.
-    let total_active_stake = pre
+    // Pool distribution from the "set" snapshot with extended cstreamer fields.
+    let total_active_stake = ledger
         .snapshots
         .set
         .as_ref()
         .map(|s| s.pool_stake.values().map(|v| v.0).sum::<u64>())
         .unwrap_or(0);
 
-    let pool_distribution: Vec<serde_json::Value> = pre
+    let pool_distribution: Vec<serde_json::Value> = ledger
         .snapshots
         .set
         .as_ref()
@@ -841,37 +753,47 @@ fn build_epoch_snapshot(
                 .iter()
                 .filter(|(_, stake)| stake.0 > 0)
                 .map(|(pool_id, stake_lovelace)| {
-                    let stake_lovelace_val = stake_lovelace.0;
-                    let stake_percent = if total_active_stake > 0 {
-                        stake_lovelace_val as f64 / total_active_stake as f64
+                    let lv = stake_lovelace.0;
+                    let pct = if total_active_stake > 0 {
+                        lv as f64 / total_active_stake as f64
                     } else {
                         0.0
                     };
                     serde_json::json!({
                         "poolId": hex::encode(pool_id.as_bytes()),
-                        // Fraction representation (denominator = total active stake)
-                        "stake": {
-                            "numerator": stake_lovelace_val,
-                            "denominator": total_active_stake,
-                        },
-                        "stakeLovelace": stake_lovelace_val,
-                        "stakePercent": stake_percent,
+                        "stake": { "numerator": lv, "denominator": total_active_stake },
+                        "stakeLovelace": lv,
+                        "stakePercent": pct,
                     })
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
-    // Deposit accounting (based on pre-apply counts and deposits).
-    let deposit_stake_key = pre.reward_account_count as u64 * pre.key_deposit;
-    let deposit_pool = pre.total_pools as u64 * pre.pool_deposit;
-    let deposit_drep = pre.drep_count as u64 * pre.drep_deposit;
+    // Deposit accounting.
+    let pp = &ledger.protocol_params;
+    let deposit_stake_key = ledger.reward_accounts.len() as u64 * pp.key_deposit.0;
+    let deposit_pool = ledger.pool_params.len() as u64 * pp.pool_deposit.0;
+    let deposit_drep = ledger.governance.dreps.len() as u64 * pp.drep_deposit.0;
     let deposit_proposal: u64 = 0;
     let deposit_total = deposit_stake_key + deposit_pool + deposit_drep + deposit_proposal;
 
-    // Pending reward update (almost always None under the corrected RUPD path,
-    // but serialised here for forward-compatibility with the cstreamer schema).
-    let rupd_next: serde_json::Value = match &pre.pending_reward_update {
+    // Protocol params summary.
+    let protocol_params = serde_json::json!({
+        "a0": { "numerator": pp.a0.numerator, "denominator": pp.a0.denominator },
+        "d":  { "numerator": pp.d.numerator,  "denominator": pp.d.denominator  },
+        "rho": { "numerator": pp.rho.numerator, "denominator": pp.rho.denominator },
+        "tau": { "numerator": pp.tau.numerator, "denominator": pp.tau.denominator },
+        "nOpt": pp.n_opt,
+        "minPoolCost": pp.min_pool_cost.0,
+        "protocolVersion": {
+            "major": pp.protocol_version_major,
+            "minor": pp.protocol_version_minor,
+        },
+    });
+
+    // Pending reward update.
+    let rupd_next: serde_json::Value = match &ledger.pending_reward_update {
         None => serde_json::Value::Null,
         Some(pu) => {
             let total_distributed: u64 = pu.rewards.values().map(|v| v.0).sum();
@@ -883,22 +805,20 @@ fn build_epoch_snapshot(
         }
     };
 
-    // RC4: Serialise the full mark/set/go stake snapshots so that the
-    // cross-validation script can verify delegation maps, pool parameters,
-    // individual stake, and per-pool block counts.
-    let snap_mark = pre
+    // RC4: full mark/set/go stake snapshots for cross-validation.
+    let snap_mark = ledger
         .snapshots
         .mark
         .as_ref()
         .map(|s| serialize_stake_snapshot("mark", s))
         .unwrap_or(serde_json::Value::Null);
-    let snap_set = pre
+    let snap_set = ledger
         .snapshots
         .set
         .as_ref()
         .map(|s| serialize_stake_snapshot("set", s))
         .unwrap_or(serde_json::Value::Null);
-    let snap_go = pre
+    let snap_go = ledger
         .snapshots
         .go
         .as_ref()
@@ -908,16 +828,14 @@ fn build_epoch_snapshot(
     serde_json::json!({
         "epoch": epoch,
         "epochFees": epoch_fees,
-        // RC1: use pre-apply reserves/treasury (completed epoch's end state)
-        "reserves": pre.reserves,
-        "treasury": pre.treasury,
-        // RC2: totalStake = maxLovelaceSupply - reserves
+        "reserves": ledger.reserves.0,
+        "treasury": ledger.treasury.0,
         "totalStake": total_stake,
         "activeStake": active_stake,
-        "totalPools": pre.total_pools,
+        "totalPools": ledger.pool_params.len(),
         "poolDistribution": pool_distribution,
-        "snapshotEraName": pre.era_name,
-        "epochNonce": hex::encode(pre.epoch_nonce),
+        "snapshotEraName": format!("{}", ledger.era),
+        "epochNonce": hex::encode(ledger.epoch_nonce.0),
         "deposits": {
             "stakeKey": deposit_stake_key,
             "pool": deposit_pool,
@@ -925,9 +843,8 @@ fn build_epoch_snapshot(
             "proposal": deposit_proposal,
             "total": deposit_total,
         },
-        "protocolParams": pre.protocol_params_json,
+        "protocolParams": protocol_params,
         "rupdNext": rupd_next,
-        // RC4: full mark/set/go snapshots for cross-validation
         "snapshots": {
             "mark": snap_mark,
             "set": snap_set,

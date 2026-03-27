@@ -2339,17 +2339,19 @@ impl Node {
                 Some(torsten_storage::AddBlockResult::AdoptedAsTip)
                 | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
                 | Some(torsten_storage::AddBlockResult::AlreadyKnown) => true,
-                Some(torsten_storage::AddBlockResult::SwitchedToFork { rollback, apply }) => {
-                    // Chain selection detected a longer competing fork.
-                    // Log the switch; the ledger rollback + replay is handled
-                    // by the existing peer-driven MsgRollBackward path once
-                    // the peer that holds the fork advances.  The VolatileDB
-                    // has already been switched atomically by the queue runner.
+                Some(torsten_storage::AddBlockResult::SwitchedToFork {
+                    intersection_hash,
+                    rollback,
+                    apply,
+                }) => {
+                    // Chain selection determined a competing fork is strictly
+                    // preferred.  The VolatileDB chain switch is already committed.
+                    // Phase 3 will wire the full ledger rollback + replay here.
                     info!(
-                        slot = block_slot.0,
+                        intersection = %intersection_hash.to_hex(),
                         rollback_count = rollback.len(),
                         apply_count = apply.len(),
-                        "ChainSelQueue: switched to longer fork"
+                        "Chain selection: fork switch detected (Phase 3 ledger rollback pending)"
                     );
                     true
                 }
@@ -3183,6 +3185,7 @@ impl Node {
                         | Some(torsten_storage::AddBlockResult::StoredNotAdopted)
                         | Some(torsten_storage::AddBlockResult::AlreadyKnown) => true,
                         Some(torsten_storage::AddBlockResult::SwitchedToFork {
+                            intersection_hash,
                             rollback,
                             apply,
                         }) => {
@@ -3193,6 +3196,7 @@ impl Node {
                             // switched; log and proceed — the ledger apply below
                             // will restore consistency on the next sync round.
                             warn!(
+                                intersection = %intersection_hash.to_hex(),
                                 slot = next_slot.0,
                                 rollback_count = rollback.len(),
                                 apply_count = apply.len(),
