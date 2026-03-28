@@ -177,12 +177,9 @@ impl LedgerState {
                 // boundary, matching Haskell's POOL STS futurePoolParams mechanism).
                 // First registrations go directly to pool_params.
                 if self.pool_params.contains_key(&params.operator) {
-                    for pools in self.pending_retirements.values_mut() {
-                        pools.retain(|id| id != &params.operator);
-                    }
-                    // Remove empty epoch entries
-                    self.pending_retirements
-                        .retain(|_, pools| !pools.is_empty());
+                    // Cancel any pending retirement (matching Haskell's
+                    // psRetiringL %~ Map.delete sppId).
+                    self.pending_retirements.remove(&params.operator);
                     // Re-registration: defer to future_pool_params
                     self.future_pool_params.insert(params.operator, pool_reg);
                     debug!(
@@ -207,10 +204,11 @@ impl LedgerState {
                     epoch,
                     pool_hash.to_hex()
                 );
+                // Insert or replace the retirement epoch for this pool.
+                // Haskell: psRetiringL %~ Map.insert sppId epoch
+                // A second retirement for the same pool replaces the first.
                 self.pending_retirements
-                    .entry(torsten_primitives::time::EpochNo(*epoch))
-                    .or_default()
-                    .push(*pool_hash);
+                    .insert(*pool_hash, torsten_primitives::time::EpochNo(*epoch));
             }
             Certificate::RegStakeDeleg {
                 credential,

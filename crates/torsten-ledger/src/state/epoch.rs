@@ -1,7 +1,7 @@
 use super::{stake_credential_hash_with_ptrs, LedgerState, StakeSnapshot};
 use std::collections::HashMap;
 use std::sync::Arc;
-use torsten_primitives::hash::Hash32;
+use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, info, warn};
@@ -301,8 +301,24 @@ impl LedgerState {
             }
         }
 
-        // Process pending pool retirements for this epoch
-        if let Some(retiring_pools) = self.pending_retirements.remove(&new_epoch) {
+        // Process pending pool retirements for this epoch.
+        // Haskell: retired = {k | (k, v) <- psRetiring, v == e}
+        let retiring_pools: Vec<Hash28> = self
+            .pending_retirements
+            .iter()
+            .filter_map(|(pool_id, epoch)| {
+                if *epoch == new_epoch {
+                    Some(*pool_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !retiring_pools.is_empty() {
+            // Remove retired entries from pending_retirements
+            for pool_id in &retiring_pools {
+                self.pending_retirements.remove(pool_id);
+            }
             let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
                 // Refund pool deposit to operator's registered reward account.
@@ -345,9 +361,10 @@ impl LedgerState {
             }
         }
 
-        // Clean up retirements from past epochs (shouldn't happen but be safe)
+        // Clean up retirements from past epochs (shouldn't happen but be safe).
+        // Haskell: psRetiring = Map.filter (\e -> e > eNo) psRetiring
         self.pending_retirements
-            .retain(|epoch, _| *epoch >= new_epoch);
+            .retain(|_, epoch| *epoch > new_epoch);
 
         // Capture prevPParams BEFORE PPUP updates curPP, matching Haskell's
         // NEWPP rule: prevPParams = old curPParams (before this boundary's PPUP).

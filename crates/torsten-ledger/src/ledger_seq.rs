@@ -791,17 +791,10 @@ fn apply_pool_change(state: &mut LedgerState, change: &PoolChange) {
                 .insert(params.pool_id, params.clone());
         }
         PoolChange::Retire { pool_id, epoch } => {
-            state
-                .pending_retirements
-                .entry(*epoch)
-                .or_default()
-                .push(*pool_id);
+            state.pending_retirements.insert(*pool_id, *epoch);
         }
         PoolChange::CancelRetirement { pool_id } => {
-            for retirements in state.pending_retirements.values_mut() {
-                retirements.retain(|id| id != pool_id);
-            }
-            state.pending_retirements.retain(|_, v| !v.is_empty());
+            state.pending_retirements.remove(pool_id);
         }
     }
 }
@@ -1004,7 +997,7 @@ fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDel
         }
     }
     // Clean up pending retirements for the epoch just processed.
-    state.pending_retirements.retain(|&ep, _| ep > et.new_epoch);
+    state.pending_retirements.retain(|_, ep| *ep > et.new_epoch);
 
     // Promote future pool params.
     {

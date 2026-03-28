@@ -84,15 +84,13 @@ pub(crate) fn handle_pool_state(
             .collect()
     };
 
-    // Build retiring map: flatten pending_retirements into (pool_id, epoch) pairs
-    let mut retiring = Vec::new();
-    for (epoch, pools) in &state.pending_retirements {
-        for pool_id in pools {
-            if filter_pools.is_empty() || filter_pools.iter().any(|h| h == pool_id) {
-                retiring.push((pool_id.clone(), *epoch));
-            }
-        }
-    }
+    // Build retiring map: filter pending_retirements by pool filter
+    let retiring: Vec<(Vec<u8>, u64)> = state
+        .pending_retirements
+        .iter()
+        .filter(|(pool_id, _)| filter_pools.is_empty() || filter_pools.iter().any(|h| h == pool_id))
+        .cloned()
+        .collect();
 
     // Build deposits map: each registered pool has pool_deposit
     let deposits: Vec<(Vec<u8>, u64)> = pool_params
@@ -812,7 +810,7 @@ mod tests {
     #[test]
     fn test_pool_state_no_filter() {
         let mut state = make_state_with_pools();
-        state.pending_retirements = vec![(150, vec![vec![2u8; 28]])];
+        state.pending_retirements = vec![(vec![2u8; 28], 150)];
         state.pool_deposit = 500_000_000;
         let cbor = make_empty_filter_cbor();
         let mut dec = minicbor::Decoder::new(&cbor);
@@ -839,7 +837,7 @@ mod tests {
     #[test]
     fn test_pool_state_filtered() {
         let mut state = make_state_with_pools();
-        state.pending_retirements = vec![(150, vec![vec![1u8; 28], vec![2u8; 28]])];
+        state.pending_retirements = vec![(vec![1u8; 28], 150), (vec![2u8; 28], 150)];
         let cbor = make_pool_filter_cbor(&[1u8; 28]);
         let mut dec = minicbor::Decoder::new(&cbor);
         let result = handle_pool_state(&state, &mut dec);

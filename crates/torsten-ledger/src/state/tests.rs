@@ -434,7 +434,7 @@ fn test_process_pool_retirement() {
     });
     // Pool still exists (retirement is pending)
     assert!(state.pool_params.contains_key(&pool_id));
-    assert!(state.pending_retirements.contains_key(&EpochNo(2)));
+    assert!(state.pending_retirements.get(&pool_id) == Some(&EpochNo(2)));
 
     // Trigger epoch transition to epoch 2
     state.process_epoch_transition(EpochNo(2));
@@ -3844,10 +3844,7 @@ fn test_pool_retirement_within_emax() {
         epoch: 28, // 10 + 18 = within bounds
     };
     state.process_certificate(&cert);
-    assert!(state
-        .pending_retirements
-        .get(&EpochNo(28))
-        .is_some_and(|v| v.contains(&pool_hash)));
+    assert!(state.pending_retirements.get(&pool_hash) == Some(&EpochNo(28)));
 }
 
 #[test]
@@ -3868,7 +3865,7 @@ fn test_pool_retirement_exceeds_emax() {
     };
     state.process_certificate(&cert);
     // Retirement IS applied during block application (no e_max re-check)
-    assert!(state.pending_retirements.contains_key(&EpochNo(29)));
+    assert!(state.pending_retirements.get(&pool_hash) == Some(&EpochNo(29)));
 }
 
 #[test]
@@ -4713,8 +4710,7 @@ fn test_pool_reregistration_cancels_pending_retirement() {
         pool_hash: pool_id,
         epoch: 5,
     });
-    assert!(state.pending_retirements.contains_key(&EpochNo(5)));
-    assert!(state.pending_retirements[&EpochNo(5)].contains(&pool_id));
+    assert!(state.pending_retirements.get(&pool_id) == Some(&EpochNo(5)));
 
     // Re-register the pool — should cancel the pending retirement
     let updated_params = PoolParams {
@@ -4724,13 +4720,7 @@ fn test_pool_reregistration_cancels_pending_retirement() {
     state.process_certificate(&Certificate::PoolRegistration(updated_params));
 
     // Pending retirement should be cancelled
-    assert!(
-        state.pending_retirements.is_empty()
-            || !state
-                .pending_retirements
-                .values()
-                .any(|v| v.contains(&pool_id))
-    );
+    assert!(!state.pending_retirements.contains_key(&pool_id));
     // Pool should still exist (original params remain until next epoch boundary)
     assert!(state.pool_params.contains_key(&pool_id));
     // Re-registration params are deferred to futurePoolParams (applied at next epoch boundary),
@@ -4779,20 +4769,15 @@ fn test_pool_reregistration_only_cancels_own_retirement() {
         pool_hash: pool_b,
         epoch: 5,
     });
-    assert_eq!(state.pending_retirements[&EpochNo(5)].len(), 2);
+    assert!(state.pending_retirements.get(&pool_a) == Some(&EpochNo(5)));
+    assert!(state.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
 
     // Re-register only pool A
     state.process_certificate(&Certificate::PoolRegistration(make_params(pool_a)));
 
     // Pool A's retirement should be cancelled, but pool B's should remain
-    let remaining: Vec<_> = state
-        .pending_retirements
-        .values()
-        .flatten()
-        .copied()
-        .collect();
-    assert!(!remaining.contains(&pool_a));
-    assert!(remaining.contains(&pool_b));
+    assert!(!state.pending_retirements.contains_key(&pool_a));
+    assert!(state.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
 }
 
 #[test]
@@ -7170,11 +7155,7 @@ fn test_pool_retirement_at_scheduled_epoch() {
     Arc::make_mut(&mut state.reward_accounts).insert(hash_key, Lovelace(0));
 
     // Schedule retirement at epoch 5
-    state
-        .pending_retirements
-        .entry(EpochNo(5))
-        .or_default()
-        .push(pool_id);
+    state.pending_retirements.insert(pool_id, EpochNo(5));
 
     // Transition to epoch 5: pool should be retired and removed
     state.process_epoch_transition(EpochNo(5));
@@ -7217,14 +7198,10 @@ fn test_pool_reregistration_cancels_retirement() {
     Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg.clone());
 
     // Schedule retirement at epoch 5
-    state
-        .pending_retirements
-        .entry(EpochNo(5))
-        .or_default()
-        .push(pool_id);
+    state.pending_retirements.insert(pool_id, EpochNo(5));
 
     // Re-register (cancel retirement)
-    state.pending_retirements.remove(&EpochNo(5));
+    state.pending_retirements.remove(&pool_id);
 
     // Transition to epoch 5: pool should still exist
     state.process_epoch_transition(EpochNo(5));

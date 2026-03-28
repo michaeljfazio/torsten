@@ -789,9 +789,7 @@ impl Node {
             pending_retirements: ls
                 .pending_retirements
                 .iter()
-                .map(|(epoch, pools)| {
-                    (epoch.0, pools.iter().map(|h| h.as_ref().to_vec()).collect())
-                })
+                .map(|(pool_id, epoch)| (pool_id.as_ref().to_vec(), epoch.0))
                 .collect(),
             pool_deposit: ls.protocol_params.pool_deposit.0,
             epoch_length: ls.epoch_length,

@@ -824,8 +824,8 @@ pub struct NodeStateSnapshot {
     pub epoch_blocks_by_pool: Vec<(Vec<u8>, u64)>,
     /// Pool parameters for pool-params queries
     pub pool_params_entries: Vec<PoolParamsSnapshot>,
-    /// Pending pool retirements: Map<EpochNo, Vec<pool_hash>>
-    pub pending_retirements: Vec<(u64, Vec<Vec<u8>>)>,
+    /// Pending pool retirements: Map<pool_hash, EpochNo> (matching Haskell's psRetiring)
+    pub pending_retirements: Vec<(Vec<u8>, u64)>,
     /// Pool deposit amount (protocol parameter)
     pub pool_deposit: u64,
     /// Epoch length in slots (for era history query)
