@@ -1472,8 +1472,11 @@ fn test_governance_proposal_deposit_refund() {
     state.process_proposal(&Hash32::from_bytes([1u8; 32]), 0, &proposal);
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Advance past expiry (default lifetime is 6 epochs)
+    // Advance past expiry (default lifetime is 6, expires_epoch = 0+6+1=7)
+    // Proposal expires when expires_epoch < new_epoch, i.e. at epoch 8.
     state.process_epoch_transition(EpochNo(7));
+    assert_eq!(state.governance.proposals.len(), 1); // still active through epoch 7
+    state.process_epoch_transition(EpochNo(8));
 
     // Proposal should be expired
     assert!(state.governance.proposals.is_empty());
@@ -1925,8 +1928,11 @@ fn test_rational_as_f64() {
 }
 
 #[test]
-fn test_info_action_always_ratified() {
-    let params = ProtocolParameters::mainnet_defaults();
+fn test_info_action_never_ratified() {
+    // InfoAction proposals can NEVER be ratified (NoVotingThreshold for all bodies).
+    // They sit in the proposals map until they expire at proposed_epoch + gov_action_lifetime.
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.gov_action_lifetime = 3;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
 
@@ -1944,16 +1950,21 @@ fn test_info_action_always_ratified() {
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // InfoAction should be ratified at epoch transition even with no votes
+    // InfoAction should NOT be ratified at epoch transition — it stays active
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.governance.proposals.len(), 0); // removed after ratification
+    assert_eq!(state.governance.proposals.len(), 1); // still active
+    assert!(state.governance.last_ratified.is_empty()); // not ratified
 
-    // Verify ratification tracking for GetRatifyState query
-    assert_eq!(state.governance.last_ratified.len(), 1);
-    assert_eq!(state.governance.last_ratified[0].0.transaction_id, tx_hash);
-    assert_eq!(state.governance.last_ratified[0].0.action_index, 0);
-    assert!(state.governance.last_expired.is_empty());
-    assert!(!state.governance.last_ratify_delayed);
+    // Should expire at proposed_epoch(0) + lifetime(3) + 1 = epoch 4
+    state.process_epoch_transition(EpochNo(2));
+    assert_eq!(state.governance.proposals.len(), 1); // still active
+    state.process_epoch_transition(EpochNo(3));
+    assert_eq!(state.governance.proposals.len(), 1); // still active through epoch 3
+    state.process_epoch_transition(EpochNo(4));
+    assert_eq!(state.governance.proposals.len(), 1); // expires_epoch = 4, 4 < 4 = false
+    state.process_epoch_transition(EpochNo(5));
+    assert_eq!(state.governance.proposals.len(), 0); // expired: 4 < 5 = true
+    assert_eq!(state.governance.last_expired.len(), 1);
 }
 
 #[test]

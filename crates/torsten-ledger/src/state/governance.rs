@@ -523,8 +523,12 @@ impl LedgerState {
 
         match &state.procedure.gov_action {
             GovAction::InfoAction => {
-                // InfoAction is always ratified (it's informational only)
-                true
+                // InfoAction can NEVER be ratified — it has NoVotingThreshold for
+                // all three voting bodies (DRep, SPO, CC). Votes are recorded but
+                // have no effect. Proposals sit until they expire at
+                // proposed_epoch + gov_action_lifetime. (Haskell: all three
+                // acceptance predicates return False when threshold = SNothing.)
+                false
             }
             GovAction::ParameterChange {
                 protocol_param_update,
@@ -2764,11 +2768,18 @@ mod tests {
 
     #[test]
     fn test_deposit_returned_on_ratification() {
+        // Use TreasuryWithdrawals (ratifiable) instead of InfoAction (never ratifies).
+        // Set CC threshold to 0 so it auto-passes with no votes.
         let mut state = gov_test_state(10, 0);
         Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
+        // DRep threshold for treasury withdrawal = dvt_treasury_withdrawal
+        state.protocol_params.dvt_treasury_withdrawal = Rational {
+            numerator: 0,
+            denominator: 1,
+        };
 
         let return_addr = vec![0u8; 29];
         let return_key = LedgerState::reward_account_to_hash(&return_addr);
@@ -2780,7 +2791,10 @@ mod tests {
             &ProposalProcedure {
                 deposit: Lovelace(50_000_000_000),
                 return_addr: return_addr.clone(),
-                gov_action: GovAction::InfoAction,
+                gov_action: GovAction::TreasuryWithdrawals {
+                    withdrawals: std::collections::BTreeMap::new(),
+                    policy_hash: None,
+                },
                 anchor: make_anchor(),
             },
         );
