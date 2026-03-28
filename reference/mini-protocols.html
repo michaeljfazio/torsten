@@ -1,0 +1,1376 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Mini-Protocol Reference - Torsten Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../quickstart.html"><strong aria-hidden="true">2.</strong> Quick Start</a></li><li class="chapter-item expanded affix "><li class="part-title">Running a Node</li><li class="chapter-item expanded "><a href="../running/configuration.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../running/config-editor.html"><strong aria-hidden="true">4.</strong> Configuration Editor (torsten-config)</a></li><li class="chapter-item expanded "><a href="../running/topology.html"><strong aria-hidden="true">5.</strong> Topology</a></li><li class="chapter-item expanded "><a href="../running/networks.html"><strong aria-hidden="true">6.</strong> Networks</a></li><li class="chapter-item expanded "><a href="../running/mithril.html"><strong aria-hidden="true">7.</strong> Mithril Snapshot Import</a></li><li class="chapter-item expanded "><a href="../running/logging.html"><strong aria-hidden="true">8.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../running/monitoring.html"><strong aria-hidden="true">9.</strong> Monitoring</a></li><li class="chapter-item expanded "><a href="../running/relay.html"><strong aria-hidden="true">10.</strong> Relay Node</a></li><li class="chapter-item expanded "><a href="../running/block-producer.html"><strong aria-hidden="true">11.</strong> Block Producer</a></li><li class="chapter-item expanded "><a href="../running/kubernetes.html"><strong aria-hidden="true">12.</strong> Kubernetes Deployment</a></li><li class="chapter-item expanded affix "><li class="part-title">CLI Reference</li><li class="chapter-item expanded "><a href="../cli/overview.html"><strong aria-hidden="true">13.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../cli/torsten-node.html"><strong aria-hidden="true">14.</strong> torsten-node</a></li><li class="chapter-item expanded "><a href="../cli/key-generation.html"><strong aria-hidden="true">15.</strong> Key Generation</a></li><li class="chapter-item expanded "><a href="../cli/transactions.html"><strong aria-hidden="true">16.</strong> Transactions</a></li><li class="chapter-item expanded "><a href="../cli/queries.html"><strong aria-hidden="true">17.</strong> Queries</a></li><li class="chapter-item expanded "><a href="../cli/stake-address.html"><strong aria-hidden="true">18.</strong> Stake Address</a></li><li class="chapter-item expanded "><a href="../cli/stake-pool.html"><strong aria-hidden="true">19.</strong> Stake Pool</a></li><li class="chapter-item expanded "><a href="../cli/node-commands.html"><strong aria-hidden="true">20.</strong> Node Commands</a></li><li class="chapter-item expanded "><a href="../cli/governance.html"><strong aria-hidden="true">21.</strong> Governance</a></li><li class="chapter-item expanded affix "><li class="part-title">Architecture</li><li class="chapter-item expanded "><a href="../architecture/overview.html"><strong aria-hidden="true">22.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../architecture/sync-pipeline.html"><strong aria-hidden="true">23.</strong> Sync Pipeline</a></li><li class="chapter-item expanded "><a href="../architecture/storage.html"><strong aria-hidden="true">24.</strong> Storage</a></li><li class="chapter-item expanded "><a href="../architecture/consensus.html"><strong aria-hidden="true">25.</strong> Consensus</a></li><li class="chapter-item expanded "><a href="../architecture/networking.html"><strong aria-hidden="true">26.</strong> Networking</a></li><li class="chapter-item expanded "><a href="../architecture/p2p-governor.html"><strong aria-hidden="true">27.</strong> P2P Governor</a></li><li class="chapter-item expanded "><a href="../architecture/genesis-support.html"><strong aria-hidden="true">28.</strong> Genesis Support</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/protocol-parameters.html"><strong aria-hidden="true">29.</strong> Protocol Parameters</a></li><li class="chapter-item expanded "><a href="../reference/mini-protocols.html" class="active"><strong aria-hidden="true">30.</strong> Mini-Protocol Reference</a></li><li class="chapter-item expanded "><a href="../reference/benchmarks.html"><strong aria-hidden="true">31.</strong> Benchmarks</a></li><li class="chapter-item expanded "><a href="../reference/third-party-licenses.html"><strong aria-hidden="true">32.</strong> Third-Party Licenses</a></li><li class="chapter-item expanded "><a href="../reference/troubleshooting.html"><strong aria-hidden="true">33.</strong> Troubleshooting</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Torsten Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/torsten/edit/main/docs/src/reference/mini-protocols.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="cardano-mini-protocol-reference"><a class="header" href="#cardano-mini-protocol-reference">Cardano Mini-Protocol Reference</a></h1>
+<p>This document is the definitive implementation reference for every Cardano
+mini-protocol used in node-to-node (N2N) and node-to-client (N2C)
+communication. It covers the complete state machine, exact CBOR wire format,
+timing constraints, flow-control rules, and every protocol-error condition for
+each protocol. The information is derived directly from the Haskell source in
+the <code>IntersectMBO/ouroboros-network</code> repository.</p>
+<hr />
+<h2 id="connection-model-and-multiplexer"><a class="header" href="#connection-model-and-multiplexer">Connection Model and Multiplexer</a></h2>
+<p>All mini-protocols share a single TCP connection per peer, multiplexed by the
+<code>network-mux</code> layer using 8-byte SDU headers:</p>
+<pre><code>  Bytes  Field
+  -----  -----
+   0-3   timestamp (u32, microseconds, used for RTT measurement)
+   4-5   mini_protocol_num (u16)
+     6   flags (bit 0 = direction: 0=initiator, 1=responder)
+   7-8   payload_length (u16, max 65535)
+</code></pre>
+<p>Large messages are fragmented across multiple SDUs transparently. Handshake
+(protocol 0) runs on the raw socket before the mux is started.</p>
+<p><strong>Key invariant</strong>: if any single mini-protocol thread throws an exception, the
+entire mux — and therefore the entire TCP connection — is torn down. Protocol
+errors are fatal to the connection, not just to the affected mini-protocol.</p>
+<p><strong>Sources:</strong></p>
+<ul>
+<li><code>ouroboros-network/network-mux/src/Network/Mux/Types.hs</code></li>
+<li><code>ouroboros-network/network-mux/src/Network/Mux/Egress.hs</code></li>
+</ul>
+<hr />
+<h2 id="shared-encoding-primitives"><a class="header" href="#shared-encoding-primitives">Shared Encoding Primitives</a></h2>
+<p>These types are used identically across all protocols.</p>
+<h3 id="point"><a class="header" href="#point">Point</a></h3>
+<p>A <code>Point</code> identifies a position on the chain by slot and header hash.</p>
+<pre><code>; CBOR encoding (Haskell: encodePoint / decodePoint)
+point = []                         ; Origin — empty definite-length list
+      / [slot_no, header_hash]     ; At(slot, hash) — definite-length list of 2
+
+slot_no     = uint     ; word64
+header_hash = bstr     ; 32 bytes (Blake2b-256 of header)
+</code></pre>
+<p>Source: <code>ouroboros-network/ouroboros-network/api/lib/Ouroboros/Network/Block.hs</code></p>
+<h3 id="tip"><a class="header" href="#tip">Tip</a></h3>
+<p>A <code>Tip</code> is the chain tip as seen by the server. It is a <code>(Point, BlockNo)</code> pair.</p>
+<pre><code>; N2N ChainSync / N2C LocalChainSync
+tip = [slot_no, header_hash, block_no]   ; At(pt, blockno)
+    / [0]                                ; TipGenesis (Origin point, blockno=0)
+
+block_no = uint   ; word64
+</code></pre>
+<p>Source: <code>ouroboros-network/ouroboros-network/api/lib/Ouroboros/Network/Block.hs</code>
+(<code>encodeTip</code> / <code>decodeTip</code>)</p>
+<h3 id="byte-and-time-limit-constants"><a class="header" href="#byte-and-time-limit-constants">Byte and Time Limit Constants</a></h3>
+<p>These constants appear in state-machine timeout and size-limit tables throughout
+this document.</p>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th><th>Source in Codec/Limits.hs</th></tr></thead><tbody>
+<tr><td><code>smallByteLimit</code></td><td>65535 bytes</td><td><code>Protocol/Limits.hs:smallByteLimit</code></td></tr>
+<tr><td><code>largeByteLimit</code></td><td>2 500 000 bytes</td><td><code>Protocol/Limits.hs:largeByteLimit</code></td></tr>
+<tr><td><code>shortWait</code></td><td>10 seconds</td><td><code>Protocol/Limits.hs:shortWait</code></td></tr>
+<tr><td><code>longWait</code></td><td>60 seconds</td><td><code>Protocol/Limits.hs:longWait</code></td></tr>
+<tr><td><code>waitForever</code></td><td>no timeout</td><td><code>Protocol/Limits.hs:waitForever</code> (= <code>Nothing</code>)</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>ouroboros-network/ouroboros-network/api/lib/Ouroboros/Network/Protocol/Limits.hs</code></p>
+<hr />
+<h2 id="n2n-mini-protocol-ids"><a class="header" href="#n2n-mini-protocol-ids">N2N Mini-Protocol IDs</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Protocol</th><th>ID</th></tr></thead><tbody>
+<tr><td>Handshake</td><td>0</td></tr>
+<tr><td>DeltaQ</td><td>1 (reserved, never used)</td></tr>
+<tr><td>ChainSync</td><td>2</td></tr>
+<tr><td>BlockFetch</td><td>3</td></tr>
+<tr><td>TxSubmission2</td><td>4</td></tr>
+<tr><td>KeepAlive</td><td>8</td></tr>
+<tr><td>PeerSharing</td><td>10</td></tr>
+<tr><td>Peras Cert</td><td>16 (future)</td></tr>
+<tr><td>Peras Vote</td><td>17 (future)</td></tr>
+</tbody></table>
+</div>
+<h2 id="n2c-mini-protocol-ids"><a class="header" href="#n2c-mini-protocol-ids">N2C Mini-Protocol IDs</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Protocol</th><th>ID</th></tr></thead><tbody>
+<tr><td>Handshake</td><td>0</td></tr>
+<tr><td>LocalChainSync</td><td>5</td></tr>
+<tr><td>LocalTxSubmission</td><td>6</td></tr>
+<tr><td>LocalStateQuery</td><td>7</td></tr>
+<tr><td>LocalTxMonitor</td><td>9</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="protocol-temperatures-n2n"><a class="header" href="#protocol-temperatures-n2n">Protocol Temperatures (N2N)</a></h2>
+<p>Protocol temperature determines when each N2N mini-protocol is started during
+the peer lifecycle (<code>cold → warm → hot</code>).</p>
+<div class="table-wrapper"><table><thead><tr><th>Temperature</th><th>Protocols</th><th>Started when</th></tr></thead><tbody>
+<tr><td>Established</td><td>KeepAlive (8), PeerSharing (10)</td><td>On cold→warm promotion</td></tr>
+<tr><td>Warm</td><td>(none currently)</td><td>—</td></tr>
+<tr><td>Hot</td><td>ChainSync (2), BlockFetch (3), TxSubmission2 (4)</td><td>On warm→hot promotion</td></tr>
+</tbody></table>
+</div>
+<p>Hot protocols use <code>StartOnDemand</code> for the responder side (they wait for the
+first inbound byte). Initiator sides are started eagerly by <code>startProtocols</code>.</p>
+<p>Source: <code>ouroboros-network/cardano-diffusion/lib/Cardano/Network/Diffusion/Peer/</code></p>
+<hr />
+<h2 id="n2n-protocol-0-handshake"><a class="header" href="#n2n-protocol-0-handshake">N2N Protocol 0: Handshake</a></h2>
+<h3 id="identity"><a class="header" href="#identity">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 0 (runs on raw socket bearer before mux starts)</li>
+<li><strong>Direction:</strong> Initiator sends <code>MsgProposeVersions</code>, responder replies</li>
+<li><strong>Versions:</strong> V14 (Plomin HF, mandatory since 2025-01-29), V15 (SRV DNS)</li>
+</ul>
+<h3 id="state-machine"><a class="header" href="#state-machine">State Machine</a></h3>
+<pre><code>StPropose  (ClientAgency)  -- initiator has agency
+    │
+    │ MsgProposeVersions
+    ▼
+StConfirm  (ServerAgency)  -- server chooses version
+    │
+    ├─── MsgAcceptVersion ──→ StDone
+    ├─── MsgRefuse        ──→ StDone
+    └─── MsgQueryReply    ──→ StDone
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Agency</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>StPropose</code></td><td>Client</td><td>Initiator must send its version list</td></tr>
+<tr><td><code>StConfirm</code></td><td>Server</td><td>Server must accept, refuse, or query</td></tr>
+<tr><td><code>StDone</code></td><td>Nobody</td><td>Terminal</td></tr>
+</tbody></table>
+</div>
+<p><strong>Terminal state:</strong> <code>StDone</code> — connection is closed after handshake completes (for N2N; the mux then starts).</p>
+<h3 id="wire-format"><a class="header" href="#wire-format">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/framework/lib/Ouroboros/Network/Protocol/Handshake/Codec.hs</code>
+and <code>cardano-diffusion/protocols/cddl/specs/handshake-node-to-node-v14.cddl</code></p>
+<pre><code>; Every handshake message is a definite-length CBOR array.
+MsgProposeVersions = [0, versionTable]
+MsgAcceptVersion   = [1, versionNumber, versionData]
+MsgRefuse          = [2, refuseReason]
+MsgQueryReply      = [3, versionTable]
+
+; versionTable is a CBOR definite-length MAP (not an array).
+; Keys are encoded in ascending order.
+versionTable = { * versionNumber =&gt; versionData }
+
+; N2N version numbers (V14=14, V15=15, V16=16, ...)
+; Note: N2N does NOT set bit-15. Only N2C uses bit-15.
+versionNumber = 14 / 15 / 16
+
+; Version data for V14/V15: 4-element array
+versionData_v14 = [networkMagic, initiatorOnly, peerSharing, query]
+; Version data for V16+: 5-element array (adds perasSupport)
+versionData_v16 = [networkMagic, initiatorOnly, peerSharing, query, perasSupport]
+
+networkMagic = uint .size 4   ; word32 (mainnet=764824073, preview=2, preprod=1)
+initiatorOnly = bool           ; true=InitiatorOnly, false=InitiatorAndResponder
+peerSharing   = 0 / 1          ; 0=Disabled, 1=Enabled
+query         = bool
+perasSupport  = bool
+
+refuseReason
+  = [0, [* versionNumber]]           ; VersionMismatch
+  / [1, versionNumber, tstr]         ; HandshakeDecodeError
+  / [2, versionNumber, tstr]         ; Refused
+</code></pre>
+<h3 id="version-negotiation-rules"><a class="header" href="#version-negotiation-rules">Version Negotiation Rules</a></h3>
+<p>Source: <code>cardano-diffusion/api/lib/Cardano/Network/NodeToNode/Version.hs</code></p>
+<ul>
+<li>The responder picks the <strong>highest</strong> version number that appears in both
+the initiator's and responder's version tables.</li>
+<li>If no common version: <code>MsgRefuse</code> with <code>VersionMismatch</code>.</li>
+<li><code>networkMagic</code> must match exactly; mismatch → <code>MsgRefuse</code> with <code>Refused</code>.</li>
+<li><code>initiatorOnlyDiffusionMode</code> = <code>min(local, remote)</code> — more restrictive wins
+(i.e., <code>InitiatorOnly</code> if either side is).</li>
+<li><code>peerSharing</code> = <code>local &lt;&gt; remote</code> (Semigroup): <strong>both</strong> must be Enabled for
+Enabled; any Disabled results in Disabled. <code>InitiatorOnly</code> nodes
+automatically have Disabled.</li>
+<li><code>query</code> = <code>local || remote</code> (logical OR).</li>
+</ul>
+<h3 id="msgqueryreply-semantics"><a class="header" href="#msgqueryreply-semantics">MsgQueryReply Semantics</a></h3>
+<p>When the initiator sends <code>MsgProposeVersions</code> with <code>query=true</code>, the responder
+<strong>must</strong> reply with <code>MsgQueryReply</code> (a copy of its own version table) and then
+close the connection. This is used by cardano-cli for version probing. The mux
+never starts in this case.</p>
+<h3 id="timeout"><a class="header" href="#timeout">Timeout</a></h3>
+<p>Handshake SDU read/write: 10 seconds per SDU. There is no per-state
+timeout beyond this; the handshake exchange must complete within one
+SDU read cycle on each side.</p>
+<hr />
+<h2 id="n2n-protocol-2-chainsync"><a class="header" href="#n2n-protocol-2-chainsync">N2N Protocol 2: ChainSync</a></h2>
+<h3 id="identity-1"><a class="header" href="#identity-1">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 2</li>
+<li><strong>Temperature:</strong> Hot (started on warm→hot promotion)</li>
+<li><strong>Direction:</strong> N2N ChainSync streams <strong>block headers</strong> only (not full blocks).
+Full blocks are fetched via BlockFetch.</li>
+<li><strong>Versions:</strong> All N2N versions (V7+)</li>
+</ul>
+<h3 id="state-machine-1"><a class="header" href="#state-machine-1">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/Type.hs</code></p>
+<pre><code>StIdle       (ClientAgency)  -- client requests next update or intersect
+    │
+    ├─── MsgRequestNext      ──→ StNext(StCanAwait)
+    ├─── MsgFindIntersect    ──→ StIntersect
+    └─── MsgDone             ──→ StDone
+
+StNext(StCanAwait)  (ServerAgency)  -- server can immediately reply or defer
+    │
+    ├─── MsgAwaitReply       ──→ StNext(StMustReply)
+    ├─── MsgRollForward      ──→ StIdle
+    └─── MsgRollBackward     ──→ StIdle
+
+StNext(StMustReply)  (ServerAgency)  -- server MUST reply (already sent await)
+    │
+    ├─── MsgRollForward      ──→ StIdle
+    └─── MsgRollBackward     ──→ StIdle
+
+StIntersect  (ServerAgency)  -- server searching for intersection
+    │
+    ├─── MsgIntersectFound   ──→ StIdle
+    └─── MsgIntersectNotFound ─→ StIdle
+
+StDone (NobodyAgency)
+</code></pre>
+<p><strong>Critical invariant:</strong> <code>MsgAwaitReply</code> is only valid in state <code>StNext(StCanAwait)</code>.
+The server transitions to <code>StNext(StMustReply)</code> after sending it. Sending
+<code>MsgAwaitReply</code> when the client sent a non-blocking variant (<code>Pipeline</code> rather
+than <code>Request</code>) or when the server has already sent <code>MsgAwaitReply</code> this round
+is a <strong>protocol error</strong> (<code>ProtocolErrorRequestNonBlocking</code>). The typed-protocol
+framework enforces this at compile time; a Rust implementation must enforce it
+at runtime by tracking which sub-state of <code>StNext</code> is current.</p>
+<h3 id="wire-format-1"><a class="header" href="#wire-format-1">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/Codec.hs</code>
+and <code>cardano-diffusion/protocols/cddl/specs/chain-sync.cddl</code></p>
+<pre><code>MsgRequestNext        = [0]
+MsgAwaitReply         = [1]
+MsgRollForward        = [2, header, tip]
+MsgRollBackward       = [3, point, tip]
+MsgFindIntersect      = [4, points]
+MsgIntersectFound     = [5, point, tip]
+MsgIntersectNotFound  = [6, tip]
+MsgDone               = [7]
+
+; points is a DEFINITE-length array (not indefinite)
+points = [* point]
+</code></pre>
+<p><strong>N2N header encoding</strong> in <code>MsgRollForward</code>: For the <code>CardanoBlock</code> HFC block
+type, the header is wrapped as:</p>
+<pre><code>header = [era_index, serialised_header_bytes]
+</code></pre>
+<p>where <code>era_index</code> is 0=Byron, 1=Shelley, ..., 6=Conway, 7=Dijkstra (see
+TxSubmission2 section for full table), and <code>serialised_header_bytes</code> is
+<code>tag(24)(bstr(cbor_encoded_header))</code> — CBOR-in-CBOR wrapping via
+<code>wrapCBORinCBOR</code>.</p>
+<p>Source: <code>ouroboros-consensus/ouroboros-consensus-cardano/src/shelley/Ouroboros/Consensus/Shelley/Node/Serialisation.hs</code></p>
+<h3 id="pipelining"><a class="header" href="#pipelining">Pipelining</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/PipelineDecision.hs</code></p>
+<p>ChainSync uses the <code>pipelineDecisionLowHighMark</code> strategy with default marks
+<code>lowMark=200, highMark=300</code> (Torsten uses configurable depth via
+<code>TORSTEN_PIPELINE_DEPTH</code>, default 150).</p>
+<pre><code>pipelineDecisionLowHighMark :: Word16 -&gt; Word16 -&gt; MkPipelineDecision
+</code></pre>
+<p>Decision logic (given <code>n</code> outstanding requests, <code>clientTip</code>, <code>serverTip</code>):</p>
+<ul>
+<li><code>n=0, clientTip == serverTip</code> → <code>Request</code> (non-pipelined, triggers await semantics)</li>
+<li><code>n=0, clientTip &lt; serverTip</code> → <code>Pipeline</code></li>
+<li><code>n&gt;0, clientTip + n &gt;= serverTip</code> → <code>Collect</code> (we're caught up, stop pipelining)</li>
+<li><code>n &gt;= highMark</code> → <code>Collect</code> (high-water: drain before adding more)</li>
+<li><code>n &lt; lowMark</code> → <code>CollectOrPipeline</code> (can collect or pipeline)</li>
+<li><code>n &gt;= lowMark</code> → <code>Collect</code> (above low mark in high state)</li>
+</ul>
+<p><strong>When <code>n=0</code> and <code>clientTip == serverTip</code>:</strong> the client sends a non-pipelined
+<code>Request</code>, the server is at its tip and sends <code>MsgAwaitReply</code> (valid because
+the client sent a blocking request). This is the "at tip" steady state.</p>
+<h3 id="timing"><a class="header" href="#timing">Timing</a></h3>
+<p>Source: <code>ouroboros-network/cardano-diffusion/protocols/lib/Cardano/Network/Protocol/ChainSync/Codec/TimeLimits.hs</code></p>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Trusted peer</th><th>Untrusted peer</th></tr></thead><tbody>
+<tr><td><code>StIdle</code></td><td>3373 s</td><td>3373 s (configurable via <code>ChainSyncIdleTimeout</code>)</td></tr>
+<tr><td><code>StNext(StCanAwait)</code></td><td>10 s (shortWait)</td><td>10 s</td></tr>
+<tr><td><code>StNext(StMustReply)</code></td><td>waitForever</td><td>uniform random 601–911 s</td></tr>
+<tr><td><code>StIntersect</code></td><td>10 s</td><td>10 s</td></tr>
+</tbody></table>
+</div>
+<p>The random range for untrusted <code>StMustReply</code> corresponds to streak-of-empty-slots
+probabilities between 99.9% and 99.9999% at <code>f=0.05</code>.</p>
+<p>Default <code>ChainSyncIdleTimeout</code> = 3373 seconds.
+Source: <code>cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs:defaultChainSyncIdleTimeout</code></p>
+<h3 id="ingress-queue-limit"><a class="header" href="#ingress-queue-limit">Ingress Queue Limit</a></h3>
+<p><code>highMark × 1400 bytes × 1.1 safety factor</code></p>
+<p>With <code>highMark=300</code>: approximately 462 000 bytes.</p>
+<hr />
+<h2 id="n2n-protocol-3-blockfetch"><a class="header" href="#n2n-protocol-3-blockfetch">N2N Protocol 3: BlockFetch</a></h2>
+<h3 id="identity-2"><a class="header" href="#identity-2">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 3</li>
+<li><strong>Temperature:</strong> Hot</li>
+<li><strong>Purpose:</strong> Bulk download of full block bodies, driven by the BlockFetch
+decision logic after ChainSync supplies candidate chain headers.</li>
+</ul>
+<h3 id="state-machine-2"><a class="header" href="#state-machine-2">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/BlockFetch/Type.hs</code></p>
+<pre><code>BFIdle      (ClientAgency)  -- client decides what to fetch
+    │
+    ├─── MsgRequestRange  ──→ BFBusy
+    └─── MsgClientDone    ──→ BFDone
+
+BFBusy      (ServerAgency)  -- server preparing batch
+    │
+    ├─── MsgStartBatch    ──→ BFStreaming
+    └─── MsgNoBlocks      ──→ BFIdle
+
+BFStreaming  (ServerAgency)  -- server streaming blocks
+    │
+    ├─── MsgBlock         ──→ BFStreaming  (self-loop, one block per message)
+    └─── MsgBatchDone     ──→ BFIdle
+
+BFDone (NobodyAgency)
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Agency</th></tr></thead><tbody>
+<tr><td><code>BFIdle</code></td><td>Client</td></tr>
+<tr><td><code>BFBusy</code></td><td>Server</td></tr>
+<tr><td><code>BFStreaming</code></td><td>Server</td></tr>
+<tr><td><code>BFDone</code></td><td>Nobody</td></tr>
+</tbody></table>
+</div>
+<h3 id="wire-format-2"><a class="header" href="#wire-format-2">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/BlockFetch/Codec.hs</code>
+and <code>cardano-diffusion/protocols/cddl/specs/block-fetch.cddl</code></p>
+<pre><code>MsgRequestRange = [0, lower_point, upper_point]
+MsgClientDone   = [1]
+MsgStartBatch   = [2]
+MsgNoBlocks     = [3]
+MsgBlock        = [4, block]
+MsgBatchDone    = [5]
+</code></pre>
+<p><strong><code>MsgRequestRange</code>:</strong> Both <code>lower_point</code> and <code>upper_point</code> are inclusive
+(the range spans from lower to upper, both included). Each point uses the
+standard <code>point</code> encoding (<code>[]</code> for Origin, <code>[slot, hash]</code> for specific).</p>
+<p><strong>Block encoding in <code>MsgBlock</code>:</strong> For <code>CardanoBlock</code>, the block is encoded as:</p>
+<pre><code>block = [era_index, tag(24)(bstr(cbor_encoded_block))]
+</code></pre>
+<p>The full block (including header and body) is CBOR-serialized, then wrapped in
+<code>tag(24)(bytes(cbor_bytes))</code> (CBOR-in-CBOR), then placed in a 2-element array
+with the HFC era index.</p>
+<p>Source: <code>ouroboros-consensus/ouroboros-consensus-cardano/src/shelley/Ouroboros/Consensus/Shelley/Node/Serialisation.hs</code></p>
+<h3 id="timing-1"><a class="header" href="#timing-1">Timing</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/BlockFetch/Codec.hs:timeLimitsBlockFetch</code></p>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Timeout</th></tr></thead><tbody>
+<tr><td><code>BFIdle</code></td><td>waitForever</td></tr>
+<tr><td><code>BFBusy</code></td><td>60 s (longWait)</td></tr>
+<tr><td><code>BFStreaming</code></td><td>60 s (longWait)</td></tr>
+</tbody></table>
+</div>
+<h3 id="byte-limits"><a class="header" href="#byte-limits">Byte Limits</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Limit</th></tr></thead><tbody>
+<tr><td><code>BFIdle</code></td><td>65535 bytes (smallByteLimit)</td></tr>
+<tr><td><code>BFBusy</code></td><td>65535 bytes (smallByteLimit)</td></tr>
+<tr><td><code>BFStreaming</code></td><td>2 500 000 bytes (largeByteLimit)</td></tr>
+</tbody></table>
+</div>
+<h3 id="blockfetch-decision-loop"><a class="header" href="#blockfetch-decision-loop">BlockFetch Decision Loop</a></h3>
+<p>The <code>blockFetchLogic</code> thread runs continuously, waking every 10 ms (Praos) or
+40 ms (Genesis). It reads candidate chains from ChainSync via STM, computes
+which block ranges need to be fetched, and issues <code>MsgRequestRange</code> messages.</p>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Default</th><th>Source</th></tr></thead><tbody>
+<tr><td><code>maxInFlightReqsPerPeer</code></td><td>100</td><td><code>blockFetchPipeliningMax</code></td></tr>
+<tr><td><code>maxConcurrencyBulkSync</code></td><td>1 peer</td><td><code>bfcMaxConcurrencyBulkSync</code></td></tr>
+<tr><td><code>maxConcurrencyDeadline</code></td><td>1 peer</td><td><code>bfcMaxConcurrencyDeadline</code></td></tr>
+<tr><td>Decision loop interval (Praos)</td><td>10 ms</td><td><code>bfcDecisionLoopIntervalPraos</code></td></tr>
+<tr><td>Decision loop interval (Genesis)</td><td>40 ms</td><td><code>bfcDecisionLoopIntervalGenesis</code></td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs:defaultBlockFetchConfiguration</code></p>
+<h3 id="ingress-queue-limit-1"><a class="header" href="#ingress-queue-limit-1">Ingress Queue Limit</a></h3>
+<p><code>max(10 × 2 097 154, 100 × 90 112) × 1.1</code> ≈ 22 MB.</p>
+<hr />
+<h2 id="n2n-protocol-4-txsubmission2"><a class="header" href="#n2n-protocol-4-txsubmission2">N2N Protocol 4: TxSubmission2</a></h2>
+<h3 id="identity-3"><a class="header" href="#identity-3">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 4</li>
+<li><strong>Temperature:</strong> Hot</li>
+<li><strong>Direction:</strong> <strong>Inverted agency</strong> — the server (inbound/receiver) has agency
+first. The server <em>requests</em> transactions; the client <em>replies</em> with them.
+This is the opposite of most protocols.</li>
+<li><strong>Versions:</strong> All N2N versions. V2 logic (multi-peer decision loop) is
+enabled server-side when <code>TxSubmissionLogicV2</code> is configured; V1 is the
+current default in cardano-node.</li>
+</ul>
+<h3 id="state-machine-3"><a class="header" href="#state-machine-3">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/TxSubmission2/Type.hs</code></p>
+<pre><code>StInit  (ClientAgency)   -- client must send MsgInit before anything else
+    │
+    │ MsgInit
+    ▼
+StIdle  (ServerAgency)   -- server has agency; requests txids or terminates
+    │
+    ├─── MsgRequestTxIds(blocking=true)    ──→ StTxIds(StBlocking)
+    ├─── MsgRequestTxIds(blocking=false)   ──→ StTxIds(StNonBlocking)
+    ├─── MsgRequestTxs                     ──→ StTxs
+    └─── MsgDone                           ──→ StDone
+
+StTxIds(StBlocking)   (ClientAgency)   -- client MUST reply, no timeout
+    │
+    └─── MsgReplyTxIds(NonEmpty list)  ──→ StIdle
+         (BlockingReply: list must be non-empty)
+
+StTxIds(StNonBlocking)  (ClientAgency)  -- client must reply within shortWait
+    │
+    └─── MsgReplyTxIds(possibly empty) ──→ StIdle
+
+StTxs  (ClientAgency)  -- client must reply with requested tx bodies
+    │
+    └─── MsgReplyTxs(tx list)  ──→ StIdle
+
+StDone (NobodyAgency)
+</code></pre>
+<p><strong><code>MsgDone</code> constraint:</strong> <code>MsgDone</code> can only be sent from <code>StIdle</code> (server side).
+It is the server's prerogative to terminate, not the client's.</p>
+<h3 id="wire-format-3"><a class="header" href="#wire-format-3">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/TxSubmission2/Codec.hs:encodeTxSubmission2</code>
+and <code>cardano-diffusion/protocols/cddl/specs/tx-submission2.cddl</code></p>
+<pre><code>MsgInit           = [6]
+
+MsgRequestTxIds   = [0, blocking:bool, ack:word16, req:word16]
+                  ; blocking=true  → StTxIds(StBlocking)
+                  ; blocking=false → StTxIds(StNonBlocking)
+
+MsgReplyTxIds     = [1, [_ *[txid, size:word32] ]]
+                  ; INDEFINITE-length outer list (encodeListLenIndef)
+                  ; Each inner entry is a DEFINITE-length array(2)
+
+MsgRequestTxs     = [2, [_ *txid ]]
+                  ; INDEFINITE-length list
+
+MsgReplyTxs       = [3, [_ *tx ]]
+                  ; INDEFINITE-length list
+
+MsgDone           = [4]
+</code></pre>
+<p><strong>IMPORTANT:</strong> Both <code>MsgReplyTxIds</code>, <code>MsgRequestTxs</code>, and <code>MsgReplyTxs</code> use
+<strong>indefinite-length</strong> CBOR arrays (encoded with <code>encodeListLenIndef</code> and
+terminated with <code>encodeBreak</code>). The codec explicitly requires this. Using
+definite-length arrays is a decoding error.</p>
+<p><strong>HFC era-tag wrapping for txids and txs:</strong></p>
+<p>For the Cardano HFC instantiation, each <code>txid</code> and each <code>tx</code> is wrapped with
+the era index before being placed into the list. The wrapping is done by
+<code>encodeNS</code> in <code>ouroboros-consensus</code>:</p>
+<pre><code>; txid (GenTxId) encoding
+txid = [era_index:uint8, bstr(32)]
+     ; era_index: 0=Byron, 1=Shelley, 2=Allegra, 3=Mary, 4=Alonzo,
+     ;            5=Babbage, 6=Conway, 7=Dijkstra
+     ; payload:   32 raw bytes = Blake2b-256 hash of tx body (no CBOR tag)
+
+; tx (GenTx) encoding
+tx = [era_index:uint8, tag(24)(bstr(cbor_of_tx))]
+   ; The transaction CBOR bytes are wrapped in CBOR tag 24 (embedded CBOR)
+</code></pre>
+<p>Example for Conway (era_index=6):</p>
+<pre><code>txid = [6, bstr(32_bytes_of_txhash)]
+tx   = [6, #6.24(bstr(cbor_bytes_of_transaction))]
+</code></pre>
+<p>Source: <code>ouroboros-consensus/ouroboros-consensus-diffusion/src/.../Consensus/Network/NodeToNode.hs</code>
+and <code>ouroboros-consensus/src/.../HardFork/Combinator/Serialisation/Common.hs:encodeNS</code></p>
+<h3 id="msgreplytxids--size-reporting"><a class="header" href="#msgreplytxids--size-reporting">MsgReplyTxIds — Size Reporting</a></h3>
+<p>Each entry in <code>MsgReplyTxIds</code> carries a <code>SizeInBytes</code> (<code>word32</code>) alongside the
+txid. This size <strong>must</strong> include the full HFC envelope overhead that the tx will
+have in <code>MsgReplyTxs</code>. For Conway: 3 bytes overhead (1 byte array-of-2 header,
+1 byte era_index word8, CBOR tag 24 header). Mismatches beyond the tolerance
+threshold (<code>const_MAX_TX_SIZE_DISCREPANCY = 10 bytes</code> in V2 inbound) terminate
+the connection.</p>
+<h3 id="blocking-vs-non-blocking-rules"><a class="header" href="#blocking-vs-non-blocking-rules">Blocking vs Non-Blocking Rules</a></h3>
+<p>In <strong>blocking mode</strong> (<code>MsgRequestTxIds(blocking=true)</code>):</p>
+<ul>
+<li><code>req_count</code> must be &gt;= 1</li>
+<li><code>MsgReplyTxIds</code> reply must contain a non-empty list (<code>BlockingReply</code>)</li>
+<li>No timeout: the client MAY block indefinitely in STM waiting for new mempool entries</li>
+</ul>
+<p>In <strong>non-blocking mode</strong> (<code>MsgRequestTxIds(blocking=false)</code>):</p>
+<ul>
+<li>At least one of <code>ack_count</code> or <code>req_count</code> must be non-zero</li>
+<li><code>MsgReplyTxIds</code> reply may be empty (<code>NonBlockingReply []</code>)</li>
+<li>Timeout: <code>shortWait</code> (10 seconds)</li>
+</ul>
+<p><strong>Acknowledgment semantics:</strong> <code>ack_count</code> tells the client how many previously
+announced txids can now be removed from the outbound window. The client
+maintains a FIFO of <code>unacknowledgedTxIds</code>. When the server sends
+<code>MsgRequestTxIds(ack=N, req=M)</code>, the client drops the first <code>N</code> entries from
+the FIFO and adds up to <code>M</code> new txids from the mempool.</p>
+<h3 id="timing-2"><a class="header" href="#timing-2">Timing</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/TxSubmission2/Codec.hs:timeLimitsTxSubmission2</code></p>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Timeout</th></tr></thead><tbody>
+<tr><td><code>StInit</code></td><td>waitForever</td></tr>
+<tr><td><code>StIdle</code></td><td>waitForever</td></tr>
+<tr><td><code>StTxIds(StBlocking)</code></td><td>waitForever</td></tr>
+<tr><td><code>StTxIds(StNonBlocking)</code></td><td>10 s (shortWait)</td></tr>
+<tr><td><code>StTxs</code></td><td>10 s (shortWait)</td></tr>
+</tbody></table>
+</div>
+<h3 id="v1-server-constants-current-default"><a class="header" href="#v1-server-constants-current-default">V1 Server Constants (current default)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>maxTxIdsToRequest</code></td><td>3</td></tr>
+<tr><td><code>maxTxToRequest</code></td><td>2</td></tr>
+<tr><td><code>maxUnacknowledgedTxIds</code></td><td>100</td></tr>
+<tr><td><code>txSubmissionInitDelay</code></td><td>60 s</td></tr>
+</tbody></table>
+</div>
+<p>The 60-second init delay is applied via <code>threadDelay</code> before the V1 server makes
+its first <code>MsgRequestTxIds</code>. This intentionally avoids requesting transactions
+during initial chain sync.</p>
+<h3 id="v2-server-constants-experimental"><a class="header" href="#v2-server-constants-experimental">V2 Server Constants (experimental)</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>maxNumTxIdsToRequest</code></td><td>12</td></tr>
+<tr><td><code>maxUnacknowledgedTxIds</code></td><td>100</td></tr>
+<tr><td><code>txsSizeInflightPerPeer</code></td><td>6 × 65540 bytes</td></tr>
+<tr><td><code>txInflightMultiplicity</code></td><td>2</td></tr>
+<tr><td>Decision loop delay</td><td>5 ms</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>ouroboros-network/ouroboros-network/lib/Ouroboros/Network/TxSubmission/Inbound/V2/</code></p>
+<h3 id="msginit-requirement"><a class="header" href="#msginit-requirement">MsgInit Requirement</a></h3>
+<p><code>MsgInit</code> (tag=6, one-element array <code>[6]</code>) must be the <strong>very first message</strong>
+sent by the client (outbound side) after the mux connection is established for
+the TxSubmission2 protocol. The server waits for <code>MsgInit</code> in <code>StInit</code> before
+transitioning to <code>StIdle</code>. Sending any other message first is a protocol error.</p>
+<h3 id="ingress-queue-limit-2"><a class="header" href="#ingress-queue-limit-2">Ingress Queue Limit</a></h3>
+<p><code>maxUnacknowledgedTxIds × (44 + 65536) × 1.1</code></p>
+<p>With <code>maxUnacknowledgedTxIds=100</code>: approximately 6 666 400 bytes.</p>
+<hr />
+<h2 id="n2n-protocol-8-keepalive"><a class="header" href="#n2n-protocol-8-keepalive">N2N Protocol 8: KeepAlive</a></h2>
+<h3 id="identity-4"><a class="header" href="#identity-4">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 8</li>
+<li><strong>Temperature:</strong> Established (started on cold→warm, runs for entire connection lifetime)</li>
+<li><strong>Purpose:</strong> Detects connection failure and measures round-trip time for
+GSV (Good-Spread-Variable) calculations used in BlockFetch prioritization.</li>
+</ul>
+<h3 id="state-machine-4"><a class="header" href="#state-machine-4">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/KeepAlive/Type.hs</code></p>
+<pre><code>StClient  (ClientAgency)  -- client sends keep-alive request
+    │
+    ├─── MsgKeepAlive(cookie)  ──→ StServer
+    └─── MsgDone               ──→ StDone
+
+StServer  (ServerAgency)  -- server must respond with same cookie
+    │
+    └─── MsgKeepAliveResponse(cookie)  ──→ StClient
+
+StDone (NobodyAgency)
+</code></pre>
+<h3 id="wire-format-4"><a class="header" href="#wire-format-4">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/KeepAlive/Codec.hs:codecKeepAlive_v2</code></p>
+<pre><code>MsgKeepAlive         = [0, cookie:word16]
+MsgKeepAliveResponse = [1, cookie:word16]
+MsgDone              = [2]
+</code></pre>
+<p><strong>Cookie matching:</strong> The server must echo back the exact <code>cookie</code> value sent by
+the client. A mismatch raises <code>KeepAliveCookieMissmatch</code> (note: the Haskell
+source has the typo "Missmatch" with double-s), which terminates the connection.</p>
+<h3 id="timing-3"><a class="header" href="#timing-3">Timing</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/KeepAlive/Codec.hs:timeLimitsKeepAlive</code></p>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Timeout</th></tr></thead><tbody>
+<tr><td><code>StClient</code></td><td>97 seconds</td></tr>
+<tr><td><code>StServer</code></td><td>60 seconds</td></tr>
+</tbody></table>
+</div>
+<p>The asymmetry is intentional: the client side (97 s) is how long the client
+waits before sending the next keep-alive; the server side (60 s) is how long
+the server has to respond. The comment in source notes that <code>StServer</code> timeout
+"should be 10s" (issue #2505) but is currently 60 s.</p>
+<h3 id="byte-limits-1"><a class="header" href="#byte-limits-1">Byte Limits</a></h3>
+<p>Both states: <code>smallByteLimit</code> (65535 bytes).</p>
+<h3 id="protocol-error-condition"><a class="header" href="#protocol-error-condition">Protocol Error Condition</a></h3>
+<p><code>KeepAliveCookieMissmatch oldCookie receivedCookie</code> — thrown when
+<code>MsgKeepAliveResponse</code> cookie does not match the outstanding request cookie.
+This terminates the connection.</p>
+<hr />
+<h2 id="n2n-protocol-10-peersharing"><a class="header" href="#n2n-protocol-10-peersharing">N2N Protocol 10: PeerSharing</a></h2>
+<h3 id="identity-5"><a class="header" href="#identity-5">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 10</li>
+<li><strong>Temperature:</strong> Established (started on cold→warm)</li>
+<li><strong>Purpose:</strong> Exchange of peer addresses to assist in peer discovery. Only
+active when both sides negotiated <code>peerSharing=1</code> in Handshake.</li>
+</ul>
+<h3 id="state-machine-5"><a class="header" href="#state-machine-5">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/PeerSharing/Type.hs</code></p>
+<pre><code>StIdle  (ClientAgency)  -- client requests peer addresses or terminates
+    │
+    ├─── MsgShareRequest(amount)  ──→ StBusy
+    └─── MsgDone                  ──→ StDone
+
+StBusy  (ServerAgency)  -- server must reply with peer list
+    │
+    └─── MsgSharePeers(addrs)  ──→ StIdle
+
+StDone (NobodyAgency)
+</code></pre>
+<h3 id="wire-format-5"><a class="header" href="#wire-format-5">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/cardano-diffusion/protocols/lib/Cardano/Network/Protocol/PeerSharing/Codec.hs</code>
+and <code>cardano-diffusion/protocols/cddl/specs/peer-sharing-v14.cddl</code></p>
+<pre><code>MsgShareRequest = [0, amount:word8]
+MsgSharePeers   = [1, [* peerAddress]]
+MsgDone         = [2]
+
+; Peer address encoding (SockAddr)
+peerAddress = [0, ipv4:word32, port:word16]
+            ; IPv4: single u32 in network byte order, then port as word16
+            / [1, word32, word32, word32, word32, port:word16]
+            ; IPv6: four u32s (network byte order), then port as word16
+</code></pre>
+<p><strong>Protocol error condition:</strong> If the server replies with more addresses than
+<code>amount</code> requested, it is a protocol error. The client must request no more
+than 255 peers (<code>word8</code> max).</p>
+<h3 id="timing-4"><a class="header" href="#timing-4">Timing</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>State</th><th>Timeout</th></tr></thead><tbody>
+<tr><td><code>StIdle</code></td><td>waitForever</td></tr>
+<tr><td><code>StBusy</code></td><td>60 s (longWait)</td></tr>
+</tbody></table>
+</div>
+<h3 id="server-address-selection-policy"><a class="header" href="#server-address-selection-policy">Server Address Selection Policy</a></h3>
+<p>The server only shares addresses for peers that satisfy all of:</p>
+<ul>
+<li><code>knownPeerAdvertise = DoAdvertisePeer</code></li>
+<li><code>knownSuccessfulConnection = True</code></li>
+<li><code>knownPeerFailCount = 0</code></li>
+</ul>
+<p>Addresses are randomized using a hash with a salt that rotates every 823
+seconds to prevent fingerprinting.</p>
+<p>Source: <code>ouroboros-network/ouroboros-network/api/lib/Ouroboros/Network/PeerSelection/PeerSharing/Codec.hs</code>
+and <code>ouroboros-network/ouroboros-network/lib/Ouroboros/Network/PeerSharing.hs</code></p>
+<h3 id="key-policy-constants"><a class="header" href="#key-policy-constants">Key Policy Constants</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Constant</th><th>Value</th></tr></thead><tbody>
+<tr><td><code>policyMaxInProgressPeerShareReqs</code></td><td>2</td></tr>
+<tr><td><code>policyPeerShareRetryTime</code></td><td>900 s</td></tr>
+<tr><td><code>policyPeerShareBatchWaitTime</code></td><td>3 s</td></tr>
+<tr><td><code>policyPeerShareOverallTimeout</code></td><td>10 s</td></tr>
+<tr><td><code>policyPeerShareActivationDelay</code></td><td>300 s</td></tr>
+<tr><td><code>ps_POLICY_PEER_SHARE_STICKY_TIME</code></td><td>823 s (salt rotation)</td></tr>
+<tr><td><code>ps_POLICY_PEER_SHARE_MAX_PEERS</code></td><td>10</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>ouroboros-network/ouroboros-network/lib/Ouroboros/Network/Diffusion/Policies.hs</code></p>
+<hr />
+<h2 id="n2c-protocol-0-handshake-node-to-client"><a class="header" href="#n2c-protocol-0-handshake-node-to-client">N2C Protocol 0: Handshake (Node-to-Client)</a></h2>
+<h3 id="identity-6"><a class="header" href="#identity-6">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 0 (same as N2N, runs on raw socket before mux)</li>
+<li><strong>Direction:</strong> Same as N2N: client proposes, server accepts or refuses</li>
+<li><strong>Versions:</strong> V16 (=32784) through V23 (=32791)</li>
+</ul>
+<h3 id="wire-format-6"><a class="header" href="#wire-format-6">Wire Format</a></h3>
+<p>Source: CDDL: <code>cardano-diffusion/protocols/cddl/specs/handshake-node-to-client.cddl</code>
+Codec: same <code>codecHandshake</code> function as N2N, parameterized on version number type.</p>
+<pre><code>; Messages are identical in structure to N2N handshake
+MsgProposeVersions = [0, versionTable]
+MsgAcceptVersion   = [1, versionNumber, nodeToClientVersionData]
+MsgRefuse          = [2, refuseReason]
+MsgQueryReply      = [3, versionTable]
+
+; N2C version numbers have bit 15 set to distinguish from N2N
+; V16=32784, V17=32785, V18=32786, V19=32787,
+; V20=32788, V21=32789, V22=32790, V23=32791
+versionNumber = 32784 / 32785 / 32786 / 32787 / 32788 / 32789 / 32790 / 32791
+
+; Encoding: versionNumber_wire = logical_version | 0x8000
+; Decoding: logical_version = wire_value &amp; 0x7FFF (after verifying bit 15 is set)
+
+; Version data (V16+): 2-element array
+nodeToClientVersionData = [networkMagic:uint, query:bool]
+</code></pre>
+<p>The <code>versionTable</code> in <code>MsgProposeVersions</code> is a <strong>definite-length CBOR map</strong>
+with entries sorted in <strong>ascending key order</strong>.</p>
+<h3 id="version-features"><a class="header" href="#version-features">Version Features</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>N2C Version</th><th>Wire Value</th><th>What Changed</th></tr></thead><tbody>
+<tr><td>V16</td><td>32784</td><td>Conway era; ImmutableTip acquire; GetStakeDelegDeposits</td></tr>
+<tr><td>V17</td><td>32785</td><td>GetProposals, GetRatifyState</td></tr>
+<tr><td>V18</td><td>32786</td><td>GetFuturePParams</td></tr>
+<tr><td>V19</td><td>32787</td><td>GetBigLedgerPeerSnapshot</td></tr>
+<tr><td>V20</td><td>32788</td><td>QueryStakePoolDefaultVote; MsgGetMeasures in LocalTxMonitor</td></tr>
+<tr><td>V21</td><td>32789</td><td>New ProtVer codec for Shelley-Babbage; GetPoolDistr2, GetStakeDistribution2, GetMaxMajorProtVersion</td></tr>
+<tr><td>V22</td><td>32790</td><td>SRV records in GetBigLedgerPeerSnapshot</td></tr>
+<tr><td>V23</td><td>32791</td><td>GetDRepDelegations; LedgerPeerSnapshot includes block hash + NetworkMagic</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>cardano-diffusion/api/lib/Cardano/Network/NodeToClient/Version.hs</code></p>
+<h3 id="version-negotiation"><a class="header" href="#version-negotiation">Version Negotiation</a></h3>
+<p>Same rules as N2N:</p>
+<ul>
+<li>Highest common version wins.</li>
+<li><code>networkMagic</code> must match.</li>
+<li><code>query = local || remote</code> (logical OR).</li>
+<li>No <code>initiatorOnlyDiffusionMode</code> or <code>peerSharing</code> fields in N2C version data.</li>
+</ul>
+<hr />
+<h2 id="n2c-protocol-5-localchainsync"><a class="header" href="#n2c-protocol-5-localchainsync">N2C Protocol 5: LocalChainSync</a></h2>
+<h3 id="identity-7"><a class="header" href="#identity-7">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 5</li>
+<li><strong>Direction:</strong> N2C clients receive <strong>full serialized blocks</strong> (not just
+headers). This is the key difference from N2N ChainSync.</li>
+<li><strong>Versions:</strong> All N2C versions</li>
+</ul>
+<h3 id="state-machine-6"><a class="header" href="#state-machine-6">State Machine</a></h3>
+<p>Identical state machine to N2N ChainSync (same Type.hs). See that section for
+the complete state machine diagram.</p>
+<h3 id="wire-format-7"><a class="header" href="#wire-format-7">Wire Format</a></h3>
+<p>Messages tags are identical to N2N ChainSync (0–7). The key difference is the
+content of <code>MsgRollForward</code>.</p>
+<p><strong>N2C <code>MsgRollForward</code> block encoding:</strong></p>
+<pre><code>; N2C LocalChainSync block payload in MsgRollForward
+block = [era_id:uint, tag(24)(bstr(cbor_of_full_block))]
+</code></pre>
+<p>The entire block (header + body) is CBOR-encoded, wrapped in CBOR <code>tag(24)</code>
+(embedded CBOR), and then paired with the era index in a 2-element array.</p>
+<p>Era indices: same as TxSubmission2 (0=Byron through 7=Dijkstra).</p>
+<p>This matches the same HFC wrapping used by BlockFetch <code>MsgBlock</code> in N2N.</p>
+<h3 id="differences-from-n2n-chainsync"><a class="header" href="#differences-from-n2n-chainsync">Differences from N2N ChainSync</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Aspect</th><th>N2N ChainSync</th><th>N2C LocalChainSync</th></tr></thead><tbody>
+<tr><td>Payload type</td><td>Block headers only</td><td>Full blocks</td></tr>
+<tr><td>Purpose</td><td>Chain selection</td><td>Wallet / tool consumption</td></tr>
+<tr><td>Pipelining</td><td>Yes (pipelineDecisionLowHighMark)</td><td>Typically none</td></tr>
+<tr><td>Source of blocks</td><td>Server → client</td><td>Server → client</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/Codec.hs</code> (same codec)</p>
+<hr />
+<h2 id="n2c-protocol-6-localtxsubmission"><a class="header" href="#n2c-protocol-6-localtxsubmission">N2C Protocol 6: LocalTxSubmission</a></h2>
+<h3 id="identity-8"><a class="header" href="#identity-8">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 6</li>
+<li><strong>Direction:</strong> Client submits a single transaction; server accepts or rejects.</li>
+<li><strong>No HFC era-tag wrapping:</strong> Unlike N2N TxSubmission2, N2C LocalTxSubmission
+sends raw transaction CBOR without any HFC era-index prefix.</li>
+<li><strong>Versions:</strong> All N2C versions</li>
+</ul>
+<h3 id="state-machine-7"><a class="header" href="#state-machine-7">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxSubmission/Type.hs</code></p>
+<pre><code>StIdle  (ClientAgency)  -- client submits a transaction or terminates
+    │
+    ├─── MsgSubmitTx(tx)  ──→ StBusy
+    └─── MsgDone          ──→ StDone
+
+StBusy  (ServerAgency)  -- server validates and responds
+    │
+    ├─── MsgAcceptTx   ──→ StIdle
+    └─── MsgRejectTx   ──→ StIdle
+
+StDone (NobodyAgency)
+</code></pre>
+<p><strong>Blocking semantics:</strong> After sending <code>MsgSubmitTx</code>, the client <strong>must</strong> wait
+for <code>MsgAcceptTx</code> or <code>MsgRejectTx</code> before sending another transaction. This
+protocol processes one transaction at a time. This is intentional: N2C is
+only used by local trusted clients (wallets, CLI), so throughput is not a
+concern.</p>
+<h3 id="wire-format-8"><a class="header" href="#wire-format-8">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxSubmission/Codec.hs:encodeLocalTxSubmission</code>
+and <code>cardano-diffusion/protocols/cddl/specs/local-tx-submission.cddl</code></p>
+<pre><code>MsgSubmitTx = [0, tx]
+MsgAcceptTx = [1]
+MsgRejectTx = [2, rejectReason]
+MsgDone     = [3]
+</code></pre>
+<p><strong>Transaction encoding (<code>tx</code>):</strong> Raw transaction CBOR, exactly as produced
+by <code>toCBOR</code> on the ledger's <code>Tx</code> type. No HFC wrapper, no era tag, no
+<code>tag(24)</code>. The server determines the era from the ledger state.</p>
+<p><strong>Rejection reason (<code>rejectReason</code>):</strong> The full <code>ApplyTxError</code> encoded via
+the ledger's <code>EncCBOR</code> instance. For Conway, this is a nested structure of
+<code>ConwayLedgerPredFailure</code> variants. The exact encoding is era-specific and
+defined in <code>cardano-ledger</code>.</p>
+<p>Source: <code>cardano-ledger/eras/conway/impl/src/Cardano/Ledger/Conway/Rules/</code></p>
+<hr />
+<h2 id="n2c-protocol-7-localstatequery"><a class="header" href="#n2c-protocol-7-localstatequery">N2C Protocol 7: LocalStateQuery</a></h2>
+<h3 id="identity-9"><a class="header" href="#identity-9">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 7</li>
+<li><strong>Direction:</strong> Client acquires a ledger state snapshot and submits queries;
+server responds with query results.</li>
+<li><strong>Versions:</strong> All N2C versions. Some queries require specific minimum versions
+(see Shelley query tag table).</li>
+</ul>
+<h3 id="state-machine-8"><a class="header" href="#state-machine-8">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalStateQuery/Type.hs</code></p>
+<pre><code>StIdle      (ClientAgency)   -- client acquires a state or terminates
+    │
+    ├─── MsgAcquire(target)  ──→ StAcquiring
+    └─── MsgDone             ──→ StDone
+
+StAcquiring  (ServerAgency)  -- server acquiring the requested state
+    │
+    ├─── MsgAcquired         ──→ StAcquired
+    └─── MsgFailure(reason)  ──→ StIdle
+
+StAcquired   (ClientAgency)  -- client can query or release
+    │
+    ├─── MsgQuery(query)     ──→ StQuerying
+    ├─── MsgRelease          ──→ StIdle
+    └─── MsgReAcquire(target)──→ StAcquiring
+
+StQuerying   (ServerAgency)  -- server computing query result
+    │
+    └─── MsgResult(result)   ──→ StAcquired
+
+StDone (NobodyAgency)
+</code></pre>
+<p><strong>Re-acquire:</strong> <code>MsgReAcquire</code> transitions from <code>StAcquired</code> directly back to
+<code>StAcquiring</code>, allowing the client to acquire a new state without going through
+<code>StIdle</code>. This avoids a round trip.</p>
+<h3 id="acquire-targets"><a class="header" href="#acquire-targets">Acquire Targets</a></h3>
+<p>Three targets exist for <code>MsgAcquire</code> and <code>MsgReAcquire</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Target</th><th>CBOR</th><th>Semantics</th><th>Min Version</th></tr></thead><tbody>
+<tr><td><code>SpecificPoint</code></td><td><code>[0, point]</code></td><td>Acquire the state at a specific slot/hash point</td><td>V8+ (any)</td></tr>
+<tr><td><code>VolatileTip</code></td><td><code>[8]</code></td><td>Acquire the current tip of the volatile chain</td><td>V8+</td></tr>
+<tr><td><code>ImmutableTip</code></td><td><code>[10]</code></td><td>Acquire the tip of the immutable chain</td><td>N2C V16+</td></tr>
+</tbody></table>
+</div>
+<p>For <code>MsgReAcquire</code>: tags are shifted by 3 → <code>SpecificPoint=[6, point]</code>,
+<code>VolatileTip=[9]</code>, <code>ImmutableTip=[11]</code> (V16+).</p>
+<p><code>VolatileTip</code> and <code>ImmutableTip</code> cannot fail (they always succeed with
+<code>MsgAcquired</code>). <code>SpecificPoint</code> can fail if the point is not in the volatile
+chain window (yields <code>MsgFailure</code>).</p>
+<h3 id="acquire-failure-codes"><a class="header" href="#acquire-failure-codes">Acquire Failure Codes</a></h3>
+<pre><code>AcquireFailurePointTooOld     = 0
+AcquireFailurePointNotOnChain = 1
+</code></pre>
+<h3 id="wire-format-9"><a class="header" href="#wire-format-9">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalStateQuery/Codec.hs:codecLocalStateQuery</code>
+and <code>cardano-diffusion/protocols/cddl/specs/local-state-query.cddl</code></p>
+<pre><code>; Acquire / Re-acquire
+MsgAcquire(SpecificPoint pt)  = [0, point]
+MsgAcquire(VolatileTip)       = [8]
+MsgAcquire(ImmutableTip)      = [10]    ; V16+ only
+
+MsgAcquired                   = [1]
+
+MsgFailure(reason)            = [2, failure_code:uint]
+                              ; 0=PointTooOld, 1=PointNotOnChain
+
+MsgQuery(query)               = [3, query_encoding]
+MsgResult(result)             = [4, result_encoding]
+MsgRelease                    = [5]
+
+MsgReAcquire(SpecificPoint pt)= [6, point]
+MsgReAcquire(VolatileTip)     = [9]
+MsgReAcquire(ImmutableTip)    = [11]    ; V16+ only
+
+MsgDone                       = [7]
+</code></pre>
+<h3 id="query-encoding-three-level-hfc-wrapping"><a class="header" href="#query-encoding-three-level-hfc-wrapping">Query Encoding (Three-Level HFC Wrapping)</a></h3>
+<p>Queries are wrapped in three layers. The outermost layer is the consensus-level
+<code>Query</code> type (in <code>Ouroboros.Consensus.Ledger.Query</code>):</p>
+<pre><code>; Outermost consensus layer
+query = [2, tag=0, wrapped_block_query]   ; BlockQuery — delegates to HFC
+      / [1, tag=1]                         ; GetSystemStart
+      / [1, tag=2]                         ; GetChainBlockNo (V16+ / QueryVersion2)
+      / [1, tag=3]                         ; GetChainPoint  (V16+ / QueryVersion2)
+      / [1, tag=4]                         ; DebugLedgerConfig (V20+ / QueryVersion3)
+</code></pre>
+<p>For <code>BlockQuery</code> (tag=0), the next layer is the HFC query:</p>
+<pre><code>; HFC (Hard Fork Combinator) layer
+hfc_query = [2, tag=0, era_query]   ; QueryIfCurrent — query current era
+          / [3, tag=1, era_query, era_index]   ; QueryAnytime
+          / [2, tag=2, hf_specific]            ; QueryHardFork
+</code></pre>
+<p>For <code>QueryIfCurrent</code>, the era index is determined by dispatch; there is no
+explicit era tag in the message. The <code>era_query</code> is the era-level query:</p>
+<pre><code>; Era-level query (Shelley BlockQuery tags)
+; These are 1-element or 2-element arrays with a numeric tag
+era_query = [1, tag=0]    ; GetLedgerTip
+          / [1, tag=1]    ; GetEpochNo
+          / [2, tag=2, ..] ; GetNonMyopicMemberRewards
+          / [1, tag=3]    ; GetCurrentPParams
+          ; ... (see full table below)
+</code></pre>
+<h3 id="shelley-blockquery-tag-table"><a class="header" href="#shelley-blockquery-tag-table">Shelley BlockQuery Tag Table</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Tag</th><th>Query Name</th><th>Min N2C Version</th></tr></thead><tbody>
+<tr><td>0</td><td>GetLedgerTip</td><td>V8</td></tr>
+<tr><td>1</td><td>GetEpochNo</td><td>V8</td></tr>
+<tr><td>2</td><td>GetNonMyopicMemberRewards</td><td>V8</td></tr>
+<tr><td>3</td><td>GetCurrentPParams</td><td>V8</td></tr>
+<tr><td>4</td><td>GetProposedPParamsUpdates</td><td>V8</td></tr>
+<tr><td>5</td><td>GetStakeDistribution</td><td>V8 (removed in V21)</td></tr>
+<tr><td>6</td><td>GetUTxOByAddress</td><td>V8</td></tr>
+<tr><td>7</td><td>GetUTxOWhole</td><td>V8</td></tr>
+<tr><td>8</td><td>DebugEpochState</td><td>V8</td></tr>
+<tr><td>9</td><td>GetCBOR (wraps inner query in tag(24))</td><td>V8</td></tr>
+<tr><td>10</td><td>GetFilteredDelegationsAndRewardAccounts</td><td>V8</td></tr>
+<tr><td>11</td><td>GetGenesisConfig</td><td>V8</td></tr>
+<tr><td>12</td><td>DebugNewEpochState</td><td>V8</td></tr>
+<tr><td>13</td><td>DebugChainDepState</td><td>V8</td></tr>
+<tr><td>14</td><td>GetRewardProvenance</td><td>V9</td></tr>
+<tr><td>15</td><td>GetUTxOByTxIn</td><td>V10</td></tr>
+<tr><td>16</td><td>GetStakePools</td><td>V11</td></tr>
+<tr><td>17</td><td>GetStakePoolParams</td><td>V11</td></tr>
+<tr><td>18</td><td>GetRewardInfoPools</td><td>V11</td></tr>
+<tr><td>19</td><td>GetPoolState</td><td>V11</td></tr>
+<tr><td>20</td><td>GetStakeSnapshots</td><td>V11</td></tr>
+<tr><td>21</td><td>GetPoolDistr</td><td>V11 (removed in V21)</td></tr>
+<tr><td>22</td><td>GetStakeDelegDeposits</td><td>V16</td></tr>
+<tr><td>23</td><td>GetConstitution</td><td>V16</td></tr>
+<tr><td>24</td><td>GetGovState</td><td>V16</td></tr>
+<tr><td>25</td><td>GetDRepState</td><td>V16</td></tr>
+<tr><td>26</td><td>GetDRepStakeDistr</td><td>V16</td></tr>
+<tr><td>27</td><td>GetCommitteeMembersState</td><td>V16</td></tr>
+<tr><td>28</td><td>GetFilteredVoteDelegatees</td><td>V16</td></tr>
+<tr><td>29</td><td>GetAccountState</td><td>V16</td></tr>
+<tr><td>30</td><td>GetSPOStakeDistr</td><td>V16</td></tr>
+<tr><td>31</td><td>GetProposals</td><td>V17</td></tr>
+<tr><td>32</td><td>GetRatifyState</td><td>V17</td></tr>
+<tr><td>33</td><td>GetFuturePParams</td><td>V18</td></tr>
+<tr><td>34</td><td>GetLedgerPeerSnapshot</td><td>V19</td></tr>
+<tr><td>35</td><td>QueryStakePoolDefaultVote</td><td>V20</td></tr>
+<tr><td>36</td><td>GetPoolDistr2</td><td>V21</td></tr>
+<tr><td>37</td><td>GetStakeDistribution2</td><td>V21</td></tr>
+<tr><td>38</td><td>GetMaxMajorProtVersion</td><td>V21</td></tr>
+<tr><td>39</td><td>GetDRepDelegations</td><td>V23</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>cardano-diffusion/api/lib/Cardano/Network/NodeToClient/Version.hs</code> and
+<code>ouroboros-consensus/ouroboros-consensus-cardano/src/unstable-cardano-tools/Cardano/Tools/DBAnalyser/Block/Cardano.hs</code></p>
+<h3 id="msgresult-wrapping"><a class="header" href="#msgresult-wrapping">MsgResult Wrapping</a></h3>
+<p>For <code>QueryIfCurrent</code> queries, the result is wrapped in an <code>EitherMismatch</code>
+type to indicate whether the query was applied to the correct era:</p>
+<pre><code>; QueryIfCurrent result encoding
+result = [result_value]          ; Success: definite-length array(1) wrapping the value
+       / [era_mismatch_info]     ; Era mismatch: see EraEraMismatch encoding
+</code></pre>
+<p>A successful <code>QueryIfCurrent</code> result is wrapped in a <strong>1-element definite-length
+array</strong>. This is easy to miss and causes decoding failures if omitted.</p>
+<p><code>QueryAnytime</code> and <code>QueryHardFork</code> results are <strong>not</strong> wrapped in this extra
+array.</p>
+<hr />
+<h2 id="n2c-protocol-9-localtxmonitor"><a class="header" href="#n2c-protocol-9-localtxmonitor">N2C Protocol 9: LocalTxMonitor</a></h2>
+<h3 id="identity-10"><a class="header" href="#identity-10">Identity</a></h3>
+<ul>
+<li><strong>Protocol ID:</strong> 9</li>
+<li><strong>Direction:</strong> Client monitors the node's mempool contents.</li>
+<li><strong>Versions:</strong> All N2C versions. <code>MsgGetMeasures</code>/<code>MsgReplyGetMeasures</code>
+require N2C V20+.</li>
+</ul>
+<h3 id="state-machine-9"><a class="header" href="#state-machine-9">State Machine</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxMonitor/Type.hs</code></p>
+<pre><code>StIdle      (ClientAgency)   -- client can acquire a snapshot or terminate
+    │
+    ├─── MsgAcquire  ──→ StAcquiring
+    └─── MsgDone     ──→ StDone
+
+StAcquiring  (ServerAgency)  -- server captures mempool snapshot
+    │
+    └─── MsgAcquired(slotNo)  ──→ StAcquired
+
+StAcquired   (ClientAgency)  -- client queries snapshot or releases
+    │
+    ├─── MsgNextTx          ──→ StBusy(NextTx)
+    ├─── MsgHasTx(txid)     ──→ StBusy(HasTx)
+    ├─── MsgGetSizes        ──→ StBusy(GetSizes)
+    ├─── MsgGetMeasures     ──→ StBusy(GetMeasures)   ; V20+ only
+    ├─── MsgAwaitAcquire    ──→ StAcquiring           ; refresh snapshot
+    └─── MsgRelease         ──→ StIdle
+
+StBusy(NextTx)      (ServerAgency)
+    └─── MsgReplyNextTx(maybe tx)  ──→ StAcquired
+
+StBusy(HasTx)       (ServerAgency)
+    └─── MsgReplyHasTx(bool)       ──→ StAcquired
+
+StBusy(GetSizes)    (ServerAgency)
+    └─── MsgReplyGetSizes(sizes)   ──→ StAcquired
+
+StBusy(GetMeasures) (ServerAgency)   ; V20+
+    └─── MsgReplyGetMeasures(m)    ──→ StAcquired
+
+StDone (NobodyAgency)
+</code></pre>
+<p><strong>Snapshot semantics:</strong> After <code>MsgAcquired</code>, the client holds a fixed snapshot
+of the mempool as of the <code>slotNo</code> returned. The snapshot does not change even
+if new transactions arrive or are removed. <code>MsgAwaitAcquire</code> refreshes the
+snapshot without going through <code>StIdle</code>.</p>
+<h3 id="wire-format-10"><a class="header" href="#wire-format-10">Wire Format</a></h3>
+<p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxMonitor/Codec.hs</code>
+and <code>cardano-diffusion/protocols/cddl/specs/local-tx-monitor.cddl</code></p>
+<pre><code>MsgDone             = [0]
+
+MsgAcquire          = [1]          ; same tag for initial acquire from StIdle
+MsgAwaitAcquire     = [1]          ; same tag for re-acquire from StAcquired
+
+MsgAcquired         = [2, slotNo:word64]
+
+MsgRelease          = [3]
+
+MsgNextTx           = [5]          ; note: tag 4 is unused
+MsgReplyNextTx      = [6]          ; no tx: empty mempool
+                    / [6, tx]      ; with tx: next transaction in snapshot
+
+MsgHasTx            = [7, txId]
+MsgReplyHasTx       = [8, bool]
+
+MsgGetSizes         = [9]
+MsgReplyGetSizes    = [10, [capacityInBytes:word32,
+                            sizeInBytes:word32,
+                            numberOfTxs:word32]]
+
+MsgGetMeasures      = [11]         ; V20+ only
+MsgReplyGetMeasures = [12, txCount:word32, {* tstr =&gt; [integer, integer]}]
+                    ; V20+ only
+</code></pre>
+<p><strong>Tag 4 is intentionally unused.</strong> Tags jump from 3 (<code>MsgRelease</code>) to 5
+(<code>MsgNextTx</code>).</p>
+<p><strong><code>MsgReplyNextTx</code>:</strong> Uses the same tag (6) for both the no-tx and has-tx
+cases, distinguished by array length: <code>[6]</code> (len=1) means no more txs;
+<code>[6, tx]</code> (len=2) means a tx follows.</p>
+<p><strong><code>MsgAcquire</code> and <code>MsgAwaitAcquire</code></strong> use the same wire tag <code>[1]</code>. The
+protocol state (<code>StIdle</code> vs <code>StAcquired</code>) determines which message is
+being decoded. This is handled by the state token in the codec.</p>
+<p><strong>Transaction encoding:</strong> Same as LocalTxSubmission — raw CBOR with no HFC
+wrapping.</p>
+<p><strong><code>txId</code> encoding:</strong> Raw 32-byte Blake2b-256 hash as CBOR bytes primitive.</p>
+<hr />
+<h2 id="initialization-sequence"><a class="header" href="#initialization-sequence">Initialization Sequence</a></h2>
+<h3 id="n2n-connection-startup"><a class="header" href="#n2n-connection-startup">N2N Connection Startup</a></h3>
+<p>After the TCP connection is established:</p>
+<ol>
+<li>
+<p><strong>Handshake</strong> (protocol 0): Both sides send <code>MsgProposeVersions</code>
+simultaneously (simultaneous open). The one with the lower socket address
+keeps the outbound role; the other keeps the inbound. Each side processes
+the other's proposal and the higher-address side sends <code>MsgAcceptVersion</code>
+or <code>MsgRefuse</code>. The connection proceeds only if both sides determine the
+same version.</p>
+</li>
+<li>
+<p><strong>Mux starts:</strong> After successful handshake, the mux multiplexer and
+demultiplexer threads are started. Protocol threads are started based on
+peer temperature.</p>
+</li>
+<li>
+<p><strong>Cold→Warm:</strong> <code>KeepAlive</code> (8) and <code>PeerSharing</code> (10) initiator threads
+start eagerly.</p>
+</li>
+<li>
+<p><strong>Warm→Hot:</strong> <code>ChainSync</code> (2), <code>BlockFetch</code> (3), <code>TxSubmission2</code> (4)
+initiator threads start eagerly. Responder threads start on-demand (when
+first inbound bytes arrive).</p>
+</li>
+<li>
+<p><strong>TxSubmission2 MsgInit:</strong> The TxSubmission2 <strong>client</strong> (outbound side)
+must send <code>MsgInit</code> (<code>[6]</code>) as its very first message. Without this,
+the server stays in <code>StInit</code> indefinitely (waitForever timeout).</p>
+</li>
+</ol>
+<h3 id="n2c-connection-startup"><a class="header" href="#n2c-connection-startup">N2C Connection Startup</a></h3>
+<ol>
+<li>
+<p><strong>Handshake</strong> (protocol 0): Same mechanism, but using N2C version numbers
+(with bit 15 set). The local client proposes; the node accepts.</p>
+</li>
+<li>
+<p><strong>Mux starts:</strong> All N2C mini-protocols start eagerly on both sides.</p>
+</li>
+<li>
+<p><strong>No mandatory initial messages:</strong> Unlike N2N TxSubmission2, no N2C
+protocol requires a mandatory initial message before the first
+client request. The client may begin with <code>MsgAcquire</code> (LocalStateQuery),
+<code>MsgSubmitTx</code> (LocalTxSubmission), or <code>MsgAcquire</code> (LocalTxMonitor)
+immediately.</p>
+</li>
+</ol>
+<hr />
+<h2 id="hfc-era-index-table"><a class="header" href="#hfc-era-index-table">HFC Era Index Table</a></h2>
+<p>This table applies to all N2N protocols (ChainSync headers, BlockFetch blocks,
+TxSubmission2 txids/txs) and N2C LocalChainSync blocks.</p>
+<div class="table-wrapper"><table><thead><tr><th>Era Index</th><th>Era</th></tr></thead><tbody>
+<tr><td>0</td><td>Byron</td></tr>
+<tr><td>1</td><td>Shelley (TPraos)</td></tr>
+<tr><td>2</td><td>Allegra (TPraos)</td></tr>
+<tr><td>3</td><td>Mary (TPraos)</td></tr>
+<tr><td>4</td><td>Alonzo (TPraos)</td></tr>
+<tr><td>5</td><td>Babbage (Praos)</td></tr>
+<tr><td>6</td><td>Conway (Praos)</td></tr>
+<tr><td>7</td><td>Dijkstra (Praos, future)</td></tr>
+</tbody></table>
+</div>
+<p>Source: <code>ouroboros-consensus/ouroboros-consensus-cardano/src/unstable-cardano-consensus/Ouroboros/Consensus/Cardano/Block.hs</code></p>
+<hr />
+<h2 id="summary-protocol-error-triggers"><a class="header" href="#summary-protocol-error-triggers">Summary: Protocol Error Triggers</a></h2>
+<p>This table lists the most common protocol violations that terminate the
+connection.</p>
+<div class="table-wrapper"><table><thead><tr><th>Protocol</th><th>Error Condition</th><th>Trigger</th></tr></thead><tbody>
+<tr><td>Handshake</td><td><code>VersionMismatch</code></td><td>No common version in propose</td></tr>
+<tr><td>Handshake</td><td><code>Refused</code></td><td>Magic mismatch, policy rejection</td></tr>
+<tr><td>Handshake</td><td><code>HandshakeDecodeError</code></td><td>Failed to decode version params</td></tr>
+<tr><td>ChainSync</td><td>Agency violation</td><td>Client sends <code>MsgRollForward</code> (server-only message)</td></tr>
+<tr><td>ChainSync</td><td><code>ProtocolErrorRequestNonBlocking</code></td><td>Server sends <code>MsgAwaitReply</code> but <code>StNext(StMustReply)</code> was active (not <code>StCanAwait</code>)</td></tr>
+<tr><td>BlockFetch</td><td>Agency violation</td><td>Client sends <code>MsgBlock</code> (server-only message)</td></tr>
+<tr><td>TxSubmission2</td><td>Protocol error</td><td>Any message before <code>MsgInit</code> is processed</td></tr>
+<tr><td>TxSubmission2</td><td><code>BlockingReply</code> empty</td><td>Server sends <code>MsgRequestTxIds(blocking=true)</code> and client replies with empty list</td></tr>
+<tr><td>TxSubmission2</td><td>Size mismatch</td><td>Reported <code>SizeInBytes</code> deviates &gt;10 bytes from actual tx wire size (V2 inbound)</td></tr>
+<tr><td>KeepAlive</td><td><code>KeepAliveCookieMissmatch</code></td><td>Response cookie != request cookie</td></tr>
+<tr><td>PeerSharing</td><td>Protocol error</td><td>Server replies with more peers than requested</td></tr>
+<tr><td>LocalStateQuery</td><td><code>AcquireFailurePointTooOld</code></td><td><code>SpecificPoint</code> is outside the volatile window</td></tr>
+<tr><td>LocalStateQuery</td><td><code>AcquireFailurePointNotOnChain</code></td><td><code>SpecificPoint</code> not on the node's chain</td></tr>
+<tr><td>LocalStateQuery</td><td><code>ImmutableTip</code> on old version</td><td>Attempting <code>MsgAcquire(ImmutableTip)</code> before N2C V16</td></tr>
+<tr><td>Any</td><td>Byte limit exceeded</td><td>Ingress queue overflow (per-state byte limits)</td></tr>
+<tr><td>Any</td><td>Timeout exceeded</td><td>Per-state timing limits (see per-protocol tables)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="source-file-index"><a class="header" href="#source-file-index">Source File Index</a></h2>
+<p>All files are in the <code>IntersectMBO/ouroboros-network</code> repository (main branch)
+unless otherwise noted.</p>
+<div class="table-wrapper"><table><thead><tr><th>Protocol / Topic</th><th>File</th></tr></thead><tbody>
+<tr><td>N2N Handshake Type</td><td><code>ouroboros-network/framework/lib/Ouroboros/Network/Protocol/Handshake/Type.hs</code></td></tr>
+<tr><td>N2N Handshake Codec</td><td><code>ouroboros-network/framework/lib/Ouroboros/Network/Protocol/Handshake/Codec.hs</code></td></tr>
+<tr><td>N2N Handshake CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/handshake-node-to-node-v14.cddl</code></td></tr>
+<tr><td>N2C Handshake CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/handshake-node-to-client.cddl</code></td></tr>
+<tr><td>N2N Version data v14 CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/node-to-node-version-data-v14.cddl</code></td></tr>
+<tr><td>N2N Version data v16 CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/node-to-node-version-data-v16.cddl</code></td></tr>
+<tr><td>N2C Version enum</td><td><code>cardano-diffusion/api/lib/Cardano/Network/NodeToClient/Version.hs</code></td></tr>
+<tr><td>N2N Version enum</td><td><code>cardano-diffusion/api/lib/Cardano/Network/NodeToNode/Version.hs</code></td></tr>
+<tr><td>ChainSync Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/Type.hs</code></td></tr>
+<tr><td>ChainSync Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/Codec.hs</code></td></tr>
+<tr><td>ChainSync TimeLimits</td><td><code>cardano-diffusion/protocols/lib/Cardano/Network/Protocol/ChainSync/Codec/TimeLimits.hs</code></td></tr>
+<tr><td>ChainSync CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/chain-sync.cddl</code></td></tr>
+<tr><td>ChainSync Pipelining</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/PipelineDecision.hs</code></td></tr>
+<tr><td>BlockFetch Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/BlockFetch/Type.hs</code></td></tr>
+<tr><td>BlockFetch Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/BlockFetch/Codec.hs</code></td></tr>
+<tr><td>BlockFetch CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/block-fetch.cddl</code></td></tr>
+<tr><td>TxSubmission2 Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/TxSubmission2/Type.hs</code></td></tr>
+<tr><td>TxSubmission2 Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/TxSubmission2/Codec.hs</code></td></tr>
+<tr><td>TxSubmission2 CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/tx-submission2.cddl</code></td></tr>
+<tr><td>KeepAlive Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/KeepAlive/Type.hs</code></td></tr>
+<tr><td>KeepAlive Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/KeepAlive/Codec.hs</code></td></tr>
+<tr><td>KeepAlive CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/keep-alive.cddl</code></td></tr>
+<tr><td>PeerSharing Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/PeerSharing/Type.hs</code></td></tr>
+<tr><td>PeerSharing Codec (Cardano)</td><td><code>cardano-diffusion/protocols/lib/Cardano/Network/Protocol/PeerSharing/Codec.hs</code></td></tr>
+<tr><td>PeerSharing CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/peer-sharing-v14.cddl</code></td></tr>
+<tr><td>LocalStateQuery Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalStateQuery/Type.hs</code></td></tr>
+<tr><td>LocalStateQuery Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalStateQuery/Codec.hs</code></td></tr>
+<tr><td>LocalStateQuery CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/local-state-query.cddl</code></td></tr>
+<tr><td>LocalTxSubmission Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxSubmission/Type.hs</code></td></tr>
+<tr><td>LocalTxSubmission Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxSubmission/Codec.hs</code></td></tr>
+<tr><td>LocalTxSubmission CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/local-tx-submission.cddl</code></td></tr>
+<tr><td>LocalTxMonitor Type</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxMonitor/Type.hs</code></td></tr>
+<tr><td>LocalTxMonitor Codec</td><td><code>ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/LocalTxMonitor/Codec.hs</code></td></tr>
+<tr><td>LocalTxMonitor CDDL</td><td><code>cardano-diffusion/protocols/cddl/specs/local-tx-monitor.cddl</code></td></tr>
+<tr><td>Protocol Limits (byte/time constants)</td><td><code>ouroboros-network/api/lib/Ouroboros/Network/Protocol/Limits.hs</code></td></tr>
+<tr><td>Diffusion Configuration</td><td><code>cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs</code></td></tr>
+<tr><td>Mux SDU framing</td><td><code>ouroboros-network/network-mux/src/Network/Mux/Types.hs</code></td></tr>
+<tr><td>HFC era encoding (encodeNS)</td><td><code>ouroboros-consensus</code> repo: <code>src/.../HardFork/Combinator/Serialisation/Common.hs</code></td></tr>
+<tr><td>network.base.cddl</td><td><code>cardano-diffusion/protocols/cddl/specs/network.base.cddl</code></td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/protocol-parameters.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/benchmarks.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/protocol-parameters.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/benchmarks.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
