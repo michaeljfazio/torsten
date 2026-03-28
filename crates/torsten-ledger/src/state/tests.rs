@@ -36,6 +36,16 @@ fn add_stake_utxo(state: &mut LedgerState, cred: &Credential, amount: u64) {
         raw_cbor: None,
     };
     state.utxo_set.insert(input, output);
+    // Also update the incremental stake_map to mirror what block processing does.
+    // In production, stake_map is populated by rebuild_stake_distribution or
+    // incrementally during apply_block; tests that bypass block processing need
+    // this manual update.
+    let key = credential_to_hash(cred);
+    *state
+        .stake_distribution
+        .stake_map
+        .entry(key)
+        .or_insert(Lovelace(0)) += Lovelace(amount);
 }
 
 fn make_test_block(
@@ -399,7 +409,8 @@ fn test_process_stake_deregistration() {
     // Deregister
     state.process_certificate(&Certificate::StakeDeregistration(cred));
 
-    assert!(!state.stake_distribution.stake_map.contains_key(&key));
+    // stake_map preserves UTxO-based balances after deregistration
+    // (deregistration only removes reward_accounts and delegations)
     assert!(!state.delegations.contains_key(&key));
 }
 
@@ -4805,7 +4816,7 @@ fn test_stake_deregistration_rejected_with_nonzero_balance() {
 
     // Stake IS deregistered (no balance re-check during block application)
     assert!(!state.reward_accounts.contains_key(&key));
-    assert!(!state.stake_distribution.stake_map.contains_key(&key));
+    // stake_map preserves UTxO-based balances — deregistration does not remove it
 }
 
 #[test]
@@ -4826,7 +4837,7 @@ fn test_stake_deregistration_allowed_with_zero_balance() {
     state.process_certificate(&Certificate::StakeDeregistration(cred));
 
     assert!(!state.reward_accounts.contains_key(&key));
-    assert!(!state.stake_distribution.stake_map.contains_key(&key));
+    // stake_map preserves UTxO-based balances — deregistration does not remove it
 }
 
 #[test]
@@ -4856,9 +4867,11 @@ fn test_conway_stake_deregistration_with_nonzero_balance() {
         refund: Lovelace(2_000_000),
     });
 
-    // Should be removed
+    // Reward account should be removed, but stake_map entry remains
+    // (the credential may still have UTxOs — stake_map is UTxO accounting,
+    // not a registration tracker).
     assert!(!state.reward_accounts.contains_key(&key));
-    assert!(!state.stake_distribution.stake_map.contains_key(&key));
+    assert!(state.stake_distribution.stake_map.contains_key(&key));
 }
 
 #[test]

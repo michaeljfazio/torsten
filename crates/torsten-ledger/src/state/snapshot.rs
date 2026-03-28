@@ -217,7 +217,9 @@ impl LedgerState {
             state.rebuild_stake_distribution();
             state.recompute_snapshot_pool_stakes();
         }
-        // Keep needs_stake_rebuild=true so every live epoch boundary rebuilds.
+        // Trigger one full rebuild at the next epoch boundary to correct any drift
+        // from the snapshot (which may have been saved with stale incremental state).
+        // After that single rebuild, incremental tracking takes over.
         state.needs_stake_rebuild = true;
         // After loading a snapshot, the node is past genesis — RUPD should fire
         // at the next epoch boundary. Old snapshots without this field will

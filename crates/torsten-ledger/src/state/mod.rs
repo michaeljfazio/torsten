@@ -628,7 +628,7 @@ impl LedgerState {
             update_quorum: default_update_quorum(),
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
-            needs_stake_rebuild: true,
+            needs_stake_rebuild: false,
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
             diff_seq: DiffSeq::new(),

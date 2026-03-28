@@ -167,13 +167,13 @@ impl LedgerState {
         // Subsequent RUPD computations can fire (matching Haskell's nesRu = SJust).
         self.snapshots.rupd_ready = true;
 
-        // Rebuild stake distribution from the full UTxO set at epoch boundaries.
-        // During fast replay (needs_stake_rebuild=false), skip the expensive full
-        // UTxO scan. During live sync (needs_stake_rebuild=true, the default),
-        // always rebuild to ensure correctness and prevent incremental drift.
-        // Note: needs_stake_rebuild stays true once set — every live epoch boundary rebuilds.
+        // Full UTxO rebuild is only needed after Mithril import or snapshot restore
+        // (where incremental tracking was not active). During normal block processing
+        // (replay or live sync), the incremental stake_map is accurate.
         if self.needs_stake_rebuild {
             self.rebuild_stake_distribution();
+            // Once rebuilt, disable for subsequent boundaries — incremental is correct.
+            self.needs_stake_rebuild = false;
         }
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.

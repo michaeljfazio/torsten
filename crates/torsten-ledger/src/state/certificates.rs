@@ -111,7 +111,11 @@ impl LedgerState {
             }
             Certificate::StakeDeregistration(credential) => {
                 let key = credential_to_hash(credential);
-                self.stake_distribution.stake_map.remove(&key);
+                // Do NOT remove from stake_distribution.stake_map — the credential
+                // may still have UTxOs. The stake_map is a UTxO accounting structure;
+                // deregistration is a delegation-layer concept. The ground truth
+                // (rebuild_stake_distribution) sums ALL UTxOs by credential regardless
+                // of registration status.
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);
@@ -142,9 +146,9 @@ impl LedgerState {
                 refund: _,
             } => {
                 // Conway cert tag 8: deregistration returns remaining reward balance
-                // as part of the deposit refund, so unconditional removal is correct.
+                // as part of the deposit refund. Remove from delegations/rewards but
+                // keep the stake_map entry — UTxOs may still exist at this credential.
                 let key = credential_to_hash(credential);
-                self.stake_distribution.stake_map.remove(&key);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);

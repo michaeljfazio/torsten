@@ -511,6 +511,15 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     let mut blocks_applied = 0u64;
     let mut epochs_written = 0u64;
     let start_time = std::time::Instant::now();
+
+    // Skip the expensive full-UTxO rebuild_stake_distribution at each epoch boundary.
+    // During dump-snapshot replay from genesis, every block is applied sequentially
+    // with full incremental stake tracking, so the stake_map is always accurate.
+    // The full rebuild is only needed after Mithril import (which skips incremental
+    // tracking) or snapshot restore.
+    // Incremental stake tracking is accurate from genesis — no full UTxO rebuild
+    // needed at epoch boundaries. needs_stake_rebuild defaults to false.
+
     info!("Replaying blocks from ImmutableDB...");
 
     mithril::replay_from_chunk_files(&immutable_dir, |cbor| {
