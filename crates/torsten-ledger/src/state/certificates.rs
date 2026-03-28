@@ -527,6 +527,12 @@ impl LedgerState {
         if reward_account.len() >= 29 {
             // Copy exactly 28 bytes of the credential (skip the 1-byte header)
             key_bytes[..28].copy_from_slice(&reward_account[1..29]);
+            // Encode credential type from the header byte:
+            // Bit 4 of the header: 0 = key hash, 1 = script hash
+            // Reward address headers: 0xe0/0xe1 = key, 0xf0/0xf1 = script
+            if reward_account[0] & 0x10 != 0 {
+                key_bytes[28] = 0x01; // script credential
+            }
         }
         Hash32::from_bytes(key_bytes)
     }

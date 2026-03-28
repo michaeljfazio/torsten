@@ -1016,9 +1016,14 @@ impl LedgerState {
     }
 }
 
-/// Extract a Hash32 from a Credential for use as a map key
+/// Extract a Hash32 from a Credential for use as a map key.
+///
+/// Uses `to_typed_hash32()` which encodes the credential TYPE (key vs script)
+/// in byte 28 of the padding. This ensures key and script credentials with
+/// the same 28-byte hash are stored as separate entries, matching Haskell's
+/// `KeyHashObj` / `ScriptHashObj` distinction.
 fn credential_to_hash(credential: &Credential) -> Hash32 {
-    credential.to_hash().to_hash32_padded()
+    credential.to_typed_hash32()
 }
 
 /// Extract the staking credential hash from an address.

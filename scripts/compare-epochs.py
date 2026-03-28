@@ -100,13 +100,14 @@ def compare_pool_distribution(torsten_pools, cstreamer_pools):
     if only_cstreamer:
         diffs.append(f"  poolDistribution: {len(only_cstreamer)} pools only in cstreamer")
 
-    # Compare stakes for common pools
+    # Compare stakeLovelace for common pools (not stake fraction, which differs
+    # when total_active_stake changes even if individual pool stakes match)
     common = t_ids & c_ids
     stake_diffs = 0
     for pid in sorted(common):
-        t_stake = t_pools[pid].get("stake", t_pools[pid].get("stakeRatio", 0))
-        c_stake = c_pools[pid].get("stake", c_pools[pid].get("stakeRatio", 0))
-        if t_stake != c_stake:
+        t_lv = t_pools[pid].get("stakeLovelace", 0)
+        c_lv = c_pools[pid].get("stakeLovelace", 0)
+        if t_lv != c_lv:
             stake_diffs += 1
 
     if stake_diffs:

@@ -648,13 +648,18 @@ fn serialize_stake_snapshot(
     use torsten_primitives::transaction::Relay;
 
     // delegations: credential hash → pool ID
-    // Key format matches cstreamer: "keyHash-{56_hex_chars}" (28-byte hash).
-    // Torsten stores credentials as Hash32 (padded), so trim to 28 bytes.
+    // Key format: "{type}Hash-{56_hex_chars}" where type is determined by
+    // byte 28 of the Hash32 (0x00=key, 0x01=script), matching cstreamer.
     let delegations: serde_json::Map<String, serde_json::Value> = snapshot
         .delegations
         .iter()
         .map(|(cred, pool_id)| {
-            let key = format!("keyHash-{}", hex::encode(&cred.as_bytes()[..28]));
+            let prefix = if cred.as_bytes()[28] == 0x01 {
+                "scriptHash"
+            } else {
+                "keyHash"
+            };
+            let key = format!("{}-{}", prefix, hex::encode(&cred.as_bytes()[..28]));
             let val = serde_json::Value::String(hex::encode(pool_id.as_bytes()));
             (key, val)
         })
@@ -741,12 +746,17 @@ fn serialize_stake_snapshot(
         .collect();
 
     // stake: per-credential lovelace
-    // Key format: "keyHash-{56_hex_chars}" (28-byte hash, trimmed from Hash32).
+    // Key format: "{type}Hash-{56_hex_chars}" (byte 28 encodes key vs script).
     let stake: serde_json::Map<String, serde_json::Value> = snapshot
         .stake_distribution
         .iter()
         .map(|(cred, lovelace)| {
-            let key = format!("keyHash-{}", hex::encode(&cred.as_bytes()[..28]));
+            let prefix = if cred.as_bytes()[28] == 0x01 {
+                "scriptHash"
+            } else {
+                "keyHash"
+            };
+            let key = format!("{}-{}", prefix, hex::encode(&cred.as_bytes()[..28]));
             let val = serde_json::Value::Number(lovelace.0.into());
             (key, val)
         })
