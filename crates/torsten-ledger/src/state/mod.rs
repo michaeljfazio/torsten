@@ -240,6 +240,12 @@ pub struct LedgerState {
     /// only for the one-time migration path.
     #[serde(default)]
     pub pending_reward_update: Option<PendingRewardUpdate>,
+    /// Running total of all stake key deposits locked in the ledger (lovelace).
+    /// Incremented by `pp.key_deposit` on StakeRegistration / ConwayStakeRegistration /
+    /// combined registration certs. Decremented on deregistration.
+    /// Matches Haskell's `oblStake = sumDepositsAccounts accounts`.
+    #[serde(default)]
+    pub total_stake_key_deposits: u64,
     /// Script-type stake credentials (credential_type = 1 for N2C queries).
     /// Populated from StakeRegistration / ConwayStakeRegistration / RegStakeDeleg /
     /// RegStakeVoteDeleg / VoteRegDeleg certificates when the credential is a
@@ -629,6 +635,7 @@ impl LedgerState {
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: false,
+            total_stake_key_deposits: 0,
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
             diff_seq: DiffSeq::new(),

@@ -10,6 +10,7 @@
 - Conway DELEG: `...Rules/Deleg.hs`
 - Conway GovCert: `...Rules/GovCert.hs`
 - Conway GOV: `...Rules/Gov.hs` (19 predicate failures for proposals/votes)
+- Bootstrap governance: [gov-bootstrap-restriction.md](gov-bootstrap-restriction.md) — isBootstrapAction allows ParameterChange/HardForkInitiation/InfoAction (NOT NoConfidence/UpdateCommittee)
 - Conway Ratify: `...Rules/Ratify.hs`
 - Conway Enact: `...Rules/Enact.hs`
 - Conway Epoch: `...Rules/Epoch.hs`

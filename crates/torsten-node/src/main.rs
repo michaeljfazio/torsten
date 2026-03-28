@@ -856,10 +856,15 @@ fn build_epoch_snapshot(
 
     // Deposit accounting.
     let pp = &ledger.protocol_params;
-    let deposit_stake_key = ledger.reward_accounts.len() as u64 * pp.key_deposit.0;
+    let deposit_stake_key = ledger.total_stake_key_deposits;
     let deposit_pool = ledger.pool_params.len() as u64 * pp.pool_deposit.0;
     let deposit_drep = ledger.governance.dreps.len() as u64 * pp.drep_deposit.0;
-    let deposit_proposal: u64 = 0;
+    let deposit_proposal: u64 = ledger
+        .governance
+        .proposals
+        .values()
+        .map(|p| p.procedure.deposit.0)
+        .sum();
     let deposit_total = deposit_stake_key + deposit_pool + deposit_drep + deposit_proposal;
 
     // Protocol params summary.

@@ -107,6 +107,7 @@ impl LedgerState {
                 if matches!(credential, Credential::Script(_)) {
                     self.script_stake_credentials.insert(key);
                 }
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
                 debug!("Stake key registered: {}", key.to_hex());
             }
             Certificate::StakeDeregistration(credential) => {
@@ -116,6 +117,9 @@ impl LedgerState {
                 // deregistration is a delegation-layer concept. The ground truth
                 // (rebuild_stake_distribution) sums ALL UTxOs by credential regardless
                 // of registration status.
+                self.total_stake_key_deposits = self
+                    .total_stake_key_deposits
+                    .saturating_sub(self.protocol_params.key_deposit.0);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);
@@ -139,6 +143,7 @@ impl LedgerState {
                 if matches!(credential, Credential::Script(_)) {
                     self.script_stake_credentials.insert(key);
                 }
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
                 debug!("Stake key registered (Conway): {}", key.to_hex());
             }
             Certificate::ConwayStakeDeregistration {
@@ -149,6 +154,9 @@ impl LedgerState {
                 // as part of the deposit refund. Remove from delegations/rewards but
                 // keep the stake_map entry — UTxOs may still exist at this credential.
                 let key = credential_to_hash(credential);
+                self.total_stake_key_deposits = self
+                    .total_stake_key_deposits
+                    .saturating_sub(self.protocol_params.key_deposit.0);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);
@@ -228,6 +236,7 @@ impl LedgerState {
                     .entry(key)
                     .or_insert(Lovelace(0));
                 Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
                 if matches!(credential, Credential::Script(_)) {
                     self.script_stake_credentials.insert(key);
                 }
@@ -381,6 +390,7 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance)
                     .vote_delegations
                     .insert(key, drep.clone());
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
                 if matches!(credential, Credential::Script(_)) {
                     self.script_stake_credentials.insert(key);
                 }
@@ -406,6 +416,7 @@ impl LedgerState {
                 Arc::make_mut(&mut self.governance)
                     .vote_delegations
                     .insert(key, drep.clone());
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
                 if matches!(credential, Credential::Script(_)) {
                     self.script_stake_credentials.insert(key);
                 }
