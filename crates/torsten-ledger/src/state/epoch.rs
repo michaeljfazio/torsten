@@ -196,10 +196,26 @@ impl LedgerState {
         }
 
         // Build per-credential stake including reward balances for the snapshot.
-        let mut snapshot_stake = self.stake_distribution.stake_map.clone();
-        for (cred_hash, reward) in self.reward_accounts.iter() {
-            if reward.0 > 0 {
-                *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += *reward;
+        // Only include credentials that are in the delegation map, matching
+        // Haskell's ssStake which is the intersection of staking credentials
+        // and the delegation map.
+        let mut snapshot_stake: HashMap<Hash32, Lovelace> =
+            HashMap::with_capacity(self.delegations.len());
+        for cred_hash in self.delegations.keys() {
+            let utxo_stake = self
+                .stake_distribution
+                .stake_map
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let reward_balance = self
+                .reward_accounts
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let total = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
+            if total.0 > 0 {
+                snapshot_stake.insert(*cred_hash, total);
             }
         }
 

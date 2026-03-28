@@ -525,7 +525,10 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             return Err(anyhow::anyhow!("STOP"));
         }
 
-        let block_fees: u64 = block.transactions.iter().map(|tx| tx.body.fee.0).sum();
+        // Capture the ledger's accumulated epoch fees BEFORE apply_block, so we
+        // can compute the delta (actual fees collected by the ledger, which correctly
+        // handles invalid tx collateral fees vs declared fees).
+        let fees_before = ledger.epoch_fees.0;
 
         if let Err(e) = ledger.apply_block(&block, torsten_ledger::BlockValidationMode::ApplyOnly) {
             if !format!("{e}").contains("Block does not connect") {
@@ -568,8 +571,21 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             epoch_fees = 0;
         }
 
-        // Accumulate fees into the current epoch AFTER the transition check.
-        epoch_fees += block_fees;
+        // Use the ledger's own fee tracking (which correctly handles invalid tx
+        // collateral fees). After the epoch transition, ledger.epoch_fees is reset
+        // and only includes the current block's fees. For inter-epoch blocks, it
+        // accumulates the delta since fees_before.
+        let ledger_fees_now = ledger.epoch_fees.0;
+        if current_epoch > last_epoch && last_epoch != u64::MAX {
+            // Epoch transitioned: fees_before was the OLD epoch's total.
+            // The ledger reset epoch_fees and then added this block's fee.
+            // epoch_fees was already captured above; now add this block's fees
+            // to the NEW epoch bucket.
+            epoch_fees = ledger_fees_now;
+        } else {
+            // Same epoch: add the delta.
+            epoch_fees += ledger_fees_now - fees_before;
+        }
         last_epoch = current_epoch;
         Ok(())
     })
@@ -792,7 +808,6 @@ fn build_epoch_snapshot(
         .map(|s| {
             s.pool_stake
                 .iter()
-                .filter(|(_, stake)| stake.0 > 0)
                 .map(|(pool_id, stake_lovelace)| {
                     let lv = stake_lovelace.0;
                     let pct = if total_active_stake > 0 {
@@ -801,11 +816,13 @@ fn build_epoch_snapshot(
                         0.0
                     };
                     // Reduce the stake fraction to simplest form (matching cstreamer).
-                    let (num, den) = if total_active_stake > 0 && lv > 0 {
+                    let (num, den) = if lv == 0 {
+                        (0, 1) // Zero stake: 0/1
+                    } else if total_active_stake > 0 {
                         let g = gcd(lv, total_active_stake);
                         (lv / g, total_active_stake / g)
                     } else {
-                        (lv, total_active_stake)
+                        (0, 1)
                     };
                     serde_json::json!({
                         "poolId": hex::encode(pool_id.as_bytes()),
