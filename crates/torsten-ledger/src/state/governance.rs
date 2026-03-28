@@ -13,8 +13,8 @@ impl LedgerState {
     /// Process a governance proposal.
     ///
     /// Validates:
-    /// 1. Bootstrap phase restrictions — only certain action types are allowed at protocol == 9
-    ///    (Haskell: `validBootstrap` in `Conway.GOV` rule).
+    /// 1. Bootstrap phase restrictions — during protocol == 9 only ParameterChange,
+    ///    HardForkInitiation, and InfoAction are allowed (Haskell: `isBootstrapAction`).
     /// 2. prev_action_id chain — must reference an active proposal **or** the last enacted
     ///    action of the same purpose (Haskell: `prevActionAsExpected`).
     ///    Validated at submission (not just ratification) per GOV rule.
@@ -29,20 +29,31 @@ impl LedgerState {
     ) {
         // --- Check 1: Bootstrap phase proposal restrictions ---
         //
-        // During Conway bootstrap (protocol_version.major == 9), only NoConfidence,
-        // UpdateCommittee, NewConstitution, and InfoAction are permitted.
-        // ParameterChange, HardForkInitiation, and TreasuryWithdrawals must be rejected.
+        // During Conway bootstrap (protocol_version.major == 9), only ParameterChange,
+        // HardForkInitiation, and InfoAction are permitted.  Everything else (NoConfidence,
+        // UpdateCommittee, NewConstitution, TreasuryWithdrawals) is rejected.
         //
-        // Per Haskell `validBootstrap` in `Conway.GOV` (cardano-ledger >=1.7):
-        //   isBootstrap => actionTag `elem` [NoConfidence, UpdateCommittee, NewConstitution, InfoAction]
+        // Per Haskell `isBootstrapAction` in `Cardano.Ledger.Conway.Rules.Gov`
+        // (introduced in commit b6282d5, present in all released versions):
+        //
+        //   isBootstrapAction :: GovAction era -> Bool
+        //   isBootstrapAction = \case
+        //     ParameterChange {}    -> True
+        //     HardForkInitiation {} -> True
+        //     InfoAction            -> True
+        //     _                     -> False
+        //
+        // The Plomin hard fork (proto 9→10) was submitted as a HardForkInitiation during
+        // the bootstrap phase and was correctly accepted.  Our earlier implementation had
+        // the allowed/disallowed sets inverted.
         if self.is_bootstrap_phase() {
-            let disallowed = matches!(
+            let allowed = matches!(
                 &proposal.gov_action,
                 GovAction::ParameterChange { .. }
                     | GovAction::HardForkInitiation { .. }
-                    | GovAction::TreasuryWithdrawals { .. }
+                    | GovAction::InfoAction
             );
-            if disallowed {
+            if !allowed {
                 debug!(
                     tx = %tx_hash.to_hex(),
                     action_index,

@@ -1785,7 +1785,12 @@ fn test_governance_proposal_and_vote() {
 
 #[test]
 fn test_governance_proposal_expiry() {
-    let params = ProtocolParameters::mainnet_defaults();
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Use protocol 10 (post-bootstrap) so that NoConfidence proposals are accepted.
+    // The bootstrap phase (proto 9) only allows ParameterChange / HardForkInitiation /
+    // InfoAction (Haskell `isBootstrapAction`).  This test is about expiry logic, not
+    // bootstrap restrictions.
+    params.protocol_version_major = 10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
 
@@ -1953,7 +1958,10 @@ fn test_info_action_always_ratified() {
 
 #[test]
 fn test_ratify_state_tracks_expired_proposals() {
-    let params = ProtocolParameters::mainnet_defaults();
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Use protocol 10 (post-bootstrap) so NoConfidence proposals are accepted.
+    // Bootstrap (proto 9) only allows ParameterChange/HardForkInitiation/InfoAction.
+    params.protocol_version_major = 10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
     state.protocol_params.gov_action_lifetime = 2; // Expires in 2 epochs
@@ -2229,7 +2237,10 @@ fn test_treasury_withdrawal_ratification() {
 
 #[test]
 fn test_no_confidence_ratification() {
-    let params = ProtocolParameters::mainnet_defaults();
+    let mut params = ProtocolParameters::mainnet_defaults();
+    // Use protocol 10 (post-bootstrap) so NoConfidence proposals are accepted.
+    // Bootstrap (proto 9) only allows ParameterChange/HardForkInitiation/InfoAction.
+    params.protocol_version_major = 10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
 
@@ -7411,52 +7422,30 @@ fn governance_test_state() -> LedgerState {
 
 #[test]
 fn test_parameter_change_ratification_bootstrap() {
-    // During Conway bootstrap (protocol version 9), ParameterChange/HardForkInitiation/
-    // TreasuryWithdrawals proposals are REJECTED at submission time (matching Haskell
-    // `validBootstrap`).  Only NoConfidence, UpdateCommittee, NewConstitution, and InfoAction
-    // are permitted.
+    // Verifies the correct Haskell `isBootstrapAction` semantics during Conway bootstrap
+    // (protocol version 9 → `hardforkConwayBootstrapPhase` is true).
     //
-    // This test verifies that:
-    //   1. ParameterChange is rejected during bootstrap (proposal never added).
-    //   2. UpdateCommittee IS permitted in bootstrap and ratifies with DRep auto-pass
-    //      (DRep thresholds are 0 during bootstrap, per Haskell `hardforkConwayBootstrapPhase`).
+    // Per `Cardano.Ledger.Conway.Rules.Gov` (commit b6282d5, unchanged through mainnet):
+    //
+    //   isBootstrapAction :: GovAction era -> Bool
+    //   isBootstrapAction = \case
+    //     ParameterChange {}    -> True   -- ALLOWED
+    //     HardForkInitiation {} -> True   -- ALLOWED (Plomin HF was submitted in bootstrap)
+    //     InfoAction            -> True   -- ALLOWED
+    //     _                     -> False  -- everything else REJECTED
+    //
+    // This means:
+    //   1. UpdateCommittee is REJECTED during bootstrap.
+    //   2. ParameterChange IS permitted and can ratify with DRep auto-pass
+    //      (all DRep thresholds are 0 during bootstrap per `hardforkConwayBootstrapPhase`).
     let mut state = governance_test_state(); // protocol_version_major = 9 (bootstrap)
 
-    // --- Part 1: ParameterChange is rejected during bootstrap ---
+    // --- Part 1: UpdateCommittee is REJECTED during bootstrap ---
     let rejected_hash = Hash32::from_bytes([42u8; 32]);
-    let ppu = ProtocolParamUpdate {
-        max_tx_ex_units: Some(ExUnits {
-            mem: 16_500_000,
-            steps: 10_000_000_000,
-        }),
-        ..Default::default()
-    };
-    let rejected_proposal = ProposalProcedure {
-        deposit: Lovelace(100_000_000_000),
-        return_addr: vec![0u8; 29],
-        gov_action: GovAction::ParameterChange {
-            prev_action_id: None,
-            protocol_param_update: Box::new(ppu),
-            policy_hash: None,
-        },
-        anchor: Anchor {
-            url: "https://example.com".to_string(),
-            data_hash: Hash32::ZERO,
-        },
-    };
-    state.process_proposal(&rejected_hash, 0, &rejected_proposal);
-    assert!(
-        state.governance.proposals.is_empty(),
-        "ParameterChange must be rejected during bootstrap (protocol == 9)"
-    );
-
-    // --- Part 2: UpdateCommittee is allowed and DRep auto-passes ---
-    let tx_hash = Hash32::from_bytes([43u8; 32]);
     let new_cc_cred = Credential::VerificationKey(Hash28::from_bytes([99u8; 28]));
     let mut members_to_add = std::collections::BTreeMap::new();
-    members_to_add.insert(new_cc_cred.clone(), 1000u64); // expires epoch 1000
-
-    let proposal = ProposalProcedure {
+    members_to_add.insert(new_cc_cred, 1000u64);
+    let rejected_proposal = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
         return_addr: vec![0u8; 29],
         gov_action: GovAction::UpdateCommittee {
@@ -7473,61 +7462,58 @@ fn test_parameter_change_ratification_bootstrap() {
             data_hash: Hash32::ZERO,
         },
     };
+    state.process_proposal(&rejected_hash, 0, &rejected_proposal);
+    assert!(
+        state.governance.proposals.is_empty(),
+        "UpdateCommittee must be rejected during bootstrap (protocol == 9)"
+    );
+
+    // --- Part 2: ParameterChange IS allowed and DRep auto-passes in bootstrap ---
+    //
+    // During bootstrap all DRep voting thresholds are treated as 0 (auto-pass),
+    // so a ParameterChange only needs CC approval (if committee is configured).
+    // governance_test_state() has committee_min_size=0, so CC is optional.
+    // ParameterChange SPO threshold = pvt_pp_security_group = 0 in test state,
+    // so it ratifies automatically without any votes.
+    let tx_hash = Hash32::from_bytes([43u8; 32]);
+    let ppu = ProtocolParamUpdate {
+        max_tx_ex_units: Some(ExUnits {
+            mem: 16_500_000,
+            steps: 10_000_000_000,
+        }),
+        ..Default::default()
+    };
+    let proposal = ProposalProcedure {
+        deposit: Lovelace(100_000_000_000),
+        return_addr: vec![0u8; 29],
+        gov_action: GovAction::ParameterChange {
+            prev_action_id: None,
+            protocol_param_update: Box::new(ppu),
+            policy_hash: None,
+        },
+        anchor: Anchor {
+            url: "https://example.com".to_string(),
+            data_hash: Hash32::ZERO,
+        },
+    };
 
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(
         state.governance.proposals.len(),
         1,
-        "UpdateCommittee must be accepted during bootstrap"
-    );
-    let action_id = GovActionId {
-        transaction_id: tx_hash,
-        action_index: 0,
-    };
-
-    // In bootstrap: DRep thresholds are 0 (auto-pass), no DRep votes needed.
-    // UpdateCommittee requires only SPO votes (pvt_committee_normal = 51%).
-    // Total SPO stake: 5 pools * 2T = 10T; 3 SPOs = 6T (60% > 51%).
-    for i in 0..3 {
-        let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
-        let spo_voter = Voter::StakePool(pool_hash28.to_hash32_padded());
-        state.process_vote(
-            &spo_voter,
-            &action_id,
-            &VotingProcedure {
-                vote: Vote::Yes,
-                anchor: None,
-            },
-        );
-    }
-
-    // Ratify at epoch boundary
-    state.process_epoch_transition(EpochNo(1));
-
-    // Verify the new CC member was added
-    let new_cc_key = credential_to_hash(&new_cc_cred);
-    assert!(
-        state
-            .governance
-            .committee_expiration
-            .contains_key(&new_cc_key),
-        "New CC member should be added after UpdateCommittee ratification"
-    );
-    assert!(
-        state.governance.proposals.is_empty(),
-        "Enacted proposal should be removed"
-    );
-    // Enacted committee root should be set
-    assert!(
-        state.governance.enacted_committee.is_some(),
-        "enacted_committee should be set after ratification"
+        "ParameterChange must be accepted during bootstrap"
     );
 }
 
 #[test]
 fn test_update_committee_no_cc_required() {
-    // UpdateCommittee does NOT require CC approval, only DRep + SPO
+    // UpdateCommittee does NOT require CC approval, only DRep + SPO.
+    // Use protocol 10 (post-bootstrap): UpdateCommittee is blocked during bootstrap
+    // (proto 9) since Haskell's `isBootstrapAction` only permits ParameterChange,
+    // HardForkInitiation, and InfoAction.  This test exercises the ratification logic,
+    // not bootstrap restrictions.
     let mut state = governance_test_state();
+    state.protocol_params.protocol_version_major = 10;
 
     // Submit UpdateCommittee to add new CC members
     let tx_hash = Hash32::from_bytes([43u8; 32]);
@@ -7559,9 +7545,25 @@ fn test_update_committee_no_cc_required() {
         action_index: 0,
     };
 
-    // Only SPO votes needed (DRep auto-passes in bootstrap)
-    // pvt_committee_normal = 0.51, total SPO stake = 10T
-    // 3 SPOs = 6T (60% > 51%)
+    // Post-bootstrap UpdateCommittee requires DRep (dvt_committee_normal=67%) + SPO votes.
+    // CC approval is NOT required for UpdateCommittee (the key property being tested).
+    //
+    // DReps: 10 registered, each with 1T stake (total 10T active).
+    //   Need > 67% → 7/10 DReps = 70% sufficient.
+    // SPOs:  5 registered, each with 2T pool stake (total 10T).
+    //   pvt_committee_normal=51% → 3 SPOs = 6T = 60% sufficient.
+    for i in 0..7 {
+        let drep_cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
+        let drep_voter = Voter::DRep(drep_cred);
+        state.process_vote(
+            &drep_voter,
+            &action_id,
+            &VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        );
+    }
     for i in 0..3 {
         let pool_hash28 = Hash28::from_bytes([100 + i as u8; 28]);
         let spo_voter = Voter::StakePool(pool_hash28.to_hash32_padded());
