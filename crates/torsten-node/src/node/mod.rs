@@ -2527,6 +2527,9 @@ impl Node {
             self.metrics.set_tip_slot_time_ms(slot_time_ms);
             self.metrics.set_epoch(ls.epoch.0);
         }
+        // Block arrived via live BlockFetch — node is following the chain tip.
+        // Set progress to 100% so health_status() reports "healthy".
+        self.metrics.set_sync_progress(100.0);
 
         // Announce to downstream peers.
         if let Some(ref tx) = self.block_announcement_tx {
