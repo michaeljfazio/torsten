@@ -786,7 +786,7 @@ impl Node {
 
         let ledger_state = Arc::new(RwLock::new(ledger));
 
-        let consensus = if let Some(ref genesis) = shelley_genesis {
+        let mut consensus = if let Some(ref genesis) = shelley_genesis {
             OuroborosPraos::with_genesis_params(
                 genesis.active_slots_coeff,
                 genesis.security_param,
@@ -807,6 +807,16 @@ impl Node {
             max_kes = consensus.max_kes_evolutions,
             "Consensus: Praos",
         );
+
+        // Seed opcert counters from the loaded ledger snapshot (#310).
+        // Closes the replay-attack window that existed when counters
+        // reset to empty on every restart.
+        {
+            let ls = ledger_state.blocking_read();
+            if !ls.opcert_counters.is_empty() {
+                consensus.set_opcert_counters(ls.opcert_counters.clone());
+            }
+        }
 
         // Build the HFC era history state machine from genesis parameters.
         // This replaces the hardcoded era lookup tables with a proper state machine

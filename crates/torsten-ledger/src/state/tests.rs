@@ -14482,3 +14482,42 @@ fn test_treasury_donation_accumulates_across_transactions() {
         donation_a + donation_b
     );
 }
+
+// ─── Opcert counter persistence (#310) ──────────────────────────────────────
+
+#[test]
+fn test_opcert_counters_persist_in_snapshot() {
+    use torsten_primitives::hash::Hash28;
+
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_path = dir.path().join("ledger-snapshot.bin");
+
+    // Create a ledger state and populate opcert counters
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    let pool_a = Hash28::from_bytes([0xAA; 28]);
+    let pool_b = Hash28::from_bytes([0xBB; 28]);
+    state.opcert_counters.insert(pool_a, 5);
+    state.opcert_counters.insert(pool_b, 42);
+
+    // Save and reload
+    state.save_snapshot(&snapshot_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+
+    // Verify counters survived
+    assert_eq!(loaded.opcert_counters.len(), 2);
+    assert_eq!(loaded.opcert_counters.get(&pool_a), Some(&5));
+    assert_eq!(loaded.opcert_counters.get(&pool_b), Some(&42));
+}
+
+#[test]
+fn test_opcert_counters_empty_by_default_in_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_path = dir.path().join("ledger-snapshot.bin");
+
+    let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.save_snapshot(&snapshot_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+
+    // Default: empty map
+    assert!(loaded.opcert_counters.is_empty());
+}

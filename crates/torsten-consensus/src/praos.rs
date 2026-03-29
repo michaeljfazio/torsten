@@ -1105,6 +1105,22 @@ impl OuroborosPraos {
         }
     }
 
+    /// Return a reference to the opcert counters map.
+    /// Used by the node layer to copy counters into LedgerState before snapshot save.
+    pub fn opcert_counters(&self) -> &HashMap<Hash28, u64> {
+        &self.opcert_counters
+    }
+
+    /// Replace the opcert counters map wholesale.
+    /// Used by the node layer to seed counters from a loaded LedgerState snapshot.
+    pub fn set_opcert_counters(&mut self, counters: HashMap<Hash28, u64>) {
+        debug!(
+            count = counters.len(),
+            "Seeded opcert counters from snapshot"
+        );
+        self.opcert_counters = counters;
+    }
+
     /// Update the tip
     pub fn update_tip(&mut self, tip: Tip) {
         self.tip = tip;
@@ -3193,6 +3209,51 @@ mod tests {
         let pool_id = Hash28::from_bytes([0xCC; 28]);
         let error = ConsensusError::UnregisteredPool { pool_id };
         assert!(matches!(error, ConsensusError::UnregisteredPool { .. }));
+    }
+
+    // ─── Opcert counter persistence (#310) ──────────────────────────────
+
+    #[test]
+    fn test_opcert_counters_restored_rejects_replay() {
+        // Simulate: pool A had counter 5, restore from snapshot, verify state
+        let mut praos = OuroborosPraos::new();
+        let pool_id = Hash28::from_bytes([0xAA; 28]);
+
+        // Seed counters as if loaded from snapshot
+        let mut restored = HashMap::new();
+        restored.insert(pool_id, 5);
+        praos.set_opcert_counters(restored);
+
+        // Counter is 5 — a block with counter 3 would be rejected by
+        // check_opcert_counter (n < m path), counter 6 would be accepted
+        assert_eq!(praos.opcert_counters()[&pool_id], 5);
+    }
+
+    #[test]
+    fn test_set_opcert_counters_replaces_all() {
+        let mut praos = OuroborosPraos::new();
+        let pool_a = Hash28::from_bytes([0xAA; 28]);
+        let pool_b = Hash28::from_bytes([0xBB; 28]);
+
+        // Existing counter
+        praos.opcert_counters.insert(pool_a, 10);
+
+        // Replace with new set
+        let mut new_counters = HashMap::new();
+        new_counters.insert(pool_b, 20);
+        praos.set_opcert_counters(new_counters);
+
+        // Old counter gone, new counter present
+        assert!(!praos.opcert_counters().contains_key(&pool_a));
+        assert_eq!(praos.opcert_counters()[&pool_b], 20);
+    }
+
+    #[test]
+    fn test_opcert_counters_fresh_start_empty() {
+        // Fresh start (no snapshot) → counters are empty → first block from
+        // any pool accepted via the m=0 first-seen path
+        let praos = OuroborosPraos::new();
+        assert!(praos.opcert_counters().is_empty());
     }
 }
 

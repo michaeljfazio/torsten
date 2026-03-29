@@ -311,6 +311,18 @@ pub struct LedgerState {
     /// compatibility with existing snapshot-loaded ledger states.
     #[serde(skip)]
     pub node_network: Option<torsten_primitives::network::NetworkId>,
+    /// Operational certificate counters per pool (cold key hash → highest seen counter).
+    ///
+    /// Persisted across node restarts to prevent opcert replay attacks.
+    /// The canonical runtime copy lives in `OuroborosPraos.opcert_counters`;
+    /// this field is populated from consensus before each snapshot save and
+    /// used to seed consensus on snapshot load.
+    ///
+    /// `#[serde(default)]` ensures backward compatibility: snapshots written
+    /// before this field was added deserialise with an empty map (the node
+    /// then rebuilds counters from the chain, same as a fresh start).
+    #[serde(default)]
+    pub opcert_counters: HashMap<Hash28, u64>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -726,6 +738,7 @@ impl LedgerState {
             script_stake_credentials: std::collections::HashSet::new(),
             diff_seq: DiffSeq::new(),
             node_network: None,
+            opcert_counters: HashMap::new(),
         }
     }
 

@@ -116,6 +116,10 @@ impl Node {
         let mut ls = self.ledger_state.write().await;
         let epoch = ls.epoch.0;
 
+        // Copy opcert counters from consensus into ledger state for snapshot persistence.
+        // Consensus is the runtime owner; ledger state is the persistence vehicle.
+        ls.opcert_counters = self.consensus.opcert_counters().clone();
+
         // Flush UTxO store to disk FIRST (cardano-lsm has no WAL)
         if let Err(e) = ls.save_utxo_snapshot() {
             error!("Failed to save UTxO store snapshot: {e}");

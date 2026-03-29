@@ -2236,7 +2236,8 @@ impl Node {
                     replayed,
                     current_slot, "Shutdown requested during LSM replay, saving snapshot"
                 );
-                let ls = self.ledger_state.write().await;
+                let mut ls = self.ledger_state.write().await;
+                ls.opcert_counters = self.consensus.opcert_counters().clone();
                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                     warn!("Failed to save snapshot on shutdown: {e}");
                 }
@@ -2308,6 +2309,7 @@ impl Node {
                                 // bulk snapshot has correct pool_stake values using the
                                 // current incremental stake_distribution.
                                 ls.recompute_snapshot_pool_stakes();
+                                ls.opcert_counters = self.consensus.opcert_counters().clone();
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
                                 }
@@ -2379,6 +2381,7 @@ impl Node {
         // Save final snapshot after replay (write lock to flush UTxO store — no WAL)
         {
             let mut ls = self.ledger_state.write().await;
+            ls.opcert_counters = self.consensus.opcert_counters().clone();
             if let Err(e) = ls.save_utxo_snapshot() {
                 error!("Failed to save UTxO store after replay: {e}");
             }
