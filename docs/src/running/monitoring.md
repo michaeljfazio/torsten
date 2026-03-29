@@ -174,6 +174,9 @@ or:
 | `torsten_disk_available_bytes` | Available disk space on the database volume |
 | `torsten_n2n_connections_active` | Currently active N2N connections |
 | `torsten_n2c_connections_active` | Currently active N2C connections |
+| `torsten_p2p_enabled` | Whether P2P governance is active (0 or 1) |
+| `torsten_diffusion_mode` | Current diffusion mode (0=InitiatorOnly, 1=InitiatorAndResponder) |
+| `torsten_peer_sharing_enabled` | Whether peer sharing is active (0 or 1) |
 | `torsten_tip_age_seconds` | Seconds since the tip slot time |
 | `torsten_chainsync_idle_seconds` | Seconds since last ChainSync RollForward event |
 | `torsten_ledger_replay_duration_seconds` | Duration of last ledger replay in seconds |

@@ -185,6 +185,21 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
                       Disable only for isolated testing or legacy topology setups.",
     },
     ParamDef {
+        key: "DiffusionMode",
+        section: "Network",
+        param_type: ParamType::Enum {
+            values: &["InitiatorOnly", "InitiatorAndResponder"],
+        },
+        default: "InitiatorAndResponder",
+        description: "Controls inbound connection acceptance. 'InitiatorAndResponder' \
+                      (default) opens a listening port and accepts inbound N2N connections — \
+                      the correct mode for relay nodes. 'InitiatorOnly' makes only outbound \
+                      connections, suitable for block producers behind a firewall.",
+        tuning_hint: "Use 'InitiatorAndResponder' for relays and public-facing nodes. \
+                      Use 'InitiatorOnly' for block producers that should never accept \
+                      unsolicited inbound connections.",
+    },
+    ParamDef {
         key: "PeerSharing",
         section: "Network",
         param_type: ParamType::Enum {
@@ -233,7 +248,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
     ParamDef {
         key: "TargetNumberOfRootPeers",
         section: "Network",
-        param_type: ParamType::U64 { min: 1, max: 50 },
+        param_type: ParamType::U64 { min: 1, max: 200 },
         default: "60",
         description: "Target number of root peers — connections maintained to the \
                       topology file entries (trusted relays). These anchor the node to \
@@ -710,10 +725,14 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
 
     // P2P networking.
     map.insert("EnableP2P".into(), json!(true));
+    map.insert(
+        "DiffusionMode".into(),
+        json!("InitiatorAndResponder"),
+    );
     map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
-    map.insert("TargetNumberOfActivePeers".into(), json!(20));
+    map.insert("TargetNumberOfActivePeers".into(), json!(15));
     map.insert("TargetNumberOfEstablishedPeers".into(), json!(40));
-    map.insert("TargetNumberOfKnownPeers".into(), json!(100));
+    map.insert("TargetNumberOfKnownPeers".into(), json!(85));
     map.insert("TargetNumberOfRootPeers".into(), json!(60));
     map.insert("TargetNumberOfActiveBigLedgerPeers".into(), json!(5));
     map.insert("TargetNumberOfEstablishedBigLedgerPeers".into(), json!(10));

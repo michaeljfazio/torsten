@@ -93,7 +93,9 @@ The interactive editor (`torsten-config edit`) renders a full-screen TUI with th
 │     AlonzoGenesisFile         │ alonzo-genes...   │                                   │
 │     ConwayGenesisFile         │ conway-genes...   │                                   │
 │ > P2P Parameters              │                   │                                   │
-│     TargetNumberOfActivePeers │ 20                │                                   │
+│     DiffusionMode             │ InitiatorAn...    │                                   │
+│     PeerSharing               │ PeerSharing...    │                                   │
+│     TargetNumberOfActivePeers │ 15                │                                   │
 └───────────────────────────────┴───────────────────┴───────────────────────────────────┘
 ```
 
@@ -152,8 +154,10 @@ torsten-config init --out-file "$CONFIG" \
   --alonzo-genesis alonzo-genesis.json \
   --conway-genesis conway-genesis.json
 
-torsten-config set "$CONFIG" TargetNumberOfActivePeers 20
+torsten-config set "$CONFIG" EnableP2P true
+torsten-config set "$CONFIG" DiffusionMode InitiatorAndResponder
+torsten-config set "$CONFIG" TargetNumberOfActivePeers 15
 torsten-config set "$CONFIG" TargetNumberOfEstablishedPeers 40
-torsten-config set "$CONFIG" TargetNumberOfKnownPeers 100
+torsten-config set "$CONFIG" TargetNumberOfKnownPeers 85
 torsten-config validate "$CONFIG"
 ```

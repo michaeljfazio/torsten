@@ -219,34 +219,134 @@ Monitors the transaction mempool:
 | `MsgNextTx` | Get the next transaction from the mempool |
 | `MsgGetSizes` | Get mempool capacity, size, and transaction count |
 
+## P2P Networking
+
+Torsten implements the full Ouroboros P2P peer selection governor, enabled by default (`EnableP2P: true`). The governor manages peer connections through a target-driven state machine that continuously maintains optimal connectivity.
+
+### Diffusion Mode
+
+The `DiffusionMode` config field controls how the node participates in the network:
+
+- **`InitiatorAndResponder`** (default) — Full relay mode. The node opens a listening port and accepts inbound N2N connections from other peers, in addition to making outbound connections. This is the correct mode for relay nodes.
+- **`InitiatorOnly`** — Block producer mode. The node only makes outbound connections to its configured relays and never opens a listening port. This prevents direct internet exposure of block producers.
+
+### Peer Sharing
+
+The PeerSharing mini-protocol enables gossip-based peer discovery. When enabled, the node exchanges addresses of known routable peers with connected peers.
+
+Peer sharing behaviour is auto-configured by default:
+- **Relays** — Peer sharing is enabled, allowing the node to both request and serve peer addresses.
+- **Block producers** — Peer sharing is disabled (when `--shelley-kes-key` is provided) to avoid leaking the BP's network position.
+
+Override with the `PeerSharing` config field (`true`/`false`) if needed.
+
+The PeerSharing protocol filters out non-routable addresses (RFC1918, CGNAT, loopback, link-local, IPv6 ULA) before sharing.
+
 ## Peer Manager
 
-The peer manager classifies peers into three categories following the cardano-node model:
+The peer manager classifies peers into three temperature categories following the cardano-node model:
 
 - **Cold** — Known but not connected
-- **Warm** — Connected but not actively syncing
-- **Hot** — Actively syncing (ChainSync + BlockFetch)
+- **Warm** — TCP connected, keepalive running, but not actively syncing
+- **Hot** — Fully active with ChainSync, BlockFetch, and TxSubmission2
 
 ### Peer Lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Cold: Discovered
+    Cold --> Warm: TCP connect + handshake
+    Warm --> Hot: Mini-protocols activated (5s dwell)
+    Hot --> Warm: Demotion (poor performance / churn)
+    Warm --> Cold: Disconnection / backoff
+    Cold --> [*]: Evicted (max failures)
 ```
-Cold --> Warm (TCP connection established)
-Warm --> Hot  (Mini-protocols activated)
-Hot  --> Warm (Demotion for poor performance)
-Warm --> Cold (Disconnection)
+
+Warm peers must dwell for at least 5 seconds before promotion to Hot, preventing rapid cycling.
+
+### Peer Sources
+
+Peers enter the Cold pool from four sources:
+
+| Source | Description |
+|--------|-------------|
+| **Topology** | Bootstrap peers, local roots, and public roots from the topology file |
+| **DNS** | A/AAAA resolution of hostname-based topology entries |
+| **Ledger** | SPO relay addresses from pool registration certificates (after `useLedgerAfterSlot`) |
+| **PeerSharing** | Addresses received via the gossip protocol from connected peers |
+
+### Peer Selection & Scoring
+
+Peers are ranked using a composite score:
+
 ```
+score = 0.4 × reputation + 0.4 × latency_score + 0.2 × failure_score
+```
+
+Where:
+- **Reputation** — 0.0 (worst) to 1.0 (best), adjusted +0.01 per success, -0.1 per failure
+- **Latency score** — `1 / (1 + ms/200)`, based on EWMA latency (smoothing α=0.3)
+- **Failure score** — `max(1.0 - failures×0.1, 0.0)`, failure counts decay (halve every 5 minutes)
+
+Subnet diversity is enforced: peers from the same /24 (IPv4) or /48 (IPv6) subnet receive a selection penalty.
 
 ### Failure Handling
 
-- Exponential backoff on connection failures
-- Latency-based ranking and reputation scoring (EWMA metrics)
-- Adaptive peer selection preferring low-latency, reliable peers
+- **Exponential backoff** on connection failures: 5s → 10s → 20s → 40s → 80s → 160s (capped), with ±2s random fuzz
+- **Max cold failures**: 5 consecutive failures before a peer is evicted from the peer table
+- **Failure decay**: Failure counts halve every 5 minutes, allowing peers to recover reputation over time
+- **Circuit breaker**: Closed → Open → HalfOpen with exponential cooldown
 
 ### Inbound Connections
 
 - Per-IP token bucket rate limiting for DoS protection
-- N2N server handles handshake, ChainSync, BlockFetch, KeepAlive, and TxSubmission2
-- Bidirectional diffusion mode supports both initiator and responder roles
+- N2N server handles handshake, ChainSync, BlockFetch, KeepAlive, TxSubmission2, and PeerSharing
+- `DiffusionMode` controls whether inbound connections are accepted
+
+## P2P Governor
+
+The governor runs as a tokio task on a 30-second interval, continuously evaluating peer counts against configured targets and emitting promotion/demotion/connect/disconnect actions.
+
+### Target Counts
+
+The governor maintains six independent target counts (matching cardano-node defaults):
+
+| Target | Default | Description |
+|--------|---------|-------------|
+| `TargetNumberOfKnownPeers` | 85 | Total peers in the peer table (cold + warm + hot) |
+| `TargetNumberOfEstablishedPeers` | 40 | Warm + hot peers (TCP connected) |
+| `TargetNumberOfActivePeers` | 15 | Hot peers (fully syncing) |
+| `TargetNumberOfKnownBigLedgerPeers` | 15 | Known big ledger peers |
+| `TargetNumberOfEstablishedBigLedgerPeers` | 10 | Established big ledger peers |
+| `TargetNumberOfActiveBigLedgerPeers` | 5 | Active big ledger peers |
+
+When any target is not met, the governor promotes peers to fill the deficit. When any target is exceeded, the governor demotes the lowest-scoring surplus peers. Local root peers are never demoted.
+
+### Sync-State-Aware Targeting
+
+The governor adjusts behaviour based on sync state:
+- **PreSyncing / Syncing** — Big ledger peers are prioritised for fast block download
+- **CaughtUp** — Normal target enforcement with balanced peer selection
+
+### Churn
+
+The governor periodically rotates a subset of peers to discover better alternatives:
+- Configurable churn interval (default: 20% target reduction cycle)
+- Local root peers are exempt from churn
+- Churn ensures the node explores the peer landscape rather than settling on suboptimal connections
+
+### Prometheus Metrics
+
+The P2P subsystem exports the following metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `torsten_p2p_enabled` | Whether P2P governance is active (gauge: 0 or 1) |
+| `torsten_diffusion_mode` | Current diffusion mode (0=InitiatorOnly, 1=InitiatorAndResponder) |
+| `torsten_peer_sharing_enabled` | Whether peer sharing is active (gauge: 0 or 1) |
+| `torsten_peers_cold` | Number of cold (known, unconnected) peers |
+| `torsten_peers_warm` | Number of warm (established) peers |
+| `torsten_peers_hot` | Number of hot (active) peers |
 
 ### Peer Discovery
 

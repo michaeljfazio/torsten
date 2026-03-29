@@ -11,6 +11,8 @@ The configuration file uses PascalCase keys (matching the cardano-node conventio
   "Network": "Testnet",
   "NetworkMagic": 2,
   "EnableP2P": true,
+  "DiffusionMode": "InitiatorAndResponder",
+  "PeerSharing": null,
   "Protocol": {
     "RequiresNetworkMagic": "RequiresMagic"
   },
@@ -18,9 +20,13 @@ The configuration file uses PascalCase keys (matching the cardano-node conventio
   "ByronGenesisFile": "byron-genesis.json",
   "AlonzoGenesisFile": "alonzo-genesis.json",
   "ConwayGenesisFile": "conway-genesis.json",
-  "TargetNumberOfActivePeers": 20,
+  "TargetNumberOfRootPeers": 60,
+  "TargetNumberOfActivePeers": 15,
   "TargetNumberOfEstablishedPeers": 40,
-  "TargetNumberOfKnownPeers": 100,
+  "TargetNumberOfKnownPeers": 85,
+  "TargetNumberOfActiveBigLedgerPeers": 5,
+  "TargetNumberOfEstablishedBigLedgerPeers": 10,
+  "TargetNumberOfKnownBigLedgerPeers": 15,
   "MinSeverity": "Info",
   "TraceOptions": {
     "TraceBlockFetchClient": false,
@@ -42,7 +48,9 @@ The configuration file uses PascalCase keys (matching the cardano-node conventio
 |-------|------|---------|-------------|
 | `Network` | string | `"Mainnet"` | Network identifier: `"Mainnet"` or `"Testnet"` |
 | `NetworkMagic` | integer | auto | Network magic number. If omitted, derived from `Network` (764824073 for mainnet) |
-| `EnableP2P` | boolean | `true` | Enable P2P networking mode |
+| `EnableP2P` | boolean | `true` | Enable P2P networking mode. When `true` (the default), the peer governor manages peer connections with automatic churn, ledger-based discovery, and peer sharing. When `false`, the node uses only static topology connections |
+| `DiffusionMode` | string | `"InitiatorAndResponder"` | Controls inbound connection acceptance. `"InitiatorAndResponder"` (default): relay mode, accepts inbound N2N connections. `"InitiatorOnly"`: block producer mode, outbound only (no listening port opened) |
+| `PeerSharing` | boolean/null | `null` | Enable the peer sharing mini-protocol. When `null` (default), peer sharing is automatically disabled for block producers (when `--shelley-kes-key` is provided) and enabled for relays. Set explicitly to override |
 
 ### Protocol
 
@@ -65,11 +73,17 @@ Genesis file paths are resolved relative to the directory containing the configu
 
 ### P2P Parameters
 
+These parameters control the P2P peer governor's target counts, matching the cardano-node defaults. The governor continuously works to maintain these targets by promoting/demoting peers and discovering new ones.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `TargetNumberOfActivePeers` | integer | 20 | Target number of active (hot) peers |
-| `TargetNumberOfEstablishedPeers` | integer | 40 | Target number of established (warm) peers |
-| `TargetNumberOfKnownPeers` | integer | 100 | Target number of known (cold) peers |
+| `TargetNumberOfRootPeers` | integer | 60 | Target number of root peers (bootstrap + local + public roots) |
+| `TargetNumberOfActivePeers` | integer | 15 | Target number of active (hot) peers — fully syncing with ChainSync + BlockFetch |
+| `TargetNumberOfEstablishedPeers` | integer | 40 | Target number of established (warm) peers — TCP connected, keepalive running |
+| `TargetNumberOfKnownPeers` | integer | 85 | Target number of known (cold) peers in the peer table |
+| `TargetNumberOfActiveBigLedgerPeers` | integer | 5 | Target number of active big ledger peers (high-stake SPOs, prioritised during sync) |
+| `TargetNumberOfEstablishedBigLedgerPeers` | integer | 10 | Target number of established big ledger peers |
+| `TargetNumberOfKnownBigLedgerPeers` | integer | 15 | Target number of known big ledger peers |
 
 ### Tracing
 
