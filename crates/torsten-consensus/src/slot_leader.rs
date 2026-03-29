@@ -75,6 +75,54 @@ pub fn vrf_nonce_value(vrf_output: &[u8]) -> [u8; 32] {
     *blake2b_256(first_hash.as_ref()).as_bytes()
 }
 
+/// TPraos domain tag for the nonce VRF: Blake2b-256 of 0u64 in big-endian.
+///
+/// This matches Haskell's `seedEta = mkNonceFromNumber 0`.
+fn tpraos_tag_eta() -> [u8; 32] {
+    *blake2b_256(&0u64.to_be_bytes()).as_bytes()
+}
+
+/// TPraos domain tag for the leader VRF: Blake2b-256 of 1u64 in big-endian.
+///
+/// This matches Haskell's `seedL = mkNonceFromNumber 1`.
+fn tpraos_tag_l() -> [u8; 32] {
+    *blake2b_256(&1u64.to_be_bytes()).as_bytes()
+}
+
+/// Construct a TPraos VRF seed with domain separation.
+///
+/// TPraos (Shelley–Alonzo) uses a different VRF input construction than Praos:
+///   seed = Blake2b-256(slot_BE || epoch_nonce) XOR tag
+///
+/// where `tag` is either `tpraos_tag_eta()` (for the nonce VRF) or
+/// `tpraos_tag_l()` (for the leader VRF).  This matches Haskell's `mkSeed`.
+fn tpraos_vrf_input(epoch_nonce: &Hash32, slot: SlotNo, tag: &[u8; 32]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(40);
+    data.extend_from_slice(&slot.0.to_be_bytes());
+    data.extend_from_slice(epoch_nonce.as_bytes());
+    let inner = blake2b_256(&data);
+    let inner_bytes = inner.as_bytes();
+    let mut seed = vec![0u8; 32];
+    for i in 0..32 {
+        seed[i] = inner_bytes[i] ^ tag[i];
+    }
+    seed
+}
+
+/// TPraos leader VRF input (domain-separated with TAG_L).
+///
+/// Used for leader election VRF proof verification in Shelley–Alonzo eras.
+pub fn tpraos_leader_vrf_input(epoch_nonce: &Hash32, slot: SlotNo) -> Vec<u8> {
+    tpraos_vrf_input(epoch_nonce, slot, &tpraos_tag_l())
+}
+
+/// TPraos nonce VRF input (domain-separated with TAG_ETA).
+///
+/// Used for nonce evolution VRF proof verification in Shelley–Alonzo eras.
+pub fn tpraos_nonce_vrf_input(epoch_nonce: &Hash32, slot: SlotNo) -> Vec<u8> {
+    tpraos_vrf_input(epoch_nonce, slot, &tpraos_tag_eta())
+}
+
 /// Expected number of blocks per epoch
 pub fn expected_blocks_per_epoch(epoch_length: u64, active_slot_coeff: f64) -> f64 {
     epoch_length as f64 * active_slot_coeff
@@ -1139,5 +1187,110 @@ mod tests {
         // certNat=0 → always elected for any positive phi.
         let result = torsten_crypto::vrf::check_leader_value(&lv, 2.0, 0.05);
         assert!(result, "certNat=0 must always elect even with stake > 1.0");
+    }
+
+    // -------------------------------------------------------------------------
+    // TPraos domain-separated VRF inputs
+    // -------------------------------------------------------------------------
+
+    /// TAG_ETA and TAG_L are Blake2b-256 of 0u64/1u64 big-endian and are distinct.
+    #[test]
+    fn test_tpraos_tag_constants() {
+        let tag_eta = tpraos_tag_eta();
+        let tag_l = tpraos_tag_l();
+
+        // Verify they match the expected construction
+        assert_eq!(tag_eta, *blake2b_256(&0u64.to_be_bytes()).as_bytes());
+        assert_eq!(tag_l, *blake2b_256(&1u64.to_be_bytes()).as_bytes());
+
+        // They must differ
+        assert_ne!(tag_eta, tag_l, "TAG_ETA and TAG_L must be distinct");
+    }
+
+    /// Praos, TPraos leader, and TPraos nonce inputs are all pairwise distinct.
+    #[test]
+    fn test_tpraos_vrf_input_domain_separation() {
+        let nonce = Hash32::from_bytes([0xABu8; 32]);
+        let slot = SlotNo(42);
+
+        let praos_input = vrf_input(&nonce, slot);
+        let tpraos_leader = tpraos_leader_vrf_input(&nonce, slot);
+        let tpraos_nonce = tpraos_nonce_vrf_input(&nonce, slot);
+
+        assert_eq!(praos_input.len(), 32);
+        assert_eq!(tpraos_leader.len(), 32);
+        assert_eq!(tpraos_nonce.len(), 32);
+
+        assert_ne!(
+            praos_input, tpraos_leader,
+            "Praos and TPraos leader must differ"
+        );
+        assert_ne!(
+            praos_input, tpraos_nonce,
+            "Praos and TPraos nonce must differ"
+        );
+        assert_ne!(
+            tpraos_leader, tpraos_nonce,
+            "TPraos leader and nonce must differ"
+        );
+    }
+
+    /// Same inputs produce same outputs (deterministic).
+    #[test]
+    fn test_tpraos_vrf_input_deterministic() {
+        let nonce = Hash32::from_bytes([0xCDu8; 32]);
+        let slot = SlotNo(999);
+
+        assert_eq!(
+            tpraos_leader_vrf_input(&nonce, slot),
+            tpraos_leader_vrf_input(&nonce, slot)
+        );
+        assert_eq!(
+            tpraos_nonce_vrf_input(&nonce, slot),
+            tpraos_nonce_vrf_input(&nonce, slot)
+        );
+    }
+
+    /// Byte-level verification matching Haskell's mkSeed: inner XOR tag.
+    #[test]
+    fn test_tpraos_vrf_input_matches_haskell_mkseed() {
+        let nonce = Hash32::from_bytes([0x42u8; 32]);
+        let slot = SlotNo(1000);
+
+        // Step 1: inner = Blake2b-256(slot_BE || epoch_nonce)
+        let mut data = Vec::with_capacity(40);
+        data.extend_from_slice(&1000u64.to_be_bytes());
+        data.extend_from_slice(nonce.as_bytes());
+        let inner = blake2b_256(&data);
+
+        // Step 2a: TAG_L = Blake2b-256(1u64 BE)
+        let tag_l = blake2b_256(&1u64.to_be_bytes());
+        let expected_leader: Vec<u8> = inner
+            .as_bytes()
+            .iter()
+            .zip(tag_l.as_bytes())
+            .map(|(a, b)| a ^ b)
+            .collect();
+
+        let actual_leader = tpraos_leader_vrf_input(&nonce, slot);
+        assert_eq!(
+            actual_leader, expected_leader,
+            "TPraos leader VRF input must match mkSeed(seedL, slot, nonce)"
+        );
+
+        // Step 2b: TAG_ETA = Blake2b-256(0u64 BE)
+        let tag_eta = blake2b_256(&0u64.to_be_bytes());
+        let expected_nonce: Vec<u8> = inner
+            .as_bytes()
+            .iter()
+            .zip(tag_eta.as_bytes())
+            .map(|(a, b)| a ^ b)
+            .collect();
+
+        let actual_nonce = tpraos_nonce_vrf_input(&nonce, slot);
+        assert_eq!(
+            actual_nonce, expected_nonce,
+            "TPraos nonce VRF input must match mkSeed(seedEta, slot, nonce)"
+        );
     }
 }

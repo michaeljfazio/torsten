@@ -384,6 +384,7 @@ impl OuroborosPraos {
         // Cryptographic verification only in Full mode
         if mode == ValidationMode::Full {
             self.verify_vrf_proof(header)?;
+            self.verify_nonce_vrf_proof(header)?;
             self.validate_operational_cert(header)?;
             self.verify_kes_signature(header)?;
         }
@@ -553,6 +554,7 @@ impl OuroborosPraos {
         // the blocks were previously validated or are from a trusted source (Mithril).
         if mode == ValidationMode::Full {
             self.verify_vrf_proof(header)?;
+            self.verify_nonce_vrf_proof(header)?;
             self.validate_operational_cert(header)?;
             self.verify_kes_signature(header)?;
         }
@@ -799,9 +801,14 @@ impl OuroborosPraos {
         // After Mithril import, the nonce is wrong until 2 full epoch transitions.
         let vrf_is_fatal = self.strict_verification && self.nonce_established;
 
-        // Construct the VRF seed per Praos spec:
-        // input = Blake2b-256(slot_BE || epoch_nonce)
-        let seed = crate::slot_leader::vrf_input(&header.epoch_nonce, header.slot);
+        // Construct the VRF seed:
+        // TPraos (Shelley–Alonzo, proto < 7): domain-separated seed with TAG_L XOR.
+        // Praos (Babbage/Conway, proto >= 7): plain hash, no domain tag.
+        let seed = if header.protocol_version.major < 7 {
+            crate::slot_leader::tpraos_leader_vrf_input(&header.epoch_nonce, header.slot)
+        } else {
+            crate::slot_leader::vrf_input(&header.epoch_nonce, header.slot)
+        };
 
         debug!(
             slot = header.slot.0,
@@ -860,6 +867,86 @@ impl OuroborosPraos {
                         slot = header.slot.0,
                         error = %e,
                         "Praos: VRF proof verification deferred (epoch nonce not established)"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Verify the nonce VRF proof in TPraos block headers.
+    ///
+    /// TPraos (Shelley–Alonzo, proto < 7) carries separate leader and nonce VRF
+    /// certificates.  The nonce VRF proof proves honest generation of the output
+    /// that feeds into epoch nonce evolution.  This method cryptographically
+    /// verifies that proof.
+    ///
+    /// Praos blocks (proto >= 7) have a single VRF certificate and derive the
+    /// nonce contribution deterministically, so this check is skipped for them.
+    fn verify_nonce_vrf_proof(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
+        // Only TPraos blocks carry a separate nonce VRF proof.
+        if header.protocol_version.major >= 7 || header.nonce_vrf_proof.is_empty() {
+            return Ok(());
+        }
+
+        let vrf_is_fatal = self.strict_verification && self.nonce_established;
+
+        // TPraos nonce VRF seed: Blake2b-256(slot_BE || epoch_nonce) XOR TAG_ETA
+        let seed = crate::slot_leader::tpraos_nonce_vrf_input(&header.epoch_nonce, header.slot);
+
+        debug!(
+            slot = header.slot.0,
+            nonce_vrf_proof_len = header.nonce_vrf_proof.len(),
+            nonce_vrf_output_len = header.nonce_vrf_output.len(),
+            "TPraos: nonce VRF verification inputs"
+        );
+
+        match torsten_crypto::vrf::verify_vrf_proof(
+            &header.vrf_vkey,
+            &header.nonce_vrf_proof,
+            &seed,
+        ) {
+            Ok(vrf_output) => {
+                // For TPraos, nonce_vrf_output stores the raw 64-byte VRF output.
+                // Verify the header's stored output matches what the proof produces.
+                if header.nonce_vrf_output.len() == 64
+                    && header.nonce_vrf_output[..] != vrf_output[..]
+                {
+                    if vrf_is_fatal {
+                        return Err(ConsensusError::InvalidBlock(
+                            "Nonce VRF output mismatch".to_string(),
+                        ));
+                    }
+                    warn!(slot = header.slot.0, "TPraos: nonce VRF output mismatch");
+                    return Ok(());
+                }
+                trace!(
+                    slot = header.slot.0,
+                    "TPraos: nonce VRF proof verified successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                if vrf_is_fatal {
+                    error!(
+                        slot = header.slot.0,
+                        epoch_nonce = %header.epoch_nonce.to_hex(),
+                        error = %e,
+                        "Nonce VRF verification failed (fatal)"
+                    );
+                    return Err(ConsensusError::VrfVerification(format!("nonce VRF: {e}")));
+                }
+                if self.nonce_established {
+                    warn!(
+                        slot = header.slot.0,
+                        error = %e,
+                        "TPraos: nonce VRF proof verification failed"
+                    );
+                } else {
+                    debug!(
+                        slot = header.slot.0,
+                        error = %e,
+                        "TPraos: nonce VRF proof verification deferred (epoch nonce not established)"
                     );
                 }
                 Ok(())
@@ -3255,6 +3342,123 @@ mod tests {
         // any pool accepted via the m=0 first-seen path
         let praos = OuroborosPraos::new();
         assert!(praos.opcert_counters().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // TPraos nonce VRF proof verification
+    // -------------------------------------------------------------------------
+
+    /// Helper: create a minimal TPraos-era block header (proto < 7).
+    fn make_tpraos_header() -> BlockHeader {
+        use torsten_primitives::block::{OperationalCert, ProtocolVersion, VrfOutput};
+        use torsten_primitives::hash::BlockHeaderHash;
+
+        BlockHeader {
+            header_hash: BlockHeaderHash::from_bytes([0u8; 32]),
+            prev_hash: BlockHeaderHash::from_bytes([0u8; 32]),
+            issuer_vkey: vec![1u8; 32],
+            vrf_vkey: vec![2u8; 32],
+            vrf_result: VrfOutput {
+                output: vec![0u8; 64],
+                proof: vec![0u8; 80],
+            },
+            block_number: BlockNo(1),
+            slot: SlotNo(100),
+            epoch_nonce: Hash32::ZERO,
+            body_size: 0,
+            body_hash: Hash32::ZERO,
+            operational_cert: OperationalCert {
+                hot_vkey: vec![0u8; 32],
+                sequence_number: 0,
+                kes_period: 0,
+                sigma: vec![0u8; 64],
+            },
+            protocol_version: ProtocolVersion { major: 6, minor: 0 },
+            kes_signature: vec![0u8; 448],
+            nonce_vrf_output: vec![],
+            nonce_vrf_proof: vec![],
+        }
+    }
+
+    /// Valid nonce VRF proof passes strict verification.
+    #[test]
+    fn test_tpraos_nonce_vrf_verification_valid() {
+        let vrf_skey = [42u8; 32];
+        let kp = torsten_crypto::vrf::generate_vrf_keypair_from_secret(&vrf_skey);
+        let vrf_vkey = kp.public_key;
+
+        let mut header = make_tpraos_header();
+        header.vrf_vkey = vrf_vkey.to_vec();
+
+        // Generate valid nonce VRF proof
+        let nonce_seed =
+            crate::slot_leader::tpraos_nonce_vrf_input(&header.epoch_nonce, header.slot);
+        let (proof, output) =
+            torsten_crypto::vrf::generate_vrf_proof(&vrf_skey, &nonce_seed).unwrap();
+        header.nonce_vrf_proof = proof.to_vec();
+        header.nonce_vrf_output = output.to_vec();
+
+        let mut praos = OuroborosPraos::new();
+        praos.strict_verification = true;
+        praos.nonce_established = true;
+
+        assert!(
+            praos.verify_nonce_vrf_proof(&header).is_ok(),
+            "Valid nonce VRF proof must pass verification"
+        );
+    }
+
+    /// Forged nonce VRF proof is rejected in strict mode.
+    #[test]
+    fn test_tpraos_nonce_vrf_verification_invalid() {
+        let mut header = make_tpraos_header();
+        header.nonce_vrf_proof = vec![0xFFu8; 80]; // invalid proof
+        header.nonce_vrf_output = vec![0u8; 64];
+
+        let mut praos = OuroborosPraos::new();
+        praos.strict_verification = true;
+        praos.nonce_established = true;
+
+        let result = praos.verify_nonce_vrf_proof(&header);
+        assert!(
+            result.is_err(),
+            "Forged nonce VRF proof must be rejected in strict mode"
+        );
+    }
+
+    /// Praos blocks (proto >= 7) skip nonce VRF verification.
+    #[test]
+    fn test_praos_nonce_vrf_skipped() {
+        use torsten_primitives::block::ProtocolVersion;
+        let mut header = make_tpraos_header();
+        header.protocol_version = ProtocolVersion { major: 9, minor: 0 };
+        header.nonce_vrf_proof = vec![0xFFu8; 80]; // would be invalid
+
+        let mut praos = OuroborosPraos::new();
+        praos.strict_verification = true;
+        praos.nonce_established = true;
+
+        assert!(
+            praos.verify_nonce_vrf_proof(&header).is_ok(),
+            "Praos blocks must skip nonce VRF check"
+        );
+    }
+
+    /// Invalid nonce VRF proof is non-fatal when nonce is not established.
+    #[test]
+    fn test_tpraos_nonce_vrf_non_fatal_when_nonce_not_established() {
+        let mut header = make_tpraos_header();
+        header.nonce_vrf_proof = vec![0xFFu8; 80];
+        header.nonce_vrf_output = vec![0u8; 64];
+
+        let mut praos = OuroborosPraos::new();
+        praos.strict_verification = true;
+        praos.nonce_established = false;
+
+        assert!(
+            praos.verify_nonce_vrf_proof(&header).is_ok(),
+            "Non-fatal when nonce not established"
+        );
     }
 }
 
