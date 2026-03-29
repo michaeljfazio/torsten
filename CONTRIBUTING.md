@@ -8,7 +8,7 @@ Thank you for your interest in contributing to Torsten! This document provides g
 2. Clone your fork: `git clone git@github.com:YOUR_USERNAME/torsten.git`
 3. Create a branch: `git checkout -b feature/your-feature`
 4. Make your changes
-5. Run the checks: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --all`
+5. Run the checks: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo nextest run --workspace`
 6. Commit and push
 7. Open a pull request
 
@@ -18,7 +18,7 @@ Thank you for your interest in contributing to Torsten! This document provides g
 - **Zero warnings**: `RUSTFLAGS="-D warnings"` is enforced in CI
 - **Clippy clean**: `cargo clippy --all-targets -- -D warnings` must pass
 - **Formatted**: `cargo fmt --all -- --check` must pass
-- **Tests pass**: `cargo test --all` must pass
+- **Tests pass**: `cargo nextest run --workspace` must pass (or `cargo test --all` if nextest is not installed)
 
 ## Code Style
 
@@ -31,7 +31,7 @@ Thank you for your interest in contributing to Torsten! This document provides g
 
 ## Architecture
 
-Torsten is an 11-crate Cargo workspace. See [Architecture Overview](https://michaeljfazio.github.io/torsten/architecture/overview.html) for details.
+Torsten is a 14-crate Cargo workspace. See [Architecture Overview](https://michaeljfazio.github.io/torsten/architecture/overview.html) for details.
 
 Key constraints:
 - **Dependency DAG**: No circular dependencies between crates

@@ -187,7 +187,7 @@ graph TD
 - **GSM state tracking**: PreSyncing/Syncing/CaughtUp with tip age monitoring
 
 ### Testing
-- **1,850+ automated tests**: unit tests, property tests (proptest), integration tests, conformance tests (against official Cardano test vectors), golden tests (VRF, N2C wire format)
+- **2,900+ automated tests**: unit tests, property tests (proptest), integration tests, conformance tests (against official Cardano test vectors), golden tests (VRF, N2C wire format)
 - **Reward cross-validation**: 11 tests verified against Koios on-chain data (preview epochs 1232-1235)
 - **LSM stress tests**: 50K-entry UTxO workload, WAL crash recovery, snapshot consistency
 - **Zero-warning policy**: `cargo clippy --all-targets -- -D warnings` enforced in CI
@@ -198,16 +198,14 @@ Torsten has been validated on the **Cardano preview testnet** (network magic=2):
 
 | Metric | Value |
 |--------|-------|
-| Blocks synced | 4,109,330 (100% to tip) |
-| UTxO count | 2,939,027 |
-| Validation errors | 0 (across full 4.1M block replay) |
-| Live blocks applied at tip | 504 (0 rejections) |
+| Blocks synced | 4,147,000+ (100% to tip) |
+| UTxO count | ~2.9M |
+| Validation errors | 0 (across full 4.1M+ block replay) |
 | Replay throughput | 13,728 blocks/sec (LSM backend) |
-| Epoch transitions | 1,237 (including all protocol version changes) |
-| Treasury | 14,065,825,286 ADA |
-| Pools | 656 registered |
-| DReps | 8,791 registered |
-| Governance proposals | 2 active, 590 ratified during replay |
+| Epoch transitions | 1,251+ (including all protocol version changes) |
+| Pools | 650+ registered |
+| DReps | 8,700+ registered |
+| Block production | Active soak testing via Sandstone Pool [SAND] |
 
 ## Production Readiness
 
@@ -235,17 +233,18 @@ Torsten can function as a **testnet relay node** with the following capabilities
 
 ### Block Producer
 
-The block production pipeline is **implemented but untested on a live network**:
+The block production pipeline is **actively soak-tested** on the Cardano preview testnet via **Sandstone Pool [SAND]** (pool ID `6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856`):
 
 - VRF proof generation and slot leader election (exact 34-digit fixed-point arithmetic matching Haskell)
 - KES key loading, evolution, and block signing (Sum6Kes)
 - Operational certificate parsing and period validation
 - Block forging with mempool transaction selection
 - Block announcement to connected peers
+- Automated restart cycles with snapshot recovery verification
+- Koios cross-validation of UTxO counts, pool stake, and governance state
 
-**Not yet verified:**
-- No testnet block has been forged by Torsten
-- Stake pool registration and delegation flow not end-to-end tested
+**Known limitations:**
+- Mainnet block production has not been tested
 - KES key rotation across multiple KES periods not tested in production
 - Mempool transaction ordering and priority not optimized
 
