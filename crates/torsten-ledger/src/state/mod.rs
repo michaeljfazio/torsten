@@ -226,6 +226,14 @@ pub struct LedgerState {
     /// During replay from genesis, incremental tracking is always correct.
     #[serde(skip)]
     pub needs_stake_rebuild: bool,
+    /// Whether pointer-addressed UTxO stake has been excluded from `stake_distribution`.
+    ///
+    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no pointer
+    /// map — pointer-addressed UTxOs are silently excluded from pool stake calculations.
+    /// This flag ensures the one-time exclusion happens at the first Conway epoch boundary.
+    /// From that point forward, the incremental `apply_block` also skips pointer addresses.
+    #[serde(skip)]
+    pub ptr_stake_excluded: bool,
     /// Pending reward update retained for backward compatibility with snapshots
     /// written by the old deferred-RUPD code path.
     ///
@@ -679,6 +687,7 @@ impl LedgerState {
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: false,
+            ptr_stake_excluded: false,
             total_stake_key_deposits: 0,
             pending_reward_update: None,
             script_stake_credentials: std::collections::HashSet::new(),
@@ -1082,15 +1091,27 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
 /// Handles Base addresses (embedded credential), Reward addresses, and
 /// Pointer addresses (resolved via the pointer_map, matching Haskell's
 /// DState ptrs). Returns None for Enterprise and Byron addresses.
+///
+/// In Conway (protocol version >= 9), pointer addresses are excluded from the
+/// stake distribution — Haskell's `ConwayInstantStake` has no `sisPtrStake`
+/// field and `addConwayInstantStake` returns `ans` unchanged for pointer
+/// addresses.  When `exclude_ptrs` is true, pointer addresses return `None`.
 fn stake_credential_hash_with_ptrs(
     address: &torsten_primitives::address::Address,
     pointer_map: &HashMap<torsten_primitives::credentials::Pointer, Hash32>,
+    exclude_ptrs: bool,
 ) -> Option<Hash32> {
     use torsten_primitives::address::Address;
     match address {
         Address::Base(base) => Some(credential_to_hash(&base.stake)),
         Address::Reward(reward) => Some(credential_to_hash(&reward.stake)),
-        Address::Pointer(ptr_addr) => pointer_map.get(&ptr_addr.pointer).copied(),
+        Address::Pointer(ptr_addr) => {
+            if exclude_ptrs {
+                None
+            } else {
+                pointer_map.get(&ptr_addr.pointer).copied()
+            }
+        }
         _ => None,
     }
 }

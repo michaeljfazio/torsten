@@ -176,6 +176,27 @@ impl LedgerState {
             self.needs_stake_rebuild = false;
         }
 
+        // Conway pointer address exclusion (matching Haskell's ConwayInstantStake).
+        //
+        // In Haskell, the Conway era uses `ConwayInstantStake` which has NO `sisPtrStake`
+        // field — pointer-addressed UTxOs are silently excluded from the stake distribution.
+        // Pre-Conway eras use `ShelleyInstantStake` which resolves pointer addresses via
+        // `saPtrs` during the SNAP rule.
+        //
+        // At the Conway HFC boundary, the migration from ShelleyInstantStake to
+        // ConwayInstantStake discards the pointer map: only `sisCredentialStake` survives.
+        // Existing pointer-addressed UTxOs remain in the UTxO set but their ADA no longer
+        // flows into pool stake, reward calculations, or voting power.
+        //
+        // Torsten resolves pointer addresses inline during UTxO processing (not deferred
+        // like Haskell), so the stake_map already includes pointer-addressed UTxO coins
+        // under the resolved credential.  To match Conway semantics, we must subtract
+        // pointer-addressed UTxO coins from the stake map starting at the first Conway epoch.
+        if self.protocol_params.protocol_version_major >= 9 && !self.ptr_stake_excluded {
+            self.exclude_pointer_address_stake();
+            self.ptr_stake_excluded = true;
+        }
+
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
             HashMap::with_capacity(self.pool_params.len());
@@ -742,9 +763,11 @@ impl LedgerState {
         let mut new_map: HashMap<Hash32, Lovelace> =
             HashMap::with_capacity(self.stake_distribution.stake_map.len());
         for (_, output) in self.utxo_set.iter() {
-            if let Some(cred_hash) =
-                stake_credential_hash_with_ptrs(&output.address, &self.pointer_map)
-            {
+            if let Some(cred_hash) = stake_credential_hash_with_ptrs(
+                &output.address,
+                &self.pointer_map,
+                self.ptr_stake_excluded,
+            ) {
                 *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
             }
         }
@@ -753,6 +776,65 @@ impl LedgerState {
             new_map.entry(*cred_hash).or_insert(Lovelace(0));
         }
         self.stake_distribution.stake_map = new_map;
+    }
+
+    /// Exclude pointer-addressed UTxO stake from the incremental stake distribution.
+    ///
+    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no pointer
+    /// map (`sisPtrStake`).  Pointer-addressed UTxOs remain in the UTxO set but their
+    /// ADA no longer flows into pool stake or reward calculations.
+    ///
+    /// Torsten resolves pointer addresses inline during UTxO processing, so their coins
+    /// are already in `stake_distribution.stake_map` under the resolved credential.
+    /// This function scans all UTxOs, finds pointer-addressed ones, and subtracts their
+    /// coins from the stake map — effectively migrating from ShelleyInstantStake to
+    /// ConwayInstantStake semantics.
+    ///
+    /// Called once at the first Conway epoch boundary.
+    fn exclude_pointer_address_stake(&mut self) {
+        use torsten_primitives::address::Address;
+
+        let mut excluded_total = 0u64;
+        let mut excluded_count = 0u64;
+
+        // Build a map of credential → pointer_coins so we can also subtract from
+        // existing snapshot pool_stake entries (SET and GO were built pre-Conway).
+        let mut ptr_coins_by_cred: HashMap<Hash32, u64> = HashMap::new();
+
+        for (_, output) in self.utxo_set.iter() {
+            if matches!(&output.address, Address::Pointer(_)) {
+                // Resolve the pointer address to a credential (using `false` since
+                // ptr_stake_excluded hasn't been set yet at this point).
+                if let Some(cred_hash) = stake_credential_hash_with_ptrs(
+                    &output.address,
+                    &self.pointer_map,
+                    false, // must resolve pointers here to find what to subtract
+                ) {
+                    if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
+                        stake.0 = stake.0.saturating_sub(output.value.coin.0);
+                        excluded_total += output.value.coin.0;
+                        excluded_count += 1;
+                    }
+                    *ptr_coins_by_cred.entry(cred_hash).or_default() += output.value.coin.0;
+                }
+            }
+        }
+
+        // NOTE: We do NOT subtract from existing SET/GO snapshots. They were built
+        // in Babbage era where ShelleyInstantStake correctly resolves pointers via
+        // saPtrs. Only the NEW mark (built after this exclusion) and future marks
+        // will lack pointer coins, matching Haskell's ConwayInstantStake semantics.
+        // The SET/GO snapshots rotate out naturally over 2 epochs.
+
+        if excluded_count > 0 {
+            info!(
+                excluded_count,
+                excluded_total,
+                excluded_ada = excluded_total / 1_000_000,
+                "Conway: excluded pointer-addressed UTxO stake from distribution \
+                 (matching ConwayInstantStake semantics)"
+            );
+        }
     }
 
     /// Recompute pool_stake for all existing snapshots (mark/set/go).
