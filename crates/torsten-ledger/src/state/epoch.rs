@@ -1,4 +1,4 @@
-use super::{stake_credential_hash_with_ptrs, LedgerState, StakeSnapshot};
+use super::{LedgerState, StakeSnapshot};
 use std::collections::HashMap;
 use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
@@ -216,6 +216,44 @@ impl LedgerState {
             *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
         }
 
+        // Resolve deferred pointer-addressed UTxO stake at SNAP time (Haskell's sisPtrStake).
+        //
+        // In Haskell's ShelleyInstantStake, pointer-addressed UTxO coins are stored in
+        // `sisPtrStake` (pointer → coin) and resolved to credentials via the current `saPtrs`
+        // map when the SNAP rule runs.  Credentials that have deregistered will have had their
+        // pointer_map entries removed, so their pointer-addressed coins are excluded from
+        // this snapshot.  In Conway, ptr_stake is always empty (cleared at the HFC boundary).
+        if !self.ptr_stake.is_empty() {
+            let mut ptr_resolved = 0u64;
+            let mut ptr_excluded = 0u64;
+            for (pointer, &coin) in &self.ptr_stake {
+                if coin == 0 {
+                    continue;
+                }
+                // Resolve the pointer to a credential via the CURRENT pointer_map.
+                // If the pointer has no entry (credential deregistered), exclude the coins.
+                if let Some(cred_hash) = self.pointer_map.get(pointer) {
+                    // Only count coins for registered, delegated credentials.
+                    if self.reward_accounts.contains_key(cred_hash) {
+                        if let Some(pool_id) = self.delegations.get(cred_hash) {
+                            *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += Lovelace(coin);
+                            ptr_resolved += coin;
+                        }
+                    }
+                } else {
+                    ptr_excluded += coin;
+                }
+            }
+            if ptr_resolved > 0 || ptr_excluded > 0 {
+                debug!(
+                    epoch = new_epoch.0,
+                    ptr_resolved_ada = ptr_resolved / 1_000_000,
+                    ptr_excluded_ada = ptr_excluded / 1_000_000,
+                    "SNAP: resolved pointer-addressed UTxO stake (sisPtrStake)"
+                );
+            }
+        }
+
         // Build per-credential stake including reward balances for the snapshot.
         // Only include credentials that are in the delegation map, matching
         // Haskell's ssStake which is the intersection of staking credentials
@@ -237,6 +275,27 @@ impl LedgerState {
             let total = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
             if total.0 > 0 {
                 snapshot_stake.insert(*cred_hash, total);
+            }
+        }
+
+        // Resolve pointer-addressed UTxO coins into per-credential snapshot_stake.
+        //
+        // This mirrors the pool_stake resolution above.  snapshot_stake is used
+        // for per-member reward calculation (individual sigma values).  Pointer
+        // coins must be included here so that pool members with pointer addresses
+        // receive the correct proportional rewards.
+        if !self.ptr_stake.is_empty() {
+            for (pointer, &coin) in &self.ptr_stake {
+                if coin == 0 {
+                    continue;
+                }
+                if let Some(cred_hash) = self.pointer_map.get(pointer) {
+                    if self.reward_accounts.contains_key(cred_hash)
+                        && self.delegations.contains_key(cred_hash)
+                    {
+                        *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += Lovelace(coin);
+                    }
+                }
             }
         }
 
@@ -753,22 +812,35 @@ impl LedgerState {
         self.epoch = new_epoch;
     }
 
-    /// Rebuild stake_distribution.stake_map from the full UTxO set.
+    /// Rebuild stake_distribution.stake_map and ptr_stake from the full UTxO set.
     ///
     /// This recomputes per-credential UTxO stake by scanning all UTxOs,
-    /// matching Haskell's behavior at epoch boundaries. This corrects any
+    /// matching Haskell's behavior at epoch boundaries.  This corrects any
     /// drift from incremental tracking (e.g., after snapshot load or Mithril import).
+    ///
+    /// Pointer-addressed UTxOs are placed in `ptr_stake` (deferred resolution)
+    /// rather than `stake_map` (eager resolution), matching Haskell's separation
+    /// of `sisCredentialStake` from `sisPtrStake` in `ShelleyInstantStake`.
     pub fn rebuild_stake_distribution(&mut self) {
+        use super::stake_routing;
+        use super::StakeRouting;
+
         // Pre-size to the current credential count to minimise rehashing.
         let mut new_map: HashMap<Hash32, Lovelace> =
             HashMap::with_capacity(self.stake_distribution.stake_map.len());
+        let mut new_ptr_stake: HashMap<torsten_primitives::credentials::Pointer, u64> =
+            HashMap::new();
+
         for (_, output) in self.utxo_set.iter() {
-            if let Some(cred_hash) = stake_credential_hash_with_ptrs(
-                &output.address,
-                &self.pointer_map,
-                self.ptr_stake_excluded,
-            ) {
-                *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+            let coin = output.value.coin.0;
+            match stake_routing(&output.address, self.ptr_stake_excluded) {
+                StakeRouting::Credential(cred_hash) => {
+                    *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(coin);
+                }
+                StakeRouting::Pointer(ptr) => {
+                    *new_ptr_stake.entry(ptr).or_insert(0) += coin;
+                }
+                StakeRouting::None => {}
             }
         }
         // Also ensure all registered stake credentials have entries (even with 0 stake)
@@ -776,63 +848,32 @@ impl LedgerState {
             new_map.entry(*cred_hash).or_insert(Lovelace(0));
         }
         self.stake_distribution.stake_map = new_map;
+        self.ptr_stake = new_ptr_stake;
     }
 
-    /// Exclude pointer-addressed UTxO stake from the incremental stake distribution.
+    /// Discard deferred pointer-addressed UTxO stake at the Conway HFC boundary.
     ///
-    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no pointer
-    /// map (`sisPtrStake`).  Pointer-addressed UTxOs remain in the UTxO set but their
-    /// ADA no longer flows into pool stake or reward calculations.
+    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no
+    /// `sisPtrStake` field — pointer-addressed UTxOs are silently excluded from the
+    /// stake distribution.
     ///
-    /// Torsten resolves pointer addresses inline during UTxO processing, so their coins
-    /// are already in `stake_distribution.stake_map` under the resolved credential.
-    /// This function scans all UTxOs, finds pointer-addressed ones, and subtracts their
-    /// coins from the stake map — effectively migrating from ShelleyInstantStake to
-    /// ConwayInstantStake semantics.
+    /// With the deferred `ptr_stake` model, pointer coins were never placed in
+    /// `stake_distribution.stake_map` — they were always in `ptr_stake`.  The
+    /// Conway transition therefore only needs to clear `ptr_stake`; nothing needs
+    /// to be subtracted from `stake_map`.
     ///
     /// Called once at the first Conway epoch boundary.
     fn exclude_pointer_address_stake(&mut self) {
-        use torsten_primitives::address::Address;
-
-        let mut excluded_total = 0u64;
-        let mut excluded_count = 0u64;
-
-        // Build a map of credential → pointer_coins so we can also subtract from
-        // existing snapshot pool_stake entries (SET and GO were built pre-Conway).
-        let mut ptr_coins_by_cred: HashMap<Hash32, u64> = HashMap::new();
-
-        for (_, output) in self.utxo_set.iter() {
-            if matches!(&output.address, Address::Pointer(_)) {
-                // Resolve the pointer address to a credential (using `false` since
-                // ptr_stake_excluded hasn't been set yet at this point).
-                if let Some(cred_hash) = stake_credential_hash_with_ptrs(
-                    &output.address,
-                    &self.pointer_map,
-                    false, // must resolve pointers here to find what to subtract
-                ) {
-                    if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
-                        stake.0 = stake.0.saturating_sub(output.value.coin.0);
-                        excluded_total += output.value.coin.0;
-                        excluded_count += 1;
-                    }
-                    *ptr_coins_by_cred.entry(cred_hash).or_default() += output.value.coin.0;
-                }
-            }
-        }
-
-        // NOTE: We do NOT subtract from existing SET/GO snapshots. They were built
-        // in Babbage era where ShelleyInstantStake correctly resolves pointers via
-        // saPtrs. Only the NEW mark (built after this exclusion) and future marks
-        // will lack pointer coins, matching Haskell's ConwayInstantStake semantics.
-        // The SET/GO snapshots rotate out naturally over 2 epochs.
-
-        if excluded_count > 0 {
+        if !self.ptr_stake.is_empty() {
+            let excluded_count = self.ptr_stake.len() as u64;
+            let excluded_total: u64 = self.ptr_stake.values().sum();
+            self.ptr_stake.clear();
             info!(
                 excluded_count,
                 excluded_total,
                 excluded_ada = excluded_total / 1_000_000,
-                "Conway: excluded pointer-addressed UTxO stake from distribution \
-                 (matching ConwayInstantStake semantics)"
+                "Conway: discarded deferred pointer-addressed UTxO stake (sisPtrStake) \
+                 — matching ConwayInstantStake semantics"
             );
         }
     }
@@ -852,6 +893,14 @@ impl LedgerState {
     /// `rebuild_stake_distribution` + `recompute_snapshot_pool_stakes` call
     /// in node startup code after the UTxO store is attached.
     pub fn recompute_snapshot_pool_stakes(&mut self) {
+        // Borrow ptr_stake and pointer_map immutably for ptr resolution.
+        // We'll use each snapshot's own delegation map for the ptr_stake lookup
+        // (preserving the historical delegation state that was active at that snapshot).
+        let ptr_stake = &self.ptr_stake;
+        let pointer_map = &self.pointer_map;
+        let reward_accounts = &self.reward_accounts;
+        let stake_map = &self.stake_distribution.stake_map;
+
         for (name, snapshot) in [
             ("mark", &mut self.snapshots.mark),
             ("set", &mut self.snapshots.set),
@@ -865,19 +914,31 @@ impl LedgerState {
                 let mut new_pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
                     HashMap::with_capacity(snap.pool_stake.len());
                 for (cred_hash, pool_id) in snap.delegations.iter() {
-                    let utxo_stake = self
-                        .stake_distribution
-                        .stake_map
-                        .get(cred_hash)
-                        .copied()
-                        .unwrap_or(Lovelace(0));
-                    let reward_balance = self
-                        .reward_accounts
+                    let utxo_stake = stake_map.get(cred_hash).copied().unwrap_or(Lovelace(0));
+                    let reward_balance = reward_accounts
                         .get(cred_hash)
                         .copied()
                         .unwrap_or(Lovelace(0));
                     let total_stake = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
                     *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
+                }
+                // Include pointer-addressed UTxO stake resolved via the current pointer_map.
+                // Use each snapshot's own delegation map so that historical delegations are
+                // respected (matching the per-snapshot delegation semantics of SNAP).
+                // ptr_stake is empty in Conway (cleared at HFC boundary), so this loop
+                // is a no-op post-Conway.
+                for (pointer, &coin) in ptr_stake {
+                    if coin == 0 {
+                        continue;
+                    }
+                    if let Some(cred_hash) = pointer_map.get(pointer) {
+                        if reward_accounts.contains_key(cred_hash) {
+                            if let Some(pool_id) = snap.delegations.get(cred_hash) {
+                                *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) +=
+                                    Lovelace(coin);
+                            }
+                        }
+                    }
                 }
                 let new_total: u64 = new_pool_stake
                     .values()

@@ -7,6 +7,7 @@
 - [RUPD snapshot position fix](ledger-rupd-snapshot-fix.md) — Use `set` snapshot (not `go`) in calculate_rewards(); stale treasury diagnostics
 - [Rollback UTxO store](ledger-rollback-utxo-store.md) — Slow-path rollback must open fresh store from LSM snapshot
 - [Output CBOR re-encode](crypto-output-cbor-reencode.md) — Indefinite-length inline datum CBOR and legacy vs post-Alonzo detection
+- [Deferred pointer stake (sisPtrStake)](ledger-ptr-stake-deferred.md) — ptr_stake field + StakeRouting enum; resolves at SNAP time not insertion; 603 epoch mismatches from epoch 647
 
 ## N2C Protocol Compliance
 - [Hash32 padding convention](n2c-hash32-padding.md) — 28→32 byte padding/truncation rules for N2C wire output

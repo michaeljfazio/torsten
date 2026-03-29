@@ -226,6 +226,31 @@ pub struct LedgerState {
     /// During replay from genesis, incremental tracking is always correct.
     #[serde(skip)]
     pub needs_stake_rebuild: bool,
+    /// Pointer-addressed UTxO stake: pointer → coin amount (Haskell's `sisPtrStake`).
+    ///
+    /// Haskell's `ShelleyInstantStake` tracks pointer-addressed UTxO coins separately
+    /// in `sisPtrStake` and resolves them to credentials at each SNAP boundary using
+    /// the current `saPtrs` map.  This deferred resolution means that if a credential
+    /// deregisters (removing its pointer_map entry), its pointer-addressed coins are
+    /// excluded from the snapshot — they are NOT credited to any pool.
+    ///
+    /// Torsten previously resolved pointer addresses eagerly at UTxO insertion time
+    /// and stored coins directly in `stake_distribution.stake_map`.  This diverged
+    /// from Haskell when a deregistration removed the pointer_map entry after the
+    /// UTxO was created — Torsten kept the coins in stake_map while Haskell excluded
+    /// them from the next snapshot.
+    ///
+    /// This field implements the deferred model: pointer UTxO coins are tracked here
+    /// by pointer key; they are resolved to credentials at each epoch boundary
+    /// (SNAP time) via the current `pointer_map`.  If a pointer has no entry in
+    /// `pointer_map` (deregistered credential), its coins are excluded from the snapshot.
+    ///
+    /// `#[serde(default)]` ensures backward compatibility: snapshots written before
+    /// this field was added deserialise with an empty map (safe because
+    /// `needs_stake_rebuild` will be set, triggering a full UTxO scan that
+    /// correctly populates both `stake_distribution.stake_map` and this field).
+    #[serde(default)]
+    pub ptr_stake: HashMap<torsten_primitives::credentials::Pointer, u64>,
     /// Whether pointer-addressed UTxO stake has been excluded from `stake_distribution`.
     ///
     /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no pointer
@@ -687,6 +712,7 @@ impl LedgerState {
             governance: Arc::new(GovernanceState::default()),
             slot_config: SlotConfig::default(),
             needs_stake_rebuild: false,
+            ptr_stake: HashMap::new(),
             ptr_stake_excluded: false,
             total_stake_key_deposits: 0,
             pending_reward_update: None,
@@ -1096,23 +1122,45 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
 /// stake distribution — Haskell's `ConwayInstantStake` has no `sisPtrStake`
 /// field and `addConwayInstantStake` returns `ans` unchanged for pointer
 /// addresses.  When `exclude_ptrs` is true, pointer addresses return `None`.
-fn stake_credential_hash_with_ptrs(
+/// The stake routing outcome for a UTxO output address.
+///
+/// Haskell's `ShelleyInstantStake` tracks pointer-addressed UTxO coins separately
+/// in `sisPtrStake` and defers their resolution to SNAP time.  Base/Reward addresses
+/// go directly into `sisCredentialStake` (our `stake_map`).  In Conway,
+/// `ConwayInstantStake` omits pointer stake entirely.
+enum StakeRouting {
+    /// Credential hash — route coins to `stake_distribution.stake_map`.
+    Credential(Hash32),
+    /// Pointer key — route coins to `ptr_stake` (deferred resolution at SNAP time).
+    Pointer(torsten_primitives::credentials::Pointer),
+    /// No stake routing (Enterprise / Byron / unknown).
+    None,
+}
+
+/// Classify a UTxO address into its stake-routing bucket.
+///
+/// * Base / Reward  → `StakeRouting::Credential` (eager resolution)
+/// * Pointer        → `StakeRouting::Pointer` (deferred — key stored in `ptr_stake`)
+/// * Everything else → `StakeRouting::None`
+///
+/// When `exclude_ptrs` is true (Conway era), pointer addresses return
+/// `StakeRouting::None` — they are silently excluded as in `ConwayInstantStake`.
+fn stake_routing(
     address: &torsten_primitives::address::Address,
-    pointer_map: &HashMap<torsten_primitives::credentials::Pointer, Hash32>,
     exclude_ptrs: bool,
-) -> Option<Hash32> {
+) -> StakeRouting {
     use torsten_primitives::address::Address;
     match address {
-        Address::Base(base) => Some(credential_to_hash(&base.stake)),
-        Address::Reward(reward) => Some(credential_to_hash(&reward.stake)),
+        Address::Base(base) => StakeRouting::Credential(credential_to_hash(&base.stake)),
+        Address::Reward(reward) => StakeRouting::Credential(credential_to_hash(&reward.stake)),
         Address::Pointer(ptr_addr) => {
             if exclude_ptrs {
-                None
+                StakeRouting::None
             } else {
-                pointer_map.get(&ptr_addr.pointer).copied()
+                StakeRouting::Pointer(ptr_addr.pointer)
             }
         }
-        _ => None,
+        _ => StakeRouting::None,
     }
 }
 

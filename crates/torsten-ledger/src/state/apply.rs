@@ -10,8 +10,7 @@
 //! - Applying UTxO changes, certificates, governance, and fee accumulation
 
 use super::{
-    credential_to_hash, stake_credential_hash_with_ptrs, BlockValidationMode, LedgerError,
-    LedgerState,
+    credential_to_hash, stake_routing, BlockValidationMode, LedgerError, LedgerState, StakeRouting,
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::plutus::evaluate_plutus_scripts;
@@ -780,14 +779,22 @@ impl LedgerState {
                 for col_input in &tx.body.collateral {
                     if let Some(spent) = self.utxo_set.lookup(col_input) {
                         collateral_input_value += spent.value.coin.0;
-                        if let Some(cred) = stake_credential_hash_with_ptrs(
-                            &spent.address,
-                            &self.pointer_map,
-                            self.ptr_stake_excluded,
-                        ) {
-                            if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred) {
-                                stake.0 = stake.0.saturating_sub(spent.value.coin.0);
+                        let coin = spent.value.coin.0;
+                        match stake_routing(&spent.address, self.ptr_stake_excluded) {
+                            StakeRouting::Credential(cred) => {
+                                if let Some(stake) =
+                                    self.stake_distribution.stake_map.get_mut(&cred)
+                                {
+                                    stake.0 = stake.0.saturating_sub(coin);
+                                }
                             }
+                            StakeRouting::Pointer(ptr) => {
+                                // Subtract from deferred ptr_stake bucket.
+                                if let Some(entry) = self.ptr_stake.get_mut(&ptr) {
+                                    *entry = entry.saturating_sub(coin);
+                                }
+                            }
+                            StakeRouting::None => {}
                         }
                         // Record collateral deletion for diff-based rollback.
                         block_diff.record_delete(col_input.clone(), spent);
@@ -796,16 +803,19 @@ impl LedgerState {
                 }
                 // If there's a collateral return output, add it
                 let collateral_return_value = if let Some(col_return) = &tx.body.collateral_return {
-                    if let Some(cred) = stake_credential_hash_with_ptrs(
-                        &col_return.address,
-                        &self.pointer_map,
-                        self.ptr_stake_excluded,
-                    ) {
-                        *self
-                            .stake_distribution
-                            .stake_map
-                            .entry(cred)
-                            .or_insert(Lovelace(0)) += Lovelace(col_return.value.coin.0);
+                    let coin = col_return.value.coin.0;
+                    match stake_routing(&col_return.address, self.ptr_stake_excluded) {
+                        StakeRouting::Credential(cred) => {
+                            *self
+                                .stake_distribution
+                                .stake_map
+                                .entry(cred)
+                                .or_insert(Lovelace(0)) += Lovelace(coin);
+                        }
+                        StakeRouting::Pointer(ptr) => {
+                            *self.ptr_stake.entry(ptr).or_insert(0) += coin;
+                        }
+                        StakeRouting::None => {}
                     }
                     let return_input = TransactionInput {
                         transaction_id: tx.hash,
@@ -855,16 +865,24 @@ impl LedgerState {
                 })
                 .collect();
 
-            // Update stake distribution from consumed inputs (subtract)
+            // Update stake distribution from consumed inputs (subtract).
+            //
+            // For pointer-addressed UTxOs, subtract from ptr_stake (the deferred
+            // bucket) rather than stake_map, mirroring the insertion path.
             for (_input, spent_output) in &spent_outputs {
-                if let Some(cred_hash) = stake_credential_hash_with_ptrs(
-                    &spent_output.address,
-                    &self.pointer_map,
-                    self.ptr_stake_excluded,
-                ) {
-                    if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
-                        stake.0 = stake.0.saturating_sub(spent_output.value.coin.0);
+                let coin = spent_output.value.coin.0;
+                match stake_routing(&spent_output.address, self.ptr_stake_excluded) {
+                    StakeRouting::Credential(cred_hash) => {
+                        if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
+                            stake.0 = stake.0.saturating_sub(coin);
+                        }
                     }
+                    StakeRouting::Pointer(ptr) => {
+                        if let Some(entry) = self.ptr_stake.get_mut(&ptr) {
+                            *entry = entry.saturating_sub(coin);
+                        }
+                    }
+                    StakeRouting::None => {}
                 }
             }
 
@@ -956,17 +974,25 @@ impl LedgerState {
                 }
 
                 // Pass 4: update stake distribution from new outputs.
+                //
+                // Pointer-addressed outputs go to ptr_stake (deferred bucket);
+                // Base/Reward addressed outputs go to stake_map (eager resolution).
+                // This matches Haskell's addShelleyInstantStake which separates
+                // sisCredentialStake from sisPtrStake.
                 for output in &tx.body.outputs {
-                    if let Some(cred_hash) = stake_credential_hash_with_ptrs(
-                        &output.address,
-                        &self.pointer_map,
-                        self.ptr_stake_excluded,
-                    ) {
-                        *self
-                            .stake_distribution
-                            .stake_map
-                            .entry(cred_hash)
-                            .or_insert(Lovelace(0)) += Lovelace(output.value.coin.0);
+                    let coin = output.value.coin.0;
+                    match stake_routing(&output.address, self.ptr_stake_excluded) {
+                        StakeRouting::Credential(cred_hash) => {
+                            *self
+                                .stake_distribution
+                                .stake_map
+                                .entry(cred_hash)
+                                .or_insert(Lovelace(0)) += Lovelace(coin);
+                        }
+                        StakeRouting::Pointer(ptr) => {
+                            *self.ptr_stake.entry(ptr).or_insert(0) += coin;
+                        }
+                        StakeRouting::None => {}
                     }
                 }
             }
