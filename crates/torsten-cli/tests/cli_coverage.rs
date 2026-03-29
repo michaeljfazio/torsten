@@ -243,6 +243,91 @@ fn test_vrf_keygen_different_each_time() {
     assert_ne!(kp1.secret_key(), kp2.secret_key());
 }
 
+// ─── VRF / KES round-trip tests ─────────────────────────────────────────────
+
+#[test]
+fn test_vrf_keygen_sign_verify_roundtrip() {
+    let kp = torsten_crypto::vrf::generate_vrf_keypair();
+
+    // Prove and verify round-trip
+    let seed = b"test slot leader election seed";
+    let (proof, output) = torsten_crypto::vrf::generate_vrf_proof(kp.secret_key(), seed).unwrap();
+    assert_eq!(proof.len(), 80);
+    assert_eq!(output.len(), 64);
+
+    let verified = torsten_crypto::vrf::verify_vrf_proof(&kp.public_key, &proof, seed).unwrap();
+    assert_eq!(verified, output);
+}
+
+#[test]
+fn test_kes_keygen_sign_verify_roundtrip() {
+    let seed = [0xABu8; 32];
+    let (sk_bytes, pk_bytes) = torsten_crypto::kes::kes_keygen(&seed).unwrap();
+
+    // Verify key sizes
+    assert_eq!(
+        sk_bytes.len(),
+        612,
+        "KES secret key must be 612 bytes (Sum6Kes)"
+    );
+    assert_eq!(pk_bytes.len(), 32, "KES public key must be 32 bytes");
+
+    // Sign and verify round-trip
+    let message = b"block header for KES signing";
+    let (sig, period) = torsten_crypto::kes::kes_sign_message(&sk_bytes, message).unwrap();
+    assert_eq!(period, 0);
+    assert!(torsten_crypto::kes::kes_verify(&pk_bytes, 0, &sig, message).is_ok());
+}
+
+#[test]
+fn test_vrf_key_envelope_cbor_format() {
+    let kp = torsten_crypto::vrf::generate_vrf_keypair();
+
+    let sk_cbor = simple_cbor_wrap(kp.secret_key());
+    let vk_cbor = simple_cbor_wrap(&kp.public_key);
+
+    // Both VRF keys are 32 bytes → CBOR prefix 0x5820
+    let sk_hex = hex::encode(&sk_cbor);
+    let vk_hex = hex::encode(&vk_cbor);
+    assert!(
+        sk_hex.starts_with("5820"),
+        "VRF skey CBOR should start with 5820, got: {}",
+        &sk_hex[..4]
+    );
+    assert!(
+        vk_hex.starts_with("5820"),
+        "VRF vkey CBOR should start with 5820, got: {}",
+        &vk_hex[..4]
+    );
+
+    // Verify extracted key bytes still work for VRF proof
+    let sk_bytes: [u8; 32] = sk_cbor[2..].try_into().unwrap();
+    let (proof, _) = torsten_crypto::vrf::generate_vrf_proof(&sk_bytes, b"test").unwrap();
+    assert_eq!(proof.len(), 80);
+}
+
+#[test]
+fn test_kes_key_envelope_cbor_format() {
+    let seed = [0xCDu8; 32];
+    let (sk_bytes, pk_bytes) = torsten_crypto::kes::kes_keygen(&seed).unwrap();
+
+    let sk_cbor_hex = hex::encode(simple_cbor_wrap(&sk_bytes));
+    let vk_cbor_hex = hex::encode(simple_cbor_wrap(&pk_bytes));
+
+    // KES skey is 612 bytes = 0x0264 → CBOR prefix 0x590264
+    assert!(
+        sk_cbor_hex.starts_with("590264"),
+        "KES skey CBOR should start with 590264, got: {}",
+        &sk_cbor_hex[..6]
+    );
+    // KES vkey is 32 bytes → CBOR prefix 0x5820
+    assert!(
+        vk_cbor_hex.starts_with("5820"),
+        "KES vkey CBOR should start with 5820, got: {}",
+        &vk_cbor_hex[..4]
+    );
+}
+
 // ─── Helper: simple CBOR byte-string wrapper ─────────────────────────────────
 
 /// Wraps raw bytes in a CBOR byte-string header.

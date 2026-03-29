@@ -141,19 +141,23 @@ impl NodeCmd {
                 verification_key_file,
                 signing_key_file,
             } => {
-                // KES keys are ed25519 keys (simplified - real KES uses sum composition)
-                let sk = torsten_crypto::keys::PaymentSigningKey::generate();
-                let vk = sk.verification_key();
+                // Generate proper Sum6Kes key pair (depth-6 binary sum composition)
+                use rand::RngCore;
+                let mut seed = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut seed);
+
+                let (sk_bytes, pk_bytes) = torsten_crypto::kes::kes_keygen(&seed)
+                    .map_err(|e| anyhow::anyhow!("KES key generation failed: {e}"))?;
 
                 let sk_env = serde_json::json!({
                     "type": "KesSigningKey_ed25519_kes_2^6",
                     "description": "KES Signing Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&sk.to_bytes()))
+                    "cborHex": hex::encode(simple_cbor_wrap(&sk_bytes))
                 });
                 let vk_env = serde_json::json!({
                     "type": "KesVerificationKey_ed25519_kes_2^6",
-                    "description": "KES Verification Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&vk.to_bytes()))
+                    "description": "KES Period Verification Key",
+                    "cborHex": hex::encode(simple_cbor_wrap(&pk_bytes))
                 });
 
                 std::fs::write(&signing_key_file, serde_json::to_string_pretty(&sk_env)?)?;

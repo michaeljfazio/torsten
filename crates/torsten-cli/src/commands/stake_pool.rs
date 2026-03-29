@@ -194,19 +194,18 @@ impl StakePoolCmd {
                 verification_key_file,
                 signing_key_file,
             } => {
-                // VRF keys are 32-byte Ed25519 keys (same generation, different type label)
-                let sk = torsten_crypto::keys::PaymentSigningKey::generate();
-                let vk = sk.verification_key();
+                // Generate proper ECVRF-ED25519-SHA512-Elligator2 key pair
+                let kp = torsten_crypto::vrf::generate_vrf_keypair();
 
                 let sk_env = serde_json::json!({
                     "type": "VrfSigningKey_PraosVRF",
                     "description": "VRF Signing Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&sk.to_bytes()))
+                    "cborHex": hex::encode(simple_cbor_wrap(kp.secret_key()))
                 });
                 let vk_env = serde_json::json!({
                     "type": "VrfVerificationKey_PraosVRF",
                     "description": "VRF Verification Key",
-                    "cborHex": hex::encode(simple_cbor_wrap(&vk.to_bytes()))
+                    "cborHex": hex::encode(simple_cbor_wrap(&kp.public_key))
                 });
 
                 std::fs::write(&signing_key_file, serde_json::to_string_pretty(&sk_env)?)?;
@@ -215,8 +214,9 @@ impl StakePoolCmd {
                     serde_json::to_string_pretty(&vk_env)?,
                 )?;
 
+                let vrf_vkey_hash = torsten_primitives::hash::blake2b_256(&kp.public_key);
                 println!("VRF key pair generated.");
-                println!("VRF verification key hash: {}", vk.hash().to_hex());
+                println!("VRF verification key hash: {}", vrf_vkey_hash.to_hex());
                 Ok(())
             }
             StakePoolSubcommand::KesKeyGen {
