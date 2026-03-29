@@ -441,6 +441,15 @@ pub struct NodeMetrics {
     /// native `torsten_*` metrics.  Allows existing cardano-node Grafana dashboards
     /// to work without modification.  Controlled by `--compat-metrics` CLI flag.
     compat_metrics: std::sync::atomic::AtomicBool,
+    /// 1 when P2P networking (peer governor, churn, discovery) is enabled, 0 for
+    /// static topology mode.  Set once at startup from the `EnableP2P` config field.
+    pub p2p_enabled: AtomicU64,
+    /// Diffusion mode: 0 = InitiatorAndResponder, 1 = InitiatorOnly.
+    /// Set once at startup from the `DiffusionMode` config field.
+    pub diffusion_mode: AtomicU64,
+    /// 1 when peer sharing mini-protocol is enabled, 0 when disabled.
+    /// Set once at startup based on config and block producer status.
+    pub peer_sharing_enabled: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -510,6 +519,9 @@ impl NodeMetrics {
             is_block_producer: AtomicU64::new(0),
             pool_id_hex: std::sync::Mutex::new(String::new()),
             compat_metrics: std::sync::atomic::AtomicBool::new(false),
+            p2p_enabled: AtomicU64::new(1),
+            diffusion_mode: AtomicU64::new(0),
+            peer_sharing_enabled: AtomicU64::new(1),
         }
     }
 
@@ -688,6 +700,33 @@ impl NodeMetrics {
     /// Set the network magic number.
     pub fn set_network_magic(&self, magic: u64) {
         self.network_magic.store(magic, Ordering::Relaxed);
+    }
+
+    /// Record P2P networking configuration state.
+    ///
+    /// Call once during node startup to set the P2P-related gauges from the
+    /// node configuration.  These are read by the TUI to display the correct
+    /// P2P status and diffusion mode.
+    ///
+    /// - `p2p`: whether the peer governor is active (`EnableP2P` config field)
+    /// - `diffusion_mode`: the `DiffusionMode` config enum
+    /// - `peer_sharing`: whether peer sharing mini-protocol is enabled
+    pub fn set_p2p_config(
+        &self,
+        p2p: bool,
+        diffusion_mode: &crate::config::DiffusionMode,
+        peer_sharing: bool,
+    ) {
+        self.p2p_enabled.store(u64::from(p2p), Ordering::Relaxed);
+        self.diffusion_mode.store(
+            match diffusion_mode {
+                crate::config::DiffusionMode::InitiatorAndResponder => 0,
+                crate::config::DiffusionMode::InitiatorOnly => 1,
+            },
+            Ordering::Relaxed,
+        );
+        self.peer_sharing_enabled
+            .store(u64::from(peer_sharing), Ordering::Relaxed);
     }
 
     /// Record block producer mode.
@@ -1006,6 +1045,21 @@ impl NodeMetrics {
                 "torsten_is_block_producer",
                 "1 when running as a block producer (forge credentials loaded), 0 for relay",
                 &self.is_block_producer,
+            ),
+            (
+                "torsten_p2p_enabled",
+                "1 when P2P networking (peer governor) is enabled, 0 for static topology mode",
+                &self.p2p_enabled,
+            ),
+            (
+                "torsten_diffusion_mode",
+                "Diffusion mode: 0 = InitiatorAndResponder, 1 = InitiatorOnly",
+                &self.diffusion_mode,
+            ),
+            (
+                "torsten_peer_sharing_enabled",
+                "1 when peer sharing mini-protocol is enabled, 0 when disabled",
+                &self.peer_sharing_enabled,
             ),
         ];
 

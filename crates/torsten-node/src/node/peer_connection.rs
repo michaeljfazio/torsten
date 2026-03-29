@@ -153,6 +153,7 @@ impl PeerConnection {
     ///
     /// * `addr` — Remote peer socket address
     /// * `network_magic` — Cardano network identifier
+    /// * `initiator_only` — True when DiffusionMode is InitiatorOnly
     /// * `peer_sharing` — Whether to advertise peer sharing support
     /// * `timeout` — Optional TCP connect timeout (defaults to 10s)
     ///
@@ -163,6 +164,7 @@ impl PeerConnection {
     pub async fn connect(
         addr: SocketAddr,
         network_magic: u64,
+        initiator_only: bool,
         peer_sharing: bool,
         timeout: Option<Duration>,
     ) -> Result<Self, PeerConnectionError> {
@@ -218,7 +220,7 @@ impl PeerConnection {
         let mux_handle = tokio::spawn(async move { mux.run().await });
 
         // Run N2N handshake on the handshake channel.
-        let our_data = N2NVersionData::new(network_magic, peer_sharing);
+        let our_data = N2NVersionData::new(network_magic, initiator_only, peer_sharing);
         let handshake_result = run_n2n_handshake_client(&mut handshake_ch, &our_data)
             .await
             .map_err(|e| PeerConnectionError::Handshake(addr, e.to_string()))?;
@@ -254,11 +256,13 @@ impl PeerConnection {
     /// * `stream` — Already-accepted TCP stream
     /// * `addr` — Remote peer socket address (for logging/identification)
     /// * `network_magic` — Cardano network identifier
+    /// * `initiator_only` — True when DiffusionMode is InitiatorOnly
     /// * `peer_sharing` — Whether to advertise peer sharing support
     pub async fn accept(
         stream: tokio::net::TcpStream,
         addr: SocketAddr,
         network_magic: u64,
+        initiator_only: bool,
         peer_sharing: bool,
     ) -> Result<Self, PeerConnectionError> {
         let bearer = TcpBearer::new(stream)
@@ -308,7 +312,7 @@ impl PeerConnection {
         let mux_handle = tokio::spawn(async move { mux.run().await });
 
         // Run N2N handshake as server.
-        let our_data = N2NVersionData::new(network_magic, peer_sharing);
+        let our_data = N2NVersionData::new(network_magic, initiator_only, peer_sharing);
         let handshake_result = run_n2n_handshake_server(&mut handshake_ch, &our_data)
             .await
             .map_err(|e| PeerConnectionError::Handshake(addr, e.to_string()))?;

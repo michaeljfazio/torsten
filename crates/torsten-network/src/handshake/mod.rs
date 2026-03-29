@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn n2n_propose_encode_decode_roundtrip() {
-        let data = N2NVersionData::new(2, true);
+        let data = N2NVersionData::new(2, false, true);
         let encoded = encode_propose_versions_n2n(n2n::N2N_VERSIONS, &data);
         let decoded = decode_propose_versions_n2n(&encoded).unwrap();
         assert!(decoded.contains_key(&14));
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn n2n_accept_encode_decode() {
-        let data = N2NVersionData::new(2, true);
+        let data = N2NVersionData::new(2, false, true);
         let encoded = encode_accept_version_n2n(15, &data);
         let result = decode_handshake_response(&encoded).unwrap();
         assert_eq!(result.version, 15);
@@ -551,7 +551,7 @@ mod tests {
     fn simultaneous_open_detection() {
         // If we receive MsgProposeVersions (tag 0) instead of MsgAcceptVersion,
         // it means simultaneous open.
-        let data = N2NVersionData::new(2, true);
+        let data = N2NVersionData::new(2, false, true);
         let proposal = encode_propose_versions_n2n(n2n::N2N_VERSIONS, &data);
         let result = decode_handshake_response(&proposal).unwrap();
         assert!(result.simultaneous_open);
