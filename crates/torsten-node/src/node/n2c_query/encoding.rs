@@ -2022,6 +2022,25 @@ fn encode_shelley_pparams_common(
     enc.u64(pp.min_pool_cost).ok();
 }
 
+/// Encode a picosecond timestamp as a CBOR integer.
+///
+/// Values that fit in u64 are encoded as a normal CBOR unsigned integer.
+/// Larger values (e.g., mainnet Byron end time ~9e19) are encoded as a CBOR
+/// positive bignum (tag 2 + big-endian byte string), matching Haskell's
+/// Serialise instance for `Fixed E12` (Pico).
+fn encode_pico(enc: &mut minicbor::Encoder<&mut Vec<u8>>, value: u128) {
+    if value <= u64::MAX as u128 {
+        enc.u64(value as u64).ok();
+    } else {
+        // CBOR tag 2 = positive bignum, followed by big-endian bytes.
+        enc.tag(minicbor::data::Tag::new(2)).ok();
+        let bytes = value.to_be_bytes();
+        // Strip leading zero bytes.
+        let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
+        enc.bytes(&bytes[start..]).ok();
+    }
+}
+
 fn encode_era_history(
     enc: &mut minicbor::Encoder<&mut Vec<u8>>,
     summaries: &[crate::node::n2c_query::types::EraSummary],
@@ -2039,13 +2058,13 @@ fn encode_era_history(
         enc.array(3).ok();
         // Start bound: [time_pico, slot, epoch]
         enc.array(3).ok();
-        enc.u64(summary.start_time_pico).ok();
+        encode_pico(enc, summary.start_time_pico);
         enc.u64(summary.start_slot).ok();
         enc.u64(summary.start_epoch).ok();
         // Era end: EraEnd(bound) = Bound directly, EraUnbounded = null
         if let Some(end) = &summary.end {
             enc.array(3).ok();
-            enc.u64(end.time_pico).ok();
+            encode_pico(enc, end.time_pico);
             enc.u64(end.slot).ok();
             enc.u64(end.epoch).ok();
         } else {

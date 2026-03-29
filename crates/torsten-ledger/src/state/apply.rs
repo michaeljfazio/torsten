@@ -244,6 +244,10 @@ impl LedgerState {
             self.lab_nonce = block.header.prev_hash;
 
             self.tip = block.tip();
+            // Detect era transitions for the HFC era history state machine.
+            if block.era > self.era {
+                self.pending_era_transition = Some((self.era, block.era, self.epoch));
+            }
             self.era = block.era;
 
             // Record this block's UTxO diff for rollback support.
@@ -1180,6 +1184,10 @@ impl LedgerState {
 
         // Update tip
         self.tip = block.tip();
+        // Detect era transitions for the HFC era history state machine.
+        if block.era > self.era {
+            self.pending_era_transition = Some((self.era, block.era, self.epoch));
+        }
         self.era = block.era;
 
         // Record this block's UTxO diff for rollback support.

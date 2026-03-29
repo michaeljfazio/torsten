@@ -3493,6 +3493,7 @@ name = "torsten-consensus"
 version = "0.4.6-alpha"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "minicbor 0.25.1",
  "num-bigint",
@@ -3502,6 +3503,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "torsten-crypto",

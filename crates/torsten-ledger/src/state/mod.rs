@@ -88,6 +88,12 @@ pub struct LedgerState {
     pub tip: Tip,
     /// Current era
     pub era: Era,
+    /// Pending era transition detected from the block stream.
+    /// Set when `block.era > self.era` during `apply_block`.
+    /// Consumed by the node layer to update the consensus-level `EraHistory`.
+    /// `(previous_era, new_era, transition_epoch)`.
+    #[serde(skip, default)]
+    pub pending_era_transition: Option<(Era, Era, EpochNo)>,
     /// Current epoch
     pub epoch: EpochNo,
     /// Shelley epoch length in slots
@@ -671,6 +677,7 @@ impl LedgerState {
             utxo_set: UtxoSet::new(),
             tip: Tip::origin(),
             era: Era::Conway,
+            pending_era_transition: None,
             epoch: EpochNo(0),
             epoch_length: 432000,          // mainnet default
             shelley_transition_epoch: 208, // mainnet default

@@ -125,9 +125,11 @@ pub struct Node {
     /// Byron epoch length in absolute slots (10 * k). For correct slot
     /// computation on non-mainnet networks.
     pub(crate) byron_epoch_length: u64,
-    /// Byron slot duration in milliseconds (from genesis, default 20000).
-    pub(crate) byron_slot_duration_ms: u64,
     pub(crate) shelley_genesis: Option<ShelleyGenesis>,
+    /// HFC era history state machine — tracks era boundaries with slot/epoch/time
+    /// arithmetic. Initialized from genesis configs and extended during sync as
+    /// era transitions are detected in the block stream.
+    pub(crate) era_history: Arc<RwLock<torsten_consensus::EraHistory>>,
     pub(crate) topology_path: PathBuf,
     pub(crate) metrics: Arc<crate::metrics::NodeMetrics>,
     /// Block producer credentials (None = relay-only mode)
@@ -806,6 +808,119 @@ impl Node {
             "Consensus: Praos",
         );
 
+        // Build the HFC era history state machine from genesis parameters.
+        // This replaces the hardcoded era lookup tables with a proper state machine
+        // that tracks era boundaries and provides slot↔time conversions.
+        let era_history = {
+            use torsten_consensus::era_history::{EraHistory, EraParams};
+
+            let k = consensus.security_param;
+            let active_slots_coeff = consensus.active_slot_coeff;
+            let genesis_window = k * 2;
+
+            let byron_params = EraParams {
+                epoch_size: if byron_epoch_length > 0 {
+                    byron_epoch_length
+                } else {
+                    // Fallback: mainnet default (10 * 2160)
+                    21600
+                },
+                slot_length_ms: byron_slot_duration_ms,
+                safe_zone: k * 2,
+            };
+
+            let shelley_epoch_length = shelley_genesis
+                .as_ref()
+                .map(|g| g.epoch_length)
+                .unwrap_or(432000);
+            let shelley_slot_length_ms = shelley_genesis
+                .as_ref()
+                .map(|g| g.slot_length * 1000)
+                .unwrap_or(1000);
+            let shelley_safe_zone = (3.0 * k as f64 / active_slots_coeff).floor() as u64;
+
+            let shelley_params = EraParams {
+                epoch_size: shelley_epoch_length,
+                slot_length_ms: shelley_slot_length_ms,
+                safe_zone: shelley_safe_zone,
+            };
+
+            let shelley_transition_epoch = epoch::shelley_transition_epoch_for_magic(network_magic);
+
+            let mut eh = EraHistory::from_genesis(
+                byron_params,
+                shelley_params,
+                shelley_transition_epoch,
+                genesis_window,
+            );
+
+            // If we loaded a ledger snapshot, reconstruct past era transitions
+            // so the era history covers all eras up to the current ledger era.
+            // This uses the same hardcoded era boundaries as the previous
+            // build_era_summaries() for known networks — only needed once on
+            // first startup after the EraHistory feature is introduced.
+            {
+                let ls = ledger_state.blocking_read();
+                let current_era = ls.era;
+                let is_mainnet = network_magic == 764824073;
+
+                if is_mainnet {
+                    // Mainnet era transitions at known epochs.
+                    // Shelley→Babbage: epoch 365, Babbage→Conway: epoch 517.
+                    // (Shelley covers Shelley/Allegra/Mary/Alonzo per Haskell HFC type list)
+                    if current_era >= torsten_primitives::era::Era::Babbage {
+                        eh.record_era_transition(torsten_primitives::era::Era::Babbage, 365);
+                    }
+                    if current_era >= torsten_primitives::era::Era::Conway {
+                        eh.record_era_transition(torsten_primitives::era::Era::Conway, 517);
+                    }
+                } else {
+                    // Testnets: Byron/Shelley/Allegra/Mary at epoch 0 (instant HF),
+                    // then Alonzo→Babbage, Babbage→Conway at testnet-specific epochs.
+                    // For preview: Alonzo 0→3, Babbage 3→646, Conway 646+.
+                    let eras_and_epochs: &[(torsten_primitives::era::Era, u64)] =
+                        match network_magic {
+                            2 => &[
+                                (torsten_primitives::era::Era::Allegra, 0),
+                                (torsten_primitives::era::Era::Mary, 0),
+                                (torsten_primitives::era::Era::Alonzo, 0),
+                                (torsten_primitives::era::Era::Babbage, 3),
+                                (torsten_primitives::era::Era::Conway, 646),
+                            ],
+                            1 => &[
+                                // Preprod
+                                (torsten_primitives::era::Era::Allegra, 0),
+                                (torsten_primitives::era::Era::Mary, 0),
+                                (torsten_primitives::era::Era::Alonzo, 0),
+                                (torsten_primitives::era::Era::Babbage, 4),
+                                (torsten_primitives::era::Era::Conway, 186),
+                            ],
+                            _ => &[
+                                // Generic testnet: assume instant transitions
+                                (torsten_primitives::era::Era::Allegra, 0),
+                                (torsten_primitives::era::Era::Mary, 0),
+                                (torsten_primitives::era::Era::Alonzo, 0),
+                                (torsten_primitives::era::Era::Babbage, 0),
+                                (torsten_primitives::era::Era::Conway, 0),
+                            ],
+                        };
+                    for &(era, epoch) in eras_and_epochs {
+                        if current_era >= era && eh.current_era() < era {
+                            eh.record_era_transition(era, epoch);
+                        }
+                    }
+                }
+            }
+
+            info!(
+                eras = eh.len(),
+                current = %eh.current_era(),
+                "HFC era history initialized",
+            );
+
+            Arc::new(RwLock::new(eh))
+        };
+
         let mempool = Arc::new(Mempool::new(MempoolConfig {
             max_transactions: args.mempool_max_tx,
             max_bytes: args.mempool_max_bytes,
@@ -1027,7 +1142,6 @@ impl Node {
             listen_addr,
             network_magic,
             byron_epoch_length,
-            byron_slot_duration_ms,
             snapshot_policy: epoch::SnapshotPolicy::with_params(
                 shelley_genesis
                     .as_ref()
@@ -1038,6 +1152,7 @@ impl Node {
                 args.snapshot_bulk_min_secs,
             ),
             shelley_genesis,
+            era_history,
             topology_path: args.topology_path,
             metrics: node_metrics,
             block_producer,
@@ -2529,6 +2644,19 @@ impl Node {
                     "Fetched block failed ledger apply: {e}"
                 );
                 return;
+            }
+            // Consume pending era transition and propagate to the HFC state machine.
+            if let Some((prev_era, new_era, epoch)) = ls.pending_era_transition.take() {
+                let mut eh = self.era_history.write().await;
+                if eh.current_era() < new_era {
+                    eh.record_era_transition(new_era, epoch.0);
+                    info!(
+                        prev = %prev_era,
+                        new = %new_era,
+                        epoch = epoch.0,
+                        "Era transition recorded in HFC era history",
+                    );
+                }
             }
         }
 

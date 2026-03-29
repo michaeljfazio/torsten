@@ -19,8 +19,10 @@ num-traits = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
+chrono = { workspace = true }
 minicbor = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -237,8 +237,9 @@ pub struct EraSummary {
     pub start_slot: u64,
     /// Start epoch number
     pub start_epoch: u64,
-    /// Start time in picoseconds relative to system start
-    pub start_time_pico: u64,
+    /// Start time in picoseconds relative to system start.
+    /// Uses u128 because mainnet Byron end time (~9e19 pico) exceeds u64::MAX.
+    pub start_time_pico: u128,
     /// End bound (None = current/unbounded era)
     pub end: Option<EraBound>,
     /// Epoch length in slots
@@ -256,7 +257,8 @@ pub struct EraSummary {
 pub struct EraBound {
     pub slot: u64,
     pub epoch: u64,
-    pub time_pico: u64,
+    /// Picoseconds from system start (u128 to avoid overflow for mainnet Byron).
+    pub time_pico: u128,
 }
 
 /// Stake snapshot result (mark/set/go)

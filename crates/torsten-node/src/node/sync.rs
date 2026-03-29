@@ -124,80 +124,18 @@ impl Node {
 
     /// Compute the current absolute slot number from wall-clock time.
     ///
-    /// This correctly accounts for the Byron era on chains like mainnet and
-    /// preprod, where the first N epochs use 20-second Byron slots before the
-    /// Shelley hard fork switches to 1-second slots.
-    ///
-    /// The calculation:
-    ///   1. Compute the total number of Byron slots that preceded Shelley:
-    ///      `shelley_transition_epoch × byron_epoch_length`
-    ///   2. Compute the wall-clock time at which Shelley began:
-    ///      `chain_start + (shelley_transition_epoch × byron_epoch_length × byron_slot_ms)`
-    ///   3. Compute elapsed Shelley slots from that point forward:
-    ///      `(now - shelley_start) / shelley_slot_ms`
-    ///   4. Total wall-clock slot = Byron slots + Shelley slots.
-    ///
-    /// For preview/sanchonet (no Byron era), `byron_epoch_length` is 0 and the
-    /// result degenerates to the simple case used previously.
+    /// Uses the HFC era history state machine to correctly account for all
+    /// era transitions (Byron→Shelley→...→Conway) with their respective
+    /// slot durations.
     pub fn current_wall_clock_slot(&self) -> Option<torsten_primitives::time::SlotNo> {
         let genesis = self.shelley_genesis.as_ref()?;
-        let chain_start = chrono::DateTime::parse_from_rfc3339(&genesis.system_start)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .ok()?;
-        let shelley_slot_ms = (genesis.slot_length * 1000) as i64;
-        if shelley_slot_ms == 0 {
-            return None;
-        }
-
-        let now = chrono::Utc::now();
-
-        // Determine how many Shelley-era slots follow the Byron era.
-        // For networks without a Byron era (preview, sanchonet), byron_epoch_length
-        // is 0 and the transition_epoch is also 0, so this whole block is a no-op.
-        let byron_epoch_len = self.byron_epoch_length;
-        let shelley_transition_epoch =
-            super::epoch::shelley_transition_epoch_for_magic(self.network_magic);
-
-        let (byron_total_slots, shelley_start_ms_offset): (u64, i64) =
-            if byron_epoch_len > 0 && shelley_transition_epoch > 0 {
-                // Total Byron slots = number of Byron epochs × slots per Byron epoch.
-                let total_byron_slots = shelley_transition_epoch * byron_epoch_len;
-                // Duration of the Byron era in milliseconds.
-                let byron_duration_ms =
-                    (total_byron_slots as i64).saturating_mul(self.byron_slot_duration_ms as i64);
-                (total_byron_slots, byron_duration_ms)
-            } else {
-                (0, 0)
-            };
-
-        // Wall-clock time at which Shelley era began (= chain start + Byron era duration).
-        let shelley_start = chain_start + chrono::Duration::milliseconds(shelley_start_ms_offset);
-
-        // Elapsed milliseconds since Shelley start.
-        let shelley_elapsed_ms = now.signed_duration_since(shelley_start).num_milliseconds();
-        if shelley_elapsed_ms < 0 {
-            // Wall clock is before Shelley era started — still in Byron era.
-            // Fall back to computing Byron slot from chain start.
-            let elapsed_ms = now.signed_duration_since(chain_start).num_milliseconds();
-            if elapsed_ms < 0 {
-                return None;
-            }
-            let byron_slot_ms = self.byron_slot_duration_ms as i64;
-            if byron_slot_ms == 0 {
-                return None;
-            }
-            return Some(torsten_primitives::time::SlotNo(
-                (elapsed_ms / byron_slot_ms) as u64,
-            ));
-        }
-
-        // Shelley-era slot count = elapsed ms / shelley slot duration.
-        let shelley_slots = (shelley_elapsed_ms / shelley_slot_ms) as u64;
-
-        // Absolute slot = Byron slots that preceded Shelley + Shelley slots elapsed.
-        Some(torsten_primitives::time::SlotNo(
-            byron_total_slots + shelley_slots,
-        ))
+        let system_start = torsten_primitives::time::SystemStart {
+            utc_time: chrono::DateTime::parse_from_rfc3339(&genesis.system_start)
+                .ok()?
+                .with_timezone(&chrono::Utc),
+        };
+        let eh = self.era_history.blocking_read();
+        eh.wallclock_to_slot(chrono::Utc::now(), &system_start).ok()
     }
 
     /// Notify connected N2N peers of a chain rollback by sending MsgRollBackward.
@@ -1310,6 +1248,19 @@ impl Node {
                         "Failed to apply block to ledger: {e} — skipping remaining blocks in batch"
                     );
                     break;
+                }
+                // Consume pending era transition and propagate to the HFC state machine.
+                if let Some((prev_era, new_era, epoch)) = ls.pending_era_transition.take() {
+                    let mut eh = self.era_history.blocking_write();
+                    if eh.current_era() < new_era {
+                        eh.record_era_transition(new_era, epoch.0);
+                        tracing::info!(
+                            prev = %prev_era,
+                            new = %new_era,
+                            epoch = epoch.0,
+                            "Era transition recorded in HFC era history",
+                        );
+                    }
                 }
                 applied_count += 1;
             }
