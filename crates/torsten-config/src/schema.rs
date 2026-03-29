@@ -725,10 +725,7 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
 
     // P2P networking.
     map.insert("EnableP2P".into(), json!(true));
-    map.insert(
-        "DiffusionMode".into(),
-        json!("InitiatorAndResponder"),
-    );
+    map.insert("DiffusionMode".into(), json!("InitiatorAndResponder"));
     map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
     map.insert("TargetNumberOfActivePeers".into(), json!(15));
     map.insert("TargetNumberOfEstablishedPeers".into(), json!(40));

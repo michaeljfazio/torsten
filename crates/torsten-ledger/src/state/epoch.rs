@@ -176,26 +176,9 @@ impl LedgerState {
             self.needs_stake_rebuild = false;
         }
 
-        // Conway pointer address exclusion (matching Haskell's ConwayInstantStake).
-        //
-        // In Haskell, the Conway era uses `ConwayInstantStake` which has NO `sisPtrStake`
-        // field — pointer-addressed UTxOs are silently excluded from the stake distribution.
-        // Pre-Conway eras use `ShelleyInstantStake` which resolves pointer addresses via
-        // `saPtrs` during the SNAP rule.
-        //
-        // At the Conway HFC boundary, the migration from ShelleyInstantStake to
-        // ConwayInstantStake discards the pointer map: only `sisCredentialStake` survives.
-        // Existing pointer-addressed UTxOs remain in the UTxO set but their ADA no longer
-        // flows into pool stake, reward calculations, or voting power.
-        //
-        // Torsten resolves pointer addresses inline during UTxO processing (not deferred
-        // like Haskell), so the stake_map already includes pointer-addressed UTxO coins
-        // under the resolved credential.  To match Conway semantics, we must subtract
-        // pointer-addressed UTxO coins from the stake map starting at the first Conway epoch.
-        if self.protocol_params.protocol_version_major >= 9 && !self.ptr_stake_excluded {
-            self.exclude_pointer_address_stake();
-            self.ptr_stake_excluded = true;
-        }
+        // Conway pointer address exclusion is now handled in apply_block BEFORE
+        // the epoch transition, gated on block.era >= Conway (matching Haskell's
+        // TranslateEra timing).  See apply_block for the full explanation.
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<torsten_primitives::hash::Hash28, Lovelace> =
@@ -853,17 +836,18 @@ impl LedgerState {
 
     /// Discard deferred pointer-addressed UTxO stake at the Conway HFC boundary.
     ///
-    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no
-    /// `sisPtrStake` field — pointer-addressed UTxOs are silently excluded from the
-    /// stake distribution.
+    /// In Haskell, `TranslateEra` converts `ShelleyInstantStake` →
+    /// `ConwayInstantStake` at the ERA boundary, discarding `sisPtrStake`.
+    /// This must fire when the era becomes Conway (not when PV reaches 9),
+    /// because the era transition precedes the PPUpdate that bumps PV.
     ///
     /// With the deferred `ptr_stake` model, pointer coins were never placed in
     /// `stake_distribution.stake_map` — they were always in `ptr_stake`.  The
     /// Conway transition therefore only needs to clear `ptr_stake`; nothing needs
     /// to be subtracted from `stake_map`.
     ///
-    /// Called once at the first Conway epoch boundary.
-    fn exclude_pointer_address_stake(&mut self) {
+    /// Called once at the first Conway-era block, before the epoch transition.
+    pub(crate) fn exclude_pointer_address_stake(&mut self) {
         if self.ptr_stake.is_empty() {
             return;
         }

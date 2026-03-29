@@ -102,6 +102,22 @@ impl LedgerState {
         // diff-based rollback without a snapshot reload + full replay.
         let mut block_diff = UtxoDiff::new();
 
+        // Conway HFC: discard pointer-addressed UTxO stake (TranslateEra equivalent).
+        //
+        // In Haskell, the TranslateEra instance converts ShelleyInstantStake →
+        // ConwayInstantStake at the ERA boundary, discarding `sisPtrStake` BEFORE
+        // the TICK/SNAP rules run.  This must happen based on the incoming block's
+        // era (not protocol_version), because the era transitions one epoch before
+        // the PPUpdate that bumps PV to 9 takes effect.
+        //
+        // On preview testnet: epoch 645 = Babbage PV8, epoch 646 = Conway PV8,
+        // epoch 647 = Conway PV9.  Gating on PV>=9 would delay ptr_stake exclusion
+        // by one epoch, causing a 35,553 ADA poolDistribution divergence.
+        if block.era >= Era::Conway && !self.ptr_stake_excluded {
+            self.exclude_pointer_address_stake();
+            self.ptr_stake_excluded = true;
+        }
+
         // Check for epoch transition before processing the block.
         // When multiple epochs are skipped (e.g., after offline time or Mithril import),
         // process each intermediate epoch transition individually so that snapshots rotate

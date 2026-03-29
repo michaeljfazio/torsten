@@ -160,6 +160,10 @@ impl LedgerState {
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
                 self.script_stake_credentials.remove(&key);
+                // Remove pointer entries for this credential (matching StakeDeregistration).
+                // Even though ptr_stake is empty in Conway, the pointer_map should reflect
+                // the actual registration state for correctness.
+                self.pointer_map.retain(|_, v| *v != key);
                 debug!("Stake key deregistered (Conway): {}", key.to_hex());
             }
             Certificate::StakeDelegation {
