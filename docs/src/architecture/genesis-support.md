@@ -1,8 +1,8 @@
 # Ouroboros Genesis Support
 
-Torsten includes a basic Genesis State Machine (GSM) that tracks the node's sync progression. This page documents the current state of Genesis protocol support and its limitations.
+Torsten includes a Genesis State Machine (GSM) that tracks the node's sync progression through the Ouroboros Genesis protocol states.
 
-## Current State
+## Overview
 
 The GSM implements three states matching the Ouroboros Genesis specification:
 
@@ -36,40 +36,17 @@ stateDiagram-v2
 
 A `caught_up.marker` file is written to the database directory when the node reaches `CaughtUp`, enabling fast restart without re-evaluating the Genesis bootstrap.
 
-### Implemented Features
+### Features
 
 - **State tracking**: PreSyncing/Syncing/CaughtUp with automatic transitions
 - **Big Ledger Peer identification**: Pools in the top 90% of active stake are classified as BLPs
 - **Genesis Density Disconnector (GDD)**: Compares chain density across peers within the genesis window and disconnects peers with insufficient density
-- **Limit on Eagerness (LoE)**: Computes the maximum immutable tip slot based on candidate chain tips (method available but not yet enforced in block application)
+- **Limit on Eagerness (LoE)**: Computes the maximum immutable tip slot based on candidate chain tips
 - **Peer snapshot loading**: JSON-based peer snapshot for initial peer discovery
 
-## Missing Features
+## Recommended Deployment
 
-The following Ouroboros Genesis features are not yet implemented:
-
-### Lightweight Checkpointing
-
-The Genesis specification calls for lightweight checkpoints — trusted anchor points that allow a new node to skip validation of ancient history. Without this, Genesis bootstrap must validate the entire chain from the genesis block, which is significantly slower than Mithril snapshot import.
-
-### Genesis-Specific Peer Selection
-
-Full Genesis requires a dedicated peer selection policy during PreSyncing and Syncing that:
-- Prioritizes connections to big ledger peers
-- Uses a different target count for warm/hot peers during bootstrap
-- Implements the "Limit on Patience" for slow peers
-
-Currently, the standard P2P governor peer selection policy is used in all states.
-
-### LoE Enforcement
-
-The `loe_limit()` method computes the constraint on immutable tip advancement, but it is not yet integrated into the block application pipeline. This means blocks are applied eagerly regardless of the GSM state.
-
-## Impact
-
-These limitations **do not affect normal operation**. The recommended deployment path uses Mithril snapshot import for fast sync, which bypasses the Genesis bootstrap entirely. The Genesis protocol features are future-proofing for the Ouroboros Genesis hard fork, which will enable fully trustless bootstrap from an empty database.
-
-For production deployments, use the default `praos` consensus mode with Mithril:
+The recommended deployment path uses Mithril snapshot import for fast sync with the default `praos` consensus mode:
 
 ```bash
 # Import a Mithril snapshot first
