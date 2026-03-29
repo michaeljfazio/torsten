@@ -264,6 +264,18 @@ impl PeerManager {
             .collect()
     }
 
+    /// Get peers in a given state that have peer sharing enabled.
+    ///
+    /// Used by the Governor to find warm peers eligible for PeerSharing
+    /// active outreach (MsgShareRequest).
+    pub fn peers_with_peer_sharing(&self, state: PeerState) -> Vec<SocketAddr> {
+        self.peers
+            .iter()
+            .filter(|(_, p)| p.state == state && p.peer_sharing)
+            .map(|(addr, _)| *addr)
+            .collect()
+    }
+
     /// Total number of known peers.
     pub fn total_peers(&self) -> usize {
         self.peers.len()
@@ -396,6 +408,26 @@ mod tests {
         let eligible = pm.peers_eligible_to_connect();
         assert_eq!(eligible.len(), 1);
         assert!(eligible.contains(&test_addr(3001)));
+    }
+
+    #[test]
+    fn peers_with_peer_sharing_filters_correctly() {
+        let mut pm = PeerManager::new();
+        pm.add_peer(test_addr(3001), PeerSource::Dns);
+        pm.promote_to_warm(&test_addr(3001));
+        pm.get_peer_mut(&test_addr(3001)).unwrap().peer_sharing = true;
+
+        pm.add_peer(test_addr(3002), PeerSource::Dns);
+        pm.promote_to_warm(&test_addr(3002));
+        // peer_sharing defaults to false
+
+        pm.add_peer(test_addr(3003), PeerSource::Dns);
+        pm.get_peer_mut(&test_addr(3003)).unwrap().peer_sharing = true;
+        // 3003 is cold, not warm
+
+        let sharing_warm = pm.peers_with_peer_sharing(PeerState::Warm);
+        assert_eq!(sharing_warm.len(), 1);
+        assert!(sharing_warm.contains(&test_addr(3001)));
     }
 
     #[test]

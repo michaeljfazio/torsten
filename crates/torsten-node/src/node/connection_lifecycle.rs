@@ -643,6 +643,21 @@ impl ConnectionLifecycleManager {
                 // Handled by the peer discovery subsystem, not the lifecycle manager.
                 debug!("governor requested peer discovery (handled externally)");
             }
+            GovernorAction::ForgetPeer(addr) => {
+                // Remove the peer from the connection table and peer manager.
+                // Cold churn evicts lowest-reputation non-topology peers.
+                debug!(%addr, "governor forgetting low-reputation cold peer");
+                if let Some(mut conn) = self.connections.remove(&addr) {
+                    conn.shutdown().await;
+                }
+                peer_manager.inner.remove_peer(&addr);
+            }
+            GovernorAction::PeerShareRequest(addr) => {
+                // PeerSharing active outreach — handled by the peer discovery
+                // subsystem which owns the PeerSharingClient. The lifecycle
+                // manager only logs the request.
+                debug!(%addr, "governor requested PeerSharing outreach (handled externally)");
+            }
         }
     }
 

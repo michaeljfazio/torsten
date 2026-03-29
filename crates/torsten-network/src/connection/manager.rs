@@ -10,10 +10,18 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use super::handler::ConnectionHandler;
 use super::state::{ConnectionState, DataFlow, Provenance};
+
+/// Inbound idle timeout — connections in `InboundIdle` for longer than this
+/// are transitioned to `TerminatingConn` and closed.
+///
+/// Matches Haskell `serverProtocolIdleTimeout = 300s` from
+/// `Ouroboros.Network.Server2`.
+const INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Connection manager configuration.
 #[derive(Debug, Clone)]
@@ -49,6 +57,12 @@ struct ConnectionEntry {
     /// Protocol handler for this connection (used by connection orchestration).
     #[allow(dead_code)]
     handler: ConnectionHandler,
+    /// When this connection entered `InboundIdle` state.
+    ///
+    /// Set when `inbound_negotiated()` transitions to `InboundIdle`, cleared
+    /// when `inbound_activity()` transitions to `InboundState`. Used by
+    /// `check_inbound_idle_timeouts()` to enforce the 5-minute idle limit.
+    idle_since: Option<Instant>,
 }
 
 /// ConnectionManager — central lifecycle manager for all connections.
@@ -108,6 +122,7 @@ impl ConnectionManager {
             ConnectionEntry {
                 state: ConnectionState::ReservedOutbound,
                 handler: ConnectionHandler::new(),
+                idle_since: None,
             },
         );
 
@@ -169,6 +184,7 @@ impl ConnectionManager {
             ConnectionEntry {
                 state: ConnectionState::UnnegotiatedConn(Provenance::Inbound),
                 handler: ConnectionHandler::new(),
+                idle_since: None,
             },
         );
 
@@ -176,6 +192,8 @@ impl ConnectionManager {
     }
 
     /// Record that an inbound connection completed handshake.
+    ///
+    /// Transitions to `InboundIdle` and starts the idle timeout clock.
     pub async fn inbound_negotiated(&self, addr: SocketAddr, duplex: bool) {
         let mut conns = self.connections.lock().await;
         if let Some(entry) = conns.get_mut(&addr) {
@@ -184,7 +202,50 @@ impl ConnectionManager {
             } else {
                 DataFlow::Unidirectional
             });
+            entry.idle_since = Some(Instant::now());
         }
+    }
+
+    /// Record mini-protocol activity on an inbound connection.
+    ///
+    /// If the connection is in `InboundIdle`, transitions to `InboundState`
+    /// and cancels the idle timeout. This prevents active connections from
+    /// being prematurely closed.
+    pub async fn inbound_activity(&self, addr: SocketAddr) {
+        let mut conns = self.connections.lock().await;
+        if let Some(entry) = conns.get_mut(&addr) {
+            if let ConnectionState::InboundIdle(df) = entry.state {
+                entry.state = ConnectionState::InboundState(df);
+                entry.idle_since = None;
+            }
+        }
+    }
+
+    /// Check for inbound idle timeouts and return addresses to terminate.
+    ///
+    /// Sweeps all connections in `InboundIdle` state. Any that have been idle
+    /// longer than [`INBOUND_IDLE_TIMEOUT`] (5 minutes) are transitioned to
+    /// `TerminatingConn` and their addresses returned for the caller to close.
+    ///
+    /// Matches Haskell `serverProtocolIdleTimeout` from `Ouroboros.Network.Server2`.
+    pub async fn check_inbound_idle_timeouts(&self) -> Vec<SocketAddr> {
+        let mut conns = self.connections.lock().await;
+        let now = Instant::now();
+        let mut to_terminate = Vec::new();
+
+        for (addr, entry) in conns.iter_mut() {
+            if matches!(entry.state, ConnectionState::InboundIdle(_)) {
+                if let Some(since) = entry.idle_since {
+                    if now.duration_since(since) >= INBOUND_IDLE_TIMEOUT {
+                        entry.state = ConnectionState::TerminatingConn;
+                        entry.idle_since = None;
+                        to_terminate.push(*addr);
+                    }
+                }
+            }
+        }
+
+        to_terminate
     }
 
     /// Remove a connection (disconnected).
@@ -283,5 +344,81 @@ mod tests {
         // Try to accept inbound from same address
         let result = cm.accept_inbound(test_addr(3001)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn inbound_idle_timeout_terminates() {
+        let cm = ConnectionManager::new(ConnectionManagerConfig::default());
+        let addr = test_addr(3001);
+
+        cm.accept_inbound(addr).await.unwrap();
+        cm.inbound_negotiated(addr, true).await;
+
+        // Immediately after negotiation — no timeout yet.
+        let expired = cm.check_inbound_idle_timeouts().await;
+        assert!(expired.is_empty(), "should not timeout immediately");
+
+        // Manually set idle_since to 6 minutes ago to simulate time passing
+        // (avoids dependency on tokio::time::pause which requires "test-util").
+        {
+            let mut conns = cm.connections.lock().await;
+            let entry = conns.get_mut(&addr).unwrap();
+            entry.idle_since = Some(Instant::now() - Duration::from_secs(360));
+        }
+
+        let expired = cm.check_inbound_idle_timeouts().await;
+        assert_eq!(expired, vec![addr], "should timeout after 5+ minutes idle");
+    }
+
+    #[tokio::test]
+    async fn inbound_activity_cancels_timeout() {
+        let cm = ConnectionManager::new(ConnectionManagerConfig::default());
+        let addr = test_addr(3001);
+
+        cm.accept_inbound(addr).await.unwrap();
+        cm.inbound_negotiated(addr, true).await;
+
+        // Simulate 3 minutes of idle time.
+        {
+            let mut conns = cm.connections.lock().await;
+            let entry = conns.get_mut(&addr).unwrap();
+            entry.idle_since = Some(Instant::now() - Duration::from_secs(180));
+        }
+
+        // Mini-protocol activity resets the timer.
+        cm.inbound_activity(addr).await;
+
+        // Even after more time, should NOT timeout because activity occurred
+        // (state is now InboundState, not InboundIdle).
+        let expired = cm.check_inbound_idle_timeouts().await;
+        assert!(
+            expired.is_empty(),
+            "activity should cancel the idle timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_idle_no_false_positives_on_outbound() {
+        let cm = ConnectionManager::new(ConnectionManagerConfig::default());
+
+        // Outbound connection in idle state — should NOT be affected by
+        // inbound idle timeout sweep.
+        let addr = test_addr(3001);
+        cm.reserve_outbound(addr).await.unwrap();
+        cm.outbound_connected(addr, true).await;
+
+        // Manually set idle_since (shouldn't happen in practice for outbound,
+        // but verifies the sweep only targets InboundIdle).
+        {
+            let mut conns = cm.connections.lock().await;
+            let entry = conns.get_mut(&addr).unwrap();
+            entry.idle_since = Some(Instant::now() - Duration::from_secs(600));
+        }
+
+        let expired = cm.check_inbound_idle_timeouts().await;
+        assert!(
+            expired.is_empty(),
+            "outbound connections should not be affected by inbound idle timeout"
+        );
     }
 }
