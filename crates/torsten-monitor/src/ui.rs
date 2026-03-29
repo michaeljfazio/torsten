@@ -680,7 +680,14 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     // matching Haskell's connectionStateToCounters exactly.
     let conn_unidirectional = app.metrics.get_u64("torsten_conn_unidirectional");
 
-    let p2p_enabled = outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0;
+    // Read the authoritative P2P status from the node's config-derived metric.
+    // Falls back to the heuristic (any peer activity) when the metric is missing
+    // (e.g. connecting to an older torsten-node version).
+    let p2p_enabled = if app.metrics.has("torsten_p2p_enabled") {
+        app.metrics.get_u64("torsten_p2p_enabled") == 1
+    } else {
+        outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0
+    };
     let p2p_color = if p2p_enabled {
         theme.success
     } else {

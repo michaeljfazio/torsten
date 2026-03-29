@@ -933,11 +933,34 @@ impl Node {
             m.set_compat_metrics(args.compat_metrics);
             // Advertise block producer mode so the TUI shows the correct role and
             // displays the abbreviated pool ID in the Node panel.
+            let is_bp = block_producer.is_some();
             if let Some(ref creds) = block_producer {
                 m.set_block_producer(&creds.pool_id.to_hex());
             }
+            // Advertise P2P configuration so the TUI can display the real state
+            // rather than guessing from peer counts.
+            let effective_peer_sharing = args.config.effective_peer_sharing(is_bp);
+            m.set_p2p_config(
+                args.config.enable_p2_p,
+                &args.config.diffusion_mode,
+                effective_peer_sharing,
+            );
             Arc::new(m)
         };
+
+        // Log P2P configuration at startup for diagnostics.
+        info!(
+            p2p_enabled = args.config.enable_p2_p,
+            diffusion_mode = %args.config.diffusion_mode,
+            peer_sharing = args.config.effective_peer_sharing(block_producer.is_some()),
+            "P2P networking configuration"
+        );
+        if !args.config.enable_p2_p {
+            warn!(
+                "P2P is disabled — running in static topology mode \
+                 (no peer governor, no churn, no ledger-based discovery)"
+            );
+        }
 
         // ── Phase 1: Initialize ChainFragment from ImmutableDB tip ──────────
         //
@@ -1393,8 +1416,15 @@ impl Node {
         // Initialize peer manager
         {
             let pm_config = PeerManagerConfig {
-                diffusion_mode: DiffusionMode::InitiatorAndResponder,
-                peer_sharing_enabled: true,
+                diffusion_mode: match self.config.diffusion_mode {
+                    crate::config::DiffusionMode::InitiatorOnly => DiffusionMode::InitiatorOnly,
+                    crate::config::DiffusionMode::InitiatorAndResponder => {
+                        DiffusionMode::InitiatorAndResponder
+                    }
+                },
+                peer_sharing_enabled: self
+                    .config
+                    .effective_peer_sharing(self.block_producer.is_some()),
                 target_hot_peers: self.config.target_number_of_active_peers,
                 target_warm_peers: self
                     .config
@@ -1563,6 +1593,11 @@ impl Node {
 
         // Start N2N server for inbound peer connections.
         //
+        // When DiffusionMode is InitiatorOnly, skip the N2N listener entirely —
+        // the node only makes outbound connections (typical for block producers
+        // behind a firewall).  Matches Haskell's `runM` branch that skips
+        // `Server.with` for InitiatorOnlyDiffusionMode.
+        //
         // Each accepted TCP connection gets its own Mux and set of protocol tasks:
         //   - Handshake (protocol 0, responder)
         //   - ChainSync (protocol 2, responder)
@@ -1581,10 +1616,13 @@ impl Node {
             self.block_announcement_tx = Some(block_ann_tx);
             self.rollback_announcement_tx = Some(rollback_ann_tx);
         }
-        {
+        if self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorAndResponder {
             let n2n_listen_addr = self.listen_addr;
             let n2n_shutdown_rx = shutdown_rx.clone();
             let n2n_network_magic = self.network_magic;
+            let n2n_peer_sharing = self
+                .config
+                .effective_peer_sharing(self.block_producer.is_some());
             let n2n_metrics = self.metrics.clone();
             let n2n_peer_manager = peer_manager.clone();
             let n2n_block_provider = Arc::new(serve::ChainDBBlockProvider {
@@ -1634,6 +1672,7 @@ impl Node {
                                     let pm = n2n_peer_manager.clone();
                                     let ann_rx = n2n_block_ann_tx.subscribe();
                                     let magic = n2n_network_magic;
+                                    let ps = n2n_peer_sharing;
 
                                     // Start the connection handler immediately without
                                     // waiting for the peer manager lock — the handshake
@@ -1641,7 +1680,7 @@ impl Node {
                                     // Peer registration happens after the handshake.
                                     tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2n_connection(
-                                            stream, magic, bp, mp, pm.clone(),
+                                            stream, magic, ps, bp, mp, pm.clone(),
                                             peer_addr, ann_rx,
                                         )
                                         .await
@@ -1669,10 +1708,12 @@ impl Node {
                     }
                 }
             });
+        } else {
+            info!("N2N server skipped (DiffusionMode=InitiatorOnly, outbound connections only)");
         }
 
-        // Start ledger-based peer discovery task
-        {
+        // Start ledger-based peer discovery task (only when P2P is enabled)
+        if self.config.enable_p2_p {
             let ledger = self.ledger_state.clone();
             let pm = peer_manager.clone();
             let topology = self.topology.clone();
@@ -1851,7 +1892,9 @@ impl Node {
             .unwrap_or(2160);
         let lifecycle = ConnectionLifecycleManager::new(
             self.network_magic,
-            /* peer_sharing */ true,
+            self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorOnly,
+            self.config
+                .effective_peer_sharing(self.block_producer.is_some()),
             connect_timeout,
             candidate_chains.clone(),
             fetched_blocks_tx.clone(),
@@ -2100,6 +2143,12 @@ impl Node {
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
                 _ = governor_ticker.tick() => {
+                    // When P2P is disabled, skip governor evaluation entirely —
+                    // static topology connections are maintained without churn.
+                    if !self.config.enable_p2_p {
+                        continue;
+                    }
+
                     // Compute governor actions based on current peer state.
                     let actions = {
                         let pm = peer_manager.read().await;
@@ -2785,6 +2834,7 @@ impl Node {
     async fn handle_n2n_connection(
         stream: tokio::net::TcpStream,
         network_magic: u64,
+        peer_sharing: bool,
         block_provider: Arc<serve::ChainDBBlockProvider>,
         mempool: Arc<Mempool>,
         peer_manager: Arc<RwLock<NodePeerManager>>,
@@ -2834,7 +2884,10 @@ impl Node {
         // Run N2N handshake as server (responder).
         // This must complete quickly — the Haskell peer times out after 10 seconds.
         info!(%peer_addr, "N2N inbound: starting handshake");
-        let our_data = torsten_network::N2NVersionData::new(network_magic, true);
+        // When handling inbound connections, we are always in
+        // InitiatorAndResponder mode (the listener is only started in that
+        // mode), so initiator_only is false.
+        let our_data = torsten_network::N2NVersionData::new(network_magic, false, peer_sharing);
         let hs_result =
             torsten_network::handshake::run_n2n_handshake_server(&mut hs_ch, &our_data).await;
         match hs_result {

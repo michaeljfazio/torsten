@@ -138,6 +138,9 @@ pub struct ConnectionLifecycleManager {
     /// Network magic for N2N handshakes (e.g. 2 for preview, 764824073 for mainnet).
     network_magic: u64,
 
+    /// Whether this node is initiator-only (DiffusionMode::InitiatorOnly).
+    initiator_only: bool,
+
     /// Whether peer sharing is enabled in handshake negotiation.
     peer_sharing: bool,
 
@@ -241,6 +244,7 @@ impl ConnectionLifecycleManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
+        initiator_only: bool,
         peer_sharing: bool,
         connect_timeout: Duration,
         candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>>,
@@ -256,6 +260,7 @@ impl ConnectionLifecycleManager {
         Self {
             connections: HashMap::new(),
             network_magic,
+            initiator_only,
             peer_sharing,
             connect_timeout,
             candidate_chains,
@@ -302,6 +307,7 @@ impl ConnectionLifecycleManager {
         let mut conn = PeerConnection::connect(
             addr,
             self.network_magic,
+            self.initiator_only,
             self.peer_sharing,
             Some(self.connect_timeout),
         )
@@ -336,14 +342,21 @@ impl ConnectionLifecycleManager {
     /// spawning duplicate tasks for the same peer.
     pub fn spawn_connect(&self, addr: SocketAddr, tx: mpsc::Sender<ConnectResult>) {
         let network_magic = self.network_magic;
+        let initiator_only = self.initiator_only;
         let peer_sharing = self.peer_sharing;
         let connect_timeout = self.connect_timeout;
         let metrics = Arc::clone(&self.metrics);
 
         tokio::spawn(async move {
             let start = std::time::Instant::now();
-            match PeerConnection::connect(addr, network_magic, peer_sharing, Some(connect_timeout))
-                .await
+            match PeerConnection::connect(
+                addr,
+                network_magic,
+                initiator_only,
+                peer_sharing,
+                Some(connect_timeout),
+            )
+            .await
             {
                 Ok(conn) => {
                     let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -557,8 +570,14 @@ impl ConnectionLifecycleManager {
         let accept_start = std::time::Instant::now();
 
         // Accept: create mux from stream, run handshake as server.
-        let mut conn =
-            PeerConnection::accept(stream, addr, self.network_magic, self.peer_sharing).await?;
+        let mut conn = PeerConnection::accept(
+            stream,
+            addr,
+            self.network_magic,
+            self.initiator_only,
+            self.peer_sharing,
+        )
+        .await?;
 
         // Record handshake RTT (includes mux setup + handshake exchange).
         let rtt_ms = accept_start.elapsed().as_secs_f64() * 1000.0;

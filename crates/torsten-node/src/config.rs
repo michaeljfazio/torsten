@@ -1,8 +1,36 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use std::path::Path;
 use torsten_primitives::network::NetworkId;
 use torsten_storage::StorageConfigJson;
+
+/// Diffusion mode — controls whether the node accepts inbound N2N connections.
+///
+/// Matches cardano-node's `DiffusionMode` config field:
+/// - `InitiatorAndResponder` (default): full P2P mode — opens listening port
+///   and accepts inbound connections.
+/// - `InitiatorOnly`: node only makes outbound connections, never listens for
+///   inbound.  Advertises `initiator_only = true` in the N2N handshake so
+///   remote peers do not attempt reverse connections.  Typical for block
+///   producers behind a firewall.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffusionMode {
+    /// Only initiate outbound connections (block producer behind NAT/firewall).
+    InitiatorOnly,
+    /// Both initiate outbound and accept inbound connections (relay).
+    #[default]
+    InitiatorAndResponder,
+}
+
+impl fmt::Display for DiffusionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitiatorOnly => write!(f, "InitiatorOnly"),
+            Self::InitiatorAndResponder => write!(f, "InitiatorAndResponder"),
+        }
+    }
+}
 
 /// Node configuration (compatible with cardano-node config format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,9 +84,31 @@ pub struct NodeConfig {
     #[serde(default)]
     pub conway_genesis_hash: Option<String>,
 
-    /// Enable P2P networking (default: true, matching cardano-node)
+    /// Enable P2P networking (default: true, matching cardano-node).
+    ///
+    /// When false, the peer governor is disabled and the node uses static
+    /// topology connections only (no churn, no ledger-based discovery, no
+    /// peer sharing).  The current Haskell cardano-node always runs P2P
+    /// (this field was removed upstream), but we retain it for operators who
+    /// want minimal networking during testing.
     #[serde(default = "default_enable_p2p")]
     pub enable_p2_p: bool,
+
+    /// Diffusion mode — controls inbound connection acceptance.
+    ///
+    /// `"InitiatorAndResponder"` (default): full relay mode, accepts inbound.
+    /// `"InitiatorOnly"`: block producer behind NAT, outbound only.
+    /// Matches cardano-node's `DiffusionMode` config field.
+    #[serde(default)]
+    pub diffusion_mode: DiffusionMode,
+
+    /// Enable peer sharing mini-protocol (default: `None` = auto).
+    ///
+    /// When `None`, peer sharing is automatically disabled for block producers
+    /// (when `--shelley-kes-key` is provided) and enabled for relays — matching
+    /// the Haskell cardano-node default behaviour.  Set explicitly to override.
+    #[serde(default)]
+    pub peer_sharing: Option<bool>,
 
     /// Target number of root peers (default: 60, matching cardano-node)
     #[serde(default = "default_root_peers")]
@@ -280,6 +330,15 @@ impl NodeConfig {
         self.network_magic.unwrap_or_else(|| self.network.magic())
     }
 
+    /// Resolve effective peer sharing setting.
+    ///
+    /// If `peer_sharing` is explicitly set in the config, returns that value.
+    /// Otherwise, returns `false` for block producers (when `is_block_producer`
+    /// is true) and `true` for relays — matching Haskell cardano-node defaults.
+    pub fn effective_peer_sharing(&self, is_block_producer: bool) -> bool {
+        self.peer_sharing.unwrap_or(!is_block_producer)
+    }
+
     /// Validate configuration at startup: check genesis file existence and hash formats.
     /// `config_dir` is the directory containing the config file, used to resolve
     /// relative genesis file paths.
@@ -343,6 +402,8 @@ impl Default for NodeConfig {
             alonzo_genesis_hash: None,
             conway_genesis_hash: None,
             enable_p2_p: true,
+            diffusion_mode: DiffusionMode::default(),
+            peer_sharing: None,
             target_number_of_root_peers: 60,
             target_number_of_active_peers: 15,
             target_number_of_established_peers: 40,
@@ -534,5 +595,89 @@ mod tests {
     fn test_resolve_config_port_zero_disables_metrics() {
         // Setting MetricsPort=0 in the config file should also disable the server.
         assert_eq!(resolve_metrics_port(false, None, Some(0)), 0);
+    }
+
+    // ── DiffusionMode config field ──────────────────────────────────────────
+
+    #[test]
+    fn test_default_diffusion_mode() {
+        let config = NodeConfig::default();
+        assert_eq!(config.diffusion_mode, DiffusionMode::InitiatorAndResponder);
+    }
+
+    #[test]
+    fn test_diffusion_mode_initiator_only_from_json() {
+        let json = r#"{"DiffusionMode": "InitiatorOnly"}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.diffusion_mode, DiffusionMode::InitiatorOnly);
+    }
+
+    #[test]
+    fn test_diffusion_mode_initiator_and_responder_from_json() {
+        let json = r#"{"DiffusionMode": "InitiatorAndResponder"}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.diffusion_mode, DiffusionMode::InitiatorAndResponder);
+    }
+
+    #[test]
+    fn test_diffusion_mode_absent_defaults_to_initiator_and_responder() {
+        let json = r#"{}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.diffusion_mode, DiffusionMode::InitiatorAndResponder);
+    }
+
+    #[test]
+    fn test_diffusion_mode_display() {
+        assert_eq!(DiffusionMode::InitiatorOnly.to_string(), "InitiatorOnly");
+        assert_eq!(
+            DiffusionMode::InitiatorAndResponder.to_string(),
+            "InitiatorAndResponder"
+        );
+    }
+
+    // ── PeerSharing config field ────────────────────────────────────────────
+
+    #[test]
+    fn test_default_peer_sharing_is_none() {
+        let config = NodeConfig::default();
+        assert!(config.peer_sharing.is_none());
+    }
+
+    #[test]
+    fn test_peer_sharing_true_from_json() {
+        let json = r#"{"PeerSharing": true}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.peer_sharing, Some(true));
+    }
+
+    #[test]
+    fn test_peer_sharing_false_from_json() {
+        let json = r#"{"PeerSharing": false}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.peer_sharing, Some(false));
+    }
+
+    #[test]
+    fn test_effective_peer_sharing_auto_relay() {
+        // Relay (not BP) with no explicit setting → enabled
+        let config = NodeConfig::default();
+        assert!(config.effective_peer_sharing(false));
+    }
+
+    #[test]
+    fn test_effective_peer_sharing_auto_block_producer() {
+        // Block producer with no explicit setting → disabled
+        let config = NodeConfig::default();
+        assert!(!config.effective_peer_sharing(true));
+    }
+
+    #[test]
+    fn test_effective_peer_sharing_explicit_override() {
+        // Explicit true overrides BP auto-disable
+        let config = NodeConfig {
+            peer_sharing: Some(true),
+            ..NodeConfig::default()
+        };
+        assert!(config.effective_peer_sharing(true));
     }
 }

@@ -37,10 +37,15 @@ pub struct N2NVersionData {
 
 impl N2NVersionData {
     /// Create version data for a full (non-query) node connection.
-    pub fn new(network_magic: u64, peer_sharing: bool) -> Self {
+    ///
+    /// `initiator_only` should be `true` when the node's `DiffusionMode` is
+    /// `InitiatorOnly` — this tells remote peers not to attempt reverse
+    /// connections.  Matches the Haskell handshake encoding where
+    /// `InitiatorOnly` sends `true` and `InitiatorAndResponder` sends `false`.
+    pub fn new(network_magic: u64, initiator_only: bool, peer_sharing: bool) -> Self {
         Self {
             network_magic,
-            initiator_only: false,
+            initiator_only,
             peer_sharing,
             query: false,
         }
@@ -106,12 +111,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let data = N2NVersionData {
-            network_magic: 2,
-            initiator_only: false,
-            peer_sharing: true,
-            query: false,
-        };
+        let data = N2NVersionData::new(2, false, true);
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
         data.encode(&mut enc);
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn accept_matching_magic() {
-        let ours = N2NVersionData::new(2, true);
+        let ours = N2NVersionData::new(2, false, true);
         let theirs = N2NVersionData {
             network_magic: 2,
             initiator_only: false,
@@ -138,8 +138,8 @@ mod tests {
 
     #[test]
     fn accept_mismatched_magic() {
-        let ours = N2NVersionData::new(2, true);
-        let theirs = N2NVersionData::new(764824073, true);
+        let ours = N2NVersionData::new(2, false, true);
+        let theirs = N2NVersionData::new(764824073, false, true);
         assert!(ours.accept(&theirs).is_none());
     }
 
@@ -151,7 +151,7 @@ mod tests {
             peer_sharing: false,
             query: false,
         };
-        let theirs = N2NVersionData::new(2, false);
+        let theirs = N2NVersionData::new(2, false, false);
         let accepted = ours.accept(&theirs).unwrap();
         // min means "degrade to initiator_only if either side sets it"
         assert!(accepted.initiator_only);
@@ -159,8 +159,8 @@ mod tests {
 
     #[test]
     fn accept_peer_sharing_and() {
-        let ours = N2NVersionData::new(2, true);
-        let theirs = N2NVersionData::new(2, false);
+        let ours = N2NVersionData::new(2, false, true);
+        let theirs = N2NVersionData::new(2, false, false);
         let accepted = ours.accept(&theirs).unwrap();
         assert!(!accepted.peer_sharing); // AND(true, false) = false
     }

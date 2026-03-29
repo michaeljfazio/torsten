@@ -41,6 +41,11 @@ impl MetricsSnapshot {
     pub fn get_u64(&self, name: &str) -> u64 {
         self.get(name) as u64
     }
+
+    /// Check whether a metric with the given name was received.
+    pub fn has(&self, name: &str) -> bool {
+        self.values.contains_key(name)
+    }
 }
 
 /// Parse Prometheus text exposition format into a `MetricsSnapshot`.
