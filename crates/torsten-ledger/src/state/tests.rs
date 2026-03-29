@@ -5110,7 +5110,7 @@ fn test_drep_denominator_yes_no_only() {
     }
 
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::TreasuryWithdrawals {
             withdrawals: BTreeMap::new(),
@@ -5159,7 +5159,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
     assert_eq!(no_confidence_stake, 3_000_000_000);
 
-    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::NoConfidence {
             prev_action_id: None,
@@ -5220,7 +5220,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
     }
 
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::TreasuryWithdrawals {
             withdrawals: BTreeMap::new(),
@@ -6776,7 +6776,7 @@ fn test_abstain_excluded_from_denominator() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _) =
+    let (drep_yes, drep_total, _, _, _, _, _) =
         state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
 
     // DRep1 voted Yes (100), DRep3 voted No (100), DRep2 Abstain (excluded)
@@ -6845,7 +6845,7 @@ fn test_all_dreps_abstain() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _) =
+    let (drep_yes, drep_total, _, _, _, _, _) =
         state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
 
     // All abstain: yes=0, total=0
@@ -6948,7 +6948,7 @@ fn test_mix_yes_no_abstain_votes() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _) =
+    let (drep_yes, drep_total, _, _, _, _, _) =
         state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
 
     // 3 * 100 = 300 yes, 1 * 100 = 100 no, total = 400 (abstain excluded)
@@ -7092,7 +7092,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     let (cache, no_conf_stake, _) = state.build_drep_power_cache();
 
     // For NoConfidence action
-    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::NoConfidence {
             prev_action_id: None,
@@ -7107,7 +7107,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     assert_eq!(drep_total, 500, "Total should include NoConfidence stake");
 
     // For InfoAction (non-NoConfidence)
-    let (drep_yes_info, drep_total_info, _, _, _, _) =
+    let (drep_yes_info, drep_total_info, _, _, _, _, _) =
         state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf_stake);
     assert_eq!(
         drep_yes_info, 0,

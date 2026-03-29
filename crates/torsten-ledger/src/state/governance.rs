@@ -383,13 +383,20 @@ impl LedgerState {
             // Check voting thresholds
             if let Some(state) = self.governance.proposals.get(action_id) {
                 // Compute vote counts for logging
-                let (_drep_yes, _drep_total, _spo_yes, _spo_voted, _cc_yes, _cc_total) = self
-                    .count_votes_by_type(
-                        action_id,
-                        &state.procedure.gov_action,
-                        &drep_power_cache,
-                        no_confidence_stake,
-                    );
+                let (
+                    _drep_yes,
+                    _drep_total,
+                    _spo_yes,
+                    _spo_voted,
+                    _spo_abstain,
+                    _cc_yes,
+                    _cc_total,
+                ) = self.count_votes_by_type(
+                    action_id,
+                    &state.procedure.gov_action,
+                    &drep_power_cache,
+                    no_confidence_stake,
+                );
                 let met = self.check_ratification(
                     action_id,
                     state,
@@ -511,7 +518,7 @@ impl LedgerState {
         // Per CIP-1694:
         // - DRep denominator = yes + no voted stake (abstain excluded)
         // - SPO denominator = total active SPO stake (non-voting SPOs effectively vote No)
-        let (drep_yes, drep_total, spo_yes, _spo_voted, _cc_yes, _cc_total) = self
+        let (drep_yes, drep_total, spo_yes, spo_voted, spo_abstain, _cc_yes, _cc_total) = self
             .count_votes_by_type(
                 action_id,
                 &state.procedure.gov_action,
@@ -520,6 +527,28 @@ impl LedgerState {
             );
 
         let bootstrap = self.is_bootstrap_phase();
+
+        // Compute effective SPO denominator based on action type and bootstrap state.
+        //
+        // Per Haskell spoAcceptedRatio / votingStakePoolThreshold:
+        // - HardForkInitiation: non-voting SPOs count as No → denominator = total_spo_stake
+        // - All other actions: non-voting SPOs default to Abstain → denominator excludes
+        //   both explicit abstainers and non-voters.
+        //
+        // During bootstrap (proto 9), non-voting SPOs are also treated as Abstain for
+        // non-HardFork actions, so the effective denominator is:
+        //   spo_voted - spo_abstain  (only explicit Yes + No voters)
+        let effective_spo_denom = |action: &GovAction| -> u64 {
+            if matches!(action, GovAction::HardForkInitiation { .. }) {
+                // HardFork: non-voting SPOs count as No → use total active SPO stake
+                total_spo_stake
+            } else {
+                // Non-HardFork: non-voting SPOs default to Abstain
+                // Effective denominator = explicit voters minus explicit abstainers
+                // During bootstrap this is the same logic (non-voters are abstain)
+                spo_voted.saturating_sub(spo_abstain)
+            }
+        };
 
         match &state.procedure.gov_action {
             GovAction::InfoAction => {
@@ -551,7 +580,11 @@ impl LedgerState {
                 let spo_met = if let Some(ref spo_threshold) =
                     pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
                 {
-                    check_threshold(spo_yes, total_spo_stake, spo_threshold)
+                    check_threshold(
+                        spo_yes,
+                        effective_spo_denom(&state.procedure.gov_action),
+                        spo_threshold,
+                    )
                 } else {
                     true // No SPO vote required for non-security params
                 };
@@ -579,7 +612,8 @@ impl LedgerState {
                 };
                 let spo_threshold = &self.protocol_params.pvt_hard_fork;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                let spo_denom = effective_spo_denom(&state.procedure.gov_action);
+                let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 let cc_met = check_cc_approval(
                     action_id,
                     &self.governance,
@@ -593,7 +627,7 @@ impl LedgerState {
                     bootstrap,
                     drep_yes, drep_total,
                     drep_threshold = drep_threshold.as_f64(), drep_met,
-                    spo_yes, total_spo_stake,
+                    spo_yes, spo_denom,
                     spo_threshold = spo_threshold.as_f64(), spo_met,
                     cc_met,
                     "HardForkInitiation ratification check"
@@ -613,7 +647,11 @@ impl LedgerState {
                 };
                 let spo_threshold = &self.protocol_params.pvt_motion_no_confidence;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                let spo_met = check_threshold(
+                    spo_yes,
+                    effective_spo_denom(&state.procedure.gov_action),
+                    spo_threshold,
+                );
                 drep_met && spo_met
             }
             GovAction::UpdateCommittee { .. } => {
@@ -642,7 +680,11 @@ impl LedgerState {
                     )
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_met = check_threshold(spo_yes, total_spo_stake, spo_threshold);
+                let spo_met = check_threshold(
+                    spo_yes,
+                    effective_spo_denom(&state.procedure.gov_action),
+                    spo_threshold,
+                );
                 drep_met && spo_met
             }
             GovAction::NewConstitution { .. } => {
@@ -705,9 +747,10 @@ impl LedgerState {
         action: &GovAction,
         drep_power_cache: &HashMap<Hash32, u64>,
         no_confidence_stake: u64,
-    ) -> (u64, u64, u64, u64, u64, u64) {
+    ) -> (u64, u64, u64, u64, u64, u64, u64) {
         let mut spo_yes = 0u64;
         let mut spo_total = 0u64;
+        let mut spo_abstain = 0u64;
         let mut cc_yes = 0u64;
         let mut cc_total = 0u64;
 
@@ -735,11 +778,11 @@ impl LedgerState {
                         b
                     });
                     let pool_stake = self.compute_spo_voting_power(&pool_id);
-                    // SPO denominator = total active SPO stake, so only count yes here
-                    // Non-voting SPOs are implicitly No (in denominator but not numerator)
                     spo_total += pool_stake;
-                    if procedure.vote == Vote::Yes {
-                        spo_yes += pool_stake;
+                    match &procedure.vote {
+                        Vote::Yes => spo_yes += pool_stake,
+                        Vote::Abstain => spo_abstain += pool_stake,
+                        _ => {} // Explicit No: in denominator but not numerator
                     }
                 }
                 Voter::ConstitutionalCommittee(_) => {
@@ -790,10 +833,21 @@ impl LedgerState {
         // DRep denominator = total active stake - abstain stake
         let drep_total = drep_total_all.saturating_sub(drep_abstain);
 
-        (drep_yes, drep_total, spo_yes, spo_total, cc_yes, cc_total)
+        (
+            drep_yes,
+            drep_total,
+            spo_yes,
+            spo_total,
+            spo_abstain,
+            cc_yes,
+            cc_total,
+        )
     }
 
-    /// Get the total stake for a credential: UTxO stake + reward account balance.
+    /// Get the total stake for a credential: UTxO stake + reward balance.
+    ///
+    /// Note: For DRep voting power (via `build_drep_power_cache_live`), proposal
+    /// deposits are added separately via `proposal_deposits_by_credential()`.
     pub(crate) fn credential_stake(&self, cred_hash: &Hash32) -> u64 {
         let utxo = self
             .stake_distribution
@@ -807,6 +861,20 @@ impl LedgerState {
             .map(|s| s.0)
             .unwrap_or(0);
         utxo + reward
+    }
+
+    /// Build a map of credential → total proposal deposits for that credential.
+    ///
+    /// Matches Haskell's `proposalsDeposits` in the DRep pulser: credentials that
+    /// submitted governance proposals have their deposited ADA counted toward
+    /// DRep/SPO voting power.
+    fn proposal_deposits_by_credential(&self) -> HashMap<Hash32, u64> {
+        let mut deposits: HashMap<Hash32, u64> = HashMap::new();
+        for proposal in self.governance.proposals.values() {
+            let cred = Self::reward_account_to_hash(&proposal.procedure.return_addr);
+            *deposits.entry(cred).or_default() += proposal.procedure.deposit.0;
+        }
+        deposits
     }
 
     /// Build a cache of DRep voting power (Hash32 -> delegated stake) for ratification.
@@ -847,8 +915,12 @@ impl LedgerState {
         let mut cache: HashMap<Hash32, u64> = HashMap::new();
         let mut no_confidence_stake = 0u64;
         let mut abstain_stake = 0u64;
+        // Precompute proposal deposits per credential (Haskell: proposalDeposits
+        // passed into DRepPulser, added to each credential's voting power).
+        let prop_deposits = self.proposal_deposits_by_credential();
         for (stake_cred, drep) in &self.governance.vote_delegations {
-            let stake = self.credential_stake(stake_cred);
+            let stake = self.credential_stake(stake_cred)
+                + prop_deposits.get(stake_cred).copied().unwrap_or(0);
             match drep {
                 DRep::KeyHash(h) => {
                     // Only count stake for active DReps
@@ -2096,7 +2168,7 @@ mod tests {
         }
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::ParameterChange {
                 prev_action_id: None,
@@ -2138,7 +2210,7 @@ mod tests {
         }
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _) =
+        let (yes, total, _, _, _, _, _) =
             state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
 
         // Denominator = total active (10B) - abstain (4B) = 6B
@@ -2180,7 +2252,7 @@ mod tests {
                                                   // DRep power cache should only have the 5 registered DReps
         assert_eq!(cache.len(), 5);
 
-        let (yes, total, _, _, _, _) =
+        let (yes, total, _, _, _, _, _) =
             state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
 
         // Total should only include active DRep stake (5B), not AlwaysAbstain (6B)
@@ -2220,7 +2292,7 @@ mod tests {
         let (cache, nc_stake, _) = state.build_drep_power_cache();
         assert_eq!(nc_stake, 6_000_000_000); // 3 * 2B
 
-        let (yes, total, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::NoConfidence {
                 prev_action_id: None,
@@ -2262,7 +2334,7 @@ mod tests {
         );
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _) =
+        let (yes, total, _, _, _, _, _) =
             state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
 
         // Non-NoConfidence: AlwaysNoConfidence counts as No (in denominator, not numerator)
