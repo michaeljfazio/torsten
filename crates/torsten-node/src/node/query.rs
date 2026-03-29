@@ -175,6 +175,7 @@ impl Node {
         };
 
         let ls = self.ledger_state.read().await;
+        let eh = self.era_history.read().await;
 
         // Build per-pool stake map from delegations for accurate reporting.
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
@@ -807,7 +808,7 @@ impl Node {
             drep_stake_distr,
             vote_delegatees,
             drep_delegations,
-            era_summaries: self.build_era_summaries(&ls),
+            era_summaries: self.build_era_summaries(&ls, &eh),
             active_slots_coeff_num: self.shelley_genesis.as_ref().map_or(1, |g| {
                 let (n, _) = float_to_rational(g.active_slots_coeff);
                 n
@@ -921,10 +922,9 @@ impl Node {
     pub fn build_era_summaries(
         &self,
         _ls: &torsten_ledger::LedgerState,
+        eh: &torsten_consensus::era_history::EraHistory,
     ) -> Vec<super::n2c_query::EraSummary> {
         use super::n2c_query::{EraBound, EraSummary};
-
-        let eh = self.era_history.blocking_read();
         eh.to_era_summary_exports()
             .into_iter()
             .map(|e| EraSummary {

@@ -127,14 +127,14 @@ impl Node {
     /// Uses the HFC era history state machine to correctly account for all
     /// era transitions (Byron→Shelley→...→Conway) with their respective
     /// slot durations.
-    pub fn current_wall_clock_slot(&self) -> Option<torsten_primitives::time::SlotNo> {
+    pub async fn current_wall_clock_slot(&self) -> Option<torsten_primitives::time::SlotNo> {
         let genesis = self.shelley_genesis.as_ref()?;
         let system_start = torsten_primitives::time::SystemStart {
             utc_time: chrono::DateTime::parse_from_rfc3339(&genesis.system_start)
                 .ok()?
                 .with_timezone(&chrono::Utc),
         };
-        let eh = self.era_history.blocking_read();
+        let eh = self.era_history.read().await;
         eh.wallclock_to_slot(chrono::Utc::now(), &system_start).ok()
     }
 
@@ -1251,7 +1251,7 @@ impl Node {
                 }
                 // Consume pending era transition and propagate to the HFC state machine.
                 if let Some((prev_era, new_era, epoch)) = ls.pending_era_transition.take() {
-                    let mut eh = self.era_history.blocking_write();
+                    let mut eh = self.era_history.write().await;
                     if eh.current_era() < new_era {
                         eh.record_era_transition(new_era, epoch.0);
                         tracing::info!(

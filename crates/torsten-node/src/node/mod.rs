@@ -3240,7 +3240,7 @@ impl Node {
     /// `try_forge_block_at`.  Used by code paths where the slot hasn't
     /// already been sampled (e.g. after catching up to tip).
     pub(crate) async fn try_forge_block(&mut self) {
-        if let Some(wc) = self.current_wall_clock_slot() {
+        if let Some(wc) = self.current_wall_clock_slot().await {
             self.try_forge_block_at(wc).await;
         }
     }
