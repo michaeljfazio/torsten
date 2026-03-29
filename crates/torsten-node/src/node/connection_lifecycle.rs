@@ -704,6 +704,14 @@ impl ConnectionLifecycleManager {
         self.connections.keys().copied().collect()
     }
 
+    /// Drain all connections, returning them as owned values.
+    ///
+    /// Used during shutdown to parallelize connection teardown without
+    /// holding `&mut self` for the duration of each `shutdown().await`.
+    pub fn drain_connections(&mut self) -> Vec<PeerConnection> {
+        self.connections.drain().map(|(_, conn)| conn).collect()
+    }
+
     // ─── Protocol Task Factories ────────────────────────────────────────────
     //
     // Each factory creates a closure matching the `ProtocolTaskFn` signature

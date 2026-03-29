@@ -1281,6 +1281,7 @@ impl Default for NodeMetrics {
 pub async fn start_metrics_server(
     port: u16,
     metrics: Arc<NodeMetrics>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
     let addr = format!("0.0.0.0:{port}");
 
@@ -1342,25 +1343,34 @@ pub async fn start_metrics_server(
     const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
     loop {
-        let (stream, _peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("Metrics server accept error: {e}");
-                continue;
-            }
-        };
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, _peer) = match accept_result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!("Metrics server accept error: {e}");
+                        continue;
+                    }
+                };
 
-        // Spawn a task per connection so one slow scraper cannot block others.
-        let metrics_clone = metrics.clone();
-        tokio::spawn(async move {
-            // Apply a hard timeout so abandoned connections don't linger.
-            let _ = tokio::time::timeout(
-                READ_TIMEOUT,
-                handle_metrics_connection(stream, metrics_clone),
-            )
-            .await;
-        });
+                // Spawn a task per connection so one slow scraper cannot block others.
+                let metrics_clone = metrics.clone();
+                tokio::spawn(async move {
+                    // Apply a hard timeout so abandoned connections don't linger.
+                    let _ = tokio::time::timeout(
+                        READ_TIMEOUT,
+                        handle_metrics_connection(stream, metrics_clone),
+                    )
+                    .await;
+                });
+            }
+            _ = shutdown_rx.changed() => {
+                info!("Metrics server shutting down");
+                break;
+            }
+        }
     }
+    Ok(())
 }
 
 /// Handle a single HTTP request on the metrics server.

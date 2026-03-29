@@ -1174,8 +1174,11 @@ impl Node {
         if self.metrics_port > 0 {
             let metrics = self.metrics.clone();
             let port = self.metrics_port;
+            let metrics_shutdown_rx = shutdown_rx.clone();
             tokio::spawn(async move {
-                if let Err(e) = crate::metrics::start_metrics_server(port, metrics).await {
+                if let Err(e) =
+                    crate::metrics::start_metrics_server(port, metrics, metrics_shutdown_rx).await
+                {
                     error!(
                         port,
                         "Metrics server failed to start: {e} — node will continue without metrics"
@@ -1363,6 +1366,10 @@ impl Node {
 
             tokio::spawn(async move {
                 let mut shutdown = n2c_shutdown_rx;
+                // Track spawned connection handlers so we can abort them on
+                // shutdown — otherwise they block indefinitely waiting for
+                // client I/O, preventing the process from exiting.
+                let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                 loop {
                     tokio::select! {
                         accept_result = listener.accept() => {
@@ -1385,7 +1392,7 @@ impl Node {
                                     let ann_rx = n2c_block_ann_tx.subscribe();
                                     let magic = n2c_network_magic;
 
-                                    tokio::spawn(async move {
+                                    let handle = tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2c_connection(
                                             stream, magic, qh, bp, mp, tv, ledger, ann_rx,
                                             metrics.clone(),
@@ -1398,6 +1405,7 @@ impl Node {
                                             .n2c_connections_active
                                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                     });
+                                    conn_handles.push(handle);
                                 }
                                 Err(e) => {
                                     warn!("N2C accept error: {e}");
@@ -1409,6 +1417,10 @@ impl Node {
                             break;
                         }
                     }
+                }
+                // Abort all active N2C connection handlers.
+                for handle in &conn_handles {
+                    handle.abort();
                 }
             });
         }
@@ -1533,6 +1545,7 @@ impl Node {
         {
             let topology_path = self.topology_path.clone();
             let pm_for_sighup = peer_manager.clone();
+            let mut hup_shutdown_rx = shutdown_rx.clone();
             tokio::spawn(async move {
                 let mut hup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
                     Ok(s) => s,
@@ -1542,49 +1555,56 @@ impl Node {
                     }
                 };
                 loop {
-                    hup.recv().await;
-                    info!(
-                        "SIGHUP received — reloading topology from {}",
-                        topology_path.display()
-                    );
-                    match Topology::load(&topology_path) {
-                        Ok(new_topology) => {
-                            let new_peers = new_topology.detailed_peers();
-                            // Resolve DNS before acquiring the write lock
-                            let mut resolved: Vec<std::net::SocketAddr> = Vec::new();
-                            for peer in &new_peers {
-                                match tokio::net::lookup_host(format!(
-                                    "{}:{}",
-                                    peer.address, peer.port
-                                ))
-                                .await
-                                {
-                                    Ok(addrs) => {
-                                        for socket_addr in addrs {
-                                            resolved.push(socket_addr);
+                    tokio::select! {
+                        _ = hup.recv() => {
+                            info!(
+                                "SIGHUP received — reloading topology from {}",
+                                topology_path.display()
+                            );
+                            match Topology::load(&topology_path) {
+                                Ok(new_topology) => {
+                                    let new_peers = new_topology.detailed_peers();
+                                    // Resolve DNS before acquiring the write lock
+                                    let mut resolved: Vec<std::net::SocketAddr> = Vec::new();
+                                    for peer in &new_peers {
+                                        match tokio::net::lookup_host(format!(
+                                            "{}:{}",
+                                            peer.address, peer.port
+                                        ))
+                                        .await
+                                        {
+                                            Ok(addrs) => {
+                                                for socket_addr in addrs {
+                                                    resolved.push(socket_addr);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    address = %peer.address,
+                                                    port = peer.port,
+                                                    "Failed to resolve peer address during topology reload: {e}"
+                                                );
+                                            }
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!(
-                                            address = %peer.address,
-                                            port = peer.port,
-                                            "Failed to resolve peer address during topology reload: {e}"
-                                        );
+                                    let mut pm = pm_for_sighup.write().await;
+                                    let added = resolved.len();
+                                    for socket_addr in resolved {
+                                        pm.add_config_peer(socket_addr);
                                     }
+                                    info!(
+                                        "Topology reloaded: {added} peers registered, {}",
+                                        pm.stats()
+                                    );
+                                }
+                                Err(e) => {
+                                    error!("Failed to reload topology: {e}");
                                 }
                             }
-                            let mut pm = pm_for_sighup.write().await;
-                            let added = resolved.len();
-                            for socket_addr in resolved {
-                                pm.add_config_peer(socket_addr);
-                            }
-                            info!(
-                                "Topology reloaded: {added} peers registered, {}",
-                                pm.stats()
-                            );
                         }
-                        Err(e) => {
-                            error!("Failed to reload topology: {e}");
+                        _ = hup_shutdown_rx.changed() => {
+                            info!("SIGHUP handler shutting down");
+                            break;
                         }
                     }
                 }
@@ -1652,6 +1672,9 @@ impl Node {
 
             tokio::spawn(async move {
                 let mut shutdown = n2n_shutdown_rx;
+                // Track spawned inbound connection handlers so we can abort
+                // them on shutdown — otherwise they block waiting for peer I/O.
+                let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                 loop {
                     tokio::select! {
                         accept_result = tcp_listener.accept() => {
@@ -1678,7 +1701,7 @@ impl Node {
                                     // waiting for the peer manager lock — the handshake
                                     // must complete within the Haskell timeout (10s).
                                     // Peer registration happens after the handshake.
-                                    tokio::spawn(async move {
+                                    let handle = tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2n_connection(
                                             stream, magic, ps, bp, mp, pm.clone(),
                                             peer_addr, ann_rx,
@@ -1695,6 +1718,7 @@ impl Node {
                                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                         pm.write().await.peer_disconnected(&peer_addr);
                                     });
+                                    conn_handles.push(handle);
                                 }
                                 Err(e) => {
                                     warn!("N2N accept error: {e}");
@@ -1706,6 +1730,10 @@ impl Node {
                             break;
                         }
                     }
+                }
+                // Abort all active N2N inbound connection handlers.
+                for handle in &conn_handles {
+                    handle.abort();
                 }
             });
         } else {
@@ -2267,15 +2295,31 @@ impl Node {
             }
         }
 
-        // Shut down all peer connections and protocol tasks.
+        // Shut down all peer connections in parallel with a global timeout.
+        // Each connection's shutdown() stops hot/warm protocols (up to 5s each)
+        // and aborts the mux — doing this sequentially with N peers could take
+        // minutes, so we run them all concurrently.
         if let Some(ref mut lifecycle) = self.connection_lifecycle {
-            info!("Shutting down peer connections...");
-            let mut pm = peer_manager.write().await;
-            let addrs: Vec<_> = lifecycle.connected_addrs();
-            for addr in addrs {
-                let _ = lifecycle.demote_to_cold(addr, &mut pm).await;
+            let connections = lifecycle.drain_connections();
+            let count = connections.len();
+            if count > 0 {
+                info!(count, "Shutting down peer connections in parallel...");
+                let shutdown_futs = connections.into_iter().map(|mut conn| async move {
+                    conn.shutdown().await;
+                });
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    futures::future::join_all(shutdown_futs),
+                )
+                .await
+                {
+                    Ok(_) => info!(count, "All peer connections shut down"),
+                    Err(_) => warn!(
+                        count,
+                        "Peer connection shutdown timed out after 10s, continuing"
+                    ),
+                }
             }
-            drop(pm);
         }
 
         // Abort the BlockFetch decision task.

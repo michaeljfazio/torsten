@@ -1259,34 +1259,12 @@ async fn run_node(args: RunArgs) -> Result<()> {
 
     info!("");
 
-    // Run the node with a concurrent SIGTERM/SIGINT watcher so the process
-    // exits cleanly (flushing logs, releasing the LSM lock, etc.) when the
-    // service manager stops it.  Without this, `panic=abort` means SIGTERM is
-    // handled by the OS with no log flush or resource cleanup.
-    tokio::select! {
-        result = node.run() => {
-            result?;
-        }
-        _ = async {
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{signal, SignalKind};
-                let mut sigterm = signal(SignalKind::terminate())
-                    .expect("SIGTERM handler registration failed");
-                sigterm.recv().await;
-                info!("SIGTERM received — shutting down");
-            }
-            #[cfg(not(unix))]
-            {
-                tokio::signal::ctrl_c().await.ok();
-                info!("CTRL-C received — shutting down");
-            }
-        } => {}
-        _ = async {
-            tokio::signal::ctrl_c().await.ok();
-            info!("CTRL-C received — shutting down");
-        } => {}
-    }
+    // node.run() registers its own SIGINT/SIGTERM handlers and performs
+    // graceful shutdown internally (peer demotion, storage flush, ledger
+    // snapshot).  Do NOT race it with an outer select! — that drops the
+    // run future mid-shutdown and leaves spawned tasks (metrics, N2C/N2N
+    // connections) alive, causing the process to hang.
+    node.run().await?;
 
     Ok(())
 }
