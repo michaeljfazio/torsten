@@ -411,6 +411,10 @@ impl LedgerState {
 
         let mut ratified = Vec::new();
         let mut delayed = false;
+        // Track cumulative enacted treasury withdrawals across the ratification
+        // pass so that multiple TreasuryWithdrawals proposals in the same epoch
+        // cannot collectively exceed the treasury balance (Haskell: checkWithdrawals).
+        let mut enacted_withdrawals_total: u64 = 0;
 
         for (action_id, action, expires) in &candidates {
             // Per Haskell RATIFY: skip proposals whose expiry epoch has passed.
@@ -463,6 +467,7 @@ impl LedgerState {
                     no_confidence_stake,
                     &snap_votes,
                 );
+                let remaining_treasury = self.treasury.0.saturating_sub(enacted_withdrawals_total);
                 let met = self.check_ratification(
                     action_id,
                     state,
@@ -475,6 +480,7 @@ impl LedgerState {
                     &snap_committee_expiration,
                     &snap_committee_resigned,
                     &snap_committee_threshold,
+                    remaining_treasury,
                 );
                 if met {
                     debug!(
@@ -484,6 +490,12 @@ impl LedgerState {
                     );
                     // Enact immediately and update threaded roots
                     self.enact_gov_action(action);
+                    // Track cumulative treasury withdrawals for aggregate cap
+                    if let GovAction::TreasuryWithdrawals { withdrawals, .. } = action {
+                        enacted_withdrawals_total += withdrawals
+                            .values()
+                            .fold(0u64, |acc, a| acc.saturating_add(a.0));
+                    }
                     // Update the threaded local enacted roots (for chaining
                     // within this ratification pass)
                     update_enacted_root_local(
@@ -592,6 +604,7 @@ impl LedgerState {
         committee_expiration: &HashMap<Hash32, EpochNo>,
         committee_resigned: &HashMap<Hash32, Option<Anchor>>,
         committee_threshold: &Option<Rational>,
+        remaining_treasury: u64,
     ) -> bool {
         // Count votes by voter type (uses pre-computed DRep power cache)
         let (drep_yes, drep_total, spo_yes, spo_voted, spo_abstain, _cc_yes, _cc_total) = self
@@ -765,7 +778,23 @@ impl LedgerState {
                 let cc_met = cc_met_fn(action_id);
                 drep_met && cc_met
             }
-            GovAction::TreasuryWithdrawals { .. } => {
+            GovAction::TreasuryWithdrawals { withdrawals, .. } => {
+                // Haskell RATIFY: checkWithdrawals — total withdrawal must not
+                // exceed the remaining treasury balance (after any previously
+                // enacted withdrawals in this ratification pass).
+                let total: u64 = withdrawals
+                    .values()
+                    .fold(0u64, |acc, a| acc.saturating_add(a.0));
+                if total > remaining_treasury {
+                    debug!(
+                        action_id = %action_id.transaction_id.to_hex(),
+                        total,
+                        remaining_treasury,
+                        "TreasuryWithdrawals rejected: exceeds remaining treasury"
+                    );
+                    return false;
+                }
+
                 let rational_zero = Rational {
                     numerator: 0,
                     denominator: 1,
@@ -2896,11 +2925,13 @@ mod tests {
 
     #[test]
     fn test_treasury_withdrawal_insufficient_funds_not_ratified() {
+        // Gap 1: TreasuryWithdrawals that exceed treasury balance must not be
+        // ratified, matching Haskell's checkWithdrawals precondition.
         let mut state = gov_test_state(10, 0);
-        state.treasury = Lovelace(1_000_000_000); // Only 1B
+        state.treasury = Lovelace(500_000_000); // 500M
 
         let mut withdrawals = BTreeMap::new();
-        withdrawals.insert(vec![0u8; 29], Lovelace(5_000_000_000)); // Request 5B
+        withdrawals.insert(vec![0u8; 29], Lovelace(1_000_000_000)); // Request 1B
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -2918,7 +2949,7 @@ mod tests {
         );
         let action_id = make_action_id(50, 0);
 
-        // All vote yes
+        // All DReps vote yes + CC votes yes — voting thresholds fully met
         for i in 0..10 {
             drep_vote(&mut state, i, &action_id, Vote::Yes);
         }
@@ -2926,18 +2957,144 @@ mod tests {
 
         state.process_epoch_transition(EpochNo(1));
 
-        // Treasury withdrawal IS enacted — the balance guard was removed from
-        // ratification to prevent divergence when local treasury tracking drifts.
-        // Haskell's ratification uses the authoritative balance.
-        // The treasury goes negative via saturating_sub (capped at 0).
-        assert!(
-            state.treasury.0 < 1_000_000_000,
-            "Treasury should have been debited by the withdrawal"
+        // Withdrawal exceeds treasury → not ratified despite unanimous approval
+        assert_eq!(
+            state.treasury.0, 500_000_000,
+            "Treasury must be unchanged when withdrawal exceeds balance"
         );
         assert_eq!(
             state.governance.proposals.len(),
+            1,
+            "Proposal must remain active (not ratified)"
+        );
+    }
+
+    #[test]
+    fn test_treasury_aggregate_withdrawal_cap() {
+        // Gap 2: Multiple TreasuryWithdrawals in the same epoch must track
+        // cumulative withdrawals. Second proposal blocked when aggregate exceeds
+        // treasury balance.
+        let mut state = gov_test_state(10, 0);
+        state.treasury = Lovelace(600_000_000); // 600M
+
+        // Two withdrawal proposals: 400M each (total 800M > 600M treasury)
+        for proposal_idx in 0u8..2 {
+            let mut withdrawals = BTreeMap::new();
+            // Use distinct reward addresses so proposals are unique
+            let mut addr = vec![0u8; 29];
+            addr[0] = proposal_idx;
+            withdrawals.insert(addr, Lovelace(400_000_000));
+
+            let tx_byte = 50 + proposal_idx;
+            let tx_hash = Hash32::from_bytes([tx_byte; 32]);
+            state.process_proposal(
+                &tx_hash,
+                0,
+                &ProposalProcedure {
+                    deposit: Lovelace(100_000_000_000),
+                    return_addr: vec![0u8; 29],
+                    gov_action: GovAction::TreasuryWithdrawals {
+                        withdrawals,
+                        policy_hash: None,
+                    },
+                    anchor: make_anchor(),
+                },
+            );
+            let action_id = make_action_id(tx_byte, 0);
+            for i in 0..10 {
+                drep_vote(&mut state, i, &action_id, Vote::Yes);
+            }
+            cc_vote_yes(&mut state, &action_id);
+        }
+
+        assert_eq!(state.governance.proposals.len(), 2);
+        state.process_epoch_transition(EpochNo(1));
+
+        // First 400M enacted, second 400M blocked (would exceed remaining 200M)
+        assert_eq!(
+            state.treasury.0, 200_000_000,
+            "Only the first 400M withdrawal should be enacted"
+        );
+        assert_eq!(
+            state.governance.proposals.len(),
+            1,
+            "Second proposal must remain active (aggregate cap)"
+        );
+    }
+
+    #[test]
+    fn test_prev_action_id_expired_proposal_blocks_child() {
+        // Gap 4 regression: Proposal A submitted → B references A via
+        // prev_action_id → A expires → B should NOT be ratified because
+        // A was never enacted, so the enacted root doesn't match.
+        let mut state = gov_test_state(10, 10);
+        state.epoch = EpochNo(5);
+
+        // Submit proposal A (ParameterChange, expires epoch 5 — already expired)
+        let tx_a = Hash32::from_bytes([40u8; 32]);
+        let ppu = ProtocolParamUpdate {
+            max_block_body_size: Some(90112),
+            ..Default::default()
+        };
+        state.process_proposal(
+            &tx_a,
             0,
-            "Proposal should have been enacted and removed"
+            &ProposalProcedure {
+                deposit: Lovelace(100_000_000_000),
+                return_addr: vec![0u8; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::new(ppu.clone()),
+                    policy_hash: None,
+                },
+                anchor: make_anchor(),
+            },
+        );
+        let action_id_a = make_action_id(40, 0);
+        // Manually set expires to current epoch so it's already expired at boundary
+        if let Some(ps) = Arc::make_mut(&mut state.governance)
+            .proposals
+            .get_mut(&action_id_a)
+        {
+            ps.expires_epoch = EpochNo(4); // Expired before current epoch 5
+        }
+
+        // Submit proposal B referencing A
+        let tx_b = Hash32::from_bytes([41u8; 32]);
+        let ppu_b = ProtocolParamUpdate {
+            max_block_body_size: Some(98304),
+            ..Default::default()
+        };
+        state.process_proposal(
+            &tx_b,
+            0,
+            &ProposalProcedure {
+                deposit: Lovelace(100_000_000_000),
+                return_addr: vec![0u8; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: Some(action_id_a.clone()),
+                    protocol_param_update: Box::new(ppu_b),
+                    policy_hash: None,
+                },
+                anchor: make_anchor(),
+            },
+        );
+        let action_id_b = make_action_id(41, 0);
+
+        // Vote unanimously for B
+        for i in 0..10 {
+            drep_vote(&mut state, i, &action_id_b, Vote::Yes);
+            spo_vote(&mut state, i, &action_id_b, Vote::Yes);
+        }
+        cc_vote_yes(&mut state, &action_id_b);
+
+        state.process_epoch_transition(EpochNo(6));
+
+        // A expired and was never enacted → enacted_pparam root is still None →
+        // B's prev_action_id (Some(A)) doesn't match → B is not ratified
+        assert_ne!(
+            state.protocol_params.max_block_body_size, 98304,
+            "Proposal B must NOT be ratified (parent A expired without enactment)"
         );
     }
 
