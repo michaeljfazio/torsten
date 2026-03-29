@@ -2438,7 +2438,11 @@ fn test_cc_approval_no_committee() {
     // No committee threshold => CC blocks ratification
     assert!(!check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         EpochNo(10),
         0,
         false
@@ -2497,7 +2501,11 @@ fn test_cc_approval_with_committee() {
     );
     assert!(check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         current_epoch,
         0,
         false
@@ -2532,7 +2540,11 @@ fn test_cc_approval_with_committee() {
     );
     assert!(!check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         current_epoch,
         0,
         false
@@ -2542,7 +2554,11 @@ fn test_cc_approval_with_committee() {
     governance.votes_by_action.remove(&action_id);
     assert!(!check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         current_epoch,
         0,
         false
@@ -2594,7 +2610,11 @@ fn test_cc_approval_expired_members() {
     );
     assert!(check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         current_epoch,
         0,
         false
@@ -2632,7 +2652,11 @@ fn test_cc_approval_min_size_check() {
     // Post-bootstrap: min_size=3 but only 1 active => CC blocks
     assert!(!check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         EpochNo(10),
         3,
         false
@@ -2640,7 +2664,11 @@ fn test_cc_approval_min_size_check() {
     // During bootstrap: min_size check skipped => CC passes
     assert!(check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         EpochNo(10),
         3,
         true
@@ -2698,7 +2726,11 @@ fn test_cc_approval_abstain_excluded() {
     );
     assert!(!check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         EpochNo(10),
         0,
         false
@@ -2733,7 +2765,11 @@ fn test_cc_approval_abstain_excluded() {
     );
     assert!(check_cc_approval(
         &action_id,
-        &governance,
+        &governance.votes_by_action,
+        &governance.committee_hot_keys,
+        &governance.committee_expiration,
+        &governance.committee_resigned,
+        &governance.committee_threshold,
         EpochNo(10),
         0,
         false
@@ -4189,14 +4225,26 @@ fn test_prev_action_as_expected_none_chain() {
         prev_action_id: None,
         protocol_version: (10, 0),
     };
-    assert!(prev_action_as_expected(&action, &governance));
+    assert!(prev_action_as_expected(
+        &action,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 
     let action = GovAction::ParameterChange {
         prev_action_id: None,
         protocol_param_update: Box::new(ProtocolParamUpdate::default()),
         policy_hash: None,
     };
-    assert!(prev_action_as_expected(&action, &governance));
+    assert!(prev_action_as_expected(
+        &action,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 }
 
 #[test]
@@ -4214,7 +4262,13 @@ fn test_prev_action_as_expected_chain_mismatch() {
         prev_action_id: None,
         protocol_version: (11, 0),
     };
-    assert!(!prev_action_as_expected(&action, &governance));
+    assert!(!prev_action_as_expected(
+        &action,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 
     // Proposal with wrong prev_action_id should FAIL
     let wrong_id = GovActionId {
@@ -4225,14 +4279,26 @@ fn test_prev_action_as_expected_chain_mismatch() {
         prev_action_id: Some(wrong_id),
         protocol_version: (11, 0),
     };
-    assert!(!prev_action_as_expected(&action, &governance));
+    assert!(!prev_action_as_expected(
+        &action,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 
     // Proposal with correct prev_action_id should PASS
     let action = GovAction::HardForkInitiation {
         prev_action_id: Some(enacted_id),
         protocol_version: (11, 0),
     };
-    assert!(prev_action_as_expected(&action, &governance));
+    assert!(prev_action_as_expected(
+        &action,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 }
 
 #[test]
@@ -4248,7 +4314,13 @@ fn test_prev_action_committee_shared_purpose() {
     let no_confidence = GovAction::NoConfidence {
         prev_action_id: Some(enacted_id.clone()),
     };
-    assert!(prev_action_as_expected(&no_confidence, &governance));
+    assert!(prev_action_as_expected(
+        &no_confidence,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 
     let update_committee = GovAction::UpdateCommittee {
         prev_action_id: Some(enacted_id),
@@ -4259,7 +4331,13 @@ fn test_prev_action_committee_shared_purpose() {
             denominator: 2,
         },
     };
-    assert!(prev_action_as_expected(&update_committee, &governance));
+    assert!(prev_action_as_expected(
+        &update_committee,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 }
 
 #[test]
@@ -4277,8 +4355,20 @@ fn test_treasury_and_info_always_pass_chain() {
         withdrawals: BTreeMap::new(),
         policy_hash: None,
     };
-    assert!(prev_action_as_expected(&treasury, &governance));
-    assert!(prev_action_as_expected(&GovAction::InfoAction, &governance));
+    assert!(prev_action_as_expected(
+        &treasury,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
+    assert!(prev_action_as_expected(
+        &GovAction::InfoAction,
+        &governance.enacted_pparam_update,
+        &governance.enacted_hard_fork,
+        &governance.enacted_committee,
+        &governance.enacted_constitution
+    ));
 }
 
 #[test]
@@ -5118,6 +5208,7 @@ fn test_drep_denominator_yes_no_only() {
         },
         &drep_power_cache,
         no_confidence_stake,
+        &state.governance.votes_by_action,
     );
 
     assert_eq!(drep_yes, 3_000_000_000);
@@ -5166,6 +5257,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
         },
         &drep_power_cache,
         no_confidence_stake,
+        &state.governance.votes_by_action,
     );
 
     // NoConfidence stake = 3B (counts as Yes for NoConfidence actions)
@@ -5228,6 +5320,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
         },
         &drep_power_cache,
         no_confidence_stake,
+        &state.governance.votes_by_action,
     );
 
     // 2B yes (voted), 3B no (AlwaysNoConfidence), 3B implicit no (non-voting DReps)
@@ -6776,8 +6869,13 @@ fn test_abstain_excluded_from_denominator() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) =
-        state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+        &action_id,
+        &GovAction::InfoAction,
+        &cache,
+        no_conf,
+        &state.governance.votes_by_action,
+    );
 
     // DRep1 voted Yes (100), DRep3 voted No (100), DRep2 Abstain (excluded)
     // drep_total = yes + no = 100 + 100 = 200 (abstain excluded)
@@ -6845,8 +6943,13 @@ fn test_all_dreps_abstain() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) =
-        state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+        &action_id,
+        &GovAction::InfoAction,
+        &cache,
+        no_conf,
+        &state.governance.votes_by_action,
+    );
 
     // All abstain: yes=0, total=0
     assert_eq!(drep_yes, 0, "No yes votes when all abstain");
@@ -6948,8 +7051,13 @@ fn test_mix_yes_no_abstain_votes() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) =
-        state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf);
+    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+        &action_id,
+        &GovAction::InfoAction,
+        &cache,
+        no_conf,
+        &state.governance.votes_by_action,
+    );
 
     // 3 * 100 = 300 yes, 1 * 100 = 100 no, total = 400 (abstain excluded)
     assert_eq!(drep_yes, 300, "Yes votes should be 300");
@@ -7054,7 +7162,11 @@ fn test_cc_abstain_excluded_from_denominator() {
     // Effective: yes=1, total_excluding_abstain=2 (yes+no), ratio=1/2 = 50% >= 50% threshold
     let result = check_cc_approval(
         &action_id,
-        &state.governance,
+        &state.governance.votes_by_action,
+        &state.governance.committee_hot_keys,
+        &state.governance.committee_expiration,
+        &state.governance.committee_resigned,
+        &state.governance.committee_threshold,
         EpochNo(10),
         1, // min committee size
         false,
@@ -7099,6 +7211,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
         },
         &cache,
         no_conf_stake,
+        &state.governance.votes_by_action,
     );
     assert_eq!(
         drep_yes, 500,
@@ -7107,8 +7220,13 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     assert_eq!(drep_total, 500, "Total should include NoConfidence stake");
 
     // For InfoAction (non-NoConfidence)
-    let (drep_yes_info, drep_total_info, _, _, _, _, _) =
-        state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, no_conf_stake);
+    let (drep_yes_info, drep_total_info, _, _, _, _, _) = state.count_votes_by_type(
+        &action_id,
+        &GovAction::InfoAction,
+        &cache,
+        no_conf_stake,
+        &state.governance.votes_by_action,
+    );
     assert_eq!(
         drep_yes_info, 0,
         "NoConfidence stake should NOT count as Yes for non-NoConfidence actions"
@@ -7783,8 +7901,18 @@ fn test_chained_parameter_changes() {
         );
     }
 
-    // Ratify second proposal
+    // First epoch transition after submission captures the snapshot; proposal2
+    // is not yet in any snapshot (it was submitted during epoch 1 and the
+    // snapshot from boundary 0→1 predates it).  Per Haskell DRep pulser timing,
+    // proposals submitted in epoch E are ratified at boundary E+1→E+2.
     state.process_epoch_transition(EpochNo(2));
+    assert_eq!(
+        state.protocol_params.drep_activity, 25,
+        "drep_activity should still be 25 — proposal2 not yet ratified (snapshot timing)"
+    );
+
+    // Ratify second proposal at the next boundary (snapshot from boundary 1→2 now contains proposal2)
+    state.process_epoch_transition(EpochNo(3));
     assert_eq!(
         state.protocol_params.drep_activity, 31,
         "drep_activity should be updated to 31 by chained governance action"

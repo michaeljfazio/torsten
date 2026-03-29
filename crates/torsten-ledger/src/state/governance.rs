@@ -1,10 +1,10 @@
 use super::{credential_to_hash, GovernanceState, LedgerState, ProposalState};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::time::EpochNo;
 use torsten_primitives::transaction::{
-    DRep, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
+    Anchor, DRep, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
 };
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
@@ -315,16 +315,74 @@ impl LedgerState {
     /// 2. Sequentially with state threading (enacted roots update between proposals)
     /// 3. With a "delaying action" flag that blocks further ratification
     /// 4. With prev_action_id chain validation (must match last enacted of same purpose)
+    ///
+    /// ## Snapshot-based ratification (matching Haskell DRep pulser)
+    ///
+    /// When `governance.ratification_snapshot` is `Some`, proposals and votes are read
+    /// from the frozen snapshot (captured at the *previous* epoch boundary) rather than
+    /// live state.  This ensures proposals/votes submitted during the epoch that just
+    /// ended are not considered for ratification until the *next* boundary — matching
+    /// Haskell's `DRepPulsingState` timing exactly.
+    ///
+    /// When `None` (genesis, or loading an old snapshot without this field), we fall
+    /// back to live-state ratification (the pre-snapshot behavior).
     pub(crate) fn ratify_proposals(&mut self) {
         let total_drep_stake = self.compute_total_drep_stake();
         let total_spo_stake = self.compute_total_spo_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
         let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
 
+        // Determine the source of proposals, votes, and committee state:
+        // prefer the frozen ratification snapshot, fall back to live state.
+        let snapshot = self.governance.ratification_snapshot.clone();
+        let using_snapshot = snapshot.is_some();
+
+        let (
+            snap_proposals,
+            snap_votes,
+            snap_committee_hot_keys,
+            snap_committee_expiration,
+            snap_committee_resigned,
+            snap_committee_threshold,
+            _snap_no_confidence,
+            mut enacted_pparam,
+            mut enacted_hardfork,
+            mut enacted_committee_root,
+            mut enacted_constitution,
+        ) = if let Some(ref snap) = snapshot {
+            (
+                snap.proposals.clone(),
+                snap.votes_by_action.clone(),
+                snap.committee_hot_keys.clone(),
+                snap.committee_expiration.clone(),
+                snap.committee_resigned.clone(),
+                snap.committee_threshold.clone(),
+                snap.no_confidence,
+                snap.enacted_pparam_update.clone(),
+                snap.enacted_hard_fork.clone(),
+                snap.enacted_committee.clone(),
+                snap.enacted_constitution.clone(),
+            )
+        } else {
+            // Fallback: live state (first epoch or old snapshot without this field)
+            let gov = &self.governance;
+            (
+                gov.proposals.clone(),
+                gov.votes_by_action.clone(),
+                gov.committee_hot_keys.clone(),
+                gov.committee_expiration.clone(),
+                gov.committee_resigned.clone(),
+                gov.committee_threshold.clone(),
+                gov.no_confidence,
+                gov.enacted_pparam_update.clone(),
+                gov.enacted_hard_fork.clone(),
+                gov.enacted_committee.clone(),
+                gov.enacted_constitution.clone(),
+            )
+        };
+
         // Collect all proposals sorted by priority (lower = higher priority)
-        let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = self
-            .governance
-            .proposals
+        let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = snap_proposals
             .iter()
             .map(|(id, state)| {
                 (
@@ -342,20 +400,34 @@ impl LedgerState {
             total_drep_stake,
             total_spo_stake,
             no_confidence_stake,
+            using_snapshot,
             bootstrap = self.is_bootstrap_phase(),
             protocol_version = self.protocol_params.protocol_version_major,
-            cc_members = self.governance.committee_expiration.len(),
-            cc_hot_keys = self.governance.committee_hot_keys.len(),
-            cc_threshold = ?self.governance.committee_threshold,
+            cc_members = snap_committee_expiration.len(),
+            cc_hot_keys = snap_committee_hot_keys.len(),
+            cc_threshold = ?snap_committee_threshold,
             "Governance ratification: evaluating proposals"
         );
 
         let mut ratified = Vec::new();
         let mut delayed = false;
 
-        for (action_id, action, _expires) in &candidates {
-            // Check prev_action_id chain
-            if !prev_action_as_expected(action, &self.governance) {
+        for (action_id, action, expires) in &candidates {
+            // Per Haskell RATIFY: skip proposals whose expiry epoch has passed.
+            // `gasExpiresAfter < reCurrentEpoch` — proposals are active through
+            // their expires_epoch and checked for expiry at the NEXT boundary.
+            if *expires < self.epoch {
+                continue;
+            }
+
+            // Check prev_action_id chain against the threaded enacted roots
+            if !prev_action_as_expected(
+                action,
+                &enacted_pparam,
+                &enacted_hardfork,
+                &enacted_committee_root,
+                &enacted_constitution,
+            ) {
                 trace!(
                     action_id = %action_id.transaction_id.to_hex(),
                     action_type = ?std::mem::discriminant(action),
@@ -363,13 +435,6 @@ impl LedgerState {
                 );
                 continue;
             }
-
-            // Treasury withdrawal balance check removed from ratification.
-            // Haskell's withdrawalCanWithdraw uses the authoritative treasury
-            // balance. If our local treasury tracking has diverged, skipping the
-            // withdrawal would cause permanent ledger divergence. Trust the
-            // canonical chain — if the proposal was ratified on-chain, apply it.
-            // The treasury debit is applied below in the enactment step.
 
             // If a delaying action was already enacted this epoch, skip remaining
             if delayed {
@@ -380,8 +445,8 @@ impl LedgerState {
                 continue;
             }
 
-            // Check voting thresholds
-            if let Some(state) = self.governance.proposals.get(action_id) {
+            // Check voting thresholds using snapshot data
+            if let Some(state) = snap_proposals.get(action_id) {
                 // Compute vote counts for logging
                 let (
                     _drep_yes,
@@ -396,6 +461,7 @@ impl LedgerState {
                     &state.procedure.gov_action,
                     &drep_power_cache,
                     no_confidence_stake,
+                    &snap_votes,
                 );
                 let met = self.check_ratification(
                     action_id,
@@ -404,6 +470,11 @@ impl LedgerState {
                     total_spo_stake,
                     &drep_power_cache,
                     no_confidence_stake,
+                    &snap_votes,
+                    &snap_committee_hot_keys,
+                    &snap_committee_expiration,
+                    &snap_committee_resigned,
+                    &snap_committee_threshold,
                 );
                 if met {
                     debug!(
@@ -411,9 +482,18 @@ impl LedgerState {
                         action_type = ?std::mem::discriminant(action),
                         "Governance proposal RATIFIED"
                     );
-                    // Enact immediately and update roots (for chain validation of subsequent proposals)
+                    // Enact immediately and update threaded roots
                     self.enact_gov_action(action);
-                    self.update_enacted_root(action_id, action);
+                    // Update the threaded local enacted roots (for chaining
+                    // within this ratification pass)
+                    update_enacted_root_local(
+                        action_id,
+                        action,
+                        &mut enacted_pparam,
+                        &mut enacted_hardfork,
+                        &mut enacted_committee_root,
+                        &mut enacted_constitution,
+                    );
                     ratified.push(action_id.clone());
                     if is_delaying_action(action) {
                         delayed = true;
@@ -428,10 +508,19 @@ impl LedgerState {
             }
         }
 
+        // After ratification pass, persist the final enacted roots to live state
+        {
+            let gov = Arc::make_mut(&mut self.governance);
+            gov.enacted_pparam_update = enacted_pparam;
+            gov.enacted_hard_fork = enacted_hardfork;
+            gov.enacted_committee = enacted_committee_root;
+            gov.enacted_constitution = enacted_constitution;
+        }
+
         // Capture ratified proposal states before removal (for GetRatifyState query tag 32)
         let mut ratified_with_state = Vec::new();
 
-        // Remove ratified proposals and refund deposits
+        // Remove ratified proposals from LIVE state and refund deposits
         if !ratified.is_empty() {
             for action_id in &ratified {
                 if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
@@ -466,26 +555,6 @@ impl LedgerState {
         gov.last_ratify_delayed = delayed;
     }
 
-    /// Update the enacted governance root for a given purpose after enactment.
-    fn update_enacted_root(&mut self, action_id: &GovActionId, action: &GovAction) {
-        match action {
-            GovAction::ParameterChange { .. } => {
-                Arc::make_mut(&mut self.governance).enacted_pparam_update = Some(action_id.clone());
-            }
-            GovAction::HardForkInitiation { .. } => {
-                Arc::make_mut(&mut self.governance).enacted_hard_fork = Some(action_id.clone());
-            }
-            GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
-                Arc::make_mut(&mut self.governance).enacted_committee = Some(action_id.clone());
-            }
-            GovAction::NewConstitution { .. } => {
-                Arc::make_mut(&mut self.governance).enacted_constitution = Some(action_id.clone());
-            }
-            // TreasuryWithdrawals and InfoAction don't update any root
-            GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {}
-        }
-    }
-
     /// Whether we are in the Conway bootstrap phase (protocol version 9).
     /// During bootstrap, all DRep voting thresholds are set to 0 (auto-pass)
     /// per the Haskell `hardforkConwayBootstrapPhase` function.
@@ -505,6 +574,11 @@ impl LedgerState {
     /// - TreasuryWithdrawals: DRep >= dvt_treasury_withdrawal + CC (no SPO)
     ///
     /// During Conway bootstrap phase (protocol version 9), all DRep thresholds are 0.
+    /// Check ratification for a governance action.
+    ///
+    /// Committee state, votes, and no-confidence flag are passed explicitly so that
+    /// `ratify_proposals()` can supply either live or snapshot data.
+    #[allow(clippy::too_many_arguments)]
     fn check_ratification(
         &self,
         action_id: &GovActionId,
@@ -513,62 +587,60 @@ impl LedgerState {
         total_spo_stake: u64,
         drep_power_cache: &HashMap<Hash32, u64>,
         no_confidence_stake: u64,
+        votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+        committee_hot_keys: &HashMap<Hash32, Hash32>,
+        committee_expiration: &HashMap<Hash32, EpochNo>,
+        committee_resigned: &HashMap<Hash32, Option<Anchor>>,
+        committee_threshold: &Option<Rational>,
     ) -> bool {
         // Count votes by voter type (uses pre-computed DRep power cache)
-        // Per CIP-1694:
-        // - DRep denominator = yes + no voted stake (abstain excluded)
-        // - SPO denominator = total active SPO stake (non-voting SPOs effectively vote No)
         let (drep_yes, drep_total, spo_yes, spo_voted, spo_abstain, _cc_yes, _cc_total) = self
             .count_votes_by_type(
                 action_id,
                 &state.procedure.gov_action,
                 drep_power_cache,
                 no_confidence_stake,
+                votes_by_action,
             );
 
         let bootstrap = self.is_bootstrap_phase();
 
         // Compute effective SPO denominator based on action type and bootstrap state.
-        //
-        // Per Haskell spoAcceptedRatio / votingStakePoolThreshold:
-        // - HardForkInitiation: non-voting SPOs count as No → denominator = total_spo_stake
-        // - All other actions: non-voting SPOs default to Abstain → denominator excludes
-        //   both explicit abstainers and non-voters.
-        //
-        // During bootstrap (proto 9), non-voting SPOs are also treated as Abstain for
-        // non-HardFork actions, so the effective denominator is:
-        //   spo_voted - spo_abstain  (only explicit Yes + No voters)
         let effective_spo_denom = |action: &GovAction| -> u64 {
             if matches!(action, GovAction::HardForkInitiation { .. }) {
-                // HardFork: non-voting SPOs count as No → use total active SPO stake
                 total_spo_stake
             } else {
-                // Non-HardFork: non-voting SPOs default to Abstain
-                // Effective denominator = explicit voters minus explicit abstainers
-                // During bootstrap this is the same logic (non-voters are abstain)
                 spo_voted.saturating_sub(spo_abstain)
             }
+        };
+
+        // Helper closure for CC approval checks using snapshot committee data
+        let cc_met_fn = |aid: &GovActionId| -> bool {
+            check_cc_approval(
+                aid,
+                votes_by_action,
+                committee_hot_keys,
+                committee_expiration,
+                committee_resigned,
+                committee_threshold,
+                self.epoch,
+                self.protocol_params.committee_min_size,
+                bootstrap,
+            )
         };
 
         match &state.procedure.gov_action {
             GovAction::InfoAction => {
                 // InfoAction can NEVER be ratified — it has NoVotingThreshold for
-                // all three voting bodies (DRep, SPO, CC). Votes are recorded but
-                // have no effect. Proposals sit until they expire at
-                // proposed_epoch + gov_action_lifetime. (Haskell: all three
-                // acceptance predicates return False when threshold = SNothing.)
+                // all three voting bodies (DRep, SPO, CC).
                 false
             }
             GovAction::ParameterChange {
                 protocol_param_update,
                 ..
             } => {
-                // Per CIP-1694: each affected DRep parameter group must independently
-                // meet its own threshold. ALL affected group thresholds must be met.
-                // SPO threshold = pvtPPSecurityGroup if any param is security-relevant
-                // CC approval required
                 let drep_met = if bootstrap {
-                    true // All DRep thresholds are 0 during bootstrap
+                    true
                 } else {
                     pp_change_drep_all_groups_met(
                         protocol_param_update,
@@ -586,15 +658,9 @@ impl LedgerState {
                         spo_threshold,
                     )
                 } else {
-                    true // No SPO vote required for non-security params
+                    true
                 };
-                let cc_met = check_cc_approval(
-                    action_id,
-                    &self.governance,
-                    self.epoch,
-                    self.protocol_params.committee_min_size,
-                    bootstrap,
-                );
+                let cc_met = cc_met_fn(action_id);
                 drep_met && spo_met && cc_met
             }
             GovAction::HardForkInitiation {
@@ -604,7 +670,6 @@ impl LedgerState {
                     numerator: 0,
                     denominator: 1,
                 };
-                // DRep + SPO + CC all required
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
@@ -614,13 +679,7 @@ impl LedgerState {
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let spo_denom = effective_spo_denom(&state.procedure.gov_action);
                 let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
-                let cc_met = check_cc_approval(
-                    action_id,
-                    &self.governance,
-                    self.epoch,
-                    self.protocol_params.committee_min_size,
-                    bootstrap,
-                );
+                let cc_met = cc_met_fn(action_id);
                 debug!(
                     action_id = %action_id.transaction_id.to_hex(),
                     version = ?protocol_version,
@@ -639,7 +698,6 @@ impl LedgerState {
                     numerator: 0,
                     denominator: 1,
                 };
-                // DRep + SPO, no CC (CC cannot vote on NoConfidence)
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
@@ -659,8 +717,14 @@ impl LedgerState {
                     numerator: 0,
                     denominator: 1,
                 };
-                // DRep + SPO, no CC (CC cannot vote on UpdateCommittee)
-                let (drep_threshold, spo_threshold) = if self.governance.no_confidence {
+                // Use snapshot no_confidence state: check if committee_threshold is None
+                // (which indicates no-confidence when committee was dissolved).
+                // The no_confidence flag from the snapshot is implicitly captured in the
+                // committee state. We use self.governance.no_confidence here because the
+                // threshold selection (normal vs no-confidence) depends on the enacted
+                // state which is threaded through the ratification pass.
+                let no_confidence = self.governance.no_confidence;
+                let (drep_threshold, spo_threshold) = if no_confidence {
                     (
                         if bootstrap {
                             rational_zero
@@ -692,20 +756,13 @@ impl LedgerState {
                     numerator: 0,
                     denominator: 1,
                 };
-                // DRep + CC, no SPO
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
                     self.protocol_params.dvt_constitution.clone()
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let cc_met = check_cc_approval(
-                    action_id,
-                    &self.governance,
-                    self.epoch,
-                    self.protocol_params.committee_min_size,
-                    bootstrap,
-                );
+                let cc_met = cc_met_fn(action_id);
                 drep_met && cc_met
             }
             GovAction::TreasuryWithdrawals { .. } => {
@@ -713,20 +770,13 @@ impl LedgerState {
                     numerator: 0,
                     denominator: 1,
                 };
-                // DRep + CC, no SPO
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
                     self.protocol_params.dvt_treasury_withdrawal.clone()
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let cc_met = check_cc_approval(
-                    action_id,
-                    &self.governance,
-                    self.epoch,
-                    self.protocol_params.committee_min_size,
-                    bootstrap,
-                );
+                let cc_met = cc_met_fn(action_id);
                 drep_met && cc_met
             }
         }
@@ -741,12 +791,16 @@ impl LedgerState {
     /// - AlwaysNoConfidence stake counts as Yes for NoConfidence, No otherwise
     /// - AlwaysAbstain stake is excluded from both numerator and denominator
     /// - Inactive/expired DReps are excluded (handled by drep_power_cache)
+    ///
+    /// The `votes_by_action` parameter is passed explicitly so that `ratify_proposals()`
+    /// can supply either live votes or a [`RatificationSnapshot`]'s frozen votes.
     pub(crate) fn count_votes_by_type(
         &self,
         action_id: &GovActionId,
         action: &GovAction,
         drep_power_cache: &HashMap<Hash32, u64>,
         no_confidence_stake: u64,
+        votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
     ) -> (u64, u64, u64, u64, u64, u64, u64) {
         let mut spo_yes = 0u64;
         let mut spo_total = 0u64;
@@ -758,11 +812,7 @@ impl LedgerState {
         let mut drep_votes: HashMap<Hash32, Vote> = HashMap::new();
 
         let empty = vec![];
-        let action_votes = self
-            .governance
-            .votes_by_action
-            .get(action_id)
-            .unwrap_or(&empty);
+        let action_votes = votes_by_action.get(action_id).unwrap_or(&empty);
 
         for (voter, procedure) in action_votes {
             match voter {
@@ -965,6 +1015,39 @@ impl LedgerState {
             gov.drep_snapshot_no_confidence,
             gov.drep_snapshot_abstain,
         );
+    }
+
+    /// Capture a ratification snapshot at an epoch boundary.
+    ///
+    /// Called AFTER ratification/expiry/enactment have been applied to live state,
+    /// so that the snapshot contains the "surviving" proposals, updated enacted roots,
+    /// and current committee state.  The snapshot is consumed by `ratify_proposals()`
+    /// at the NEXT epoch boundary, matching Haskell's DRep pulser timing where the
+    /// pulser is created with `setFreshDRepPulsingState` from post-transition state.
+    pub(crate) fn capture_ratification_snapshot(&mut self) {
+        let gov = &self.governance;
+        let snapshot = super::RatificationSnapshot {
+            proposals: gov.proposals.clone(),
+            votes_by_action: gov.votes_by_action.clone(),
+            committee_hot_keys: gov.committee_hot_keys.clone(),
+            committee_expiration: gov.committee_expiration.clone(),
+            committee_resigned: gov.committee_resigned.clone(),
+            committee_threshold: gov.committee_threshold.clone(),
+            no_confidence: gov.no_confidence,
+            enacted_pparam_update: gov.enacted_pparam_update.clone(),
+            enacted_hard_fork: gov.enacted_hard_fork.clone(),
+            enacted_committee: gov.enacted_committee.clone(),
+            enacted_constitution: gov.enacted_constitution.clone(),
+            snapshot_epoch: self.epoch,
+        };
+        debug!(
+            epoch = self.epoch.0,
+            proposals = snapshot.proposals.len(),
+            votes = snapshot.votes_by_action.len(),
+            committee = snapshot.committee_expiration.len(),
+            "Ratification snapshot captured for next epoch boundary"
+        );
+        Arc::make_mut(&mut self.governance).ratification_snapshot = Some(snapshot);
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
@@ -1431,15 +1514,25 @@ pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> boo
 ///
 /// During bootstrap (protocol version 9), committeeMinSize check is skipped.
 /// Post-bootstrap, if active_size < committeeMinSize, CC blocks ratification.
+///
+/// The committee data is passed explicitly (not via `&GovernanceState`) so that
+/// `ratify_proposals()` can supply either live state or a [`RatificationSnapshot`]'s
+/// committee fields, matching Haskell's `committeeAccepted` which reads from the
+/// frozen `RatifyEnv`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_cc_approval(
     action_id: &GovActionId,
-    governance: &GovernanceState,
+    votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+    committee_hot_keys: &HashMap<Hash32, Hash32>,
+    committee_expiration: &HashMap<Hash32, EpochNo>,
+    committee_resigned: &HashMap<Hash32, Option<Anchor>>,
+    committee_threshold: &Option<Rational>,
     current_epoch: EpochNo,
     committee_min_size: u64,
     bootstrap: bool,
 ) -> bool {
     // Get committee quorum threshold
-    let threshold = match &governance.committee_threshold {
+    let threshold = match committee_threshold {
         Some(t) => t,
         None => {
             // No committee exists — CC vote fails (blocks ratification)
@@ -1455,7 +1548,7 @@ pub(crate) fn check_cc_approval(
     // Collect CC votes for this action indexed by hot credential
     let mut cc_votes: HashMap<Hash32, Vote> = HashMap::new();
     let empty = vec![];
-    let action_votes = governance.votes_by_action.get(action_id).unwrap_or(&empty);
+    let action_votes = votes_by_action.get(action_id).unwrap_or(&empty);
     for (voter, procedure) in action_votes {
         if let Voter::ConstitutionalCommittee(cred) = voter {
             let hot_key = credential_to_hash(cred);
@@ -1468,7 +1561,7 @@ pub(crate) fn check_cc_approval(
     let mut total_excluding_abstain = 0u64;
     let mut active_size = 0u64;
 
-    for (cold_key, expiry) in &governance.committee_expiration {
+    for (cold_key, expiry) in committee_expiration {
         // Expired members: excluded (treated as abstain)
         // Per Haskell: `currentEpoch > validUntil` means expired.
         // Members are active through their expiry epoch (inclusive).
@@ -1477,13 +1570,13 @@ pub(crate) fn check_cc_approval(
         }
 
         // Check if member has a registered hot key
-        let hot_key = match governance.committee_hot_keys.get(cold_key) {
+        let hot_key = match committee_hot_keys.get(cold_key) {
             Some(hk) => hk,
             None => continue, // No hot key: excluded (treated as abstain)
         };
 
         // Resigned members: excluded (treated as abstain)
-        if governance.committee_resigned.contains_key(cold_key) {
+        if committee_resigned.contains_key(cold_key) {
             continue;
         }
 
@@ -1522,8 +1615,8 @@ pub(crate) fn check_cc_approval(
             active_size, yes_count, total_excluding_abstain,
             threshold = threshold.as_f64(),
             cc_voters = cc_votes.len(),
-            committee_members = governance.committee_expiration.len(),
-            hot_keys = governance.committee_hot_keys.len(),
+            committee_members = committee_expiration.len(),
+            hot_keys = committee_hot_keys.len(),
             "CC approval check: all active members abstained"
         );
         return false;
@@ -1539,8 +1632,8 @@ pub(crate) fn check_cc_approval(
             ratio = yes_count as f64 / total_excluding_abstain as f64,
             result,
             cc_voters = cc_votes.len(),
-            committee_members = governance.committee_expiration.len(),
-            hot_keys = governance.committee_hot_keys.len(),
+            committee_members = committee_expiration.len(),
+            hot_keys = committee_hot_keys.len(),
             "CC approval check failed"
         );
     }
@@ -1552,25 +1645,61 @@ pub(crate) fn check_cc_approval(
 ///
 /// NoConfidence and UpdateCommittee share the `Committee` purpose.
 /// TreasuryWithdrawals and InfoAction have no prev_action_id chain (always pass).
-pub(crate) fn prev_action_as_expected(action: &GovAction, governance: &GovernanceState) -> bool {
+///
+/// The enacted roots are passed explicitly so that `ratify_proposals()` can thread
+/// them through as proposals are enacted within a single ratification pass (matching
+/// Haskell's `RatifyState.rsEnactState` threading).
+pub(crate) fn prev_action_as_expected(
+    action: &GovAction,
+    enacted_pparam: &Option<GovActionId>,
+    enacted_hardfork: &Option<GovActionId>,
+    enacted_committee: &Option<GovActionId>,
+    enacted_constitution: &Option<GovActionId>,
+) -> bool {
     match action {
-        GovAction::ParameterChange { prev_action_id, .. } => {
-            *prev_action_id == governance.enacted_pparam_update
-        }
+        GovAction::ParameterChange { prev_action_id, .. } => *prev_action_id == *enacted_pparam,
         GovAction::HardForkInitiation { prev_action_id, .. } => {
-            *prev_action_id == governance.enacted_hard_fork
+            *prev_action_id == *enacted_hardfork
         }
-        GovAction::NoConfidence { prev_action_id } => {
-            *prev_action_id == governance.enacted_committee
-        }
-        GovAction::UpdateCommittee { prev_action_id, .. } => {
-            *prev_action_id == governance.enacted_committee
-        }
+        GovAction::NoConfidence { prev_action_id } => *prev_action_id == *enacted_committee,
+        GovAction::UpdateCommittee { prev_action_id, .. } => *prev_action_id == *enacted_committee,
         GovAction::NewConstitution { prev_action_id, .. } => {
-            *prev_action_id == governance.enacted_constitution
+            *prev_action_id == *enacted_constitution
         }
         // TreasuryWithdrawals and InfoAction have no chain requirement
         GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => true,
+    }
+}
+
+/// Update threaded enacted roots during a ratification pass.
+///
+/// Called by `ratify_proposals()` after a proposal is successfully ratified to update
+/// the local enacted root variables (not the live `GovernanceState`).  The live state
+/// is updated in bulk after the full ratification pass completes.  This matches
+/// Haskell's `RatifyState.rsEnactState` threading through the RATIFY rule.
+fn update_enacted_root_local(
+    action_id: &GovActionId,
+    action: &GovAction,
+    enacted_pparam: &mut Option<GovActionId>,
+    enacted_hardfork: &mut Option<GovActionId>,
+    enacted_committee: &mut Option<GovActionId>,
+    enacted_constitution: &mut Option<GovActionId>,
+) {
+    match action {
+        GovAction::ParameterChange { .. } => {
+            *enacted_pparam = Some(action_id.clone());
+        }
+        GovAction::HardForkInitiation { .. } => {
+            *enacted_hardfork = Some(action_id.clone());
+        }
+        GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => {
+            *enacted_committee = Some(action_id.clone());
+        }
+        GovAction::NewConstitution { .. } => {
+            *enacted_constitution = Some(action_id.clone());
+        }
+        // TreasuryWithdrawals and InfoAction don't update any root
+        GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => {}
     }
 }
 
@@ -1947,20 +2076,29 @@ mod tests {
                 protocol_param_update: Box::new(ProtocolParamUpdate::default()),
                 policy_hash: None
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
         assert!(prev_action_as_expected(
             &GovAction::HardForkInitiation {
                 prev_action_id: None,
                 protocol_version: (10, 0)
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
         assert!(prev_action_as_expected(
             &GovAction::NoConfidence {
                 prev_action_id: None
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
         // TreasuryWithdrawals always passes (no chain)
         assert!(prev_action_as_expected(
@@ -1968,10 +2106,19 @@ mod tests {
                 withdrawals: BTreeMap::new(),
                 policy_hash: None
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
         // InfoAction always passes
-        assert!(prev_action_as_expected(&GovAction::InfoAction, &gov));
+        assert!(prev_action_as_expected(
+            &GovAction::InfoAction,
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
+        ));
     }
 
     #[test]
@@ -1989,7 +2136,10 @@ mod tests {
                 protocol_param_update: Box::new(ProtocolParamUpdate::default()),
                 policy_hash: None,
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
 
         // NoConfidence with wrong prevActionId should fail
@@ -1997,7 +2147,10 @@ mod tests {
             &GovAction::NoConfidence {
                 prev_action_id: Some(wrong_id.clone())
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
     }
 
@@ -2012,7 +2165,10 @@ mod tests {
             &GovAction::NoConfidence {
                 prev_action_id: Some(enacted_id.clone())
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
         assert!(prev_action_as_expected(
             &GovAction::UpdateCommittee {
@@ -2024,7 +2180,10 @@ mod tests {
                     denominator: 2
                 },
             },
-            &gov
+            &gov.enacted_pparam_update,
+            &gov.enacted_hard_fork,
+            &gov.enacted_committee,
+            &gov.enacted_constitution
         ));
     }
 
@@ -2177,6 +2336,7 @@ mod tests {
             },
             &cache,
             nc_stake,
+            &state.governance.votes_by_action,
         );
 
         assert_eq!(yes, 3_000_000_000); // 3 DReps * 1B
@@ -2210,8 +2370,13 @@ mod tests {
         }
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _, _) =
-            state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
+        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+            &action_id,
+            &GovAction::InfoAction,
+            &cache,
+            nc_stake,
+            &state.governance.votes_by_action,
+        );
 
         // Denominator = total active (10B) - abstain (4B) = 6B
         assert_eq!(yes, 3_000_000_000);
@@ -2252,8 +2417,13 @@ mod tests {
                                                   // DRep power cache should only have the 5 registered DReps
         assert_eq!(cache.len(), 5);
 
-        let (yes, total, _, _, _, _, _) =
-            state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
+        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+            &action_id,
+            &GovAction::InfoAction,
+            &cache,
+            nc_stake,
+            &state.governance.votes_by_action,
+        );
 
         // Total should only include active DRep stake (5B), not AlwaysAbstain (6B)
         assert_eq!(yes, 0);
@@ -2299,6 +2469,7 @@ mod tests {
             },
             &cache,
             nc_stake,
+            &state.governance.votes_by_action,
         );
 
         // NoConfidence action: AlwaysNoConfidence counts as Yes
@@ -2334,8 +2505,13 @@ mod tests {
         );
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _, _) =
-            state.count_votes_by_type(&action_id, &GovAction::InfoAction, &cache, nc_stake);
+        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+            &action_id,
+            &GovAction::InfoAction,
+            &cache,
+            nc_stake,
+            &state.governance.votes_by_action,
+        );
 
         // Non-NoConfidence: AlwaysNoConfidence counts as No (in denominator, not numerator)
         assert_eq!(yes, 0);
@@ -2417,7 +2593,11 @@ mod tests {
         // At epoch 5, member with expiry 5 should still be active
         let result = check_cc_approval(
             &action_id,
-            &state.governance,
+            &state.governance.votes_by_action,
+            &state.governance.committee_hot_keys,
+            &state.governance.committee_expiration,
+            &state.governance.committee_resigned,
+            &state.governance.committee_threshold,
             EpochNo(5),
             state.protocol_params.committee_min_size,
             false,
@@ -2427,7 +2607,11 @@ mod tests {
         // At epoch 6, member with expiry 5 should be expired
         let result = check_cc_approval(
             &action_id,
-            &state.governance,
+            &state.governance.votes_by_action,
+            &state.governance.committee_hot_keys,
+            &state.governance.committee_expiration,
+            &state.governance.committee_resigned,
+            &state.governance.committee_threshold,
             EpochNo(6),
             state.protocol_params.committee_min_size,
             false,
@@ -2462,7 +2646,11 @@ mod tests {
         // CC vote should fail — only member is resigned
         let result = check_cc_approval(
             &action_id,
-            &state.governance,
+            &state.governance.votes_by_action,
+            &state.governance.committee_hot_keys,
+            &state.governance.committee_expiration,
+            &state.governance.committee_resigned,
+            &state.governance.committee_threshold,
             EpochNo(0),
             state.protocol_params.committee_min_size,
             false,
@@ -2479,7 +2667,17 @@ mod tests {
         };
 
         let action_id = make_action_id(50, 0);
-        let result = check_cc_approval(&action_id, &gov, EpochNo(0), 0, false);
+        let result = check_cc_approval(
+            &action_id,
+            &gov.votes_by_action,
+            &gov.committee_hot_keys,
+            &gov.committee_expiration,
+            &gov.committee_resigned,
+            &gov.committee_threshold,
+            EpochNo(0),
+            0,
+            false,
+        );
         assert!(!result);
     }
 
@@ -2503,11 +2701,31 @@ mod tests {
         cc_vote_yes(&mut state, &action_id);
 
         // Post-bootstrap: should fail because active_size (1) < committee_min_size (3)
-        let result = check_cc_approval(&action_id, &state.governance, EpochNo(0), 3, false);
+        let result = check_cc_approval(
+            &action_id,
+            &state.governance.votes_by_action,
+            &state.governance.committee_hot_keys,
+            &state.governance.committee_expiration,
+            &state.governance.committee_resigned,
+            &state.governance.committee_threshold,
+            EpochNo(0),
+            3,
+            false,
+        );
         assert!(!result);
 
         // During bootstrap: min size check is skipped
-        let result = check_cc_approval(&action_id, &state.governance, EpochNo(0), 3, true);
+        let result = check_cc_approval(
+            &action_id,
+            &state.governance.votes_by_action,
+            &state.governance.committee_hot_keys,
+            &state.governance.committee_expiration,
+            &state.governance.committee_resigned,
+            &state.governance.committee_threshold,
+            EpochNo(0),
+            3,
+            true,
+        );
         assert!(result);
     }
 
@@ -3330,41 +3548,58 @@ mod tests {
 
     #[test]
     fn test_enacted_roots_updated_correctly() {
-        let mut state = gov_test_state(5, 0);
+        // Test the update_enacted_root_local free function which threads enacted
+        // roots through a ratification pass.
+        let mut enacted_pparam: Option<GovActionId> = None;
+        let mut enacted_hardfork: Option<GovActionId> = None;
+        let mut enacted_committee: Option<GovActionId> = None;
+        let mut enacted_constitution: Option<GovActionId> = None;
 
         let pp_id = make_action_id(1, 0);
-        state.update_enacted_root(
+        update_enacted_root_local(
             &pp_id,
             &GovAction::ParameterChange {
                 prev_action_id: None,
                 protocol_param_update: Box::new(ProtocolParamUpdate::default()),
                 policy_hash: None,
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_pparam_update, Some(pp_id));
+        assert_eq!(enacted_pparam, Some(pp_id));
 
         let hf_id = make_action_id(2, 0);
-        state.update_enacted_root(
+        update_enacted_root_local(
             &hf_id,
             &GovAction::HardForkInitiation {
                 prev_action_id: None,
                 protocol_version: (10, 0),
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_hard_fork, Some(hf_id));
+        assert_eq!(enacted_hardfork, Some(hf_id));
 
         let nc_id = make_action_id(3, 0);
-        state.update_enacted_root(
+        update_enacted_root_local(
             &nc_id,
             &GovAction::NoConfidence {
                 prev_action_id: None,
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_committee, Some(nc_id.clone()));
+        assert_eq!(enacted_committee, Some(nc_id.clone()));
 
         // UpdateCommittee shares the committee purpose with NoConfidence
         let uc_id = make_action_id(4, 0);
-        state.update_enacted_root(
+        update_enacted_root_local(
             &uc_id,
             &GovAction::UpdateCommittee {
                 prev_action_id: None,
@@ -3375,11 +3610,15 @@ mod tests {
                     denominator: 2,
                 },
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_committee, Some(uc_id));
+        assert_eq!(enacted_committee, Some(uc_id));
 
         let co_id = make_action_id(5, 0);
-        state.update_enacted_root(
+        update_enacted_root_local(
             &co_id,
             &GovAction::NewConstitution {
                 prev_action_id: None,
@@ -3388,20 +3627,28 @@ mod tests {
                     script_hash: None,
                 },
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_constitution, Some(co_id));
+        assert_eq!(enacted_constitution, Some(co_id));
 
         // TreasuryWithdrawals and InfoAction don't update any root
         let tw_id = make_action_id(6, 0);
-        let old_pp = state.governance.enacted_pparam_update.clone();
-        state.update_enacted_root(
+        let old_pp = enacted_pparam.clone();
+        update_enacted_root_local(
             &tw_id,
             &GovAction::TreasuryWithdrawals {
                 withdrawals: BTreeMap::new(),
                 policy_hash: None,
             },
+            &mut enacted_pparam,
+            &mut enacted_hardfork,
+            &mut enacted_committee,
+            &mut enacted_constitution,
         );
-        assert_eq!(state.governance.enacted_pparam_update, old_pp);
+        assert_eq!(enacted_pparam, old_pp);
     }
 
     // ========================================================================

@@ -652,6 +652,18 @@ impl LedgerState {
             );
         }
 
+        // Capture the ratification snapshot for the NEXT epoch boundary.
+        //
+        // Per Haskell `setFreshDRepPulsingState`, the pulser is created from the
+        // post-transition state — after ratification/expiry have pruned proposals,
+        // enacted roots have been updated, DRep activity has been updated, and
+        // committee members have been expired.  This snapshot will be consumed by
+        // `ratify_proposals()` at the NEXT epoch boundary so that proposals/votes
+        // submitted during the new epoch are not considered until then.
+        if self.protocol_params.protocol_version_major >= 9 {
+            self.capture_ratification_snapshot();
+        }
+
         // Compute new epoch nonce per Haskell TICKN rule:
         //
         //   TRC (TicknEnv extraEntropy ηc ηph, TicknState _ ηh, newEpoch)

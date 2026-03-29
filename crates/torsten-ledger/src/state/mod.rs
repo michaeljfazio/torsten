@@ -398,6 +398,50 @@ pub struct GovernanceState {
     /// Companion to `drep_distribution_snapshot`.
     #[serde(default)]
     pub drep_snapshot_abstain: u64,
+    /// Frozen ratification snapshot from the previous epoch boundary.
+    ///
+    /// Analogous to Haskell's `DRepPulsingState` / `PulsingSnapshot`.  Captured at
+    /// epoch boundary E (after ratification/expiry/enactment); consumed by
+    /// `ratify_proposals()` at boundary E+1.  This ensures proposals and votes
+    /// submitted during epoch E are not considered for ratification until E+1→E+2,
+    /// matching the Haskell DRep pulser timing.
+    ///
+    /// `None` at genesis or when loading a snapshot that predates this field —
+    /// `ratify_proposals()` falls back to live state in that case.
+    #[serde(default)]
+    pub ratification_snapshot: Option<RatificationSnapshot>,
+}
+
+/// Frozen ratification inputs captured at epoch boundary E.
+///
+/// Consumed by `ratify_proposals()` at boundary E+1 so that proposals/votes
+/// submitted during epoch E are not considered until the following boundary.
+/// Analogous to Haskell's `DRepPulsingState` snapshot fields (`dpProposals`,
+/// `dpCommitteeState`, `dpEnactState`, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RatificationSnapshot {
+    /// Proposals active at snapshot time.
+    pub proposals: BTreeMap<GovActionId, ProposalState>,
+    /// Votes indexed by action ID at snapshot time.
+    pub votes_by_action: BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+    /// Committee hot key authorizations (cold → hot) at snapshot time.
+    pub committee_hot_keys: HashMap<Hash32, Hash32>,
+    /// Committee member expiration epochs at snapshot time.
+    pub committee_expiration: HashMap<Hash32, EpochNo>,
+    /// Resigned committee members at snapshot time.
+    pub committee_resigned: HashMap<Hash32, Option<Anchor>>,
+    /// Committee quorum threshold at snapshot time.
+    pub committee_threshold: Option<Rational>,
+    /// Whether the committee was in a no-confidence state at snapshot time.
+    pub no_confidence: bool,
+    /// Enacted governance action roots at snapshot time (starting point for
+    /// `prev_action_id` chain validation during ratification).
+    pub enacted_pparam_update: Option<GovActionId>,
+    pub enacted_hard_fork: Option<GovActionId>,
+    pub enacted_committee: Option<GovActionId>,
+    pub enacted_constitution: Option<GovActionId>,
+    /// The epoch when this snapshot was captured.
+    pub snapshot_epoch: EpochNo,
 }
 
 /// Registration state for a DRep
