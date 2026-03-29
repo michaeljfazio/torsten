@@ -4051,4 +4051,390 @@ mod tests {
             "no dependencies should be recorded for a tx spending on-chain UTxOs"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Epoch re-validation integration tests (issue #311)
+    //
+    // These tests verify that mempool transactions are correctly evicted when
+    // protocol parameters change at epoch boundaries.  They wire up the real
+    // `validate_transaction` function from torsten-ledger (or focused parameter
+    // checks that mirror the production closure) to prove parameter-aware
+    // revalidation works end-to-end.
+    // -----------------------------------------------------------------------
+
+    use torsten_ledger::utxo::UtxoSet;
+    use torsten_primitives::protocol_params::ProtocolParameters;
+
+    /// Create a transaction suitable for epoch-revalidation tests.
+    ///
+    /// The transaction has:
+    /// - A unique spending input (via atomic counter)
+    /// - A single Byron output whose value = `input_value - fee`
+    /// - `raw_cbor` set to a vector of `raw_size` bytes starting with `0x84`
+    ///   (Alonzo+ 4-element array), so `fee_tx_size` subtracts 1 byte for the
+    ///   `is_valid` field — matching the production fee formula exactly.
+    /// - Correct value conservation: input_value = output_value + fee
+    fn make_revalidation_tx(fee: u64, input_value: u64, raw_size: usize) -> Transaction {
+        use std::sync::atomic::{AtomicU32, Ordering as AOrdering};
+        static REVAL_COUNTER: AtomicU32 = AtomicU32::new(1_000_000);
+        let n = REVAL_COUNTER.fetch_add(1, AOrdering::Relaxed);
+        let mut id_bytes = [0u8; 32];
+        id_bytes[28..32].copy_from_slice(&n.to_be_bytes());
+
+        let output_value = input_value.saturating_sub(fee);
+
+        // Build raw_cbor: first byte 0x84 (Alonzo+ 4-element CBOR array), rest zeros.
+        let mut raw = vec![0u8; raw_size];
+        if !raw.is_empty() {
+            raw[0] = 0x84;
+        }
+
+        Transaction {
+            era: torsten_primitives::era::Era::Conway,
+            hash: Hash32::from_bytes(id_bytes),
+            body: TransactionBody {
+                inputs: vec![TransactionInput {
+                    transaction_id: Hash32::from_bytes(id_bytes),
+                    index: n,
+                }],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0; 32],
+                    }),
+                    value: Value::lovelace(output_value),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(fee),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: Some(raw),
+        }
+    }
+
+    /// Create a transaction with declared Plutus ExUnits (via a redeemer).
+    ///
+    /// This is used for tests that need to verify ExUnits limit checks
+    /// without requiring a fully valid Plutus script execution environment.
+    fn make_tx_with_ex_units(
+        fee: u64,
+        input_value: u64,
+        ex_mem: u64,
+        ex_steps: u64,
+    ) -> Transaction {
+        let mut tx = make_revalidation_tx(fee, input_value, 0);
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: ex_mem,
+                steps: ex_steps,
+            },
+        });
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01]);
+        tx
+    }
+
+    /// Build a UtxoSet containing entries for the given transaction's inputs.
+    ///
+    /// Each input maps to a UTxO with `input_value` lovelace at a Byron address,
+    /// ensuring Rule 2 (inputs exist) and Rule 3 (value conservation) pass.
+    fn make_utxo_for_tx(tx: &Transaction, input_value: u64) -> UtxoSet {
+        let mut utxo = UtxoSet::new();
+        for input in &tx.body.inputs {
+            utxo.insert(
+                input.clone(),
+                TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0; 32],
+                    }),
+                    value: Value::lovelace(input_value),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                },
+            );
+        }
+        utxo
+    }
+
+    /// Revalidate mempool transactions using `validate_transaction` with the
+    /// given protocol parameters — mirrors the epoch-boundary closure in sync.rs.
+    fn revalidate_with_params(
+        mempool: &Mempool,
+        utxo: &UtxoSet,
+        params: &ProtocolParameters,
+        slot: u64,
+    ) -> Vec<TransactionHash> {
+        mempool.revalidate_all(|tx| {
+            let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+            torsten_ledger::validation::validate_transaction(tx, utxo, params, slot, tx_size, None)
+                .is_ok()
+        })
+    }
+
+    /// Revalidate mempool transactions with a focused ExUnits check against the
+    /// given protocol parameters.
+    ///
+    /// This mirrors the production revalidation but checks only the declared
+    /// ExUnits against `max_tx_ex_units` — which is the minimum re-validation
+    /// described in the Haskell reference (checking declared ExUnits against new
+    /// limits without full Phase-2 re-execution).
+    fn revalidate_ex_units(mempool: &Mempool, params: &ProtocolParameters) -> Vec<TransactionHash> {
+        mempool.revalidate_all(|tx| {
+            let total_mem: u64 = tx
+                .witness_set
+                .redeemers
+                .iter()
+                .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.mem));
+            let total_steps: u64 = tx
+                .witness_set
+                .redeemers
+                .iter()
+                .fold(0u64, |acc, r| acc.saturating_add(r.ex_units.steps));
+            total_mem <= params.max_tx_ex_units.mem && total_steps <= params.max_tx_ex_units.steps
+        })
+    }
+
+    /// Test 1 (issue #311): Fee parameter increase evicts under-fee transactions.
+    ///
+    /// Admit a tx with fee=200,000 when minFeeA=44 (min_fee = 44*999 + 155,381
+    /// = 199,337 — passes).  Increase minFeeA to 50 (min_fee = 50*999 + 155,381
+    /// = 205,331 — fee now insufficient) and verify it's evicted.
+    ///
+    /// raw_cbor is 1000 bytes starting with 0x84 (Alonzo+), so fee_tx_size
+    /// subtracts 1 byte → effective size = 999.
+    #[test]
+    fn test_epoch_revalidate_evicts_on_fee_increase() {
+        let fee = 200_000u64;
+        let input_value = 10_000_000u64;
+        let raw_size = 1000usize;
+
+        let tx = make_revalidation_tx(fee, input_value, raw_size);
+        let tx_hash = tx.hash;
+        let utxo = make_utxo_for_tx(&tx, input_value);
+
+        let mempool = Mempool::new(default_config());
+        mempool
+            .add_tx_with_fee(tx_hash, tx, raw_size, Lovelace(fee))
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
+
+        // With original params (minFeeA=44): min_fee = 44*999 + 155,381 = 199,337.
+        // Fee 200,000 >= 199,337 → valid.
+        let params = ProtocolParameters::mainnet_defaults();
+        let evicted = revalidate_with_params(&mempool, &utxo, &params, 100);
+        assert!(evicted.is_empty(), "tx should survive with original params");
+        assert_eq!(mempool.len(), 1);
+
+        // Increase minFeeA to 50: min_fee = 50*999 + 155,381 = 205,331.
+        // Fee 200,000 < 205,331 → evicted.
+        let mut new_params = params;
+        new_params.min_fee_a = 50;
+        let evicted = revalidate_with_params(&mempool, &utxo, &new_params, 100);
+        assert_eq!(evicted.len(), 1, "tx should be evicted after fee increase");
+        assert_eq!(evicted[0], tx_hash);
+        assert!(mempool.is_empty());
+    }
+
+    /// Test 2 (issue #311): Reducing maxTxExUnits.mem evicts Plutus transactions
+    /// whose declared ExUnits exceed the new limit.
+    ///
+    /// Admit a tx with declared ExUnits (mem=1,000,000, steps=500,000,000).
+    /// With maxTxExUnits.mem=14,000,000 it passes.  Reduce to 500,000 and
+    /// verify the tx is evicted.
+    #[test]
+    fn test_epoch_revalidate_evicts_on_ex_units_decrease() {
+        let ex_mem = 1_000_000u64;
+        let ex_steps = 500_000_000u64;
+
+        let tx = make_tx_with_ex_units(1_000_000, 10_000_000, ex_mem, ex_steps);
+        let tx_hash = tx.hash;
+
+        let mempool = Mempool::new(default_config());
+        mempool
+            .add_tx_full(
+                tx_hash,
+                tx,
+                500,
+                Lovelace(1_000_000),
+                ex_mem,
+                ex_steps,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
+
+        // With default maxTxExUnits.mem = 14,000,000: 1M <= 14M → valid.
+        let params = ProtocolParameters::mainnet_defaults();
+        let evicted = revalidate_ex_units(&mempool, &params);
+        assert!(evicted.is_empty(), "tx should survive with original limits");
+        assert_eq!(mempool.len(), 1);
+
+        // Reduce maxTxExUnits.mem to 500,000: 1M > 500K → evicted.
+        let mut new_params = params;
+        new_params.max_tx_ex_units.mem = 500_000;
+        let evicted = revalidate_ex_units(&mempool, &new_params);
+        assert_eq!(
+            evicted.len(),
+            1,
+            "tx should be evicted after ExUnits decrease"
+        );
+        assert_eq!(evicted[0], tx_hash);
+        assert!(mempool.is_empty());
+    }
+
+    /// Test 3 (issue #311): No parameter changes → all transactions survive
+    /// revalidation.
+    #[test]
+    fn test_epoch_revalidate_no_param_change_keeps_all() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let raw_size = 300usize;
+        // min_fee at size 300: 44*(300-1) + 155,381 = 13,156 + 155,381 = 168,537
+        // All fees are well above this.
+        let fees = [200_000u64, 500_000, 1_000_000];
+        let input_value = 10_000_000u64;
+
+        let mempool = Mempool::new(default_config());
+        let mut utxo = UtxoSet::new();
+
+        for (i, &fee) in fees.iter().enumerate() {
+            let tx = make_revalidation_tx(fee, input_value, raw_size);
+            let tx_hash = tx.hash;
+            // Populate UTxO for this tx
+            for input in &tx.body.inputs {
+                utxo.insert(
+                    input.clone(),
+                    TransactionOutput {
+                        address: Address::Byron(ByronAddress {
+                            payload: vec![0; 32],
+                        }),
+                        value: Value::lovelace(input_value),
+                        datum: OutputDatum::None,
+                        script_ref: None,
+                        is_legacy: false,
+                        raw_cbor: None,
+                    },
+                );
+            }
+            mempool
+                .add_tx_with_fee(tx_hash, tx, raw_size, Lovelace(fee))
+                .unwrap();
+            assert_eq!(mempool.len(), i + 1);
+        }
+
+        // Revalidate with unchanged params — zero evictions expected.
+        let evicted = revalidate_with_params(&mempool, &utxo, &params, 100);
+        assert!(
+            evicted.is_empty(),
+            "no txs should be evicted when params unchanged, got {} evicted",
+            evicted.len()
+        );
+        assert_eq!(mempool.len(), 3);
+    }
+
+    /// Test 4 (issue #311): Cost model change alone does not evict non-Plutus
+    /// transactions, but reducing ExUnits limits evicts Plutus transactions that
+    /// exceed the new bounds.
+    ///
+    /// This demonstrates the nuance: cost model changes affect Plutus script
+    /// re-evaluation budgets, but the minimum re-validation check (declared
+    /// ExUnits vs maxTxExUnits) correctly catches transactions whose declared
+    /// execution budgets exceed the tightened limits.
+    #[test]
+    fn test_epoch_revalidate_cost_model_and_ex_units_change() {
+        let mempool = Mempool::new(default_config());
+        let params = ProtocolParameters::mainnet_defaults();
+
+        // Add a simple (non-Plutus) tx — should never be evicted by ExUnits checks.
+        let simple_tx = make_revalidation_tx(500_000, 10_000_000, 300);
+        let simple_hash = simple_tx.hash;
+        mempool
+            .add_tx_with_fee(simple_hash, simple_tx, 300, Lovelace(500_000))
+            .unwrap();
+
+        // Add a Plutus tx with declared ExUnits (mem=1M, steps=500M).
+        let plutus_tx = make_tx_with_ex_units(1_000_000, 10_000_000, 1_000_000, 500_000_000);
+        let plutus_hash = plutus_tx.hash;
+        mempool
+            .add_tx_full(
+                plutus_hash,
+                plutus_tx,
+                500,
+                Lovelace(1_000_000),
+                1_000_000,
+                500_000_000,
+                0,
+                TxOrigin::Local,
+            )
+            .unwrap();
+        assert_eq!(mempool.len(), 2);
+
+        // Step 1: Change only cost models — ExUnits limits unchanged.
+        // The ExUnits revalidation should keep both txs since limits aren't
+        // tightened (cost model changes don't affect the declarative check).
+        let mut params_cost_model_only = params.clone();
+        params_cost_model_only.cost_models.plutus_v2 = Some(vec![1; 175]);
+        let evicted = revalidate_ex_units(&mempool, &params_cost_model_only);
+        assert!(
+            evicted.is_empty(),
+            "cost model change alone should not evict any tx"
+        );
+        assert_eq!(mempool.len(), 2);
+
+        // Step 2: Also reduce maxTxExUnits.mem to 500,000 (below the Plutus tx's 1M).
+        // Now the Plutus tx exceeds the new limit and should be evicted,
+        // while the simple tx (no redeemers → 0 ExUnits) survives.
+        let mut params_combined = params_cost_model_only;
+        params_combined.max_tx_ex_units.mem = 500_000;
+        let evicted = revalidate_ex_units(&mempool, &params_combined);
+        assert_eq!(
+            evicted.len(),
+            1,
+            "Plutus tx should be evicted after ExUnits decrease"
+        );
+        assert_eq!(evicted[0], plutus_hash);
+        assert_eq!(mempool.len(), 1);
+        assert!(
+            mempool.contains(&simple_hash),
+            "simple tx should survive ExUnits check (no redeemers)"
+        );
+    }
 }
