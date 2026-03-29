@@ -671,6 +671,7 @@ impl LedgerState {
                         self.node_network,
                         Some(&committee_member_keys),
                         Some(&committee_resigned_keys),
+                        Some(&self.stake_key_deposits),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

@@ -46,7 +46,7 @@ impl LedgerState {
     ///
     /// Increment when `GovernanceState`/`LedgerState` fields change.
     /// Bincode is positional — any field addition/reorder breaks old snapshots.
-    pub(crate) const SNAPSHOT_VERSION: u8 = 11;
+    pub(crate) const SNAPSHOT_VERSION: u8 = 12;
 
     /// Save ledger state snapshot to disk using bincode serialization.
     ///
@@ -225,6 +225,33 @@ impl LedgerState {
         // at the next epoch boundary. Old snapshots without this field will
         // deserialize with rupd_ready=false (serde default), so set it here.
         state.snapshots.rupd_ready = true;
+        // Migration: populate per-credential deposit maps from current protocol
+        // parameters when loading snapshots written before per-credential deposit
+        // tracking was added (version < 12). This is an approximation that is
+        // correct for all networks where key_deposit/pool_deposit have never
+        // changed via governance.
+        if state.stake_key_deposits.is_empty() && !state.reward_accounts.is_empty() {
+            let deposit = state.protocol_params.key_deposit.0;
+            for cred_hash in state.reward_accounts.keys() {
+                state.stake_key_deposits.insert(*cred_hash, deposit);
+            }
+            debug!(
+                "Migrated {} stake key deposits from current key_deposit={}",
+                state.stake_key_deposits.len(),
+                deposit,
+            );
+        }
+        if state.pool_deposits.is_empty() && !state.pool_params.is_empty() {
+            let deposit = state.protocol_params.pool_deposit.0;
+            for pool_id in state.pool_params.keys() {
+                state.pool_deposits.insert(*pool_id, deposit);
+            }
+            debug!(
+                "Migrated {} pool deposits from current pool_deposit={}",
+                state.pool_deposits.len(),
+                deposit,
+            );
+        }
         debug!(
             "Snapshot loaded from {} ({:.1} MB, {} UTxOs, epoch {})",
             path.display(),

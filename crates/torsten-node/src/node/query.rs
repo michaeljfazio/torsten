@@ -572,8 +572,11 @@ impl Node {
             pvt_pp_security_group_den: pp.pvt_pp_security_group.denominator,
         };
 
-        // Build stake delegation deposits (registered stake credentials → key_deposit)
-        let key_deposit = ls.protocol_params.key_deposit.0;
+        // Build stake delegation deposits (registered stake credentials → per-credential deposit).
+        // Uses the stored deposit paid at registration time for correct values when
+        // key_deposit changes via governance. Falls back to current key_deposit for
+        // credentials registered before per-credential tracking was added.
+        let fallback_deposit = ls.protocol_params.key_deposit.0;
         let stake_deleg_deposits: Vec<StakeDelegDepositEntry> = ls
             .reward_accounts
             .keys()
@@ -581,7 +584,11 @@ impl Node {
                 credential_hash: cred_hash.as_ref()[..28].to_vec(),
                 // Use the script_stake_credentials set to distinguish key (0) from script (1).
                 credential_type: ls.script_stake_credentials.contains(cred_hash) as u8,
-                deposit: key_deposit,
+                deposit: ls
+                    .stake_key_deposits
+                    .get(cred_hash)
+                    .copied()
+                    .unwrap_or(fallback_deposit),
             })
             .collect();
 

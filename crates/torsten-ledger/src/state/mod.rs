@@ -323,6 +323,17 @@ pub struct LedgerState {
     /// then rebuilds counters from the chain, same as a fresh start).
     #[serde(default)]
     pub opcert_counters: HashMap<Hash28, u64>,
+    /// Per-credential deposit paid at stake key registration time (lovelace).
+    /// Maps credential_hash → deposit amount paid when this credential was registered.
+    /// Used for correct refund amounts when key_deposit changes via governance.
+    /// Matches Haskell's per-credential deposit in DState.dsUnified (UMap).
+    #[serde(default)]
+    pub stake_key_deposits: HashMap<Hash32, u64>,
+    /// Per-pool deposit paid at pool registration time (lovelace).
+    /// Maps pool_id → deposit amount paid when this pool was first registered.
+    /// Used for correct refund at pool retirement when pool_deposit changes.
+    #[serde(default)]
+    pub pool_deposits: HashMap<Hash28, u64>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -739,6 +750,8 @@ impl LedgerState {
             diff_seq: DiffSeq::new(),
             node_network: None,
             opcert_counters: HashMap::new(),
+            stake_key_deposits: HashMap::new(),
+            pool_deposits: HashMap::new(),
         }
     }
 

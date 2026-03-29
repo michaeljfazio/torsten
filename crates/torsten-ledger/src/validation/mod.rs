@@ -64,6 +64,7 @@ pub struct ValidationContext {
     pub node_network: Option<NetworkId>,
     pub committee_members: Option<HashSet<Hash32>>,
     pub committee_resigned: Option<HashSet<Hash32>>,
+    pub stake_key_deposits: Option<HashMap<Hash32, u64>>,
 }
 
 impl ValidationContext {
@@ -113,6 +114,11 @@ impl ValidationContext {
 
     pub fn with_committee_resigned(mut self, resigned: HashSet<Hash32>) -> Self {
         self.committee_resigned = Some(resigned);
+        self
+    }
+
+    pub fn with_stake_key_deposits(mut self, deposits: HashMap<Hash32, u64>) -> Self {
+        self.stake_key_deposits = Some(deposits);
         self
     }
 
@@ -567,6 +573,7 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -623,6 +630,7 @@ pub fn validate_transaction_with_context(
         context.node_network,
         context.committee_members.as_ref(),
         context.committee_resigned.as_ref(),
+        context.stake_key_deposits.as_ref(),
     )
 }
 
@@ -679,6 +687,7 @@ pub fn validate_transaction_with_pools(
     node_network: Option<torsten_primitives::network::NetworkId>,
     committee_members: Option<&HashSet<Hash32>>,
     committee_resigned: Option<&HashSet<Hash32>>,
+    stake_key_deposits: Option<&HashMap<Hash32, u64>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -704,6 +713,7 @@ pub fn validate_transaction_with_pools(
         registered_pools,
         current_epoch,
         node_network,
+        stake_key_deposits,
         &mut errors,
     );
 

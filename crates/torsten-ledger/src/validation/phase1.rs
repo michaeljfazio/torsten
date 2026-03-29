@@ -26,10 +26,10 @@
 //! - Rule 13 — native script evaluation
 //! - Rule 14 — Ed25519 vkey/bootstrap witness signature verification
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use torsten_primitives::credentials::Credential;
-use torsten_primitives::hash::Hash28;
+use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::{Certificate, Transaction};
@@ -196,6 +196,7 @@ pub(super) fn run_phase1_rules(
     registered_pools: Option<&std::collections::HashSet<Hash28>>,
     current_epoch: Option<u64>,
     node_network: Option<torsten_primitives::network::NetworkId>,
+    stake_key_deposits: Option<&HashMap<Hash32, u64>>,
     errors: &mut Vec<ValidationError>,
 ) {
     let body = &tx.body;
@@ -302,14 +303,17 @@ pub(super) fn run_phase1_rules(
     }
 
     // ------------------------------------------------------------------
-    // Rule 1g: Conway stake deregistration refund must match key_deposit
+    // Rule 1g: Conway stake deregistration refund must match stored deposit
     //
     // Per Haskell's Conway DELEG rule (`conwayStakeDeregDeposit`):
     // `ConwayStakeDeregistration` (UnRegCert, certificate tag 8) carries an
-    // explicit refund amount that must equal the current `keyDeposit`
-    // protocol parameter. The refund field exists so that a transaction
-    // built against old parameters is rejected if `keyDeposit` has since
-    // changed via a governance update — preventing silent under-refunds.
+    // explicit refund amount that must equal the deposit paid at registration
+    // time (stored per-credential in `stake_key_deposits`). This ensures
+    // correct refunds even if `keyDeposit` has changed via governance.
+    //
+    // Falls back to the current `keyDeposit` parameter when the per-credential
+    // deposit map is not available or the credential is not found (e.g. old
+    // snapshots before per-credential tracking was added).
     //
     // This check applies only in Conway (protocol >= 9) where the new
     // certificate tag is used.  Pre-Conway `StakeDeregistration` (tag 1)
@@ -317,11 +321,15 @@ pub(super) fn run_phase1_rules(
     // ------------------------------------------------------------------
     if params.protocol_version_major >= 9 {
         for cert in &body.certificates {
-            if let Certificate::ConwayStakeDeregistration { refund, .. } = cert {
-                if refund.0 != params.key_deposit.0 {
+            if let Certificate::ConwayStakeDeregistration { credential, refund } = cert {
+                let key = credential.to_typed_hash32();
+                let expected = stake_key_deposits
+                    .and_then(|m| m.get(&key).copied())
+                    .unwrap_or(params.key_deposit.0);
+                if refund.0 != expected {
                     errors.push(ValidationError::StakeDeregistrationRefundMismatch {
                         declared: refund.0,
-                        expected: params.key_deposit.0,
+                        expected,
                     });
                 }
             }
@@ -426,6 +434,7 @@ pub(super) fn run_phase1_rules(
             &body.certificates,
             params,
             registered_pools,
+            stake_key_deposits,
         );
 
         // Proposal deposits (Conway governance) — use u128 to prevent mul overflow

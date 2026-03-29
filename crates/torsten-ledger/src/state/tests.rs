@@ -14521,3 +14521,278 @@ fn test_opcert_counters_empty_by_default_in_snapshot() {
     // Default: empty map
     assert!(loaded.opcert_counters.is_empty());
 }
+
+// =========================================================================
+// Per-credential deposit tracking tests (#297)
+// =========================================================================
+
+/// Stake registration populates the per-credential deposit map.
+#[test]
+fn test_stake_registration_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xAA; 28]));
+    let key = cred.to_typed_hash32();
+
+    state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+}
+
+/// Conway stake registration populates the per-credential deposit map.
+#[test]
+fn test_conway_stake_registration_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xBB; 28]));
+    let key = cred.to_typed_hash32();
+
+    state.process_certificate(&Certificate::ConwayStakeRegistration {
+        credential: cred.clone(),
+        deposit: Lovelace(2_000_000),
+    });
+
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+}
+
+/// Stake deregistration removes from deposit map and uses stored deposit.
+#[test]
+fn test_stake_deregistration_removes_from_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xCC; 28]));
+    let key = cred.to_typed_hash32();
+
+    // Register
+    state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+
+    // Change key_deposit — deregistration should still use stored deposit
+    state.protocol_params.key_deposit = Lovelace(3_000_000);
+
+    // Deregister
+    state.process_certificate(&Certificate::StakeDeregistration(cred.clone()));
+    assert!(!state.stake_key_deposits.contains_key(&key));
+    // Decremented by stored 2M, not current 3M
+    assert_eq!(state.total_stake_key_deposits, 0);
+}
+
+/// Conway deregistration uses stored deposit (not current param) after param change.
+#[test]
+fn test_conway_deregistration_uses_stored_deposit_after_param_change() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xDD; 28]));
+    let key = cred.to_typed_hash32();
+
+    // Register with key_deposit = 2M
+    state.process_certificate(&Certificate::ConwayStakeRegistration {
+        credential: cred.clone(),
+        deposit: Lovelace(2_000_000),
+    });
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+
+    // Governance changes key_deposit to 3M
+    state.protocol_params.key_deposit = Lovelace(3_000_000);
+
+    // Deregister — should decrement by stored 2M
+    state.process_certificate(&Certificate::ConwayStakeDeregistration {
+        credential: cred.clone(),
+        refund: Lovelace(2_000_000),
+    });
+    assert!(!state.stake_key_deposits.contains_key(&key));
+    assert_eq!(state.total_stake_key_deposits, 0);
+}
+
+/// Pool registration populates the per-pool deposit map (new pools only).
+#[test]
+fn test_pool_registration_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.pool_deposit = Lovelace(500_000_000);
+    let mut state = LedgerState::new(params);
+    let pool_id = Hash28::from_bytes([0x11; 28]);
+
+    let pool_params = PoolParams {
+        operator: pool_id,
+        vrf_keyhash: Hash32::ZERO,
+        pledge: Lovelace(100_000_000),
+        cost: Lovelace(340_000_000),
+        margin: Rational {
+            numerator: 1,
+            denominator: 100,
+        },
+        reward_account: vec![0xe0; 29],
+        pool_owners: vec![pool_id],
+        relays: vec![],
+        pool_metadata: None,
+    };
+
+    state.process_certificate(&Certificate::PoolRegistration(pool_params));
+    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+}
+
+/// Pool re-registration does NOT overwrite the stored deposit.
+#[test]
+fn test_pool_reregistration_preserves_deposit() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.pool_deposit = Lovelace(500_000_000);
+    let mut state = LedgerState::new(params);
+    let pool_id = Hash28::from_bytes([0x22; 28]);
+
+    let pool_params = PoolParams {
+        operator: pool_id,
+        vrf_keyhash: Hash32::ZERO,
+        pledge: Lovelace(100_000_000),
+        cost: Lovelace(340_000_000),
+        margin: Rational {
+            numerator: 1,
+            denominator: 100,
+        },
+        reward_account: vec![0xe0; 29],
+        pool_owners: vec![pool_id],
+        relays: vec![],
+        pool_metadata: None,
+    };
+
+    // First registration
+    state.process_certificate(&Certificate::PoolRegistration(pool_params.clone()));
+    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+
+    // Change pool_deposit, then re-register
+    state.protocol_params.pool_deposit = Lovelace(700_000_000);
+    state.process_certificate(&Certificate::PoolRegistration(pool_params));
+
+    // Deposit map should still have the original 500M, not 700M
+    // (re-registration goes to future_pool_params, not pool_deposits)
+    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+}
+
+/// RegStakeDeleg combined cert populates deposit map.
+#[test]
+fn test_reg_stake_deleg_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xEE; 28]));
+    let key = cred.to_typed_hash32();
+    let pool_id = Hash28::from_bytes([0x33; 28]);
+
+    state.process_certificate(&Certificate::RegStakeDeleg {
+        credential: cred.clone(),
+        pool_hash: pool_id,
+        deposit: Lovelace(2_000_000),
+    });
+
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+}
+
+/// RegStakeVoteDeleg combined cert populates deposit map.
+#[test]
+fn test_reg_stake_vote_deleg_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xFF; 28]));
+    let key = cred.to_typed_hash32();
+    let pool_id = Hash28::from_bytes([0x44; 28]);
+
+    state.process_certificate(&Certificate::RegStakeVoteDeleg {
+        credential: cred.clone(),
+        pool_hash: pool_id,
+        drep: DRep::Abstain,
+        deposit: Lovelace(2_000_000),
+    });
+
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+}
+
+/// VoteRegDeleg combined cert populates deposit map.
+#[test]
+fn test_vote_reg_deleg_populates_deposit_map() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    let mut state = LedgerState::new(params);
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xAB; 28]));
+    let key = cred.to_typed_hash32();
+
+    state.process_certificate(&Certificate::VoteRegDeleg {
+        credential: cred.clone(),
+        drep: DRep::Abstain,
+        deposit: Lovelace(2_000_000),
+    });
+
+    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+}
+
+/// Snapshot round-trip preserves per-credential deposit maps.
+#[test]
+fn test_snapshot_roundtrip_preserves_deposit_maps() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    params.pool_deposit = Lovelace(500_000_000);
+    let mut state = LedgerState::new(params);
+
+    let cred = Credential::VerificationKey(Hash28::from_bytes([0xCD; 28]));
+    let key = cred.to_typed_hash32();
+    let pool_id = Hash28::from_bytes([0x55; 28]);
+
+    state.stake_key_deposits.insert(key, 2_000_000);
+    state.pool_deposits.insert(pool_id, 500_000_000);
+
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_path = dir.path().join("deposit_test.snap");
+    state.save_snapshot(&snapshot_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+
+    assert_eq!(loaded.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(loaded.pool_deposits.get(&pool_id), Some(&500_000_000));
+}
+
+/// Snapshot migration populates deposit maps from params × credentials.
+#[test]
+fn test_snapshot_migration_populates_deposit_maps() {
+    let mut params = ProtocolParameters::mainnet_defaults();
+    params.key_deposit = Lovelace(2_000_000);
+    params.pool_deposit = Lovelace(500_000_000);
+    let mut state = LedgerState::new(params);
+
+    // Simulate a pre-v12 snapshot: registered credentials but empty deposit maps.
+    let cred_hash = Credential::VerificationKey(Hash28::from_bytes([0xDE; 28])).to_typed_hash32();
+    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(0));
+    let pool_id = Hash28::from_bytes([0x66; 28]);
+    Arc::make_mut(&mut state.pool_params).insert(
+        pool_id,
+        PoolRegistration {
+            pool_id,
+            vrf_keyhash: torsten_primitives::hash::Hash32::ZERO,
+            pledge: Lovelace(0),
+            cost: Lovelace(340_000_000),
+            margin_numerator: 1,
+            margin_denominator: 100,
+            reward_account: vec![0xe0; 29],
+            owners: vec![pool_id],
+            relays: vec![],
+            metadata_url: None,
+            metadata_hash: None,
+        },
+    );
+    // Ensure deposit maps are empty (simulating old snapshot)
+    assert!(state.stake_key_deposits.is_empty());
+    assert!(state.pool_deposits.is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot_path = dir.path().join("migration_test.snap");
+    state.save_snapshot(&snapshot_path).unwrap();
+    let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
+
+    // Migration should have populated maps from current params
+    assert_eq!(loaded.stake_key_deposits.get(&cred_hash), Some(&2_000_000));
+    assert_eq!(loaded.pool_deposits.get(&pool_id), Some(&500_000_000));
+}

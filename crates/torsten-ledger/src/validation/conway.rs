@@ -7,9 +7,9 @@
 //! - Calculating the net deposit and refund amounts for all certificate types
 //!   across eras, including pool re-registration logic.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use torsten_primitives::hash::Hash28;
+use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::Certificate;
 
@@ -105,10 +105,16 @@ pub(super) fn check_era_gating(
 /// When `registered_pools` is `Some`, pool re-registrations (updating an existing
 /// pool's parameters) do not charge an additional deposit — only new pool
 /// registrations do. When `None`, all pool registrations are treated as new.
+///
+/// When `stake_key_deposits` is `Some`, pre-Conway `StakeDeregistration` refund
+/// amounts are looked up from the per-credential deposit map (the deposit paid
+/// at registration time). When `None`, the current `key_deposit` parameter is
+/// used as a fallback.
 pub(super) fn calculate_deposits_and_refunds(
     certificates: &[Certificate],
     params: &ProtocolParameters,
     registered_pools: Option<&HashSet<Hash28>>,
+    stake_key_deposits: Option<&HashMap<Hash32, u64>>,
 ) -> (u64, u64) {
     let mut deposits = 0u64;
     let mut refunds = 0u64;
@@ -122,8 +128,14 @@ pub(super) fn calculate_deposits_and_refunds(
             Certificate::StakeRegistration(_) => {
                 deposits += params.key_deposit.0;
             }
-            Certificate::StakeDeregistration(_) => {
-                refunds += params.key_deposit.0;
+            Certificate::StakeDeregistration(credential) => {
+                // Use the stored per-credential deposit for correct refund when
+                // key_deposit changes via governance. Falls back to current param
+                // when deposit map is unavailable or credential not found.
+                let key = credential.to_typed_hash32();
+                refunds += stake_key_deposits
+                    .and_then(|m| m.get(&key).copied())
+                    .unwrap_or(params.key_deposit.0);
             }
             Certificate::ConwayStakeRegistration { deposit, .. } => {
                 deposits += deposit.0;

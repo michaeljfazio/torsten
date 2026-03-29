@@ -366,9 +366,42 @@ mod tests {
             Certificate::StakeRegistration(cred.clone()),
             Certificate::StakeDeregistration(cred),
         ];
-        let (deposits, refunds) = calculate_deposits_and_refunds(&certs, &params, None);
+        let (deposits, refunds) = calculate_deposits_and_refunds(&certs, &params, None, None);
         assert_eq!(deposits, params.key_deposit.0 * 2);
         assert_eq!(refunds, params.key_deposit.0);
+    }
+
+    /// Pre-Conway StakeDeregistration refund uses stored per-credential deposit
+    /// when key_deposit has changed via governance.
+    #[test]
+    fn test_deposits_and_refunds_uses_stored_deposit() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.key_deposit = Lovelace(3_000_000); // Current param
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            torsten_primitives::hash::Hash28::from_bytes([7u8; 28]),
+        );
+        let key = cred.to_typed_hash32();
+        // Stored deposit was 2M when credential was registered
+        let mut stored = std::collections::HashMap::new();
+        stored.insert(key, 2_000_000u64);
+        let certs = vec![Certificate::StakeDeregistration(cred)];
+        let (_, refunds) = calculate_deposits_and_refunds(&certs, &params, None, Some(&stored));
+        // Should use stored 2M, not current 3M
+        assert_eq!(refunds, 2_000_000);
+    }
+
+    /// Without stored deposits, pre-Conway StakeDeregistration falls back to current param.
+    #[test]
+    fn test_deposits_and_refunds_fallback_without_stored_deposit() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.key_deposit = Lovelace(3_000_000);
+        let cred = torsten_primitives::credentials::Credential::VerificationKey(
+            torsten_primitives::hash::Hash28::from_bytes([8u8; 28]),
+        );
+        let certs = vec![Certificate::StakeDeregistration(cred)];
+        let (_, refunds) = calculate_deposits_and_refunds(&certs, &params, None, None);
+        // No stored deposit map → falls back to current key_deposit
+        assert_eq!(refunds, 3_000_000);
     }
 
     // ---------------------------------------------------------------------------
@@ -2240,6 +2273,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
         assert!(
             result.is_ok(),
@@ -2293,6 +2327,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
         assert!(
             result.is_ok(),
@@ -2343,6 +2378,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -2356,12 +2392,12 @@ mod tests {
         let params = ProtocolParameters::mainnet_defaults();
         let pool_id = torsten_primitives::hash::Hash28::from_bytes([42u8; 28]);
         let certs = vec![Certificate::PoolRegistration(make_pool_params(pool_id))];
-        let (deposits_new, _) = calculate_deposits_and_refunds(&certs, &params, None);
+        let (deposits_new, _) = calculate_deposits_and_refunds(&certs, &params, None, None);
         assert_eq!(deposits_new, params.pool_deposit.0);
         let mut registered = HashSet::new();
         registered.insert(pool_id);
         let (deposits_rereg, _) =
-            calculate_deposits_and_refunds(&certs, &params, Some(&registered));
+            calculate_deposits_and_refunds(&certs, &params, Some(&registered), None);
         assert_eq!(deposits_rereg, 0);
     }
 
@@ -8140,6 +8176,7 @@ mod tests {
             None,      // node_network
             None,      // committee_members
             None,      // committee_resigned
+            None,      // stake_key_deposits
         );
 
         assert!(
@@ -8204,6 +8241,7 @@ mod tests {
             None,      // node_network
             None,      // committee_members
             None,      // committee_resigned
+            None,      // stake_key_deposits
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8256,6 +8294,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8368,6 +8407,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8416,6 +8456,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -8457,6 +8498,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8507,6 +8549,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8562,6 +8605,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -8618,6 +8662,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -8673,6 +8718,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8758,6 +8804,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -8810,6 +8857,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8848,6 +8896,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8899,6 +8948,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -8983,6 +9033,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9036,6 +9087,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9074,6 +9126,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9165,6 +9218,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9214,6 +9268,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9244,6 +9299,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9317,6 +9373,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9417,6 +9474,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9494,6 +9552,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9564,6 +9623,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9633,6 +9693,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // The only expected error is VRF dedup — all other checks should pass.
@@ -9707,6 +9768,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9779,6 +9841,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9850,6 +9913,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9924,6 +9988,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -9989,6 +10054,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10082,6 +10148,7 @@ mod tests {
             None, // node_network
             Some(&committee_members),
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -10131,6 +10198,7 @@ mod tests {
             None, // node_network
             Some(&committee_members),
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10180,6 +10248,7 @@ mod tests {
             None, // node_network
             Some(&committee_members),
             Some(&committee_resigned),
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -10212,6 +10281,7 @@ mod tests {
             None, // node_network
             None, // committee_members = None → check skipped
             None, // committee_resigned = None → check skipped
+            None, // stake_key_deposits
         );
 
         let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10260,6 +10330,7 @@ mod tests {
             None, // node_network
             Some(&committee_members),
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
@@ -10309,6 +10380,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         assert!(
@@ -10352,6 +10424,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // Content matches — no mismatch error.
@@ -10390,6 +10463,7 @@ mod tests {
             None, // node_network
             None, // committee_members
             None, // committee_resigned
+            None, // stake_key_deposits
         );
 
         // The content check is skipped when raw_cbor is absent; this should
@@ -10449,6 +10523,7 @@ mod tests {
             Some(NetworkId::Mainnet), // node expects Mainnet
             None,                     // committee_members
             None,                     // committee_resigned
+            None,                     // stake_key_deposits
         );
 
         assert!(
@@ -10508,6 +10583,7 @@ mod tests {
             Some(NetworkId::Testnet), // node is Testnet — matches output
             None,                     // committee_members
             None,                     // committee_resigned
+            None,                     // stake_key_deposits
         );
 
         let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
@@ -10581,6 +10657,7 @@ mod tests {
             Some(NetworkId::Mainnet), // node expects Mainnet
             None,                     // committee_members
             None,                     // committee_resigned
+            None,                     // stake_key_deposits
         );
 
         // The network check fires regardless of whether other withdrawal

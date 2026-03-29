@@ -382,13 +382,19 @@ impl LedgerState {
             for pool_id in &retiring_pools {
                 self.pending_retirements.remove(pool_id);
             }
-            let pool_deposit = self.protocol_params.pool_deposit;
             for pool_id in &retiring_pools {
                 // Refund pool deposit to operator's registered reward account.
+                // Use the stored per-pool deposit (recorded at registration time) for
+                // correct refunds when pool_deposit changes via governance.
                 // Also remove all delegations pointing to this pool, matching
                 // Haskell's POOLREAP which filters delegations to retired pools:
                 //   adjustedDelegs = Map.filter (\pid -> pid `Set.notMember` retired) delegs
                 if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
+                    let pool_deposit = self
+                        .pool_deposits
+                        .remove(pool_id)
+                        .map(Lovelace)
+                        .unwrap_or(self.protocol_params.pool_deposit);
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
                     // Refund deposit: if the reward account is registered, refund to it.
                     // If unregistered, refund goes to treasury (matching Haskell's POOLREAP
