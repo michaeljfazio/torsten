@@ -93,6 +93,14 @@ pub struct BlockHeader {
     /// Empty for Byron blocks (OBFT — no VRF).
     #[serde(default)]
     pub nonce_vrf_output: Vec<u8>,
+    /// TPraos nonce VRF proof (80 bytes for Shelley–Alonzo, empty for Praos/Byron).
+    ///
+    /// In TPraos (proto < 7), the header contains separate leader_vrf and nonce_vrf
+    /// certificates. This field preserves the nonce VRF proof so consensus can
+    /// cryptographically verify it. For Praos (proto >= 7) there is only one VRF
+    /// certificate, so this field is empty.
+    #[serde(default)]
+    pub nonce_vrf_proof: Vec<u8>,
 }
 
 /// VRF output

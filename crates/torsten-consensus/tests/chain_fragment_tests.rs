@@ -39,6 +39,7 @@ fn make_header(slot: u64, block_no: u64, hash_byte: u8, prev_byte: u8) -> BlockH
         protocol_version: ProtocolVersion { major: 9, minor: 0 },
         kes_signature: vec![],
         nonce_vrf_output: vec![],
+        nonce_vrf_proof: vec![],
     }
 }
 

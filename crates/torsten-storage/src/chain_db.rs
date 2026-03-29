@@ -365,6 +365,7 @@ impl ChainDB {
                     },
                     kes_signature: Vec::new(),
                     nonce_vrf_output: Vec::new(),
+                    nonce_vrf_proof: Vec::new(),
                 }
             })
             .collect()

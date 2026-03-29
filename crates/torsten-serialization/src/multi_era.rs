@@ -210,17 +210,20 @@ fn decode_block_header(
     //   - TPraos (Shelley-Alonzo): eta = blake2b_256(nonce_vrf.0) — hash raw 64-byte VRF output
     //   - Praos (Babbage/Conway): eta = blake2b_256("N" || vrf_result.0) — hash "N"-prefixed output
     //   In both cases exactly one hash is applied to produce the 32-byte eta.
-    let (vrf_result, nonce_vrf_output, body_hash, op_cert, protocol_version, kes_signature) =
+    let (vrf_result, nonce_vrf_output, nonce_vrf_proof, body_hash, op_cert, protocol_version, kes_signature) =
         if let Some(babbage) = pallas_header.as_babbage() {
             let hb = &babbage.header_body;
             // Babbage/Conway Praos: eta = blake2b_256("N" || raw_vrf_result)
             let nonce_eta = hb.nonce_vrf_output();
+            // Praos has a single VRF certificate — no separate nonce proof.
+            let nonce_vrf_proof = Vec::new();
             (
                 VrfOutput {
                     output: hb.vrf_result.0.to_vec(),
                     proof: hb.vrf_result.1.to_vec(),
                 },
                 nonce_eta,
+                nonce_vrf_proof,
                 pallas_hash_to_torsten32(&hb.block_body_hash),
                 OperationalCert {
                     hot_vkey: hb.operational_cert.operational_cert_hot_vkey.to_vec(),
@@ -240,12 +243,15 @@ fn decode_block_header(
             // The ledger's update_evolving_nonce ALWAYS hashes: eta = blake2b_256(raw).
             // This matches pallas's generate_rolling_nonce which always hashes its input.
             let nonce_eta = hb.nonce_vrf.0.to_vec();
+            // Preserve the 80-byte nonce VRF proof for consensus verification.
+            let nonce_vrf_proof = hb.nonce_vrf.1.to_vec();
             (
                 VrfOutput {
                     output: hb.leader_vrf.0.to_vec(),
                     proof: hb.leader_vrf.1.to_vec(),
                 },
                 nonce_eta,
+                nonce_vrf_proof,
                 pallas_hash_to_torsten32(&hb.block_body_hash),
                 OperationalCert {
                     hot_vkey: hb.operational_cert_hot_vkey.to_vec(),
@@ -267,6 +273,7 @@ fn decode_block_header(
                     proof: Vec::new(),
                 },
                 Vec::new(),
+                Vec::new(), // Byron has no nonce VRF proof
                 Hash32::ZERO,
                 OperationalCert {
                     hot_vkey: Vec::new(),
@@ -294,6 +301,7 @@ fn decode_block_header(
         protocol_version,
         kes_signature,
         nonce_vrf_output,
+        nonce_vrf_proof,
     })
 }
 

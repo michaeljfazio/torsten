@@ -982,6 +982,7 @@ mod tests {
             protocol_version: ProtocolVersion { major: 9, minor: 0 },
             kes_signature: vec![],
             nonce_vrf_output: vec![],
+            nonce_vrf_proof: vec![],
         }
     }
 
