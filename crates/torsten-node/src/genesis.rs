@@ -761,18 +761,23 @@ impl ConwayGenesis {
                 None => continue,
             };
             // Parse "scriptHash-<hex>" or "keyHash-<hex>" format
-            let hex_str = if let Some(h) = key.strip_prefix("scriptHash-") {
-                h
+            let (hex_str, is_script) = if let Some(h) = key.strip_prefix("scriptHash-") {
+                (h, true)
             } else if let Some(h) = key.strip_prefix("keyHash-") {
-                h
+                (h, false)
             } else {
                 continue;
             };
             if let Ok(bytes) = hex::decode(hex_str) {
-                // Committee credentials are 28 bytes; pad to 32 for our Hash32 representation
+                // Committee credentials are 28 bytes; pad to 32 for our Hash32 representation.
+                // Byte 28 encodes the credential type: 0x00=key, 0x01=script
+                // (matching Credential::to_typed_hash32).
                 let mut hash = [0u8; 32];
-                let len = bytes.len().min(32);
+                let len = bytes.len().min(28);
                 hash[..len].copy_from_slice(&bytes[..len]);
+                if is_script {
+                    hash[28] = 0x01;
+                }
                 result.push((hash, expiration));
             }
         }
@@ -957,9 +962,15 @@ mod tests {
         let script_hash_hex = "ff9babf23fef3f54ec29132c07a8e23807d7b395b143ecd8ff79f4c7";
         let expected_bytes = hex::decode(script_hash_hex).unwrap();
         let found = members.iter().any(|(hash, exp)| {
-            hash[..28] == expected_bytes[..] && hash[28..] == [0, 0, 0, 0] && *exp == 1000
+            hash[..28] == expected_bytes[..]
+                && hash[28] == 0x01
+                && hash[29..] == [0, 0, 0]
+                && *exp == 1000
         });
-        assert!(found, "scriptHash member not found with correct expiration");
+        assert!(
+            found,
+            "scriptHash member not found with correct expiration and type byte"
+        );
 
         // Check keyHash member
         let found_key = members.iter().any(|(_, exp)| *exp == 500);

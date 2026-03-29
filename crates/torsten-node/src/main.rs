@@ -406,16 +406,40 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         }
     }
 
+    let mut conway_committee_threshold: Option<(u64, u64)> = None;
+    let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
     if let Some(ref genesis_path) = node_config.conway_genesis_file {
         let genesis_path = config_dir.join(genesis_path);
         if let Ok(genesis) = genesis::ConwayGenesis::load(&genesis_path) {
             genesis.apply_to_protocol_params(&mut protocol_params);
+            conway_committee_threshold = genesis.committee_threshold();
+            conway_committee_members = genesis.committee_members();
             info!("Conway genesis loaded");
         }
     }
 
     // Initialize fresh ledger state from genesis params
     let mut ledger = torsten_ledger::LedgerState::new(protocol_params);
+
+    // Seed Conway genesis committee members and threshold (required for governance
+    // ratification — without these, check_cc_approval returns false and no
+    // proposals requiring CC approval can ratify).
+    if let Some((num, den)) = conway_committee_threshold {
+        use torsten_primitives::transaction::Rational;
+        std::sync::Arc::make_mut(&mut ledger.governance).committee_threshold = Some(Rational {
+            numerator: num,
+            denominator: den,
+        });
+    }
+    if !conway_committee_members.is_empty() {
+        use torsten_primitives::hash::Hash32;
+        for (hash_bytes, expiration) in &conway_committee_members {
+            let cold_key = Hash32::from_bytes(*hash_bytes);
+            std::sync::Arc::make_mut(&mut ledger.governance)
+                .committee_expiration
+                .insert(cold_key, torsten_primitives::EpochNo(*expiration));
+        }
+    }
 
     // Apply Shelley genesis configuration (epoch length, slot config, reserves)
     // Must use set_epoch_length() (not direct field assignment) to compute the
