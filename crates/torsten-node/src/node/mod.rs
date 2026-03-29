@@ -784,8 +784,9 @@ impl Node {
         //     meaning the node must observe a live boundary before forging.
         let snapshot_epoch_transitions: u32 = ledger.epoch.0 as u32;
 
-        // Extract opcert counters before moving ledger into the lock,
-        // so we can seed consensus without blocking inside the runtime.
+        // Extract opcert counters and current era before moving ledger into
+        // the lock, so we avoid blocking_read() inside the tokio runtime.
+        let snapshot_era = ledger.era;
         let snapshot_opcert_counters = if ledger.opcert_counters.is_empty() {
             None
         } else {
@@ -874,9 +875,10 @@ impl Node {
             // This uses the same hardcoded era boundaries as the previous
             // build_era_summaries() for known networks — only needed once on
             // first startup after the EraHistory feature is introduced.
+            // NOTE: snapshot_era was extracted before wrapping ledger in Arc<RwLock>
+            // to avoid blocking_read() panic inside the tokio runtime.
             {
-                let ls = ledger_state.blocking_read();
-                let current_era = ls.era;
+                let current_era = snapshot_era;
                 let is_mainnet = network_magic == 764824073;
 
                 if is_mainnet {
@@ -2100,8 +2102,9 @@ impl Node {
         // ─── GSM (Genesis State Machine) ─────────────────────────────────
         let genesis_enabled = self.consensus_mode == "genesis";
         if genesis_enabled {
+            let gsm_state = self.gsm.read().await.state();
             info!(
-                state = %self.gsm.blocking_read().state(),
+                state = %gsm_state,
                 "Genesis mode enabled — note: lightweight checkpointing and Genesis-specific \
                  peer selection are not yet implemented. The GSM provides basic state tracking \
                  (PreSyncing/Syncing/CaughtUp) and density-based peer disconnection."
