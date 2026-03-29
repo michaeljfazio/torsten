@@ -784,6 +784,14 @@ impl Node {
         //     meaning the node must observe a live boundary before forging.
         let snapshot_epoch_transitions: u32 = ledger.epoch.0 as u32;
 
+        // Extract opcert counters before moving ledger into the lock,
+        // so we can seed consensus without blocking inside the runtime.
+        let snapshot_opcert_counters = if ledger.opcert_counters.is_empty() {
+            None
+        } else {
+            Some(ledger.opcert_counters.clone())
+        };
+
         let ledger_state = Arc::new(RwLock::new(ledger));
 
         let mut consensus = if let Some(ref genesis) = shelley_genesis {
@@ -811,11 +819,8 @@ impl Node {
         // Seed opcert counters from the loaded ledger snapshot (#310).
         // Closes the replay-attack window that existed when counters
         // reset to empty on every restart.
-        {
-            let ls = ledger_state.blocking_read();
-            if !ls.opcert_counters.is_empty() {
-                consensus.set_opcert_counters(ls.opcert_counters.clone());
-            }
+        if let Some(counters) = snapshot_opcert_counters {
+            consensus.set_opcert_counters(counters);
         }
 
         // Build the HFC era history state machine from genesis parameters.
