@@ -9,7 +9,7 @@ This guide walks you through getting Torsten running on the Cardano preview test
 ```bash
 curl -LO https://github.com/michaeljfazio/torsten/releases/latest/download/torsten-x86_64-linux.tar.gz
 tar xzf torsten-x86_64-linux.tar.gz
-sudo mv torsten-node torsten-cli /usr/local/bin/
+sudo mv torsten-node torsten-cli torsten-monitor torsten-config /usr/local/bin/
 ```
 
 **Option B: Container image**
@@ -36,7 +36,7 @@ torsten-node mithril-import \
   --database-path ./db-preview
 ```
 
-This downloads the latest snapshot from the Mithril aggregator, extracts it, and imports all blocks into the database. On preview testnet this takes about 60 seconds.
+This downloads the latest snapshot from the Mithril aggregator, extracts it, and imports all blocks into the database. On preview testnet this takes approximately 9 minutes (downloading a ~2.7 GB snapshot containing ~4M blocks).
 
 ## 3. Run the Node
 

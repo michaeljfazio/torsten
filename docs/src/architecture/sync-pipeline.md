@@ -99,4 +99,4 @@ This bypasses pallas' serial ChainSync state machine in favor of a custom implem
 - **Block processing** is batched (500 blocks per batch) with single-lock acquisition
 - **Throughput** depends on network latency, peer count, and block sizes
 
-On preview testnet, full sync from genesis completes in approximately 10 hours, with block replay (from Mithril snapshot) achieving ~10,600 blocks/second.
+On preview testnet, full sync from genesis completes in approximately 10 hours, with block replay (from Mithril snapshot) achieving ~13,700 blocks/second.

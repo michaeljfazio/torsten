@@ -17,7 +17,7 @@ Download the latest release from [GitHub Releases](https://github.com/michaeljfa
 # Example: download and extract for Linux x86_64
 curl -LO https://github.com/michaeljfazio/torsten/releases/latest/download/torsten-x86_64-linux.tar.gz
 tar xzf torsten-x86_64-linux.tar.gz
-sudo mv torsten-node torsten-cli /usr/local/bin/
+sudo mv torsten-node torsten-cli torsten-monitor torsten-config /usr/local/bin/
 ```
 
 Verify checksums:
@@ -96,12 +96,14 @@ On Linux with kernel 5.1+, you can enable io_uring for improved disk I/O in the 
 cargo build --release --features io-uring
 ```
 
-This produces two binaries in `target/release/`:
+This produces four binaries in `target/release/`:
 
 | Binary | Description |
 |--------|-------------|
 | `torsten-node` | The Cardano node |
 | `torsten-cli` | The cardano-cli compatible command-line interface |
+| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
+| `torsten-config` | Interactive TUI configuration editor with tree navigation, inline editing, and diff view |
 
 #### Install Binaries
 
@@ -110,6 +112,8 @@ To install the binaries into your `$CARGO_HOME/bin` (typically `~/.cargo/bin/`):
 ```bash
 cargo install --path crates/torsten-node
 cargo install --path crates/torsten-cli
+cargo install --path crates/torsten-monitor
+cargo install --path crates/torsten-config
 ```
 
 ## Running Tests

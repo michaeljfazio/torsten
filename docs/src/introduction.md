@@ -38,4 +38,4 @@ See the [Feature Status](https://github.com/michaeljfazio/torsten#feature-status
 
 ## License
 
-Torsten is released under the [MIT License](https://github.com/michaeljfazio/torsten/blob/main/LICENSE).
+Torsten is released under the [Apache-2.0 License](https://github.com/michaeljfazio/torsten/blob/main/LICENSE).

@@ -37,6 +37,7 @@
 - [Overview](./architecture/overview.md)
 - [Sync Pipeline](./architecture/sync-pipeline.md)
 - [Storage](./architecture/storage.md)
+- [Ledger](./architecture/ledger.md)
 - [Consensus](./architecture/consensus.md)
 - [Networking](./architecture/networking.md)
 - [P2P Governor](./architecture/p2p-governor.md)

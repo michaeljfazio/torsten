@@ -23,7 +23,7 @@ resolver = "2"
 version = "0.4.6-alpha"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/example/torsten"
+repository = "https://github.com/michaeljfazio/torsten"
 description = "Torsten - A Rust implementation of the Cardano node"
 
 [workspace.dependencies]
