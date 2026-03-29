@@ -1,5 +1,8 @@
 # Cardano Haskell Oracle - Agent Memory
 
+## DRep Pulser & Ratification
+- [drep-pulser-ratification.md](drep-pulser-ratification.md) — Complete pulser lifecycle: snapshot timing (end of EPOCH rule, post-transition state), pulse spreading (4k blocks, pulseSize=numAccounts/(4k)), RATIFY runs once at finishDRepPulser, results applied at NEXT epoch boundary
+
 ## Key Reference Files
 - Conway UTXO rules: `cardano-ledger/eras/conway/impl/src/Cardano/Ledger/Conway/Rules/Utxo.hs`
 - Conway UTXOW rules: `...Rules/Utxow.hs`
@@ -145,6 +148,9 @@
 
 ## SDU Segmentation Size — CRITICAL
 - See [sdu-segmentation-critical.md](sdu-segmentation-critical.md) — SDUSize=12288 is PAYLOAD split point (NOT 12280); Haskell splits EXACTLY at sduSize bytes, NO -8 adjustment; ingress accepts any payload_length 0-65535
+
+## Conway Pointer Stake Exclusion
+- [conway-instant-stake-ptr-exclusion.md](conway-instant-stake-ptr-exclusion.md) — ConwayInstantStake has NO sisPtrStake; addConwayInstantStake drops StakeRefPtr via _other; sisPtrStake discarded at HFC deserialization; SNAP rule unchanged
 
 ## Ledger Types, Crypto, and Wire Format
 - See [cardano-ledger-types-wire-format.md](cardano-ledger-types-wire-format.md) — COMPLETE reference: all hash types (ADDRHASH=28B/Blake2b-224, HASH=32B/Blake2b-256), key types (Ed25519 VKey, VRF, KES), address binary format (header byte truth table), MaryValue CBOR (uint vs array(2)), script prefix tags (0x00-0x04), Datum/BinaryData (tag24), PParams array(31) positional index table, PParamsUpdate sparse map (keys 0-33), PoolVotingThresholds array(5), DRepVotingThresholds array(10), Rational tag(30), ShelleyGenesis/AlonzoGenesis/ConwayGenesis structures, Withdrawals map encoding, Credential array(2) encoding

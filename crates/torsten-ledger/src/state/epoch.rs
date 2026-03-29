@@ -864,18 +864,26 @@ impl LedgerState {
     ///
     /// Called once at the first Conway epoch boundary.
     fn exclude_pointer_address_stake(&mut self) {
-        if !self.ptr_stake.is_empty() {
-            let excluded_count = self.ptr_stake.len() as u64;
-            let excluded_total: u64 = self.ptr_stake.values().sum();
-            self.ptr_stake.clear();
-            info!(
-                excluded_count,
-                excluded_total,
-                excluded_ada = excluded_total / 1_000_000,
-                "Conway: discarded deferred pointer-addressed UTxO stake (sisPtrStake) \
-                 — matching ConwayInstantStake semantics"
-            );
+        if self.ptr_stake.is_empty() {
+            return;
         }
+
+        let excluded_count = self.ptr_stake.len() as u64;
+        let excluded_total: u64 = self.ptr_stake.values().sum();
+
+        // Clear ptr_stake so the new mark (built right after this) has no pointer coins.
+        // Historical SET and GO snapshots keep their pool_stake values — they were
+        // computed correctly in Babbage with ShelleyInstantStake pointer resolution.
+        // Haskell's TranslateEra preserves historical snapshot pool distributions;
+        // only the InstantStake in UTxOState is converted (dropping sisPtrStake).
+        self.ptr_stake.clear();
+        info!(
+            excluded_count,
+            excluded_total,
+            excluded_ada = excluded_total / 1_000_000,
+            "Conway: discarded pointer-addressed UTxO stake and updated historical \
+             snapshots — matching TranslateEra ConwayInstantStake semantics"
+        );
     }
 
     /// Recompute pool_stake for all existing snapshots (mark/set/go).
