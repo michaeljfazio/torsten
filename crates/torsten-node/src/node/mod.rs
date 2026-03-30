@@ -229,18 +229,15 @@ pub struct Node {
 
 impl Node {
     pub fn new(args: NodeArgs) -> Result<Self> {
-        let chain_db = Arc::new(RwLock::new(ChainDB::open_with_config(
-            &args.database_path,
-            &args.storage_config.immutable,
-        )?));
-
         let mut protocol_params = ProtocolParameters::mainnet_defaults();
 
-        // Load Byron genesis if configured
+        // Load Byron genesis if configured — done early so we can read the
+        // security parameter k before opening ChainDB.
         let config_dir = args.config_dir.clone();
         let mut byron_epoch_length: u64 = 0; // 0 = use pallas defaults (mainnet)
         let mut byron_slot_duration_ms: u64 = 20_000; // default 20s, overridden by genesis
         let mut byron_genesis_file_hash: Option<torsten_primitives::hash::Hash32> = None;
+        let mut security_param_k: usize = torsten_storage::chain_db::DEFAULT_SECURITY_PARAM_K;
         let byron_genesis_utxos: Vec<(Vec<u8>, u64)> =
             if let Some(ref genesis_path) = args.config.byron_genesis_file {
                 let genesis_path = config_dir.join(genesis_path);
@@ -248,6 +245,7 @@ impl Node {
                     Ok((genesis, hash)) => {
                         let utxos = genesis.initial_utxos();
                         let k = genesis.security_param();
+                        security_param_k = k as usize;
                         byron_epoch_length = 10 * k;
                         byron_slot_duration_ms = genesis.slot_duration_ms();
                         info!(
@@ -269,6 +267,13 @@ impl Node {
             } else {
                 Vec::new()
             };
+
+        // Open ChainDB with the security parameter k from Byron genesis
+        let chain_db = Arc::new(RwLock::new(ChainDB::open_with_config(
+            &args.database_path,
+            &args.storage_config.immutable,
+            security_param_k,
+        )?));
 
         // Load Shelley genesis if configured (with hash for nonce initialization)
         let (shelley_genesis, shelley_genesis_hash) =
@@ -3228,9 +3233,154 @@ impl Node {
         if !byron_genesis_utxos.is_empty() {
             ledger.seed_genesis_utxos(byron_genesis_utxos);
         }
+
+        // Seed Shelley genesis initial funds and staking (used by custom devnets;
+        // empty on mainnet/preview/preprod).
+        if let Some(genesis) = shelley_genesis {
+            let shelley_utxos = genesis.initial_utxos();
+            if !shelley_utxos.is_empty() {
+                let tuples: Vec<(Vec<u8>, u64)> = shelley_utxos
+                    .iter()
+                    .map(|e| (e.address.clone(), e.lovelace))
+                    .collect();
+                ledger.seed_genesis_utxos(&tuples);
+            }
+
+            if let Some(ref staking) = genesis.staking {
+                // Seed pool registrations
+                for (pool_id_hex, pool) in &staking.pools {
+                    if let Some(reg) = parse_genesis_pool(pool_id_hex, pool) {
+                        ledger.seed_genesis_pool(reg);
+                    }
+                }
+                // Seed stake delegations
+                for (stake_cred_hex, pool_id_hex) in &staking.stake {
+                    if let Some((cred, pool_id)) =
+                        parse_genesis_delegation(stake_cred_hex, pool_id_hex)
+                    {
+                        ledger.seed_genesis_delegation(cred, pool_id);
+                    }
+                }
+            }
+        }
+
         ledger
     }
+}
 
+/// Parse a Shelley genesis pool entry into a `PoolRegistration`.
+///
+/// Returns `None` if the pool ID or VRF key hex is invalid.
+fn parse_genesis_pool(
+    pool_id_hex: &str,
+    pool: &crate::genesis::ShelleyGenesisPool,
+) -> Option<torsten_ledger::state::PoolRegistration> {
+    use torsten_primitives::hash::{Hash28, Hash32};
+    use torsten_primitives::value::Lovelace;
+
+    let pool_id = Hash28::from_hex(pool_id_hex).ok()?;
+    let vrf_keyhash = Hash32::from_hex(&pool.public_key).ok()?;
+
+    // Convert margin f64 to numerator/denominator
+    let (margin_num, margin_den) = {
+        // Use the same approach as genesis float_to_rational
+        let s = format!("{}", pool.margin);
+        let decimals = s.split('.').nth(1).map(|d| d.len()).unwrap_or(0);
+        let denom = 10u64.pow(decimals as u32);
+        let num = (pool.margin * denom as f64).round() as u64;
+        let g = gcd(num, denom);
+        (num / g, denom / g)
+    };
+
+    let owners: Vec<Hash28> = pool
+        .owners
+        .iter()
+        .filter_map(|h| Hash28::from_hex(h).ok())
+        .collect();
+
+    // Build a minimal reward account from the JSON
+    let reward_account = parse_genesis_reward_account(&pool.reward_account);
+
+    Some(torsten_ledger::state::PoolRegistration {
+        pool_id,
+        vrf_keyhash,
+        pledge: Lovelace(pool.pledge),
+        cost: Lovelace(pool.cost),
+        margin_numerator: margin_num,
+        margin_denominator: margin_den,
+        reward_account,
+        owners,
+        relays: Vec::new(),
+        metadata_url: None,
+        metadata_hash: None,
+    })
+}
+
+/// Parse a genesis reward account JSON value into raw address bytes.
+///
+/// The Shelley genesis format uses:
+/// ```json
+/// { "credential": { "keyHash": "hex" }, "network": "Testnet" }
+/// ```
+fn parse_genesis_reward_account(value: &serde_json::Value) -> Vec<u8> {
+    let network_byte: u8 = if value
+        .get("network")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Testnet")
+        == "Mainnet"
+    {
+        0xe1 // reward address header, mainnet
+    } else {
+        0xe0 // reward address header, testnet
+    };
+
+    let cred_hex = value
+        .get("credential")
+        .and_then(|c| c.get("keyHash").or_else(|| c.get("scriptHash")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if let Ok(cred_bytes) = hex::decode(cred_hex) {
+        if cred_bytes.len() == 28 {
+            let mut addr = Vec::with_capacity(29);
+            addr.push(network_byte);
+            addr.extend_from_slice(&cred_bytes);
+            return addr;
+        }
+    }
+
+    Vec::new()
+}
+
+/// Parse a genesis stake delegation: credential hex → pool ID hex.
+fn parse_genesis_delegation(
+    stake_cred_hex: &str,
+    pool_id_hex: &str,
+) -> Option<(torsten_primitives::Hash32, torsten_primitives::hash::Hash28)> {
+    use torsten_primitives::hash::{Hash28, Hash32};
+
+    let pool_id = Hash28::from_hex(pool_id_hex).ok()?;
+    let cred_bytes = hex::decode(stake_cred_hex).ok()?;
+    if cred_bytes.len() != 28 {
+        return None;
+    }
+    // Pad 28-byte credential to 32 bytes (matching ledger convention)
+    let mut padded = [0u8; 32];
+    padded[..28].copy_from_slice(&cred_bytes);
+    Some((Hash32::from_bytes(padded), pool_id))
+}
+
+/// Greatest common divisor (for margin rational conversion).
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+impl Node {
     // ─── try_forge_block() ───────────────────────────────────────────────────
 
     /// Attempt to forge a block if we are in block producer mode and are the slot leader.

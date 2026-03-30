@@ -1050,7 +1050,11 @@ async fn run_db_info(args: DbInfoArgs) -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e))?;
 
     // Open the ChainDB read-only
-    let chain_db = torsten_storage::ChainDB::open_with_config(db_path, &storage_config.immutable)?;
+    let chain_db = torsten_storage::ChainDB::open_with_config(
+        db_path,
+        &storage_config.immutable,
+        torsten_storage::chain_db::DEFAULT_SECURITY_PARAM_K,
+    )?;
 
     // Immutable DB info
     let immutable_dir = db_path.join("immutable");

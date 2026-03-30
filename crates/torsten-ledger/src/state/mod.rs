@@ -1013,6 +1013,46 @@ impl LedgerState {
         );
     }
 
+    /// Seed a genesis pool registration into the ledger state.
+    ///
+    /// Inserts the pool registration into `pool_params` and registers
+    /// the reward account with zero balance.
+    pub fn seed_genesis_pool(&mut self, registration: PoolRegistration) {
+        let pool_id = registration.pool_id;
+        let reward_account = registration.reward_account.clone();
+
+        let pool_params = Arc::make_mut(&mut self.pool_params);
+        pool_params.insert(pool_id, registration);
+
+        // Register reward account with zero balance if not already present
+        if reward_account.len() >= 29 {
+            // Extract the 28-byte credential hash from the reward address
+            // (byte 0 is the header, bytes 1-28 are the credential)
+            let mut cred = [0u8; 32];
+            cred[..28].copy_from_slice(&reward_account[1..29]);
+            let cred_hash = Hash32::from_bytes(cred);
+            let reward_accounts = Arc::make_mut(&mut self.reward_accounts);
+            reward_accounts.entry(cred_hash).or_insert(Lovelace(0));
+        }
+
+        debug!("Ledger: seeded genesis pool {}", pool_id.to_hex());
+    }
+
+    /// Seed a genesis stake delegation into the ledger state.
+    ///
+    /// Maps a stake credential (as padded Hash32) to a pool ID (Hash28).
+    /// Registers the credential in reward accounts with zero balance.
+    pub fn seed_genesis_delegation(&mut self, stake_credential: Hash32, pool_id: Hash28) {
+        let delegations = Arc::make_mut(&mut self.delegations);
+        delegations.insert(stake_credential, pool_id);
+
+        // Register stake credential in reward accounts if not present
+        let reward_accounts = Arc::make_mut(&mut self.reward_accounts);
+        reward_accounts
+            .entry(stake_credential)
+            .or_insert(Lovelace(0));
+    }
+
     /// Advance the ledger tip through a Byron Epoch Boundary Block (EBB).
     ///
     /// EBBs carry no transactions and do not mutate the UTxO set, stake

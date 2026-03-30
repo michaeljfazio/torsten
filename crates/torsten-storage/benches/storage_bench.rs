@@ -96,7 +96,7 @@ fn populate_chaindb_with_config(
     count: u64,
     config: &ImmutableConfig,
 ) -> (ChainDB, Vec<Hash32>) {
-    let mut db = ChainDB::open_with_config(path, config).unwrap();
+    let mut db = ChainDB::open_with_config(path, config, SECURITY_PARAM_K as usize).unwrap();
     let mut hashes = Vec::with_capacity(count as usize);
     for i in 0..count {
         let hash = make_hash(i);

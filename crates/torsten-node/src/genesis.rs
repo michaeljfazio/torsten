@@ -6,7 +6,7 @@ use torsten_ledger::SlotConfig;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_primitives::transaction::Rational;
 use torsten_primitives::value::Lovelace;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Byron genesis
@@ -270,6 +270,54 @@ pub struct ShelleyGenesis {
     pub slots_per_k_e_s_period: u64,
     pub update_quorum: u64,
     pub protocol_params: ShelleyGenesisProtocolParams,
+    /// Genesis delegation keys: genesis_credential_hash → (delegate_hash, vrf_hash).
+    /// Present on all networks; used for BFT overlay in early Shelley.
+    #[serde(default)]
+    pub gen_delegs: HashMap<String, GenDelegPair>,
+    /// Initial UTxO set for the Shelley era. Keys are bech32-encoded Shelley
+    /// addresses, values are lovelace amounts. Empty on mainnet/preview/preprod;
+    /// used by custom devnets.
+    #[serde(default)]
+    pub initial_funds: HashMap<String, u64>,
+    /// Initial staking configuration: pool registrations and stake delegations.
+    /// Absent on mainnet/preview/preprod; used by custom devnets.
+    #[serde(default)]
+    pub staking: Option<ShelleyGenesisStaking>,
+}
+
+/// A genesis delegation pair: delegate key hash and VRF key hash.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenDelegPair {
+    pub delegate: String,
+    pub vrf: String,
+}
+
+/// Initial staking configuration from Shelley genesis.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ShelleyGenesisStaking {
+    /// Pool registrations: pool_id_hex → pool parameters.
+    #[serde(default)]
+    pub pools: HashMap<String, ShelleyGenesisPool>,
+    /// Stake delegations: stake_credential_hex → pool_id_hex.
+    #[serde(default)]
+    pub stake: HashMap<String, String>,
+}
+
+/// A pool registration entry in Shelley genesis staking config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelleyGenesisPool {
+    pub cost: u64,
+    pub margin: f64,
+    #[allow(dead_code)] // deserialized but not used for ledger state
+    pub metadata: Option<serde_json::Value>,
+    pub owners: Vec<String>,
+    pub pledge: u64,
+    /// VRF key hash (hex-encoded).
+    pub public_key: String,
+    #[allow(dead_code)] // deserialized but not used for ledger state
+    pub relays: Vec<serde_json::Value>,
+    pub reward_account: serde_json::Value,
 }
 
 /// Protocol parameters as specified in Shelley genesis
@@ -362,6 +410,90 @@ impl ShelleyGenesis {
             zero_slot: 0,
             slot_length: slot_length_ms,
         }
+    }
+
+    /// Convert genesis delegations to wire-format triples for N2C encoding.
+    ///
+    /// Each entry is (genesis_key_hash_28, delegate_key_hash_28, vrf_hash_32)
+    /// as raw bytes. Entries that fail hex-decoding or have wrong lengths are
+    /// skipped with a warning.
+    pub fn gen_delegs_entries(&self) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let mut entries = Vec::with_capacity(self.gen_delegs.len());
+        for (genesis_hash_hex, pair) in &self.gen_delegs {
+            let genesis_hash = match hex::decode(genesis_hash_hex) {
+                Ok(b) if b.len() == 28 => b,
+                _ => {
+                    warn!(
+                        hash = %genesis_hash_hex,
+                        "Shelley genesis: skipping genDeleg with invalid genesis key hash"
+                    );
+                    continue;
+                }
+            };
+            let delegate_hash = match hex::decode(&pair.delegate) {
+                Ok(b) if b.len() == 28 => b,
+                _ => {
+                    warn!(
+                        hash = %pair.delegate,
+                        "Shelley genesis: skipping genDeleg with invalid delegate hash"
+                    );
+                    continue;
+                }
+            };
+            let vrf_hash = match hex::decode(&pair.vrf) {
+                Ok(b) if b.len() == 32 => b,
+                _ => {
+                    warn!(
+                        hash = %pair.vrf,
+                        "Shelley genesis: skipping genDeleg with invalid VRF hash"
+                    );
+                    continue;
+                }
+            };
+            entries.push((genesis_hash, delegate_hash, vrf_hash));
+        }
+        entries
+    }
+
+    /// Extract initial UTxO entries from Shelley genesis `initialFunds`.
+    ///
+    /// Each entry maps a Shelley address (bech32 or hex-encoded) to a lovelace
+    /// amount. The resulting `GenesisUtxoEntry` can be fed to
+    /// `seed_genesis_utxos()` since the Haskell node uses the same TxId
+    /// derivation as Byron genesis: `TxId = Blake2b_256(raw_address_bytes)`,
+    /// `TxIx = 0`.
+    pub fn initial_utxos(&self) -> Vec<GenesisUtxoEntry> {
+        let mut entries = Vec::with_capacity(self.initial_funds.len());
+        for (addr_str, lovelace) in &self.initial_funds {
+            if *lovelace == 0 {
+                continue;
+            }
+            // Try bech32 first, then hex (Haskell accepts both formats)
+            let address = if let Ok((_hrp, data)) = bech32::decode(addr_str) {
+                data
+            } else if let Ok(data) = hex::decode(addr_str) {
+                data
+            } else {
+                warn!(
+                    address = %addr_str,
+                    "Shelley genesis: skipping initialFunds entry with unparseable address"
+                );
+                continue;
+            };
+            entries.push(GenesisUtxoEntry {
+                address,
+                lovelace: *lovelace,
+            });
+        }
+        if !entries.is_empty() {
+            let total: u64 = entries.iter().map(|e| e.lovelace).sum();
+            info!(
+                count = entries.len(),
+                total_lovelace = total,
+                "Shelley genesis: parsed initialFunds"
+            );
+        }
+        entries
     }
 }
 
@@ -1321,5 +1453,206 @@ mod tests {
         assert_eq!(utxos.len(), 2, "Should have 1 non-AVVM + 1 AVVM");
         let total: u64 = utxos.iter().map(|e| e.lovelace).sum();
         assert_eq!(total, 3000000);
+    }
+
+    #[test]
+    fn test_shelley_genesis_gen_delegs() {
+        let json = r#"{
+            "networkMagic": 2,
+            "networkId": "Testnet",
+            "systemStart": "2022-10-25T00:00:00Z",
+            "activeSlotsCoeff": 0.05,
+            "securityParam": 432,
+            "epochLength": 86400,
+            "slotLength": 1,
+            "maxLovelaceSupply": 45000000000000000,
+            "maxKESEvolutions": 62,
+            "slotsPerKESPeriod": 129600,
+            "updateQuorum": 5,
+            "protocolParams": {
+                "minFeeA": 44, "minFeeB": 155381, "maxBlockBodySize": 65536,
+                "maxTxSize": 16384, "maxBlockHeaderSize": 1100, "keyDeposit": 2000000,
+                "poolDeposit": 500000000, "eMax": 18, "nOpt": 150, "a0": 0.3,
+                "rho": 0.003, "tau": 0.2, "minPoolCost": 340000000,
+                "protocolVersion": { "major": 6, "minor": 0 }
+            },
+            "genDelegs": {
+                "12b0f443d02861948a0fce9541916b014e8402984c7b83ad70a834ce": {
+                    "delegate": "7c54a168c731f2f44ced620f3cca7c2bd90731cab223d5167aa994e6",
+                    "vrf": "62d546a35e1be66a2b06e29558ef33f4222f1c466adbb59b52d800964d4e60ec"
+                },
+                "93fd5083ff20e7ab5570948831730073143bea5a5d5539852ed45889": {
+                    "delegate": "3b783a80aeceb95567b3468bfcb4a9a57a904b02e6eb7ca5a85fda81",
+                    "vrf": "50ca594e6c1aa30dce4e9c2d3a5c3e0a37a4e84d2d8f23f42fded2bd73a132e7"
+                }
+            }
+        }"#;
+
+        let genesis: ShelleyGenesis = serde_json::from_str(json).unwrap();
+        assert_eq!(genesis.gen_delegs.len(), 2);
+
+        let entries = genesis.gen_delegs_entries();
+        assert_eq!(entries.len(), 2);
+
+        // Verify byte lengths: genesis key hash = 28, delegate hash = 28, VRF hash = 32
+        for (genesis_hash, delegate_hash, vrf_hash) in &entries {
+            assert_eq!(
+                genesis_hash.len(),
+                28,
+                "Genesis key hash should be 28 bytes"
+            );
+            assert_eq!(delegate_hash.len(), 28, "Delegate hash should be 28 bytes");
+            assert_eq!(vrf_hash.len(), 32, "VRF hash should be 32 bytes");
+        }
+    }
+
+    #[test]
+    fn test_shelley_genesis_gen_delegs_from_preview_file() {
+        // Load the actual preview Shelley genesis and verify genDelegs parse
+        let path = std::path::Path::new("../../config/preview-shelley-genesis.json");
+        if !path.exists() {
+            return; // skip if config files not available
+        }
+        let (genesis, _hash) = ShelleyGenesis::load_with_hash(path).unwrap();
+        let entries = genesis.gen_delegs_entries();
+        assert!(
+            !entries.is_empty(),
+            "Preview Shelley genesis should have genDelegs"
+        );
+        // Preview has 7 genesis delegates
+        assert_eq!(entries.len(), 7);
+    }
+
+    #[test]
+    fn test_shelley_genesis_initial_funds() {
+        let json = r#"{
+            "networkMagic": 42,
+            "networkId": "Testnet",
+            "systemStart": "2024-01-01T00:00:00Z",
+            "activeSlotsCoeff": 0.05,
+            "securityParam": 10,
+            "epochLength": 500,
+            "slotLength": 1,
+            "maxLovelaceSupply": 45000000000000000,
+            "maxKESEvolutions": 62,
+            "slotsPerKESPeriod": 129600,
+            "updateQuorum": 5,
+            "protocolParams": {
+                "minFeeA": 44, "minFeeB": 155381, "maxBlockBodySize": 65536,
+                "maxTxSize": 16384, "maxBlockHeaderSize": 1100, "keyDeposit": 2000000,
+                "poolDeposit": 500000000, "eMax": 18, "nOpt": 150, "a0": 0.3,
+                "rho": 0.003, "tau": 0.2, "minPoolCost": 340000000,
+                "protocolVersion": { "major": 6, "minor": 0 }
+            },
+            "initialFunds": {
+                "6000000000000000000000000000000000000000000000000000000001": 1000000000,
+                "6000000000000000000000000000000000000000000000000000000002": 2000000000
+            }
+        }"#;
+
+        let genesis: ShelleyGenesis = serde_json::from_str(json).unwrap();
+        assert_eq!(genesis.initial_funds.len(), 2);
+
+        let utxos = genesis.initial_utxos();
+        assert_eq!(utxos.len(), 2);
+
+        let total: u64 = utxos.iter().map(|e| e.lovelace).sum();
+        assert_eq!(total, 3000000000);
+
+        // Verify addresses are valid decoded bytes
+        for utxo in &utxos {
+            assert!(
+                !utxo.address.is_empty(),
+                "Address bytes should not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shelley_genesis_staking() {
+        let json = r#"{
+            "networkMagic": 42,
+            "networkId": "Testnet",
+            "systemStart": "2024-01-01T00:00:00Z",
+            "activeSlotsCoeff": 0.05,
+            "securityParam": 10,
+            "epochLength": 500,
+            "slotLength": 1,
+            "maxLovelaceSupply": 45000000000000000,
+            "maxKESEvolutions": 62,
+            "slotsPerKESPeriod": 129600,
+            "updateQuorum": 5,
+            "protocolParams": {
+                "minFeeA": 44, "minFeeB": 155381, "maxBlockBodySize": 65536,
+                "maxTxSize": 16384, "maxBlockHeaderSize": 1100, "keyDeposit": 2000000,
+                "poolDeposit": 500000000, "eMax": 18, "nOpt": 150, "a0": 0.3,
+                "rho": 0.003, "tau": 0.2, "minPoolCost": 340000000,
+                "protocolVersion": { "major": 6, "minor": 0 }
+            },
+            "staking": {
+                "pools": {
+                    "00000000000000000000000000000001": {
+                        "cost": 340000000,
+                        "margin": 0.02,
+                        "metadata": null,
+                        "owners": ["00000000000000000000000000000099"],
+                        "pledge": 100000000,
+                        "publicKey": "62d546a35e1be66a2b06e29558ef33f4222f1c466adbb59b52d800964d4e60ec",
+                        "relays": [],
+                        "rewardAccount": {
+                            "credential": { "keyHash": "00000000000000000000000000000099" },
+                            "network": "Testnet"
+                        }
+                    }
+                },
+                "stake": {
+                    "00000000000000000000000000000099": "00000000000000000000000000000001"
+                }
+            }
+        }"#;
+
+        let genesis: ShelleyGenesis = serde_json::from_str(json).unwrap();
+        let staking = genesis.staking.as_ref().unwrap();
+        assert_eq!(staking.pools.len(), 1);
+        assert_eq!(staking.stake.len(), 1);
+
+        // Verify pool fields
+        let pool = staking.pools.values().next().unwrap();
+        assert_eq!(pool.cost, 340000000);
+        assert_eq!(pool.pledge, 100000000);
+        assert_eq!(pool.owners.len(), 1);
+    }
+
+    #[test]
+    fn test_shelley_genesis_empty_optional_fields() {
+        // Verify that ShelleyGenesis parses correctly when genDelegs,
+        // initialFunds, and staking are absent (mainnet/preview/preprod case)
+        let json = r#"{
+            "networkMagic": 2,
+            "networkId": "Testnet",
+            "systemStart": "2022-10-25T00:00:00Z",
+            "activeSlotsCoeff": 0.05,
+            "securityParam": 432,
+            "epochLength": 86400,
+            "slotLength": 1,
+            "maxLovelaceSupply": 45000000000000000,
+            "maxKESEvolutions": 62,
+            "slotsPerKESPeriod": 129600,
+            "updateQuorum": 5,
+            "protocolParams": {
+                "minFeeA": 44, "minFeeB": 155381, "maxBlockBodySize": 65536,
+                "maxTxSize": 16384, "maxBlockHeaderSize": 1100, "keyDeposit": 2000000,
+                "poolDeposit": 500000000, "eMax": 18, "nOpt": 150, "a0": 0.3,
+                "rho": 0.003, "tau": 0.2, "minPoolCost": 340000000,
+                "protocolVersion": { "major": 6, "minor": 0 }
+            }
+        }"#;
+
+        let genesis: ShelleyGenesis = serde_json::from_str(json).unwrap();
+        assert!(genesis.gen_delegs.is_empty());
+        assert!(genesis.initial_funds.is_empty());
+        assert!(genesis.staking.is_none());
+        assert!(genesis.gen_delegs_entries().is_empty());
+        assert!(genesis.initial_utxos().is_empty());
     }
 }

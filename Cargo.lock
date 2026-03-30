@@ -3663,6 +3663,7 @@ version = "0.4.6-alpha"
 dependencies = [
  "anyhow",
  "base64",
+ "bech32 0.11.1",
  "bs58",
  "chrono",
  "clap",

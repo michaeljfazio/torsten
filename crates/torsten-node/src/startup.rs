@@ -443,7 +443,7 @@ fn replay_immutable_gap(
 ///   representing the initial chain fragment from the VolatileDB (oldest first).
 ///   These are replayed as deltas on top of the anchor.
 /// - `k` — Security parameter (maximum rollback depth). Callers should pass
-///   the value from the genesis configuration (`SECURITY_PARAM_K = 2 160`).
+///   the value from the genesis configuration (e.g. mainnet k=2160, preview k=432).
 ///
 /// # Returns
 ///
@@ -628,6 +628,7 @@ mod tests {
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::protocol_params::ProtocolParameters;
     use torsten_primitives::time::SlotNo;
+    use torsten_storage::chain_db::DEFAULT_SECURITY_PARAM_K;
 
     // ── InvalidBlockCache ─────────────────────────────────────────────────────
 
@@ -845,7 +846,7 @@ mod tests {
             &chain_db,
             Some((SlotNo(0), Hash32::ZERO)),
             &[],
-            2160,
+            DEFAULT_SECURITY_PARAM_K as u64,
         )
         .unwrap();
 
@@ -869,7 +870,14 @@ mod tests {
         let chain_db = ChainDB::open(db_path).unwrap();
 
         // No immutable tip — fresh chain.
-        let seq = recover_ledger_seq(db_path, &chain_db, None, &[], 2160).unwrap();
+        let seq = recover_ledger_seq(
+            db_path,
+            &chain_db,
+            None,
+            &[],
+            DEFAULT_SECURITY_PARAM_K as u64,
+        )
+        .unwrap();
 
         // Should produce a genesis-anchored LedgerSeq with no deltas.
         assert_eq!(seq.len(), 0);
@@ -889,7 +897,7 @@ mod tests {
             &chain_db,
             Some((SlotNo(100), Hash32::from_bytes([5u8; 32]))),
             &[],
-            2160,
+            DEFAULT_SECURITY_PARAM_K as u64,
         );
 
         assert!(

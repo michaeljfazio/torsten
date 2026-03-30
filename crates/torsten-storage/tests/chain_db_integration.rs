@@ -6,7 +6,7 @@
 use torsten_primitives::block::Point;
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::time::{BlockNo, SlotNo};
-use torsten_storage::chain_db::SECURITY_PARAM_K;
+use torsten_storage::chain_db::DEFAULT_SECURITY_PARAM_K;
 use torsten_storage::ChainDB;
 
 /// Create a deterministic hash from a u64 block number.
@@ -36,7 +36,7 @@ fn test_write_flush_read_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = ChainDB::open(dir.path()).unwrap();
 
-    let total = SECURITY_PARAM_K as u64 + 100;
+    let total = DEFAULT_SECURITY_PARAM_K as u64 + 100;
     build_chain(&mut db, total);
 
     // Verify tip before flush
@@ -67,7 +67,7 @@ fn test_rollback_after_flush() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = ChainDB::open(dir.path()).unwrap();
 
-    let total = SECURITY_PARAM_K as u64 + 200;
+    let total = DEFAULT_SECURITY_PARAM_K as u64 + 200;
     build_chain(&mut db, total);
 
     // Flush 200 blocks to immutable
@@ -117,7 +117,7 @@ fn test_crash_recovery_reopen() {
     // Phase 1: write blocks and flush some to immutable
     {
         let mut db = ChainDB::open(dir.path()).unwrap();
-        let total = SECURITY_PARAM_K as u64 + 50;
+        let total = DEFAULT_SECURITY_PARAM_K as u64 + 50;
         build_chain(&mut db, total);
 
         let flushed = db.flush_to_immutable().unwrap();

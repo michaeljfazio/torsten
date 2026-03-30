@@ -37,8 +37,12 @@ pub enum ChainDBError {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// The security parameter k (number of blocks before immutability)
-pub const SECURITY_PARAM_K: usize = 2160;
+/// Default security parameter k (number of blocks before immutability).
+///
+/// This is the mainnet value. For testnets (e.g. preview k=432, preprod k=432),
+/// the actual value should be read from Byron genesis `protocolConsts.k` and
+/// passed to [`ChainDB::open_with_config`].
+pub const DEFAULT_SECURITY_PARAM_K: usize = 2160;
 
 // ---------------------------------------------------------------------------
 // ChainDB
@@ -57,6 +61,9 @@ pub struct ChainDB {
     /// The highest block_no that has already been flushed to ImmutableDB.
     /// Avoids re-scanning from block 1 on every `flush_to_immutable` call.
     last_flushed_block_no: u64,
+    /// Security parameter k — blocks deeper than k from the tip are flushed
+    /// to immutable storage. Read from Byron genesis `protocolConsts.k`.
+    security_param_k: usize,
 }
 
 impl ChainDB {
@@ -66,15 +73,21 @@ impl ChainDB {
     /// chunk files and writing new ones. VolatileDB starts empty (re-synced
     /// from peers on restart).
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
-        Self::open_with_config(db_path, &ImmutableConfig::default())
+        Self::open_with_config(
+            db_path,
+            &ImmutableConfig::default(),
+            DEFAULT_SECURITY_PARAM_K,
+        )
     }
 
-    /// Open or create a ChainDB at the given path with the given ImmutableDB config.
+    /// Open or create a ChainDB at the given path with the given ImmutableDB config
+    /// and security parameter k (number of blocks to retain in volatile storage).
     pub fn open_with_config(
         db_path: &Path,
         config: &ImmutableConfig,
+        k: usize,
     ) -> Result<Self, ChainDBError> {
-        debug!(path = %db_path.display(), k = SECURITY_PARAM_K, index_type = ?config.index_type, "Opening ChainDB");
+        debug!(path = %db_path.display(), k, index_type = ?config.index_type, "Opening ChainDB");
         std::fs::create_dir_all(db_path)?;
 
         let immutable_dir = db_path.join("immutable");
@@ -126,6 +139,7 @@ impl ChainDB {
             volatile,
             immutable_tip,
             last_flushed_block_no,
+            security_param_k: k,
         })
     }
 
@@ -136,6 +150,11 @@ impl ChainDB {
     pub fn open_for_bulk_import(path: &Path) -> Result<Self, ChainDBError> {
         debug!(path = %path.display(), "Opening ChainDB for bulk import");
         Self::open(path)
+    }
+
+    /// The security parameter k used by this ChainDB instance.
+    pub fn security_param_k(&self) -> usize {
+        self.security_param_k
     }
 
     // -- Writes -------------------------------------------------------------
@@ -629,11 +648,11 @@ impl ChainDB {
         };
 
         let tip_block_no = vol_tip.2;
-        if tip_block_no <= SECURITY_PARAM_K as u64 {
+        if tip_block_no <= self.security_param_k as u64 {
             return Ok(0); // Not enough blocks to finalize anything
         }
 
-        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let finalize_up_to_block_no = tip_block_no - self.security_param_k as u64;
         let start_block_no = self.last_flushed_block_no + 1;
 
         // Walk the canonical selected-chain fragment (oldest → newest) and
@@ -704,11 +723,11 @@ impl ChainDB {
         };
 
         let tip_block_no = vol_tip.2;
-        if tip_block_no <= SECURITY_PARAM_K as u64 {
+        if tip_block_no <= self.security_param_k as u64 {
             return Ok(0);
         }
 
-        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let finalize_up_to_block_no = tip_block_no - self.security_param_k as u64;
         let start_block_no = self.last_flushed_block_no + 1;
 
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
@@ -770,11 +789,11 @@ impl ChainDB {
         };
 
         let tip_block_no = vol_tip.2;
-        if tip_block_no <= SECURITY_PARAM_K as u64 {
+        if tip_block_no <= self.security_param_k as u64 {
             return Ok(0);
         }
 
-        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let finalize_up_to_block_no = tip_block_no - self.security_param_k as u64;
         let start_block_no = self.last_flushed_block_no + 1;
 
         let mut to_finalize: Vec<(u64, Hash32, u64, Vec<u8>)> = Vec::new();
@@ -858,11 +877,11 @@ impl ChainDB {
         };
 
         let tip_block_no = vol_tip.2;
-        if tip_block_no <= SECURITY_PARAM_K as u64 {
+        if tip_block_no <= self.security_param_k as u64 {
             return Ok(0);
         }
 
-        let finalize_up_to_block_no = tip_block_no - SECURITY_PARAM_K as u64;
+        let finalize_up_to_block_no = tip_block_no - self.security_param_k as u64;
         let start_block_no = self.last_flushed_block_no + 1;
 
         // Walk the canonical chain fragment (oldest → newest), applying both
@@ -1242,9 +1261,9 @@ mod tests {
         let mut db = ChainDB::open(dir.path()).unwrap();
 
         // Add k+10 blocks (enough to finalize 10)
-        let total = (SECURITY_PARAM_K + 10) as u8;
+        let total = (DEFAULT_SECURITY_PARAM_K + 10) as u8;
         // We can't use u8 for >255, so use a loop with u64
-        for i in 1..=(SECURITY_PARAM_K as u64 + 10) {
+        for i in 1..=(DEFAULT_SECURITY_PARAM_K as u64 + 10) {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
@@ -1275,7 +1294,43 @@ mod tests {
         assert!(db.has_block(&first_hash));
 
         // Volatile should have k blocks remaining
-        assert_eq!(db.volatile.len(), SECURITY_PARAM_K);
+        assert_eq!(db.volatile.len(), DEFAULT_SECURITY_PARAM_K);
+    }
+
+    /// Verify that a custom security parameter k is respected by flush_to_immutable.
+    ///
+    /// Uses a small k=10 so that adding 20 blocks should flush exactly 10.
+    #[test]
+    fn test_custom_security_param_k() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom_k: usize = 10;
+        let mut db = ChainDB::open_with_config(
+            dir.path(),
+            &crate::config::ImmutableConfig::default(),
+            custom_k,
+        )
+        .unwrap();
+
+        assert_eq!(db.security_param_k(), custom_k);
+
+        // Add 20 blocks (k + 10)
+        for i in 1..=20u64 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
+            let hash = Hash32::from_bytes(hash_bytes);
+            let mut prev_bytes = [0u8; 32];
+            prev_bytes[0..8].copy_from_slice(&(i - 1).to_be_bytes());
+            let prev = Hash32::from_bytes(prev_bytes);
+            db.add_block(hash, SlotNo(i * 10), BlockNo(i), prev, vec![0x80])
+                .unwrap();
+        }
+
+        // Flush — should finalize 10 blocks (20 - k)
+        let flushed = db.flush_to_immutable().unwrap();
+        assert_eq!(flushed, 10);
+
+        // Volatile should retain exactly k blocks
+        assert_eq!(db.volatile.len(), custom_k);
     }
 
     /// Verify that `flush_to_immutable_loe` respects the LoE slot ceiling.
@@ -1290,7 +1345,7 @@ mod tests {
         let mut db = ChainDB::open(dir.path()).unwrap();
 
         // Add k+10 blocks.  Each block i has slot = i * 10.
-        for i in 1..=(SECURITY_PARAM_K as u64 + 10) {
+        for i in 1..=(DEFAULT_SECURITY_PARAM_K as u64 + 10) {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
@@ -1325,7 +1380,7 @@ mod tests {
         // Blocks 6+ are still volatile (within LoE constraint).
         assert_eq!(
             db.volatile.len(),
-            SECURITY_PARAM_K + 5,
+            DEFAULT_SECURITY_PARAM_K + 5,
             "Blocks beyond loe_slot must remain in volatile"
         );
 
@@ -1340,7 +1395,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut db = ChainDB::open(dir.path()).unwrap();
 
-        for i in 1..=(SECURITY_PARAM_K as u64 + 10) {
+        for i in 1..=(DEFAULT_SECURITY_PARAM_K as u64 + 10) {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
@@ -1362,7 +1417,7 @@ mod tests {
         assert_eq!(flushed, 0, "LoE=0 must block all immutable advancement");
         assert_eq!(
             db.volatile.len(),
-            SECURITY_PARAM_K + 10,
+            DEFAULT_SECURITY_PARAM_K + 10,
             "All blocks must stay volatile when LoE=0"
         );
     }
@@ -1427,7 +1482,7 @@ mod tests {
         let mut db = ChainDB::open(dir.path()).unwrap();
 
         // Add blocks and flush some to immutable
-        for i in 1..=(SECURITY_PARAM_K as u64 + 5) {
+        for i in 1..=(DEFAULT_SECURITY_PARAM_K as u64 + 5) {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
@@ -1594,7 +1649,8 @@ mod tests {
             mmap_load_factor: 0.7,
             mmap_initial_capacity: 0,
         };
-        let mut db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+        let mut db =
+            ChainDB::open_with_config(dir.path(), &config, DEFAULT_SECURITY_PARAM_K).unwrap();
 
         let hash = make_hash(1);
         let prev = make_hash(0);
@@ -1619,14 +1675,15 @@ mod tests {
         let hash = make_hash(1);
 
         {
-            let mut db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+            let mut db =
+                ChainDB::open_with_config(dir.path(), &config, DEFAULT_SECURITY_PARAM_K).unwrap();
             db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1")])
                 .unwrap();
             db.persist().unwrap();
         }
 
         // Reopen with mmap config — should find the block
-        let db = ChainDB::open_with_config(dir.path(), &config).unwrap();
+        let db = ChainDB::open_with_config(dir.path(), &config, DEFAULT_SECURITY_PARAM_K).unwrap();
         assert!(db.has_block(&hash));
         assert_eq!(db.tip_slot(), SlotNo(100));
     }
@@ -1968,7 +2025,7 @@ mod tests {
             Hash32::from_bytes(bytes)
         };
 
-        let k = SECURITY_PARAM_K as u64;
+        let k = DEFAULT_SECURITY_PARAM_K as u64;
 
         // Build canonical chain: blocks 1 .. k+3
         // Each block i has slot = i and is linked to block i-1.

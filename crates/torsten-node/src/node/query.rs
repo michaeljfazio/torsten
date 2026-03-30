@@ -903,7 +903,7 @@ impl Node {
                         min_utxo_value: gp.min_u_tx_o_value,
                         min_pool_cost: gp.min_pool_cost,
                     },
-                    gen_delegs: Vec::new(),
+                    gen_delegs: g.gen_delegs_entries(),
                 }
             }),
         };

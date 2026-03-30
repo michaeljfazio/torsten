@@ -555,7 +555,7 @@ impl Default for SnapshotScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain_db::{ChainDB, SECURITY_PARAM_K};
+    use crate::chain_db::{ChainDB, DEFAULT_SECURITY_PARAM_K};
     use tempfile::TempDir;
     use torsten_primitives::hash::Hash32;
     use torsten_primitives::time::{BlockNo, EpochNo, SlotNo};
@@ -983,8 +983,8 @@ mod tests {
     #[test]
     fn security_param_k_is_correct() {
         // mainnet k = 2160
-        assert_eq!(SECURITY_PARAM_K, 2160);
-        let copier = CopyToImmutable::new(SECURITY_PARAM_K);
+        assert_eq!(DEFAULT_SECURITY_PARAM_K, 2160);
+        let copier = CopyToImmutable::new(DEFAULT_SECURITY_PARAM_K);
         assert_eq!(copier.k, 2160);
     }
 }
