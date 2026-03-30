@@ -88,13 +88,13 @@ Only blocks in the VolatileDB (the last k=2160 blocks) can be rolled back. Block
 
 ## Pipelined ChainSync
 
-Torsten uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each `MsgRollForward` before requesting the next header, the node sends up to 150 `MsgRequestNext` messages concurrently (configurable via `TORSTEN_PIPELINE_DEPTH`).
+Torsten uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each `MsgRollForward` before requesting the next header, the node sends up to 300 `MsgRequestNext` messages concurrently (configurable via `TORSTEN_PIPELINE_DEPTH`).
 
 This bypasses pallas' serial ChainSync state machine in favor of a custom implementation that manages the pipeline depth directly.
 
 ## Performance Characteristics
 
-- **Header collection** is pipelined per peer (up to 150 in-flight requests, configurable via `TORSTEN_PIPELINE_DEPTH`)
+- **Header collection** is pipelined per peer (up to 300 in-flight requests, configurable via `TORSTEN_PIPELINE_DEPTH`)
 - **Block fetching** is parallelized across up to 4 concurrent peers
 - **Block processing** is batched (500 blocks per batch) with single-lock acquisition
 - **Throughput** depends on network latency, peer count, and block sizes

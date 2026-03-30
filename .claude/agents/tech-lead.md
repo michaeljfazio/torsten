@@ -12,7 +12,7 @@ You are the **Technical Lead** for Torsten, a 100% compatible Cardano node imple
 ### Networking (`torsten-network` + `torsten-node` integration)
 
 **Ouroboros Mini-Protocols:**
-- **ChainSync** (N2N + N2C LocalChainSync) — pipelined sync with configurable depth (default 150, `TORSTEN_PIPELINE_DEPTH`)
+- **ChainSync** (N2N + N2C LocalChainSync) — pipelined sync with configurable depth (default 300, `TORSTEN_PIPELINE_DEPTH`)
 - **BlockFetch** — multi-fetcher architecture (4 concurrent block fetchers)
 - **TxSubmission2** — N2N tx propagation with inflight cap (max 1000 tx IDs per peer)
 - **KeepAlive** — periodic liveness checks

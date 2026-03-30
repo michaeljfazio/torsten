@@ -15,6 +15,21 @@ use super::{decode_message, encode_message, KeepAliveMessage};
 /// Default keepalive ping interval.
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Timeout for waiting for a pong response after sending a ping.
+///
+/// If the remote peer does not respond within this window, the attempt is
+/// counted as a failure. After `MAX_CONSECUTIVE_FAILURES` consecutive
+/// timeouts, the KeepAlive client returns `ProtocolError::KeepAliveTimeout`
+/// so the connection can be closed and the peer demoted.
+const KEEPALIVE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum consecutive pong timeouts before escalating to connection close.
+///
+/// After this many consecutive unresponded pings, the peer is considered
+/// unresponsive and the KeepAlive client exits with an error. The connection
+/// lifecycle manager should close the connection and record a failure.
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
 /// KeepAlive client that periodically pings the remote peer.
 pub struct KeepAliveClient {
     /// Interval between pings.
@@ -37,6 +52,7 @@ impl KeepAliveClient {
     pub async fn run(&self, channel: &mut MuxChannel) -> Result<Option<Duration>, ProtocolError> {
         let mut cookie: u16 = 0;
         let mut last_rtt: Option<Duration> = None;
+        let mut consecutive_failures: u32 = 0;
 
         loop {
             // Check for cancellation before sending
@@ -52,7 +68,7 @@ impl KeepAliveClient {
             let ping = encode_message(&KeepAliveMessage::MsgKeepAlive(cookie));
             channel.send(ping).await.map_err(ProtocolError::from)?;
 
-            // Wait for response or cancellation
+            // Wait for response, cancellation, or timeout
             tokio::select! {
                 result = channel.recv() => {
                     let response_bytes = result.map_err(ProtocolError::from)?;
@@ -74,6 +90,8 @@ impl KeepAliveClient {
                                     ),
                                 });
                             }
+                            // Successful pong — reset failure counter.
+                            consecutive_failures = 0;
                             last_rtt = Some(start.elapsed());
                             tracing::debug!(
                                 cookie,
@@ -95,6 +113,21 @@ impl KeepAliveClient {
                     let msg = encode_message(&KeepAliveMessage::MsgDone);
                     let _ = channel.send(msg).await;
                     return Ok(last_rtt);
+                }
+                _ = tokio::time::sleep(KEEPALIVE_RESPONSE_TIMEOUT) => {
+                    // No pong within the deadline — peer may be unresponsive.
+                    consecutive_failures += 1;
+                    tracing::warn!(
+                        cookie,
+                        consecutive_failures,
+                        "keepalive: pong timeout ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})",
+                    );
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        return Err(ProtocolError::KeepAliveTimeout {
+                            consecutive_failures,
+                        });
+                    }
+                    // Continue — try next ping after the sleep interval.
                 }
             }
 
@@ -178,5 +211,79 @@ mod tests {
         let result = client.run(&mut channel).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None); // No RTT measured
+    }
+
+    /// 3 consecutive pong timeouts should trigger KeepAliveTimeout error.
+    #[tokio::test(start_paused = true)]
+    async fn consecutive_timeouts_trigger_escalation() {
+        let (mut channel, mut egress_rx, _ingress_tx) = make_test_channel();
+        let cancel = CancellationToken::new();
+        // Use short interval so the test is fast with paused time.
+        let client = KeepAliveClient::new(Duration::from_millis(100), cancel);
+
+        let handle = tokio::spawn(async move { client.run(&mut channel).await });
+
+        // For each of the 3 expected pings, drain the ping from egress
+        // but never send a pong — let the response timeout fire.
+        for expected_cookie in 0..3u16 {
+            // Read the outgoing MsgKeepAlive.
+            let (_, _, ping_bytes) = egress_rx.recv().await.unwrap();
+            let ping = decode_message(&ping_bytes).unwrap();
+            assert_eq!(ping, KeepAliveMessage::MsgKeepAlive(expected_cookie));
+
+            // Advance past the 30s response timeout + 100ms ping interval.
+            tokio::time::advance(Duration::from_secs(31)).await;
+        }
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ProtocolError::KeepAliveTimeout {
+                consecutive_failures,
+            } => {
+                assert_eq!(consecutive_failures, 3);
+            }
+            other => panic!("expected KeepAliveTimeout, got: {other}"),
+        }
+    }
+
+    /// A successful pong between timeouts resets the failure counter.
+    #[tokio::test(start_paused = true)]
+    async fn success_resets_failure_counter() {
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let client = KeepAliveClient::new(Duration::from_millis(100), cancel);
+
+        let handle = tokio::spawn(async move { client.run(&mut channel).await });
+
+        // Ping 0: timeout (failure 1)
+        let (_, _, ping_bytes) = egress_rx.recv().await.unwrap();
+        let _ = decode_message(&ping_bytes).unwrap();
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        // Ping 1: success (resets counter to 0)
+        let (_, _, ping_bytes) = egress_rx.recv().await.unwrap();
+        let _ = decode_message(&ping_bytes).unwrap();
+        let pong = encode_message(&KeepAliveMessage::MsgKeepAliveResponse(1));
+        ingress_tx.send(Bytes::from(pong)).await.unwrap();
+        // Advance past the interval
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        // Ping 2: timeout (failure 1 again, not 2)
+        let (_, _, ping_bytes) = egress_rx.recv().await.unwrap();
+        let _ = decode_message(&ping_bytes).unwrap();
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        // Ping 3: timeout (failure 2, not 3 — because we reset)
+        let (_, _, ping_bytes) = egress_rx.recv().await.unwrap();
+        let _ = decode_message(&ping_bytes).unwrap();
+
+        // Cancel before a third consecutive failure.
+        cancel_clone.cancel();
+
+        let result = handle.await.unwrap();
+        // Should complete without error (cancelled, not timed out).
+        assert!(result.is_ok());
     }
 }

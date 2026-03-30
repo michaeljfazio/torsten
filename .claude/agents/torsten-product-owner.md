@@ -40,7 +40,7 @@ When evaluating bugs, classify by severity:
 ### 4. Performance Objectives
 Track and assess performance against targets:
 - Preview: 4M blocks replay in ~250s from genesis, ~10 hours full sync
-- Pipelined ChainSync depth 150 (configurable), 4 block fetchers
+- Pipelined ChainSync depth 300 (configurable), 4 block fetchers
 - ImmutableDB: ~10,600 blocks/s replay
 - Mithril import: 4M blocks in ~2 minutes
 - Memory efficiency: snapshot save with BufWriter, cardano-lsm tuning (bloom filter, 256MB cache, 128MB write buffer)

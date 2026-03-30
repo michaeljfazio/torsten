@@ -126,7 +126,7 @@ graph TD
 
 ### Networking (N2N)
 - **Protocol versions**: V14/V15 (matching cardano-node 10.x)
-- **Pipelined ChainSync**: configurable pipeline depth (default 150, via `TORSTEN_PIPELINE_DEPTH`)
+- **Pipelined ChainSync**: configurable pipeline depth (default 300, via `TORSTEN_PIPELINE_DEPTH`)
 - **Multi-peer BlockFetch**: up to 4 concurrent fetchers with chunk-based retry on failure
 - **N2N server**: handshake (magic verification), ChainSync, BlockFetch, KeepAlive, TxSubmission2, PeerSharing
 - **Block relay**: synced blocks announced to downstream peers via broadcast channel (full relay behavior)

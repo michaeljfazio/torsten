@@ -64,7 +64,9 @@ const MAX_BATCH_SIZE: usize = 100;
 /// than this, the entry is purged so the block can be re-fetched from
 /// another peer.  This prevents sync stalls when a peer's TCP connection
 /// dies silently (half-open) and the worker never reports back.
-const IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(120);
+///
+/// Set to 60s to match Haskell's `bfcFetchDeadlinePolicy` fetch deadline.
+const IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Independent block fetch decision task.
 ///

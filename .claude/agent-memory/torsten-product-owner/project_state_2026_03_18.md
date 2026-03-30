@@ -33,7 +33,7 @@ type: project
 - Epoch transitions: DONE (mark/set/go, RUPD deferred timing)
 
 ### N2N Mini-Protocols: ~95% complete
-- ChainSync: DONE (pipelined depth 150)
+- ChainSync: DONE (pipelined depth 300)
 - BlockFetch: DONE (4 fetchers)
 - TxSubmission2: DONE (3 critical bugs fixed)
 - KeepAlive: DONE

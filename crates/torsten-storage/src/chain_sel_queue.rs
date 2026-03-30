@@ -472,7 +472,7 @@ impl ChainSelHandle {
     /// Default MPSC channel capacity.
     ///
     /// Chosen to be large enough to absorb a burst of pipelined block-fetch
-    /// responses (pipeline depth is typically 150) while keeping backpressure
+    /// responses (pipeline depth is typically 300) while keeping backpressure
     /// intact.  When the queue fills the sender will apply natural backpressure
     /// via `await` in [`submit_block`].
     pub const DEFAULT_CHANNEL_CAPACITY: usize = 512;

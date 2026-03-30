@@ -23,6 +23,7 @@ pub(crate) mod sync;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,6 +115,9 @@ pub struct Node {
     /// Receiver for blocks fetched by per-peer BlockFetch workers.
     /// The main run loop consumes these and applies them to the ledger.
     fetched_blocks_rx: Option<mpsc::Receiver<FetchedBlock>>,
+    /// Receiver for peer failure reports from protocol tasks (e.g. fetch timeout).
+    /// The main run loop drains this to call `peer_failed()` for reputation scoring.
+    peer_failure_rx: Option<mpsc::Receiver<SocketAddr>>,
     pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
     pub(crate) peer_manager: Arc<RwLock<NodePeerManager>>,
     pub(crate) socket_path: PathBuf,
@@ -1156,6 +1160,7 @@ impl Node {
             connection_lifecycle: None,
             block_fetch_task: None,
             fetched_blocks_rx: None,
+            peer_failure_rx: None,
             query_handler,
             peer_manager: Arc::new(RwLock::new(NodePeerManager::new(
                 PeerManagerConfig::default(),
@@ -2054,7 +2059,8 @@ impl Node {
         // which creates/tears down protocol tasks on the single per-peer
         // mux connection.
         let (fetched_blocks_tx, fetched_blocks_rx) = mpsc::channel::<FetchedBlock>(1000);
-        let candidate_chains: Arc<RwLock<HashMap<std::net::SocketAddr, CandidateChainState>>> =
+        let (peer_failure_tx, peer_failure_rx) = mpsc::channel::<SocketAddr>(64);
+        let candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
         let connect_timeout = Duration::from_secs(5);
@@ -2089,9 +2095,11 @@ impl Node {
             active_slots_coeff,
             self.metrics.clone(),
             self.mempool.clone(),
+            peer_failure_tx,
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
+        self.peer_failure_rx = Some(peer_failure_rx);
 
         // ─── Spawn BlockFetch Decision Task ──────────────────────────────
         //
@@ -2216,6 +2224,10 @@ impl Node {
             .fetched_blocks_rx
             .take()
             .expect("fetched_blocks_rx was just set");
+        let mut peer_failure_rx = self
+            .peer_failure_rx
+            .take()
+            .expect("peer_failure_rx was just set");
 
         // Forge ticker — fires every second (slot granularity) to check
         // for block production opportunities.  Only active when the node
@@ -2429,11 +2441,22 @@ impl Node {
                         }
                         Err((addr, error)) => {
                             in_flight_connects.remove(&addr);
-                            warn!(%addr, "background cold->warm failed: {error}");
+                            debug!(%addr, "background cold->warm failed: {error}");
                             let mut pm = peer_manager.write().await;
                             pm.peer_failed(&addr);
                         }
                     }
+                }
+
+                // ── Peer failure reports from protocol tasks ────────────
+                //
+                // BlockFetch tasks report timed-out peers here so we can
+                // record the failure for reputation scoring and backoff
+                // without waiting for the mux to die naturally.
+                Some(failed_addr) = peer_failure_rx.recv() => {
+                    let mut pm = peer_manager.write().await;
+                    warn!(%failed_addr, "peer reported as failed by protocol task");
+                    pm.peer_failed(&failed_addr);
                 }
 
                 // ── Forge ticker (block production) ─────────────────────

@@ -2671,70 +2671,123 @@ pub async fn chainsync_client_task(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Phase 2: Find intersection with MsgFindIntersect
+    // Phase 2: Find intersection with MsgFindIntersect (with retry)
     // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Try progressively deeper points if the peer rejects our initial set.
+    // This handles peers on a different fork or peers that have pruned recent
+    // history.  Retry attempts use deeper ImmutableDB historical points
+    // before falling back to Origin.
 
-    let codec_points: Vec<CodecPoint> = known_points.iter().map(to_codec_point).collect();
+    /// Send MsgFindIntersect with the given points and return the result.
+    async fn try_find_intersect(
+        channel: &mut MuxChannel,
+        peer_addr: SocketAddr,
+        points: &[CodecPoint],
+    ) -> Result<Option<CodecPoint>, anyhow::Error> {
+        let find_msg = cs_encode(&ChainSyncMessage::MsgFindIntersect(
+            points
+                .iter()
+                .map(|p| match p {
+                    CodecPoint::Origin => torsten_network::codec::Point::Origin,
+                    CodecPoint::Specific(s, h) => torsten_network::codec::Point::Specific(*s, *h),
+                })
+                .collect(),
+        ));
+        channel
+            .send(find_msg)
+            .await
+            .map_err(|e| anyhow::anyhow!("ChainSync MsgFindIntersect send failed: {e}"))?;
 
-    // Send MsgFindIntersect.
-    let find_msg = cs_encode(&ChainSyncMessage::MsgFindIntersect(
-        codec_points
-            .iter()
-            .map(|p| match p {
-                CodecPoint::Origin => torsten_network::codec::Point::Origin,
-                CodecPoint::Specific(s, h) => torsten_network::codec::Point::Specific(*s, *h),
-            })
-            .collect(),
-    ));
-    channel
-        .send(find_msg)
-        .await
-        .map_err(|e| anyhow::anyhow!("ChainSync MsgFindIntersect send failed: {e}"))?;
+        let response = channel
+            .recv()
+            .await
+            .map_err(|e| anyhow::anyhow!("ChainSync intersection response recv failed: {e}"))?;
+        let intersect_msg = cs_decode(&response)
+            .map_err(|e| anyhow::anyhow!("ChainSync intersection decode failed: {e}"))?;
 
-    // Receive MsgIntersectFound or MsgIntersectNotFound.
-    let response = channel
-        .recv()
-        .await
-        .map_err(|e| anyhow::anyhow!("ChainSync intersection response recv failed: {e}"))?;
-    let intersect_msg = cs_decode(&response)
-        .map_err(|e| anyhow::anyhow!("ChainSync intersection decode failed: {e}"))?;
-
-    let intersection = match intersect_msg {
-        ChainSyncMessage::MsgIntersectFound {
-            point,
-            tip_slot,
-            tip_block_number,
-            ..
-        } => {
-            let prim_point = from_codec_point(&point);
-            info!(
-                %peer_addr,
-                point = %prim_point,
+        match intersect_msg {
+            ChainSyncMessage::MsgIntersectFound {
+                point,
                 tip_slot,
                 tip_block_number,
-                "ChainSync intersection found",
-            );
-            Some(point)
-        }
-        ChainSyncMessage::MsgIntersectNotFound {
-            tip_slot,
-            tip_block_number,
-            ..
-        } => {
-            info!(
-                %peer_addr,
+                ..
+            } => {
+                let prim_point = from_codec_point(&point);
+                info!(
+                    %peer_addr,
+                    point = %prim_point,
+                    tip_slot,
+                    tip_block_number,
+                    "ChainSync intersection found",
+                );
+                Ok(Some(point))
+            }
+            ChainSyncMessage::MsgIntersectNotFound {
                 tip_slot,
                 tip_block_number,
-                "ChainSync no intersection — syncing from Origin",
-            );
-            None
-        }
-        other => {
-            return Err(anyhow::anyhow!(
+                ..
+            } => {
+                info!(
+                    %peer_addr,
+                    tip_slot,
+                    tip_block_number,
+                    "ChainSync MsgIntersectNotFound",
+                );
+                Ok(None)
+            }
+            other => Err(anyhow::anyhow!(
                 "ChainSync unexpected response to MsgFindIntersect: {other:?}"
-            ));
+            )),
         }
-    };
+    }
+
+    // Attempt 1: use the known_points we built above.
+    let codec_points: Vec<CodecPoint> = known_points.iter().map(to_codec_point).collect();
+    let mut intersection = try_find_intersect(&mut channel, peer_addr, &codec_points).await?;
+
+    // Retry with progressively deeper ImmutableDB points if not found.
+    if intersection.is_none() {
+        let retry_depths: &[usize] = &[16, 64, 256];
+        for (attempt, &depth) in retry_depths.iter().enumerate() {
+            let db = chain_db.read().await;
+            let deep_points: Vec<CodecPoint> = db
+                .get_immutable_historical_points(depth)
+                .iter()
+                .map(|(slot, hash)| CodecPoint::Specific(*slot, hash.0))
+                .collect();
+            drop(db);
+
+            if deep_points.is_empty() {
+                // No deeper points available — fall through to Origin.
+                break;
+            }
+
+            warn!(
+                %peer_addr,
+                attempt = attempt + 2,
+                depth,
+                points = deep_points.len(),
+                "ChainSync intersection retry with deeper points",
+            );
+
+            // Include Origin as final fallback in the retry set.
+            let mut retry_points = deep_points;
+            retry_points.push(CodecPoint::Origin);
+
+            if let Some(found) = try_find_intersect(&mut channel, peer_addr, &retry_points).await? {
+                intersection = Some(found);
+                break;
+            }
+        }
+
+        if intersection.is_none() {
+            info!(
+                %peer_addr,
+                "ChainSync no intersection after retries — syncing from Origin",
+            );
+        }
+    }
 
     // Initialize candidate chain state for this peer.
     {

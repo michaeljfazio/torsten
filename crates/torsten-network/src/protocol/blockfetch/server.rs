@@ -56,6 +56,11 @@ use super::{decode_message, encode_message, BlockFetchMessage, TAG_BLOCK};
 
 /// Safety limit on blocks pre-collected per batch response.
 ///
+/// This is a **block count** limit, not a slot count limit.  The slot range
+/// `(from_slot, to_slot)` defines the range boundaries, but the `limit`
+/// parameter passed to `get_blocks_in_range()` caps the number of actual
+/// blocks returned from the iterator.
+///
 /// The Haskell BlockFetch client expects ALL blocks between from_point and
 /// to_point to be served in a single batch.  Sending fewer triggers
 /// `BlockFetchProtocolFailureTooFewBlocks`.  Typical ranges are 10–200

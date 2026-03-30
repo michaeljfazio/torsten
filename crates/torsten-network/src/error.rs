@@ -132,6 +132,12 @@ pub enum MuxError {
     ChannelClosed,
     /// Bearer-level error propagated through the mux layer.
     Bearer(BearerError),
+    /// No SDU data received within the per-SDU read deadline (30s).
+    ///
+    /// Matches Haskell's `sduTimeout` (30 seconds). When the remote peer
+    /// stops sending data mid-connection (e.g. silent TCP failure or stalled
+    /// peer), this timeout fires and the mux tears down the bearer.
+    SduReadTimeout,
 }
 
 impl fmt::Display for MuxError {
@@ -160,6 +166,7 @@ impl fmt::Display for MuxError {
             Self::BearerClosed => write!(f, "bearer closed"),
             Self::ChannelClosed => write!(f, "channel closed"),
             Self::Bearer(e) => write!(f, "bearer: {e}"),
+            Self::SduReadTimeout => write!(f, "SDU read timeout (30s)"),
         }
     }
 }
@@ -276,6 +283,16 @@ pub enum ProtocolError {
         /// Human-readable description of the violation.
         reason: String,
     },
+    /// KeepAlive response timed out repeatedly, indicating an unresponsive peer.
+    ///
+    /// After `consecutive_failures` consecutive pong timeouts (default threshold: 3),
+    /// the KeepAlive client returns this error to signal that the peer should be
+    /// demoted and the connection closed. This provides faster failure detection
+    /// than waiting for the mux to die via TCP timeout or idle detection.
+    KeepAliveTimeout {
+        /// Number of consecutive pong timeouts before giving up.
+        consecutive_failures: u32,
+    },
     /// Multiplexer error propagated through the protocol layer.
     Mux(MuxError),
 }
@@ -312,6 +329,14 @@ impl fmt::Display for ProtocolError {
             }
             Self::BoundsExceeded { protocol, reason } => {
                 write!(f, "{protocol}: bounds exceeded: {reason}")
+            }
+            Self::KeepAliveTimeout {
+                consecutive_failures,
+            } => {
+                write!(
+                    f,
+                    "KeepAlive: {consecutive_failures} consecutive response timeouts"
+                )
             }
             Self::Mux(e) => write!(f, "mux: {e}"),
         }

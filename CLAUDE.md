@@ -90,7 +90,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 - ChainDB write happens BEFORE ledger apply to prevent divergence on failure
 - Epoch transitions use mark/set/go snapshot model with reward distribution from "go" snapshot
 - Governance ratification: DRep/SPO/CC voting thresholds vary by action type (CIP-1694)
-- Pipelined ChainSync bypasses pallas serial state machine; default pipeline depth 150 (configurable via `TORSTEN_PIPELINE_DEPTH`)
+- Pipelined ChainSync bypasses pallas serial state machine; default pipeline depth 300 (configurable via `TORSTEN_PIPELINE_DEPTH`)
 - Ledger-based peer discovery: extracts SPO relay addresses from `pool_params` when past `useLedgerAfterSlot`
 - Pallas 1.0: `DatumOption` (was `PseudoDatumOption`), `Option<T>` (was `Nullable<T>`)
 - Pallas 28-byte hash types (DRep keys, pool voter keys, required signers) must be padded to 32 bytes — do not use `Hash<32>::from()` directly on 28-byte hashes

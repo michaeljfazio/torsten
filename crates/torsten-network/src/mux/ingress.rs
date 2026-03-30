@@ -20,6 +20,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::error::{BearerError, MuxError};
@@ -27,6 +28,13 @@ use crate::mux::segment::{decode_header, Direction, HEADER_SIZE};
 
 /// Reserved protocol ID that is silently discarded on ingress.
 const RESERVED_PROTOCOL_ID: u16 = 1;
+
+/// Per-SDU read deadline matching Haskell's `sduTimeout` (30 seconds).
+///
+/// If no data arrives within this window during a single SDU header or payload
+/// read, the bearer is considered dead and the mux is torn down. The timeout
+/// resets for each SDU — busy connections with frequent traffic never time out.
+const SDU_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Per-protocol ingress channel registration.
 pub(crate) struct IngressRoute {
@@ -69,12 +77,14 @@ impl IngressTask {
             > + Send,
     {
         loop {
-            // Read the 8-byte SDU header
-            let header_bytes = match read_fn(HEADER_SIZE).await {
-                Ok(bytes) => bytes,
-                Err(BearerError::ConnectionReset) => return Ok(()), // clean EOF
-                Err(e) => return Err(MuxError::Bearer(e)),
-            };
+            // Read the 8-byte SDU header with a 30s deadline per Haskell sduTimeout.
+            let header_bytes =
+                match tokio::time::timeout(SDU_READ_TIMEOUT, read_fn(HEADER_SIZE)).await {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(BearerError::ConnectionReset)) => return Ok(()), // clean EOF
+                    Ok(Err(e)) => return Err(MuxError::Bearer(e)),
+                    Err(_elapsed) => return Err(MuxError::SduReadTimeout),
+                };
 
             let header = decode_header(header_bytes[..8].try_into().expect("read exact 8 bytes"));
 
@@ -82,8 +92,9 @@ impl IngressTask {
             if header.protocol_id == RESERVED_PROTOCOL_ID {
                 if header.payload_length > 0 {
                     // Read and discard the payload
-                    let _ = read_fn(header.payload_length as usize)
+                    tokio::time::timeout(SDU_READ_TIMEOUT, read_fn(header.payload_length as usize))
                         .await
+                        .map_err(|_| MuxError::SduReadTimeout)?
                         .map_err(MuxError::Bearer)?;
                 }
                 continue;
@@ -91,8 +102,9 @@ impl IngressTask {
 
             // Read the payload
             let payload = if header.payload_length > 0 {
-                read_fn(header.payload_length as usize)
+                tokio::time::timeout(SDU_READ_TIMEOUT, read_fn(header.payload_length as usize))
                     .await
+                    .map_err(|_| MuxError::SduReadTimeout)?
                     .map_err(MuxError::Bearer)?
             } else {
                 Vec::new()
@@ -300,5 +312,23 @@ mod tests {
         // Only protocol 2 should have received data
         let chunk = rx2.recv().await.unwrap();
         assert_eq!(chunk.as_ref(), &[0x81, 0x01]);
+    }
+
+    /// Verify that a stalled bearer (no data at all) triggers SduReadTimeout.
+    #[tokio::test(start_paused = true)]
+    async fn sdu_read_timeout_on_stalled_bearer() {
+        let routes = HashMap::new();
+        let task = IngressTask::new(routes);
+
+        // read_fn that never resolves — simulates a half-open TCP connection.
+        let result = task
+            .run(|_n: usize| Box::pin(std::future::pending::<Result<Vec<u8>, BearerError>>()))
+            .await;
+
+        // Should timeout after SDU_READ_TIMEOUT (30s).
+        assert!(
+            matches!(result, Err(MuxError::SduReadTimeout)),
+            "expected SduReadTimeout, got: {result:?}"
+        );
     }
 }

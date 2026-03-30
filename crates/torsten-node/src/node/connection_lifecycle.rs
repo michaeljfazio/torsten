@@ -30,6 +30,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Per-range fetch deadline: maximum time a single `BlockFetchClient::fetch_range()`
+/// call is allowed to run before being cancelled.
+///
+/// Matches Haskell's `bfcFetchDeadlinePolicy` (60s). When a peer's TCP connection
+/// is half-open or the remote node stalls mid-batch, this timeout fires, the
+/// blockfetch task exits, and the active fetcher flag is released so another peer
+/// can take over. The peer is also reported as failed to the peer manager for
+/// reputation scoring and exponential backoff.
+const FETCH_RANGE_TIMEOUT: Duration = Duration::from_secs(60);
+
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -200,6 +210,14 @@ pub struct ConnectionLifecycleManager {
 
     /// Shared mempool for TxSubmission2 tx relay to peers.
     mempool: Arc<Mempool>,
+
+    /// Channel for protocol tasks to report peer failures (e.g. fetch timeout).
+    ///
+    /// When a BlockFetch task times out on a peer, it sends the peer address here
+    /// so the main run loop can call `peer_failed()` for reputation scoring and
+    /// exponential backoff. This provides faster failure detection than waiting
+    /// for the mux to die via `cleanup_dead_connections()`.
+    peer_failure_tx: mpsc::Sender<SocketAddr>,
 }
 
 /// Errors from lifecycle management operations.
@@ -249,6 +267,7 @@ impl ConnectionLifecycleManager {
     /// * `active_slots_coeff` — Shelley genesis active slots coefficient (0.05 on mainnet/preview)
     /// * `metrics` — Prometheus metrics handle for recording peer latencies
     /// * `mempool` — Shared mempool for TxSubmission2 tx relay
+    /// * `peer_failure_tx` — Channel for protocol tasks to report peer failures
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
@@ -265,6 +284,7 @@ impl ConnectionLifecycleManager {
         active_slots_coeff: f64,
         metrics: Arc<NodeMetrics>,
         mempool: Arc<Mempool>,
+        peer_failure_tx: mpsc::Sender<SocketAddr>,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -284,6 +304,7 @@ impl ConnectionLifecycleManager {
             max_fetched_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             metrics,
             mempool,
+            peer_failure_tx,
         }
     }
 
@@ -328,7 +349,7 @@ impl ConnectionLifecycleManager {
         self.metrics.record_handshake_rtt(rtt_ms);
 
         // Start warm protocols (KeepAlive).
-        let keepalive_fn = self.make_keepalive_task();
+        let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
 
         // Update peer manager state.
@@ -405,7 +426,7 @@ impl ConnectionLifecycleManager {
             return Err(LifecycleError::AlreadyConnected(addr));
         }
 
-        let keepalive_fn = self.make_keepalive_task();
+        let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
 
         peer_manager.peer_connected(&addr, ConnectionDirection::Outbound);
@@ -594,7 +615,7 @@ impl ConnectionLifecycleManager {
         self.metrics.record_handshake_rtt(rtt_ms);
 
         // Start warm protocols (KeepAlive).
-        let keepalive_fn = self.make_keepalive_task();
+        let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
 
         // Update peer manager.
@@ -750,7 +771,8 @@ impl ConnectionLifecycleManager {
     ///
     /// In Haskell, KeepAlive uses a 90-second interval and the Governor
     /// monitors RTT measurements from responses.
-    fn make_keepalive_task(&self) -> ProtocolTaskFn {
+    fn make_keepalive_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        let peer_failure_tx = self.peer_failure_tx.clone();
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
                 // CRITICAL: Delay the first KeepAlive ping until AFTER Hot protocols
@@ -772,8 +794,18 @@ impl ConnectionLifecycleManager {
                     cancel,
                 );
                 match client.run(&mut channel).await {
-                    Ok(_rtt) => debug!("keepalive task completed"),
-                    Err(e) => debug!("keepalive error: {e}"),
+                    Ok(_rtt) => debug!(%addr, "keepalive task completed"),
+                    Err(torsten_network::error::ProtocolError::KeepAliveTimeout {
+                        consecutive_failures,
+                    }) => {
+                        warn!(
+                            %addr,
+                            consecutive_failures,
+                            "keepalive: peer unresponsive, reporting failure",
+                        );
+                        let _ = peer_failure_tx.try_send(addr);
+                    }
+                    Err(e) => debug!(%addr, "keepalive error: {e}"),
                 }
             })
         })
@@ -837,6 +869,7 @@ impl ConnectionLifecycleManager {
         let active_fetcher = self.active_fetcher.clone();
         let _max_fetched_slot = self.max_fetched_slot.clone();
         let metrics_clone = self.metrics.clone();
+        let peer_failure_tx = self.peer_failure_tx.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
@@ -1009,40 +1042,59 @@ impl ConnectionLifecycleManager {
                                 let mut decoded_blocks: Vec<FetchedBlock> = Vec::new();
 
                                 let fetch_start = std::time::Instant::now();
-                                match BlockFetchClient::fetch_range(
-                                    &mut channel,
-                                    from,
-                                    to,
-                                    |block_cbor| {
-                                        match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
-                                            &block_cbor, bel,
-                                        ) {
-                                            Ok(block) => {
-                                                let slot = block.slot().0;
-                                                debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded");
-                                                decoded_blocks.push(FetchedBlock {
-                                                    peer,
-                                                    block,
-                                                    tip_slot: range_to_slot,
-                                                    tip_hash: [0u8; 32],
-                                                    tip_block_number: 0,
-                                                });
+                                let fetch_result = tokio::time::timeout(
+                                    FETCH_RANGE_TIMEOUT,
+                                    BlockFetchClient::fetch_range(
+                                        &mut channel,
+                                        from,
+                                        to,
+                                        |block_cbor| {
+                                            match torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+                                                &block_cbor, bel,
+                                            ) {
+                                                Ok(block) => {
+                                                    let slot = block.slot().0;
+                                                    debug!(%addr, slot, block_no = block.block_number().0, "BlockFetch: block decoded");
+                                                    decoded_blocks.push(FetchedBlock {
+                                                        peer,
+                                                        block,
+                                                        tip_slot: range_to_slot,
+                                                        tip_hash: [0u8; 32],
+                                                        tip_block_number: 0,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    warn!(%addr, "block decode error: {e}");
+                                                }
                                             }
-                                            Err(e) => {
-                                                warn!(%addr, "block decode error: {e}");
-                                            }
-                                        }
-                                        Ok(())
-                                    },
-                                ).await {
-                                    Ok(count) => {
+                                            Ok(())
+                                        },
+                                    ),
+                                ).await;
+                                match fetch_result {
+                                    Ok(Ok(count)) => {
                                         let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
                                         metrics_clone.record_block_fetch_latency(fetch_ms);
                                         debug!(%addr, count, fetch_ms, "BlockFetch: range complete");
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         warn!(%addr, "BlockFetch error: {e}");
                                         active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
+                                        let _ = peer_failure_tx.try_send(addr);
+                                        return;
+                                    }
+                                    Err(_elapsed) => {
+                                        // Fetch deadline exceeded — peer is stalled or
+                                        // TCP connection is half-open. Release active
+                                        // fetcher so another peer can take over, and
+                                        // report the failure for reputation scoring.
+                                        warn!(
+                                            %addr,
+                                            timeout_secs = FETCH_RANGE_TIMEOUT.as_secs(),
+                                            "BlockFetch range timed out, releasing fetcher",
+                                        );
+                                        active_fetcher.store(0, std::sync::atomic::Ordering::SeqCst);
+                                        let _ = peer_failure_tx.try_send(addr);
                                         return;
                                     }
                                 }

@@ -20,7 +20,7 @@ type: project
 
 ### Sync: MOSTLY COMPLETE
 - Mithril import works on preview/preprod/mainnet — 4M blocks in ~2 min
-- Pipelined ChainSync (depth 150) with 4 parallel block fetchers
+- Pipelined ChainSync (depth 300) with 4 parallel block fetchers
 - Genesis sync from genesis block: works but no Ouroboros Genesis trustless bootstrap (LoE not enforced in pipeline)
 - AVVM genesis UTxO seeding works (nonAvvmBalances + avvmDistr via Byron redeem addresses)
 - Strict verification only activates after node catches up; during sync, VRF/KES failures are non-fatal

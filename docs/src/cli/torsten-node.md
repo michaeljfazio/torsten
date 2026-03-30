@@ -81,7 +81,7 @@ If any of the three flags is missing, the node runs in relay-only mode.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TORSTEN_PIPELINE_DEPTH` | `150` | ChainSync pipeline depth (number of blocks requested ahead) |
+| `TORSTEN_PIPELINE_DEPTH` | `300` | ChainSync pipeline depth (number of blocks requested ahead) |
 | `RUST_LOG` | `info` | Log level filter (e.g., `debug`, `info`, `warn`, `torsten_node=debug`). Overrides `--log-level`. |
 
 See [Logging](../running/logging.md) for details on output targets, file rotation, and per-crate filtering.

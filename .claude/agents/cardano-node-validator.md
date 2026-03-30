@@ -489,7 +489,7 @@ Your diagnostic report MUST include ALL of the following sections:
 ### 9. Important Details
 
 **Torsten:**
-- The `TORSTEN_PIPELINE_DEPTH` env var controls sync pipeline depth (default: 150)
+- The `TORSTEN_PIPELINE_DEPTH` env var controls sync pipeline depth (default: 300)
 - Mithril snapshot import can bootstrap the DB quickly: `torsten-node mithril-import --network-magic 2 --database-path <path> --temp-dir <path>`
 - Prometheus metrics on port 12798
 - Socket path: `./node.sock`
