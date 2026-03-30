@@ -40,12 +40,10 @@ use torsten_consensus::chain_fragment::ChainFragment;
 use torsten_consensus::OuroborosPraos;
 use torsten_ledger::{BlockValidationMode, LedgerState};
 use torsten_mempool::{Mempool, MempoolConfig};
-use torsten_network::{Governor, GovernorConfig, PeerTargets};
+use torsten_network::{Governor, GovernorConfig, PeerTargets, RollbackAnnouncement};
 
 use crate::node::n2c_query::QueryHandler;
-use crate::node::networking::{
-    DiffusionMode, NodePeerManager, PeerManagerConfig, RollbackAnnouncement,
-};
+use crate::node::networking::{DiffusionMode, NodePeerManager, PeerManagerConfig};
 use torsten_primitives::block::Point;
 use torsten_primitives::protocol_params::ProtocolParameters;
 use torsten_storage::background::{CopyToImmutable, GcScheduler, SnapshotScheduler};
@@ -1501,8 +1499,9 @@ impl Node {
                 tokio::sync::broadcast::channel::<torsten_network::BlockAnnouncement>(64);
             let (rollback_ann_tx, _) = tokio::sync::broadcast::channel::<RollbackAnnouncement>(16);
             self.block_announcement_tx = Some(block_ann_tx.clone());
-            self.rollback_announcement_tx = Some(rollback_ann_tx);
+            self.rollback_announcement_tx = Some(rollback_ann_tx.clone());
             let n2c_block_ann_tx = block_ann_tx;
+            let n2c_rollback_ann_tx = rollback_ann_tx;
 
             tokio::spawn(async move {
                 let mut shutdown = n2c_shutdown_rx;
@@ -1530,12 +1529,13 @@ impl Node {
                                     let ledger = n2c_ledger.clone();
                                     let metrics = conn_metrics.clone();
                                     let ann_rx = n2c_block_ann_tx.subscribe();
+                                    let rb_rx = n2c_rollback_ann_tx.subscribe();
                                     let magic = n2c_network_magic;
 
                                     let handle = tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2c_connection(
                                             stream, magic, qh, bp, mp, tv, ledger, ann_rx,
-                                            metrics.clone(),
+                                            rb_rx, metrics.clone(),
                                         )
                                         .await
                                         {
@@ -1794,6 +1794,11 @@ impl Node {
                 .as_ref()
                 .expect("block_announcement_tx was just set")
                 .clone();
+            let n2n_rollback_ann_tx = self
+                .rollback_announcement_tx
+                .as_ref()
+                .expect("rollback_announcement_tx was just set")
+                .clone();
 
             let diffusion_mode = self.peer_manager.read().await.diffusion_mode();
             info!(
@@ -1834,6 +1839,7 @@ impl Node {
                                     let metrics = conn_metrics.clone();
                                     let pm = n2n_peer_manager.clone();
                                     let ann_rx = n2n_block_ann_tx.subscribe();
+                                    let rb_rx = n2n_rollback_ann_tx.subscribe();
                                     let magic = n2n_network_magic;
                                     let ps = n2n_peer_sharing;
 
@@ -1844,7 +1850,7 @@ impl Node {
                                     let handle = tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2n_connection(
                                             stream, magic, ps, bp, mp, pm.clone(),
-                                            peer_addr, ann_rx,
+                                            peer_addr, ann_rx, rb_rx,
                                         )
                                         .await
                                         {
@@ -2856,6 +2862,7 @@ impl Node {
         tx_validator: Arc<serve::LedgerTxValidator>,
         ledger: Arc<RwLock<LedgerState>>,
         announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
+        rollback_rx: tokio::sync::broadcast::Receiver<RollbackAnnouncement>,
         metrics: Arc<crate::metrics::NodeMetrics>,
     ) -> Result<()> {
         use torsten_network::protocol;
@@ -2914,9 +2921,13 @@ impl Node {
         // LocalChainSync server
         let lcs_bp = block_provider.clone();
         let lcs_ann_rx = announcement_rx;
+        let lcs_rb_rx = rollback_rx;
         let lcs_task = tokio::spawn(async move {
             let mut server = protocol::local_chainsync::server::LocalChainSyncServer::new();
-            if let Err(e) = server.run(&mut cs_ch, lcs_bp.as_ref(), lcs_ann_rx).await {
+            if let Err(e) = server
+                .run(&mut cs_ch, lcs_bp.as_ref(), lcs_ann_rx, lcs_rb_rx)
+                .await
+            {
                 debug!("N2C LocalChainSync ended: {e}");
             }
         });
@@ -3048,6 +3059,7 @@ impl Node {
         peer_manager: Arc<RwLock<NodePeerManager>>,
         peer_addr: std::net::SocketAddr,
         announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
+        rollback_rx: tokio::sync::broadcast::Receiver<RollbackAnnouncement>,
     ) -> Result<()> {
         use torsten_network::protocol;
 
@@ -3130,9 +3142,13 @@ impl Node {
         // ChainSync server
         let cs_bp = block_provider.clone();
         let cs_ann_rx = announcement_rx;
+        let cs_rb_rx = rollback_rx;
         let cs_task = tokio::spawn(async move {
             let mut server = protocol::chainsync::server::ChainSyncServer::new();
-            if let Err(e) = server.run(&mut cs_ch, cs_bp.as_ref(), cs_ann_rx).await {
+            if let Err(e) = server
+                .run(&mut cs_ch, cs_bp.as_ref(), cs_ann_rx, cs_rb_rx)
+                .await
+            {
                 debug!("N2N ChainSync server ended: {e}");
             }
         });

@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::connection_lifecycle::{CandidateChainState, PendingHeader};
-use super::networking::{EbbInfo, RollbackAnnouncement};
+use super::networking::EbbInfo;
 use torsten_consensus::praos::BlockIssuerInfo;
 use torsten_consensus::ValidationMode;
 use torsten_ledger::BlockValidationMode;
@@ -23,6 +23,7 @@ use torsten_network::protocol::chainsync::{
     decode_message as cs_decode, encode_message as cs_encode, ChainSyncMessage,
 };
 use torsten_network::MuxChannel;
+use torsten_network::RollbackAnnouncement;
 use torsten_primitives::block::Point;
 
 use super::epoch::SnapshotPolicy;
@@ -138,8 +139,10 @@ impl Node {
         eh.wallclock_to_slot(chrono::Utc::now(), &system_start).ok()
     }
 
-    /// Notify connected N2N peers of a chain rollback by sending MsgRollBackward.
-    #[allow(dead_code)] // retained for networking rewrite
+    /// Notify connected N2N/N2C peers of a chain rollback by broadcasting a
+    /// `RollbackAnnouncement`.  Both the N2N ChainSync server and the N2C
+    /// LocalChainSync server subscribe to this channel and translate the
+    /// announcement into `MsgRollBackward` messages for their downstream peers.
     pub async fn notify_rollback(&self, rollback_point: &Point) {
         if let Some(ref tx) = self.rollback_announcement_tx {
             let rb_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);

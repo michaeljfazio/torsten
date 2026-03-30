@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use crate::codec::Point;
 use crate::error::ProtocolError;
 use crate::mux::channel::MuxChannel;
-use crate::protocol::chainsync::server::BlockAnnouncement;
+use crate::protocol::chainsync::server::{BlockAnnouncement, RollbackAnnouncement};
 use crate::protocol::chainsync::{decode_message, encode_message, ChainSyncMessage};
 use crate::BlockProvider;
 
@@ -33,11 +33,15 @@ impl LocalChainSyncServer {
     }
 
     /// Run the LocalChainSync server loop.
+    ///
+    /// Accepts a `rollback_rx` receiver to propagate chain rollbacks to N2C
+    /// clients via `MsgRollBackward`.
     pub async fn run<B: BlockProvider>(
         &mut self,
         channel: &mut MuxChannel,
         block_provider: &B,
         mut announcement_rx: broadcast::Receiver<BlockAnnouncement>,
+        mut rollback_rx: broadcast::Receiver<RollbackAnnouncement>,
     ) -> Result<(), ProtocolError> {
         loop {
             let msg_bytes = channel.recv().await.map_err(ProtocolError::from)?;
@@ -52,8 +56,13 @@ impl LocalChainSyncServer {
                         .await?;
                 }
                 ChainSyncMessage::MsgRequestNext => {
-                    self.handle_request_next(channel, block_provider, &mut announcement_rx)
-                        .await?;
+                    self.handle_request_next(
+                        channel,
+                        block_provider,
+                        &mut announcement_rx,
+                        &mut rollback_rx,
+                    )
+                    .await?;
                 }
                 ChainSyncMessage::MsgDone => {
                     tracing::debug!("local chainsync server: client sent MsgDone");
@@ -123,13 +132,24 @@ impl LocalChainSyncServer {
         Ok(())
     }
 
-    /// Handle MsgRequestNext — sends full blocks (not headers) with HFC wrapping.
+    /// Handle MsgRequestNext — sends full blocks (not headers) with HFC wrapping,
+    /// or sends MsgRollBackward if a rollback has occurred.
     async fn handle_request_next<B: BlockProvider>(
         &mut self,
         channel: &mut MuxChannel,
         block_provider: &B,
         announcement_rx: &mut broadcast::Receiver<BlockAnnouncement>,
+        rollback_rx: &mut broadcast::Receiver<RollbackAnnouncement>,
     ) -> Result<(), ProtocolError> {
+        // ── Check for pending rollbacks before serving ──────────────────────
+        if let Some(rb) = Self::drain_rollback(rollback_rx) {
+            if self.cursor_slot > rb.slot
+                || (self.cursor_slot == rb.slot && self.cursor_hash != rb.hash)
+            {
+                return self.send_rollback(channel, block_provider, &rb).await;
+            }
+        }
+
         if let Some((slot, hash, block_cbor)) =
             block_provider.get_next_block_after_slot(self.cursor_slot)
         {
@@ -151,46 +171,139 @@ impl LocalChainSyncServer {
             return Ok(());
         }
 
-        // At tip — wait for announcement
+        // At tip — wait for announcement or rollback.
         let await_msg = encode_message(&ChainSyncMessage::MsgAwaitReply);
         channel.send(await_msg).await.map_err(ProtocolError::from)?;
 
-        match announcement_rx.recv().await {
-            Ok(ann) => {
-                if let Some(block_cbor) = block_provider.get_block(&ann.hash) {
-                    let tip = block_provider.get_tip();
-                    let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                        header: block_cbor,
-                        tip_slot: tip.slot,
-                        tip_hash: tip.hash,
-                        tip_block_number: tip.block_number,
-                    });
-                    channel.send(response).await.map_err(ProtocolError::from)?;
-                    self.cursor_slot = ann.slot;
-                    self.cursor_hash = ann.hash;
+        tokio::select! {
+            // ── Rollback while waiting at tip ───────────────────────────────
+            rollback = rollback_rx.recv() => {
+                match rollback {
+                    Ok(rb) => {
+                        if self.cursor_slot > rb.slot
+                            || (self.cursor_slot == rb.slot && self.cursor_hash != rb.hash)
+                        {
+                            self.send_rollback(channel, block_provider, &rb).await
+                        } else {
+                            // Cursor behind rollback — serve next block from new fork.
+                            if let Some((slot, hash, block_cbor)) =
+                                block_provider.get_next_block_after_slot(self.cursor_slot)
+                            {
+                                let tip = block_provider.get_tip();
+                                let response = encode_message(&ChainSyncMessage::MsgRollForward {
+                                    header: block_cbor,
+                                    tip_slot: tip.slot,
+                                    tip_hash: tip.hash,
+                                    tip_block_number: tip.block_number,
+                                });
+                                channel.send(response).await.map_err(ProtocolError::from)?;
+                                self.cursor_slot = slot;
+                                self.cursor_hash = hash;
+                            }
+                            Ok(())
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let tip = block_provider.get_tip();
+                        let rb = RollbackAnnouncement {
+                            slot: tip.slot,
+                            hash: tip.hash,
+                        };
+                        self.send_rollback(channel, block_provider, &rb).await
+                    }
+                    Err(broadcast::error::RecvError::Closed) => Ok(()),
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // Try to catch up from current position
-                if let Some((slot, hash, block_cbor)) =
-                    block_provider.get_next_block_after_slot(self.cursor_slot)
-                {
-                    let tip = block_provider.get_tip();
-                    let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                        header: block_cbor,
-                        tip_slot: tip.slot,
-                        tip_hash: tip.hash,
-                        tip_block_number: tip.block_number,
-                    });
-                    channel.send(response).await.map_err(ProtocolError::from)?;
-                    self.cursor_slot = slot;
-                    self.cursor_hash = hash;
+            announcement = announcement_rx.recv() => {
+                match announcement {
+                    Ok(ann) => {
+                        if let Some(block_cbor) = block_provider.get_block(&ann.hash) {
+                            let tip = block_provider.get_tip();
+                            let response = encode_message(&ChainSyncMessage::MsgRollForward {
+                                header: block_cbor,
+                                tip_slot: tip.slot,
+                                tip_hash: tip.hash,
+                                tip_block_number: tip.block_number,
+                            });
+                            channel.send(response).await.map_err(ProtocolError::from)?;
+                            self.cursor_slot = ann.slot;
+                            self.cursor_hash = ann.hash;
+                        }
+                        Ok(())
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Try to catch up from current position.
+                        if let Some((slot, hash, block_cbor)) =
+                            block_provider.get_next_block_after_slot(self.cursor_slot)
+                        {
+                            let tip = block_provider.get_tip();
+                            let response = encode_message(&ChainSyncMessage::MsgRollForward {
+                                header: block_cbor,
+                                tip_slot: tip.slot,
+                                tip_hash: tip.hash,
+                                tip_block_number: tip.block_number,
+                            });
+                            channel.send(response).await.map_err(ProtocolError::from)?;
+                            self.cursor_slot = slot;
+                            self.cursor_hash = hash;
+                        }
+                        Ok(())
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Node shutting down.
+                        Ok(())
+                    }
                 }
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                // Node shutting down
             }
         }
+    }
+
+    /// Drain any pending rollback announcements, returning the most recent one.
+    fn drain_rollback(
+        rollback_rx: &mut broadcast::Receiver<RollbackAnnouncement>,
+    ) -> Option<RollbackAnnouncement> {
+        let mut latest: Option<RollbackAnnouncement> = None;
+        loop {
+            match rollback_rx.try_recv() {
+                Ok(rb) => latest = Some(rb),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        latest
+    }
+
+    /// Send `MsgRollBackward` to the N2C client and rewind the cursor.
+    async fn send_rollback<B: BlockProvider>(
+        &mut self,
+        channel: &mut MuxChannel,
+        block_provider: &B,
+        rb: &RollbackAnnouncement,
+    ) -> Result<(), ProtocolError> {
+        let tip = block_provider.get_tip();
+        let point = if rb.slot == 0 && rb.hash == [0u8; 32] {
+            Point::Origin
+        } else {
+            Point::Specific(rb.slot, rb.hash)
+        };
+
+        tracing::info!(
+            rollback_slot = rb.slot,
+            cursor_slot = self.cursor_slot,
+            "local chainsync server: sending MsgRollBackward to N2C client"
+        );
+
+        let response = encode_message(&ChainSyncMessage::MsgRollBackward {
+            point,
+            tip_slot: tip.slot,
+            tip_hash: tip.hash,
+            tip_block_number: tip.block_number,
+        });
+        channel.send(response).await.map_err(ProtocolError::from)?;
+
+        // Rewind cursor to the rollback point.
+        self.cursor_slot = rb.slot;
+        self.cursor_hash = rb.hash;
 
         Ok(())
     }

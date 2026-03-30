@@ -131,14 +131,10 @@ pub struct LocalRootGroupInfo {
 
 // ─── Announcement Types ──────────────────────────────────────────────────────
 
-/// Rollback announcement sent via broadcast channel when the chain rolls back.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used by networking rewrite
-pub struct RollbackAnnouncement {
-    /// The point to roll back to.
-    pub slot: u64,
-    pub hash: [u8; 32],
-}
+// RollbackAnnouncement is defined in torsten-network alongside BlockAnnouncement
+// and re-exported as `torsten_network::RollbackAnnouncement`.  The node crate
+// uses that type directly for broadcast channels shared between sync and the
+// ChainSync/LocalChainSync servers.
 
 // ─── Sync Client Types ───────────────────────────────────────────────────────
 

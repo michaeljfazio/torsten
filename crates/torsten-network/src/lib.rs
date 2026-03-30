@@ -341,7 +341,7 @@ pub trait ConnectionMetrics: Send + Sync + 'static {
 pub use protocol::blockfetch::client::BlockFetchClient;
 pub use protocol::blockfetch::decision::BlockFetchDecision;
 pub use protocol::chainsync::client::{ChainSyncEvent, PipelinedChainSyncClient};
-pub use protocol::chainsync::server::BlockAnnouncement;
+pub use protocol::chainsync::server::{BlockAnnouncement, RollbackAnnouncement};
 pub use protocol::keepalive::client::KeepAliveClient;
 pub use protocol::keepalive::server::KeepAliveServer;
 pub use protocol::local_state_query::server::QueryHandler;

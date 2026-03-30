@@ -119,6 +119,19 @@ pub struct BlockAnnouncement {
     pub block_number: u64,
 }
 
+/// Rollback announcement sent via broadcast channel when the chain rolls back.
+///
+/// When the local chain switches to a better fork, all downstream ChainSync
+/// followers must be notified so they send `MsgRollBackward` to their peers
+/// instead of continuing to serve blocks from the old (now-abandoned) fork.
+#[derive(Debug, Clone)]
+pub struct RollbackAnnouncement {
+    /// Slot of the point to roll back to.
+    pub slot: u64,
+    /// Hash of the block at the rollback point.
+    pub hash: [u8; 32],
+}
+
 /// ChainSync server that serves headers to a single downstream peer.
 pub struct ChainSyncServer {
     /// Current cursor: the last point served to this peer.
@@ -145,13 +158,15 @@ impl ChainSyncServer {
     /// Run the ChainSync server loop.
     ///
     /// Handles `MsgFindIntersect`, `MsgRequestNext`, and `MsgDone` from the client.
-    /// Uses `block_provider` to look up blocks and `announcement_rx` to wait for
-    /// new blocks at the tip.
+    /// Uses `block_provider` to look up blocks, `announcement_rx` to wait for
+    /// new blocks at the tip, and `rollback_rx` to propagate chain rollbacks
+    /// to downstream peers via `MsgRollBackward`.
     pub async fn run<B: BlockProvider>(
         &mut self,
         channel: &mut MuxChannel,
         block_provider: &B,
         mut announcement_rx: broadcast::Receiver<BlockAnnouncement>,
+        mut rollback_rx: broadcast::Receiver<RollbackAnnouncement>,
     ) -> Result<(), ProtocolError> {
         loop {
             let msg_bytes = channel.recv().await.map_err(ProtocolError::from)?;
@@ -166,8 +181,13 @@ impl ChainSyncServer {
                         .await?;
                 }
                 ChainSyncMessage::MsgRequestNext => {
-                    self.handle_request_next(channel, block_provider, &mut announcement_rx)
-                        .await?;
+                    self.handle_request_next(
+                        channel,
+                        block_provider,
+                        &mut announcement_rx,
+                        &mut rollback_rx,
+                    )
+                    .await?;
                 }
                 ChainSyncMessage::MsgDone => {
                     tracing::debug!("chainsync server: client sent MsgDone");
@@ -246,13 +266,32 @@ impl ChainSyncServer {
         Ok(())
     }
 
-    /// Handle MsgRequestNext: serve the next header or wait for announcement.
+    /// Handle MsgRequestNext: serve the next header, propagate rollback, or wait
+    /// for an announcement.
+    ///
+    /// When a rollback is detected (either because the cursor points beyond the
+    /// rollback point, or a `RollbackAnnouncement` arrives while waiting at the
+    /// tip), the server sends `MsgRollBackward` to rewind the downstream peer's
+    /// cursor.
     async fn handle_request_next<B: BlockProvider>(
         &mut self,
         channel: &mut MuxChannel,
         block_provider: &B,
         announcement_rx: &mut broadcast::Receiver<BlockAnnouncement>,
+        rollback_rx: &mut broadcast::Receiver<RollbackAnnouncement>,
     ) -> Result<(), ProtocolError> {
+        // ── Check for pending rollbacks before serving ──────────────────────
+        // Drain any rollback announcements that arrived between the last
+        // MsgRequestNext and now.  If the cursor is beyond the rollback point,
+        // we must send MsgRollBackward instead of the next block.
+        if let Some(rb) = Self::drain_rollback(rollback_rx) {
+            if self.cursor_slot > rb.slot
+                || (self.cursor_slot == rb.slot && self.cursor_hash != rb.hash)
+            {
+                return self.send_rollback(channel, block_provider, &rb).await;
+            }
+        }
+
         // Try to find the next block after our cursor.
         //
         // When cursor_at_origin is true, we use the inclusive `>=` lookup so
@@ -294,11 +333,64 @@ impl ChainSyncServer {
         let await_msg = encode_message(&ChainSyncMessage::MsgAwaitReply);
         channel.send(await_msg).await.map_err(ProtocolError::from)?;
 
-        // Wait for a block announcement with a fixed timeout.
+        // Wait for a block announcement OR rollback with a fixed timeout.
         // Haskell uses a timeout range of 135–911 seconds; we use 135s as the lower bound.
         let timeout = Duration::from_secs(135);
 
         tokio::select! {
+            // ── Rollback received while waiting at tip ──────────────────────
+            // This is the critical path for issue #299: a follower in
+            // MsgAwaitReply (StMustReply) must receive MsgRollBackward when
+            // the chain switches to a better fork.
+            rollback = rollback_rx.recv() => {
+                match rollback {
+                    Ok(rb) => {
+                        // Only send rollback if cursor is at or beyond the rollback point.
+                        // If cursor is behind, the peer hasn't seen the rolled-back blocks
+                        // yet and will naturally follow the new fork.
+                        if self.cursor_slot > rb.slot
+                            || (self.cursor_slot == rb.slot && self.cursor_hash != rb.hash)
+                        {
+                            self.send_rollback(channel, block_provider, &rb).await
+                        } else {
+                            // Cursor is behind the rollback point — the new fork blocks
+                            // will be served naturally.  Try to serve the next block now.
+                            let tip = block_provider.get_tip();
+                            if let Some(block_cbor) = block_provider.get_block(&tip.hash) {
+                                let hfc_header = extract_header_for_chainsync(&block_cbor)
+                                    .map_err(|reason| ProtocolError::CborDecode {
+                                        protocol: "ChainSync",
+                                        reason: format!(
+                                            "header extraction failed for post-rollback block \
+                                             at slot {}: {reason}",
+                                            tip.slot
+                                        ),
+                                    })?;
+                                let response = encode_message(&ChainSyncMessage::MsgRollForward {
+                                    header: hfc_header,
+                                    tip_slot: tip.slot,
+                                    tip_hash: tip.hash,
+                                    tip_block_number: tip.block_number,
+                                });
+                                channel.send(response).await.map_err(ProtocolError::from)?;
+                                self.cursor_slot = tip.slot;
+                                self.cursor_hash = tip.hash;
+                            }
+                            Ok(())
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Missed rollback events — send rollback to current tip.
+                        let tip = block_provider.get_tip();
+                        let rb = RollbackAnnouncement {
+                            slot: tip.slot,
+                            hash: tip.hash,
+                        };
+                        self.send_rollback(channel, block_provider, &rb).await
+                    }
+                    Err(broadcast::error::RecvError::Closed) => Ok(()),
+                }
+            }
             announcement = announcement_rx.recv() => {
                 match announcement {
                     Ok(ann) => {
@@ -390,6 +482,63 @@ impl ChainSyncServer {
                 Ok(())
             }
         }
+    }
+
+    /// Drain any pending rollback announcements, returning the most recent one.
+    ///
+    /// Multiple rollbacks may have queued up between calls — only the latest
+    /// matters because each successive rollback supersedes the previous one.
+    fn drain_rollback(
+        rollback_rx: &mut broadcast::Receiver<RollbackAnnouncement>,
+    ) -> Option<RollbackAnnouncement> {
+        let mut latest: Option<RollbackAnnouncement> = None;
+        loop {
+            match rollback_rx.try_recv() {
+                Ok(rb) => latest = Some(rb),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    // Missed some — continue draining to get latest.
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        latest
+    }
+
+    /// Send `MsgRollBackward` to the downstream peer and rewind the cursor.
+    async fn send_rollback<B: BlockProvider>(
+        &mut self,
+        channel: &mut MuxChannel,
+        block_provider: &B,
+        rb: &RollbackAnnouncement,
+    ) -> Result<(), ProtocolError> {
+        let tip = block_provider.get_tip();
+        let point = if rb.slot == 0 && rb.hash == [0u8; 32] {
+            Point::Origin
+        } else {
+            Point::Specific(rb.slot, rb.hash)
+        };
+
+        tracing::info!(
+            rollback_slot = rb.slot,
+            cursor_slot = self.cursor_slot,
+            "chainsync server: sending MsgRollBackward to downstream peer"
+        );
+
+        let response = encode_message(&ChainSyncMessage::MsgRollBackward {
+            point: point.clone(),
+            tip_slot: tip.slot,
+            tip_hash: tip.hash,
+            tip_block_number: tip.block_number,
+        });
+        channel.send(response).await.map_err(ProtocolError::from)?;
+
+        // Rewind cursor to the rollback point.
+        self.cursor_slot = rb.slot;
+        self.cursor_hash = rb.hash;
+        self.cursor_at_origin = matches!(point, Point::Origin);
+
+        Ok(())
     }
 }
 
@@ -639,12 +788,18 @@ mod tests {
             blocks: vec![(100, [0xAA; 32], block_cbor)],
         };
         let (ann_tx, _) = broadcast::channel(16);
+        let (rb_tx, _) = broadcast::channel(16);
 
         let mut server = ChainSyncServer::new();
 
         let handle = tokio::spawn(async move {
             server
-                .run(&mut channel, &provider, ann_tx.subscribe())
+                .run(
+                    &mut channel,
+                    &provider,
+                    ann_tx.subscribe(),
+                    rb_tx.subscribe(),
+                )
                 .await
         });
 
@@ -681,12 +836,18 @@ mod tests {
             blocks: vec![(10, [0x01; 32], block_a), (20, [0x02; 32], block_b)],
         };
         let (ann_tx, _) = broadcast::channel(16);
+        let (rb_tx, _) = broadcast::channel(16);
 
         let mut server = ChainSyncServer::new();
 
         let handle = tokio::spawn(async move {
             server
-                .run(&mut channel, &provider, ann_tx.subscribe())
+                .run(
+                    &mut channel,
+                    &provider,
+                    ann_tx.subscribe(),
+                    rb_tx.subscribe(),
+                )
                 .await
         });
 
@@ -727,6 +888,306 @@ mod tests {
         }
 
         // Send MsgDone
+        let done = encode_message(&ChainSyncMessage::MsgDone);
+        ingress_tx.send(Bytes::from(done)).await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // ─── rollback propagation tests ─────────────────────────────────────────────
+
+    /// Block slot, hash, and CBOR data — the elements stored in mock providers.
+    type BlockEntry = (u64, [u8; 32], Vec<u8>);
+
+    /// Mock block provider that supports mutation for simulating rollback scenarios.
+    ///
+    /// Wraps blocks in an `Arc<Mutex<_>>` so both the server task and the test
+    /// can modify the block set concurrently (simulating ChainDB changes during
+    /// a fork switch).
+    struct MutableMockBlockProvider {
+        blocks: std::sync::Arc<std::sync::Mutex<Vec<BlockEntry>>>,
+    }
+
+    impl MutableMockBlockProvider {
+        fn new(blocks: Vec<BlockEntry>) -> Self {
+            Self {
+                blocks: std::sync::Arc::new(std::sync::Mutex::new(blocks)),
+            }
+        }
+    }
+
+    impl BlockProvider for MutableMockBlockProvider {
+        fn get_block(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, h, _)| h == hash)
+                .map(|(_, _, cbor)| cbor.clone())
+        }
+
+        fn has_block(&self, hash: &[u8; 32]) -> bool {
+            self.blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, h, _)| h == hash)
+        }
+
+        fn get_tip(&self) -> TipInfo {
+            let blocks = self.blocks.lock().unwrap();
+            if let Some((slot, hash, _)) = blocks.last() {
+                TipInfo {
+                    slot: *slot,
+                    hash: *hash,
+                    block_number: blocks.len() as u64,
+                }
+            } else {
+                TipInfo {
+                    slot: 0,
+                    hash: [0; 32],
+                    block_number: 0,
+                }
+            }
+        }
+
+        fn get_next_block_after_slot(&self, after_slot: u64) -> Option<(u64, [u8; 32], Vec<u8>)> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _, _)| *s > after_slot)
+                .cloned()
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_sends_msg_roll_backward() {
+        // Scenario: serve 3 blocks (slots 10, 20, 30), then trigger a 2-block
+        // rollback to slot 10.  The server should send MsgRollBackward(slot=10)
+        // and then serve new fork blocks on the next MsgRequestNext.
+        let block_a = make_hfc_block(7, &[0x0A]);
+        let block_b = make_hfc_block(7, &[0x0B]);
+        let block_c = make_hfc_block(7, &[0x0C]);
+
+        let provider = MutableMockBlockProvider::new(vec![
+            (10, [0x01; 32], block_a),
+            (20, [0x02; 32], block_b),
+            (30, [0x03; 32], block_c),
+        ]);
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let (ann_tx, _) = broadcast::channel(16);
+        let (rb_tx, _) = broadcast::channel::<RollbackAnnouncement>(16);
+        let ann_rx = ann_tx.subscribe();
+        let rb_rx = rb_tx.subscribe();
+
+        let blocks_ref = provider.blocks.clone();
+        let mut server = ChainSyncServer::new();
+
+        let handle =
+            tokio::spawn(async move { server.run(&mut channel, &provider, ann_rx, rb_rx).await });
+
+        // Find intersection at origin.
+        let find = encode_message(&ChainSyncMessage::MsgFindIntersect(vec![Point::Origin]));
+        ingress_tx.send(Bytes::from(find)).await.unwrap();
+        let _ = egress_rx.recv().await.unwrap(); // MsgIntersectFound
+
+        // Serve all 3 blocks via MsgRequestNext.
+        for _ in 0..3 {
+            let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+            ingress_tx.send(Bytes::from(req)).await.unwrap();
+            let (_, _, resp) = egress_rx.recv().await.unwrap();
+            let msg = decode_message(&resp).unwrap();
+            assert!(
+                matches!(msg, ChainSyncMessage::MsgRollForward { .. }),
+                "expected MsgRollForward, got {msg:?}"
+            );
+        }
+
+        // Simulate rollback: remove blocks at slots 20 and 30, add new fork block.
+        let new_fork_block = make_hfc_block(7, &[0xF1]);
+        {
+            let mut blocks = blocks_ref.lock().unwrap();
+            blocks.retain(|(s, _, _)| *s <= 10);
+            blocks.push((25, [0xF1; 32], new_fork_block));
+        }
+
+        // Broadcast rollback announcement to slot 10.
+        rb_tx
+            .send(RollbackAnnouncement {
+                slot: 10,
+                hash: [0x01; 32],
+            })
+            .unwrap();
+
+        // The next MsgRequestNext should yield MsgRollBackward to slot 10.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        if let ChainSyncMessage::MsgRollBackward {
+            point, tip_slot, ..
+        } = msg
+        {
+            assert_eq!(
+                point,
+                Point::Specific(10, [0x01; 32]),
+                "rollback should target slot 10"
+            );
+            // Tip should reflect the new chain state (slot 25).
+            assert_eq!(tip_slot, 25);
+        } else {
+            panic!("expected MsgRollBackward, got {msg:?}");
+        }
+
+        // Next MsgRequestNext should serve the new fork block at slot 25.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        if let ChainSyncMessage::MsgRollForward { tip_slot, .. } = msg {
+            assert_eq!(tip_slot, 25, "should serve new fork block");
+        } else {
+            panic!("expected MsgRollForward for new fork, got {msg:?}");
+        }
+
+        // Clean up.
+        let done = encode_message(&ChainSyncMessage::MsgDone);
+        ingress_tx.send(Bytes::from(done)).await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollback_during_await_reply() {
+        // Scenario: follower is at the tip (in MsgAwaitReply/StMustReply state)
+        // when a rollback occurs.  The server must send MsgRollBackward, not a
+        // stale MsgRollForward.
+        let block_a = make_hfc_block(7, &[0x0A]);
+
+        let provider = MutableMockBlockProvider::new(vec![(10, [0x01; 32], block_a)]);
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let (ann_tx, _) = broadcast::channel(16);
+        let (rb_tx, _) = broadcast::channel::<RollbackAnnouncement>(16);
+        let ann_rx = ann_tx.subscribe();
+        let rb_rx = rb_tx.subscribe();
+
+        let mut server = ChainSyncServer::new();
+
+        let handle =
+            tokio::spawn(async move { server.run(&mut channel, &provider, ann_rx, rb_rx).await });
+
+        // Find intersection at origin.
+        let find = encode_message(&ChainSyncMessage::MsgFindIntersect(vec![Point::Origin]));
+        ingress_tx.send(Bytes::from(find)).await.unwrap();
+        let _ = egress_rx.recv().await.unwrap(); // MsgIntersectFound
+
+        // Serve the only block.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(matches!(
+            decode_message(&resp).unwrap(),
+            ChainSyncMessage::MsgRollForward { .. }
+        ));
+
+        // Request next — will go into MsgAwaitReply since we're at the tip.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+
+        // Read MsgAwaitReply.
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(matches!(
+            decode_message(&resp).unwrap(),
+            ChainSyncMessage::MsgAwaitReply
+        ));
+
+        // Now broadcast a rollback to origin (slot 0).
+        // The server is in StMustReply — it must respond with MsgRollBackward.
+        rb_tx
+            .send(RollbackAnnouncement {
+                slot: 0,
+                hash: [0u8; 32],
+            })
+            .unwrap();
+
+        // The server should send MsgRollBackward to origin.
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        if let ChainSyncMessage::MsgRollBackward { point, .. } = msg {
+            assert_eq!(point, Point::Origin, "should rollback to origin");
+        } else {
+            panic!("expected MsgRollBackward while in MsgAwaitReply, got {msg:?}");
+        }
+
+        // Clean up.
+        let done = encode_message(&ChainSyncMessage::MsgDone);
+        ingress_tx.send(Bytes::from(done)).await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollback_cursor_behind_rollback_point_no_rollback_sent() {
+        // Scenario: cursor is at slot 10, rollback occurs to slot 20.
+        // Since the cursor is behind the rollback point, the server should
+        // NOT send MsgRollBackward — the peer hasn't seen the rolled-back blocks.
+        let block_a = make_hfc_block(7, &[0x0A]);
+        let block_b = make_hfc_block(7, &[0x0B]);
+        let block_c = make_hfc_block(7, &[0x0C]);
+
+        let provider = MockBlockProvider {
+            blocks: vec![
+                (10, [0x01; 32], block_a),
+                (20, [0x02; 32], block_b),
+                (30, [0x03; 32], block_c),
+            ],
+        };
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let (ann_tx, _) = broadcast::channel(16);
+        let (rb_tx, _) = broadcast::channel::<RollbackAnnouncement>(16);
+        let ann_rx = ann_tx.subscribe();
+        let rb_rx = rb_tx.subscribe();
+
+        let mut server = ChainSyncServer::new();
+
+        let handle =
+            tokio::spawn(async move { server.run(&mut channel, &provider, ann_rx, rb_rx).await });
+
+        // Find intersection at origin.
+        let find = encode_message(&ChainSyncMessage::MsgFindIntersect(vec![Point::Origin]));
+        ingress_tx.send(Bytes::from(find)).await.unwrap();
+        let _ = egress_rx.recv().await.unwrap(); // MsgIntersectFound
+
+        // Serve only block at slot 10 (cursor now at slot 10).
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(matches!(
+            decode_message(&resp).unwrap(),
+            ChainSyncMessage::MsgRollForward { .. }
+        ));
+
+        // Broadcast rollback to slot 20 — cursor is at slot 10, which is before
+        // the rollback point.  No MsgRollBackward should be sent.
+        rb_tx
+            .send(RollbackAnnouncement {
+                slot: 20,
+                hash: [0x02; 32],
+            })
+            .unwrap();
+
+        // Next request should serve the block at slot 20 (MsgRollForward, not RollBackward).
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        assert!(
+            matches!(msg, ChainSyncMessage::MsgRollForward { .. }),
+            "cursor behind rollback point should not trigger MsgRollBackward, got {msg:?}"
+        );
+
+        // Clean up.
         let done = encode_message(&ChainSyncMessage::MsgDone);
         ingress_tx.send(Bytes::from(done)).await.unwrap();
         handle.await.unwrap().unwrap();
