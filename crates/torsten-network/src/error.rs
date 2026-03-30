@@ -269,6 +269,13 @@ pub enum ProtocolError {
         /// The actual state found.
         actual: String,
     },
+    /// Remote peer exceeded protocol bounds (e.g. sent more tx IDs than requested).
+    BoundsExceeded {
+        /// Name of the mini-protocol.
+        protocol: &'static str,
+        /// Human-readable description of the violation.
+        reason: String,
+    },
     /// Multiplexer error propagated through the protocol layer.
     Mux(MuxError),
 }
@@ -302,6 +309,9 @@ impl fmt::Display for ProtocolError {
                 actual,
             } => {
                 write!(f, "{protocol}: expected state {expected}, got {actual}")
+            }
+            Self::BoundsExceeded { protocol, reason } => {
+                write!(f, "{protocol}: bounds exceeded: {reason}")
             }
             Self::Mux(e) => write!(f, "mux: {e}"),
         }

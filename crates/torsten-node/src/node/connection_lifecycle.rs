@@ -1186,6 +1186,10 @@ impl TxSource for MempoolTxSource {
     fn has_pending(&self) -> bool {
         !self.mempool.is_empty()
     }
+
+    fn tx_notify(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        Some(self.mempool.tx_notify())
+    }
 }
 
 #[cfg(test)]

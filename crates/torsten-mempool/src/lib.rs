@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use torsten_primitives::hash::TransactionHash;
 use torsten_primitives::time::SlotNo;
 use torsten_primitives::transaction::{Transaction, TransactionInput, TransactionOutput};
@@ -186,6 +187,9 @@ pub struct Mempool {
     remote_fifo: Mutex<()>,
     /// Fairness mutex for all submissions — local acquires only this, remote acquires both
     all_fifo: Mutex<()>,
+    /// Notifies waiting TxSubmission2 clients when new transactions arrive.
+    /// Uses `notify_waiters()` so all blocked peers wake simultaneously.
+    tx_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -243,7 +247,14 @@ impl Mempool {
             config: RwLock::new(config),
             remote_fifo: Mutex::new(()),
             all_fifo: Mutex::new(()),
+            tx_notify: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Returns a handle to the tx arrival notification.
+    /// TxSubmission2 clients await this to replace busy-wait polling.
+    pub fn tx_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.tx_notify.clone()
     }
 
     /// Add a transaction to the mempool.
@@ -466,6 +477,9 @@ impl Mempool {
             total_txs = self.tx_count.load(Ordering::Relaxed),
             "Mempool: transaction added"
         );
+
+        // Wake all TxSubmission2 clients waiting for new transactions.
+        self.tx_notify.notify_waiters();
 
         Ok(MempoolAddResult::Added)
     }

@@ -18,8 +18,16 @@ use crate::mux::channel::MuxChannel;
 
 use super::{decode_message, encode_message, TxIdAndSize, TxSubmissionMessage};
 
-/// Maximum number of tx IDs to request at once.
+/// Maximum number of tx IDs to request in a single MsgRequestTxIds.
 const MAX_TX_IDS_PER_REQUEST: u16 = 10;
+
+/// Maximum unacknowledged tx IDs before the server stops requesting more.
+/// Matches Haskell `maxUnacked` in `Ouroboros.Network.TxSubmission.Inbound`.
+const MAX_UNACKED: usize = 100;
+
+/// Maximum in-flight tx IDs (requested but not yet received).
+/// Peers exceeding this limit are disconnected for protocol violation.
+const MAX_INFLIGHT_TX_IDS: usize = 1000;
 
 /// TxSubmission2 server that requests transactions from remote peers.
 pub struct TxSubmissionServer;
@@ -64,6 +72,7 @@ impl TxSubmissionServer {
             for _ in 0..ack_count {
                 unacked.pop_front();
             }
+
             // Blocking mode rules (enforced by Haskell txSubmissionOutbound):
             //
             // - blocking=true when unacked is empty (including the FIRST request).
@@ -76,18 +85,24 @@ impl TxSubmissionServer {
             // - ProtocolErrorRequestBlocking: blocking when unacked is non-empty
             let blocking = unacked.is_empty();
 
+            // Dynamic request count: never request more IDs than the unacked
+            // capacity allows, capping at MAX_TX_IDS_PER_REQUEST per round.
+            let remaining_capacity = MAX_UNACKED.saturating_sub(unacked.len());
+            let req_count = (remaining_capacity as u16).min(MAX_TX_IDS_PER_REQUEST);
+
             // Request more tx IDs
             tracing::debug!(
                 blocking,
                 ack_count,
-                req_count = MAX_TX_IDS_PER_REQUEST,
+                req_count,
                 unacked = unacked.len(),
+                inflight = inflight.len(),
                 "txsubmission2 server: sending MsgRequestTxIds"
             );
             let req = encode_message(&TxSubmissionMessage::MsgRequestTxIds {
                 blocking,
                 ack_count,
-                req_count: MAX_TX_IDS_PER_REQUEST,
+                req_count,
             });
             channel.send(req).await.map_err(ProtocolError::from)?;
 
@@ -105,6 +120,33 @@ impl TxSubmissionServer {
                         continue;
                     }
 
+                    // ── Bounds check 1: reply must not exceed the requested count ──
+                    // A well-behaved peer never sends more IDs than were requested.
+                    if ids.len() > req_count as usize {
+                        return Err(ProtocolError::BoundsExceeded {
+                            protocol: "TxSubmission2",
+                            reason: format!(
+                                "peer sent {} tx IDs but only {} were requested",
+                                ids.len(),
+                                req_count
+                            ),
+                        });
+                    }
+
+                    // ── Bounds check 2: unacked queue must not overflow ──
+                    // Defense-in-depth: even if reply size is within req_count, the
+                    // total unacked count must stay within MAX_UNACKED.
+                    if unacked.len() + ids.len() > MAX_UNACKED {
+                        return Err(ProtocolError::BoundsExceeded {
+                            protocol: "TxSubmission2",
+                            reason: format!(
+                                "unacked count would reach {} (max {})",
+                                unacked.len() + ids.len(),
+                                MAX_UNACKED
+                            ),
+                        });
+                    }
+
                     // Track new tx IDs, dedup against inflight.
                     // to_fetch carries (era_id, tx_hash) pairs for MsgRequestTxs.
                     let mut to_fetch: Vec<(u8, [u8; 32])> = Vec::new();
@@ -116,6 +158,20 @@ impl TxSubmissionServer {
                         unacked.push_back(id.clone());
                     }
                     stats.tx_ids_received += ids.len() as u64;
+
+                    // ── Bounds check 3: inflight must not overflow ──
+                    // Protects against a peer that advertises many unique tx IDs
+                    // without ever providing the corresponding tx bodies.
+                    if inflight.len() > MAX_INFLIGHT_TX_IDS {
+                        return Err(ProtocolError::BoundsExceeded {
+                            protocol: "TxSubmission2",
+                            reason: format!(
+                                "inflight tx IDs reached {} (max {})",
+                                inflight.len(),
+                                MAX_INFLIGHT_TX_IDS
+                            ),
+                        });
+                    }
 
                     if to_fetch.is_empty() {
                         continue;
@@ -334,5 +390,117 @@ mod tests {
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].0, [0xAA; 32]);
         assert_eq!(accepted[0].1, vec![0x01, 0x02]);
+    }
+
+    /// Helper: generate N unique TxIdAndSize entries with distinct tx_id bytes.
+    fn make_tx_ids(n: usize, start_byte: u8) -> Vec<TxIdAndSize> {
+        (0..n)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                // Use two bytes to support up to 65535 unique IDs.
+                id[0] = start_byte;
+                id[1] = (i >> 8) as u8;
+                id[2] = (i & 0xFF) as u8;
+                TxIdAndSize {
+                    era_id: 6,
+                    tx_id: id,
+                    size_in_bytes: 100,
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn server_rejects_reply_exceeding_request() {
+        // Peer sends 11 tx IDs when only MAX_TX_IDS_PER_REQUEST (10) were requested.
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+
+        let handle = tokio::spawn(async move {
+            TxSubmissionServer::run(&mut channel, |_tx_id, _tx_bytes| true).await
+        });
+
+        // MsgInit
+        ingress_tx
+            .send(Bytes::from(encode_message(&TxSubmissionMessage::MsgInit)))
+            .await
+            .unwrap();
+
+        // Read first request
+        let _ = egress_rx.recv().await.unwrap();
+
+        // Reply with 11 tx IDs (exceeds the 10 requested)
+        let too_many = make_tx_ids(11, 0xBB);
+        let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(too_many));
+        ingress_tx.send(Bytes::from(reply)).await.unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err(), "server should reject oversized reply");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::BoundsExceeded { .. }),
+            "expected BoundsExceeded, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_normal_flow_within_bounds() {
+        // Normal flow: peer sends exactly MAX_TX_IDS_PER_REQUEST IDs, all accepted.
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+
+        let handle = tokio::spawn(async move {
+            TxSubmissionServer::run(&mut channel, |_tx_id, _tx_bytes| true).await
+        });
+
+        // MsgInit
+        ingress_tx
+            .send(Bytes::from(encode_message(&TxSubmissionMessage::MsgInit)))
+            .await
+            .unwrap();
+
+        // Read first request
+        let _ = egress_rx.recv().await.unwrap();
+
+        // Reply with exactly 10 tx IDs (within bounds)
+        let ids = make_tx_ids(MAX_TX_IDS_PER_REQUEST as usize, 0xCC);
+        let reply = encode_message(&TxSubmissionMessage::MsgReplyTxIds(ids.clone()));
+        ingress_tx.send(Bytes::from(reply)).await.unwrap();
+
+        // Read MsgRequestTxs
+        let (_, _, req_txs) = egress_rx.recv().await.unwrap();
+        let req = decode_message(&req_txs).unwrap();
+        let fetch_ids = match req {
+            TxSubmissionMessage::MsgRequestTxs(ref f) => f.clone(),
+            _ => panic!("expected MsgRequestTxs"),
+        };
+        assert_eq!(fetch_ids.len(), MAX_TX_IDS_PER_REQUEST as usize);
+
+        // Reply with tx bodies
+        let txs: Vec<(u8, Vec<u8>)> = fetch_ids
+            .iter()
+            .map(|(era, _)| (*era, vec![0x42]))
+            .collect();
+        let reply_txs = encode_message(&TxSubmissionMessage::MsgReplyTxs(txs));
+        ingress_tx.send(Bytes::from(reply_txs)).await.unwrap();
+
+        // Read next request (should ack the 10 IDs)
+        let (_, _, req2) = egress_rx.recv().await.unwrap();
+        if let TxSubmissionMessage::MsgRequestTxIds { ack_count, .. } =
+            decode_message(&req2).unwrap()
+        {
+            assert_eq!(ack_count, MAX_TX_IDS_PER_REQUEST);
+        } else {
+            panic!("expected MsgRequestTxIds");
+        }
+
+        // Send MsgDone
+        ingress_tx
+            .send(Bytes::from(encode_message(&TxSubmissionMessage::MsgDone)))
+            .await
+            .unwrap();
+
+        let stats = handle.await.unwrap().unwrap();
+        assert_eq!(stats.tx_ids_received, MAX_TX_IDS_PER_REQUEST as u64);
+        assert_eq!(stats.txs_received, MAX_TX_IDS_PER_REQUEST as u64);
+        assert_eq!(stats.txs_accepted, MAX_TX_IDS_PER_REQUEST as u64);
     }
 }

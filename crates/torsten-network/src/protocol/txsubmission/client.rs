@@ -10,6 +10,8 @@
 //! 4. Waits for `MsgRequestTxs` to send full tx bodies
 //! 5. Sends `MsgDone` when in blocking state with no transactions
 
+use std::sync::Arc;
+
 use crate::error::ProtocolError;
 use crate::mux::channel::MuxChannel;
 
@@ -32,6 +34,15 @@ pub trait TxSource: Send + Sync {
 
     /// Check if there are any pending transactions.
     fn has_pending(&self) -> bool;
+
+    /// Optional notification handle for event-driven wakeup.
+    ///
+    /// When `Some`, the client awaits this instead of polling every 500ms.
+    /// The mempool fires `notify_waiters()` on each successful tx admission,
+    /// providing zero-CPU-waste blocking behavior matching Haskell's STM retry.
+    fn tx_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
 }
 
 /// TxSubmission2 client that announces transactions to a remote peer.
@@ -80,12 +91,16 @@ impl TxSubmissionClient {
                         // acknowledged previously-outstanding tx IDs.  Subsequent
                         // polls must NOT re-acknowledge (ack_count=0) but the
                         // outstanding set was already drained by the first call.
-                        //
-                        // Poll every 500ms until new txs appear or the cancel
-                        // token fires.
-                        tracing::debug!("txsubmission2 client: blocking — polling mempool for txs");
+                        tracing::debug!("txsubmission2 client: blocking — waiting for mempool txs");
                         loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            // Event-driven wakeup when the mempool provides a Notify
+                            // handle; falls back to 500ms polling for TxSource impls
+                            // that don't support notification (e.g. test mocks).
+                            if let Some(notify) = source.tx_notify() {
+                                notify.notified().await;
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
                             // ack_count=0: the first call already acknowledged.
                             // req_count stays the same — peer wants up to this many.
                             tx_ids = source.get_tx_ids(0, req_count);
@@ -264,6 +279,113 @@ mod tests {
         assert!(result.is_err(), "client should block, not send MsgDone");
 
         // Abort the client task (it's polling forever with empty mempool).
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Mock TxSource that supports Notify-based wakeup with shared tx_ids
+    /// that can be populated externally after construction.
+    struct NotifyMockTxSource {
+        notify: Arc<tokio::sync::Notify>,
+        /// Shared so the test can inject tx IDs while the source is in use.
+        tx_ids: std::sync::Arc<std::sync::Mutex<Vec<TxIdAndSize>>>,
+        txs: Vec<([u8; 32], Vec<u8>)>,
+    }
+
+    impl TxSource for NotifyMockTxSource {
+        fn get_tx_ids(&self, _ack_count: u16, max_count: u16) -> Vec<TxIdAndSize> {
+            self.tx_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .take(max_count as usize)
+                .cloned()
+                .collect()
+        }
+
+        fn get_txs(&self, tx_ids: &[(u8, [u8; 32])]) -> Vec<(u8, Vec<u8>)> {
+            tx_ids
+                .iter()
+                .filter_map(|(era_id, id)| {
+                    self.txs
+                        .iter()
+                        .find(|(tid, _)| tid == id)
+                        .map(|(_, data)| (*era_id, data.clone()))
+                })
+                .collect()
+        }
+
+        fn has_pending(&self) -> bool {
+            !self.tx_ids.lock().unwrap().is_empty()
+        }
+
+        fn tx_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+            Some(self.notify.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn client_wakes_on_notify_instead_of_polling() {
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let shared_tx_ids: std::sync::Arc<std::sync::Mutex<Vec<TxIdAndSize>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tx_ids_handle = shared_tx_ids.clone();
+
+        let source = NotifyMockTxSource {
+            notify: notify.clone(),
+            tx_ids: shared_tx_ids,
+            txs: vec![([0xDD; 32], vec![0x99])],
+        };
+
+        let handle =
+            tokio::spawn(async move { TxSubmissionClient::run(&mut channel, &source).await });
+
+        // Read MsgInit
+        let _ = egress_rx.recv().await.unwrap();
+
+        // Send blocking MsgRequestTxIds
+        let req = encode_message(&TxSubmissionMessage::MsgRequestTxIds {
+            blocking: true,
+            ack_count: 0,
+            req_count: 10,
+        });
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+
+        // Client should be waiting on the notify (not polling).
+        // Verify no message within 100ms.
+        let timeout_result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), egress_rx.recv()).await;
+        assert!(
+            timeout_result.is_err(),
+            "client should be waiting on notify"
+        );
+
+        // "Add a tx to the mempool" via the shared handle, then fire notify.
+        tx_ids_handle.lock().unwrap().push(TxIdAndSize {
+            era_id: 6,
+            tx_id: [0xDD; 32],
+            size_in_bytes: 200,
+        });
+        notify.notify_waiters();
+
+        // The client should wake promptly and send MsgReplyTxIds within 100ms
+        // (proving it used Notify, not 500ms polling).
+        let reply_result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), egress_rx.recv()).await;
+        assert!(
+            reply_result.is_ok(),
+            "client should wake from notify and reply promptly"
+        );
+        let (_, _, reply_bytes) = reply_result.unwrap().unwrap();
+        if let TxSubmissionMessage::MsgReplyTxIds(ids) = decode_message(&reply_bytes).unwrap() {
+            assert_eq!(ids.len(), 1);
+            assert_eq!(ids[0].tx_id, [0xDD; 32]);
+        } else {
+            panic!("expected MsgReplyTxIds");
+        }
+
+        // Clean up
         handle.abort();
         let _ = handle.await;
     }
