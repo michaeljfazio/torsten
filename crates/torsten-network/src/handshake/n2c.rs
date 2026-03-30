@@ -67,19 +67,33 @@ impl N2CVersionData {
     }
 
     /// Decode from CBOR.
+    ///
+    /// Accepts both V16 legacy format `[network_magic]` (1 element, query defaults
+    /// to false) and V17+ format `[network_magic, query]` (2 elements).
     pub fn decode(dec: &mut Decoder<'_>) -> Result<Self, minicbor::decode::Error> {
         let len = dec.array()?;
-        if len != Some(2) {
-            return Err(minicbor::decode::Error::message(
-                "N2C version data must be array(2)",
-            ));
+        match len {
+            Some(1) => {
+                // V16 legacy format: [network_magic] — query defaults to false
+                let network_magic = dec.u64()?;
+                Ok(Self {
+                    network_magic,
+                    query: false,
+                })
+            }
+            Some(2) => {
+                // V17+ format: [network_magic, query]
+                let network_magic = dec.u64()?;
+                let query = dec.bool()?;
+                Ok(Self {
+                    network_magic,
+                    query,
+                })
+            }
+            _ => Err(minicbor::decode::Error::message(
+                "N2C version data must be array(1) or array(2)",
+            )),
         }
-        let network_magic = dec.u64()?;
-        let query = dec.bool()?;
-        Ok(Self {
-            network_magic,
-            query,
-        })
     }
 
     /// Compute accepted version data.
@@ -150,6 +164,49 @@ mod tests {
         let ours = N2CVersionData::new(2);
         let theirs = N2CVersionData::new(764824073);
         assert!(ours.accept(&theirs).is_none());
+    }
+
+    #[test]
+    fn decode_v16_single_element_array() {
+        // V16 legacy format: [network_magic] with no query field
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(1).expect("infallible");
+        enc.u64(764824073).expect("infallible");
+
+        let mut dec = Decoder::new(&buf);
+        let data = N2CVersionData::decode(&mut dec).unwrap();
+        assert_eq!(data.network_magic, 764824073);
+        assert!(!data.query); // defaults to false
+    }
+
+    #[test]
+    fn decode_v16_two_element_still_works() {
+        // Verify the existing 2-element format is unbroken
+        let data = N2CVersionData {
+            network_magic: 2,
+            query: true,
+        };
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        data.encode(&mut enc);
+        let mut dec = Decoder::new(&buf);
+        let decoded = N2CVersionData::decode(&mut dec).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_v16_rejects_invalid_array_length() {
+        // array(3) should be rejected
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(3).expect("infallible");
+        enc.u64(2).expect("infallible");
+        enc.bool(false).expect("infallible");
+        enc.bool(true).expect("infallible");
+
+        let mut dec = Decoder::new(&buf);
+        assert!(N2CVersionData::decode(&mut dec).is_err());
     }
 
     #[test]

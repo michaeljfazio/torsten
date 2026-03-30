@@ -26,9 +26,14 @@ pub mod n2n;
 
 use minicbor::{Decoder, Encoder};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use crate::error::HandshakeError;
 use crate::mux::channel::MuxChannel;
+
+/// Handshake timeout — matches Haskell's 10-second handshake deadline.
+/// Prevents indefinite blocking when a peer never responds.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub use n2c::N2CVersionData;
 pub use n2n::N2NVersionData;
@@ -66,10 +71,22 @@ pub async fn run_n2n_handshake_client(
     let msg = encode_propose_versions_n2n(n2n::N2N_VERSIONS, our_data);
     channel.send(msg).await.map_err(HandshakeError::from)?;
 
-    // Receive response
-    let response = channel.recv().await.map_err(HandshakeError::from)?;
+    // Receive response (with timeout to prevent indefinite blocking)
+    let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.recv())
+        .await
+        .map_err(|_| HandshakeError::Timeout)?
+        .map_err(HandshakeError::from)?;
 
-    decode_handshake_response(&response)
+    let result = decode_handshake_response(&response, our_data)?;
+
+    // On simultaneous open, we negotiated from the remote's proposal — send
+    // MsgAcceptVersion back so the remote also completes its handshake.
+    if result.simultaneous_open {
+        let accept = encode_accept_version_n2n(result.version, our_data);
+        channel.send(accept).await.map_err(HandshakeError::from)?;
+    }
+
+    Ok(result)
 }
 
 /// Run the handshake as the server (responder) for N2N connections.
@@ -80,8 +97,11 @@ pub async fn run_n2n_handshake_server(
     channel: &mut MuxChannel,
     our_data: &N2NVersionData,
 ) -> Result<HandshakeResult, HandshakeError> {
-    // Receive MsgProposeVersions
-    let proposal = channel.recv().await.map_err(HandshakeError::from)?;
+    // Receive MsgProposeVersions (with timeout)
+    let proposal = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.recv())
+        .await
+        .map_err(|_| HandshakeError::Timeout)?
+        .map_err(HandshakeError::from)?;
 
     let remote_versions = decode_propose_versions_n2n(&proposal)?;
 
@@ -128,7 +148,11 @@ pub async fn run_n2c_handshake_client(
     let msg = encode_propose_versions_n2c(n2c::N2C_VERSIONS, our_data);
     channel.send(msg).await.map_err(HandshakeError::from)?;
 
-    let response = channel.recv().await.map_err(HandshakeError::from)?;
+    // Receive response (with timeout)
+    let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.recv())
+        .await
+        .map_err(|_| HandshakeError::Timeout)?
+        .map_err(HandshakeError::from)?;
 
     // Decode, converting wire versions back to logical
     decode_handshake_response_n2c(&response)
@@ -139,7 +163,11 @@ pub async fn run_n2c_handshake_server(
     channel: &mut MuxChannel,
     our_data: &N2CVersionData,
 ) -> Result<HandshakeResult, HandshakeError> {
-    let proposal = channel.recv().await.map_err(HandshakeError::from)?;
+    // Receive MsgProposeVersions (with timeout)
+    let proposal = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.recv())
+        .await
+        .map_err(|_| HandshakeError::Timeout)?
+        .map_err(HandshakeError::from)?;
 
     let remote_versions = decode_propose_versions_n2c(&proposal)?;
 
@@ -355,8 +383,52 @@ fn decode_propose_versions_n2c(
     Ok(versions)
 }
 
+/// Decode a RefuseReason from a CBOR decoder positioned after the `[2, ...]` tag.
+///
+/// RefuseReason variants per CDDL:
+/// - `[0, [v1, v2, ...]]` — VersionMismatch
+/// - `[1, version, reason_text]` — HandshakeDecodeError
+/// - `[2, version, reason_text]` — Refused
+fn decode_refuse_reason(dec: &mut Decoder<'_>) -> HandshakeError {
+    let _reason_arr = dec.array().ok();
+    let reason_tag = dec.u8().unwrap_or(255);
+    let reason = match reason_tag {
+        0 => {
+            // VersionMismatch: [0, [v1, v2, ...]] per CDDL refuseReasonVersionMismatch.
+            let versions: Vec<u16> = if let Ok(Some(n)) = dec.array() {
+                (0..n).filter_map(|_| dec.u16().ok()).collect()
+            } else {
+                vec![]
+            };
+            format!("version mismatch; remote supports: {versions:?}")
+        }
+        1 => {
+            // HandshakeDecodeError: [1, version, reason_text]
+            let v = dec.u16().unwrap_or(0);
+            let r = dec.str().unwrap_or("unknown").to_owned();
+            format!("handshake decode error (v{v}): {r}")
+        }
+        2 => {
+            // Refused: [2, version, reason_text]
+            let v = dec.u16().unwrap_or(0);
+            let r = dec.str().unwrap_or("unknown").to_owned();
+            format!("refused (v{v}): {r}")
+        }
+        _ => format!("unknown refuse reason tag {reason_tag}"),
+    };
+    HandshakeError::Refused { version: 0, reason }
+}
+
 /// Decode a handshake response (MsgAcceptVersion, MsgRefuse, or MsgProposeVersions for N2N).
-fn decode_handshake_response(data: &[u8]) -> Result<HandshakeResult, HandshakeError> {
+///
+/// On simultaneous open (receiving MsgProposeVersions instead of MsgAcceptVersion), decodes
+/// the remote's version map and negotiates the highest common version — effectively acting
+/// as the responder. Both sides do this and converge on the same version since `N2N_VERSIONS`
+/// preference order is identical.
+fn decode_handshake_response(
+    data: &[u8],
+    our_data: &N2NVersionData,
+) -> Result<HandshakeResult, HandshakeError> {
     let mut dec = Decoder::new(data);
     let _arr_len = dec
         .array()
@@ -377,48 +449,50 @@ fn decode_handshake_response(data: &[u8]) -> Result<HandshakeResult, HandshakeEr
                 simultaneous_open: false,
             })
         }
-        MSG_REFUSE => {
-            // Decode RefuseReason
-            let _reason_arr = dec
-                .array()
-                .map_err(|e| HandshakeError::DecodeError(e.to_string()))?;
-            let reason_tag = dec
-                .u8()
-                .map_err(|e| HandshakeError::DecodeError(e.to_string()))?;
-            let reason = match reason_tag {
-                0 => {
-                    // VersionMismatch: [0, [v1, v2, ...]] per CDDL refuseReasonVersionMismatch.
-                    // Decode the inner list of supported version numbers.
-                    let versions: Vec<u16> = if let Ok(Some(n)) = dec.array() {
-                        (0..n).filter_map(|_| dec.u16().ok()).collect()
-                    } else {
-                        vec![]
-                    };
-                    format!("version mismatch; remote supports: {versions:?}")
-                }
-                1 => {
-                    // HandshakeDecodeError: [1, version, reason_text]
-                    let v = dec.u16().unwrap_or(0);
-                    let r = dec.str().unwrap_or("unknown").to_owned();
-                    format!("handshake decode error (v{v}): {r}")
-                }
-                2 => {
-                    // Refused: [2, version, reason_text]
-                    let v = dec.u16().unwrap_or(0);
-                    let r = dec.str().unwrap_or("unknown").to_owned();
-                    format!("refused (v{v}): {r}")
-                }
-                _ => format!("unknown refuse reason tag {reason_tag}"),
-            };
-            Err(HandshakeError::Refused { version: 0, reason })
-        }
+        MSG_REFUSE => Err(decode_refuse_reason(&mut dec)),
         MSG_PROPOSE_VERSIONS => {
             // Simultaneous open — the remote also sent MsgProposeVersions.
-            // We need to negotiate from their proposal.
-            // For now, return a marker; the caller handles version selection.
-            Ok(HandshakeResult {
-                version: 0, // Caller must re-negotiate
-                simultaneous_open: true,
+            // Decode their version map and negotiate from it, acting as responder.
+            let map_len = dec
+                .map()
+                .map_err(|e| HandshakeError::DecodeError(e.to_string()))?
+                .ok_or_else(|| {
+                    HandshakeError::DecodeError("indefinite map not supported".to_string())
+                })?;
+
+            let mut remote_versions = BTreeMap::new();
+            for _ in 0..map_len {
+                let version = dec
+                    .u16()
+                    .map_err(|e| HandshakeError::DecodeError(e.to_string()))?;
+                let version_data = N2NVersionData::decode(&mut dec)
+                    .map_err(|e| HandshakeError::DecodeError(e.to_string()))?;
+                remote_versions.insert(version, version_data);
+            }
+
+            // Find highest common version (same logic as server-side negotiation)
+            for &our_version in n2n::N2N_VERSIONS {
+                if let Some(their_data) = remote_versions.get(&our_version) {
+                    if our_data.accept(their_data).is_some() {
+                        return Ok(HandshakeResult {
+                            version: our_version,
+                            simultaneous_open: true,
+                        });
+                    }
+                    // Magic mismatch on a matching version — reject
+                    return Err(HandshakeError::NetworkMagicMismatch {
+                        ours: our_data.network_magic,
+                        theirs: their_data.network_magic,
+                    });
+                }
+            }
+
+            // No common version
+            let our_versions: Vec<u16> = n2n::N2N_VERSIONS.to_vec();
+            let their_versions: Vec<u16> = remote_versions.keys().copied().collect();
+            Err(HandshakeError::VersionMismatch {
+                ours: our_versions,
+                theirs: their_versions,
             })
         }
         _ => Err(HandshakeError::DecodeError(format!(
@@ -449,10 +523,7 @@ fn decode_handshake_response_n2c(data: &[u8]) -> Result<HandshakeResult, Handsha
                 simultaneous_open: false,
             })
         }
-        MSG_REFUSE => {
-            // Same refuse format as N2N
-            decode_handshake_response(data)
-        }
+        MSG_REFUSE => Err(decode_refuse_reason(&mut dec)),
         _ => Err(HandshakeError::DecodeError(format!(
             "unexpected N2C handshake message tag: {tag}"
         ))),
@@ -478,7 +549,7 @@ mod tests {
     fn n2n_accept_encode_decode() {
         let data = N2NVersionData::new(2, false, true);
         let encoded = encode_accept_version_n2n(15, &data);
-        let result = decode_handshake_response(&encoded).unwrap();
+        let result = decode_handshake_response(&encoded, &data).unwrap();
         assert_eq!(result.version, 15);
         assert!(!result.simultaneous_open);
     }
@@ -486,8 +557,9 @@ mod tests {
     #[test]
     fn n2n_refuse_version_mismatch_decode() {
         // VersionMismatch (tag 0): [0, [v1, v2, ...]] per CDDL
+        let data = N2NVersionData::new(2, false, true);
         let encoded = encode_refuse_version_mismatch(&[14, 15]);
-        let result = decode_handshake_response(&encoded);
+        let result = decode_handshake_response(&encoded, &data);
         assert!(result.is_err());
         if let Err(HandshakeError::Refused { reason, .. }) = result {
             assert!(
@@ -502,8 +574,9 @@ mod tests {
     #[test]
     fn n2n_refuse_refused_decode() {
         // Refused (tag 2): [2, version, reason_text]
+        let data = N2NVersionData::new(2, false, true);
         let encoded = encode_refuse_with_reason(2, 15, "bad magic");
-        let result = decode_handshake_response(&encoded);
+        let result = decode_handshake_response(&encoded, &data);
         assert!(result.is_err());
         if let Err(HandshakeError::Refused { reason, .. }) = result {
             assert!(reason.contains("bad magic"));
@@ -548,12 +621,50 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_open_detection() {
-        // If we receive MsgProposeVersions (tag 0) instead of MsgAcceptVersion,
-        // it means simultaneous open.
-        let data = N2NVersionData::new(2, false, true);
-        let proposal = encode_propose_versions_n2n(n2n::N2N_VERSIONS, &data);
-        let result = decode_handshake_response(&proposal).unwrap();
+    fn simultaneous_open_negotiates_version() {
+        // When we receive MsgProposeVersions (simultaneous open), the decoder should
+        // negotiate the highest common version instead of returning version 0.
+        let our_data = N2NVersionData::new(2, false, true);
+        let their_data = N2NVersionData::new(2, false, true);
+        let proposal = encode_propose_versions_n2n(n2n::N2N_VERSIONS, &their_data);
+        let result = decode_handshake_response(&proposal, &our_data).unwrap();
         assert!(result.simultaneous_open);
+        // Should negotiate the highest common version (first in N2N_VERSIONS preference order)
+        assert_eq!(result.version, n2n::N2N_VERSIONS[0]);
+        assert_ne!(result.version, 0, "version must not be the old sentinel 0");
+    }
+
+    #[test]
+    fn simultaneous_open_version_mismatch() {
+        // No common versions between the two sides — should return VersionMismatch.
+        let our_data = N2NVersionData::new(2, false, true);
+        // Build a proposal with a version we don't support (e.g., version 99)
+        let fake_data = N2NVersionData::new(2, false, true);
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        enc.array(2).expect("infallible");
+        enc.u64(MSG_PROPOSE_VERSIONS).expect("infallible");
+        enc.map(1).expect("infallible");
+        enc.u16(99).expect("infallible");
+        fake_data.encode(&mut enc);
+
+        let result = decode_handshake_response(&buf, &our_data);
+        assert!(
+            matches!(result, Err(HandshakeError::VersionMismatch { .. })),
+            "expected VersionMismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn simultaneous_open_magic_mismatch() {
+        // Same version numbers but different network magic — should fail.
+        let our_data = N2NVersionData::new(2, false, true);
+        let their_data = N2NVersionData::new(764824073, false, true); // mainnet magic
+        let proposal = encode_propose_versions_n2n(n2n::N2N_VERSIONS, &their_data);
+        let result = decode_handshake_response(&proposal, &our_data);
+        assert!(
+            matches!(result, Err(HandshakeError::NetworkMagicMismatch { .. })),
+            "expected NetworkMagicMismatch, got: {result:?}"
+        );
     }
 }
