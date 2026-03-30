@@ -12155,6 +12155,7 @@ fn make_lovelace_output(lovelace: u64) -> TransactionOutput {
 /// rolled-back block are restored so that a replacement block at the same slot
 /// can successfully spend them.
 #[test]
+#[allow(deprecated)] // Tests legacy UTxO-only rollback path (#308)
 fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
@@ -12314,6 +12315,7 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
 /// Rollback by 2: both blocks' UTxO changes are inverted in reverse order
 /// (B first, then A), restoring the genesis UTxO set.
 #[test]
+#[allow(deprecated)] // Tests legacy UTxO-only rollback path (#308)
 fn test_multi_block_diff_rollback_restores_full_chain() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
@@ -12412,6 +12414,7 @@ fn test_multi_block_diff_rollback_restores_full_chain() {
 /// This is the exact micro-fork scenario from issue #176 but with
 /// 2 blocks in the diff window.
 #[test]
+#[allow(deprecated)] // Tests legacy UTxO-only rollback path (#308)
 fn test_partial_rollback_then_reapply() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);

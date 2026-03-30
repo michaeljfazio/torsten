@@ -1,6 +1,9 @@
 use super::{credential_to_hash, DRepRegistration, LedgerState, PoolRegistration};
+use crate::ledger_seq::{
+    DelegationChange, GovernanceChange, LedgerDelta, PoolChange, RewardChange,
+};
 use std::sync::Arc;
-use torsten_primitives::credentials::Credential;
+use torsten_primitives::credentials::{Credential, Pointer};
 use torsten_primitives::hash::Hash32;
 use torsten_primitives::transaction::{Certificate, MIRSource, MIRTarget};
 use torsten_primitives::value::Lovelace;
@@ -551,6 +554,638 @@ impl LedgerState {
             // (rewards were consumed in the on-chain transaction)
             balance.0 = 0;
         }
+    }
+
+    /// Process a certificate with pointer tracking AND delta recording.
+    ///
+    /// Identical to `process_certificate_with_pointer` in all state mutations, but
+    /// additionally records every change into the provided `LedgerDelta`. Call this
+    /// during normal block application when the LedgerSeq is active.
+    #[allow(dead_code)]
+    pub(crate) fn process_certificate_with_delta(
+        &mut self,
+        cert: &Certificate,
+        slot: u64,
+        tx_index: u64,
+        cert_index: u64,
+        delta: &mut LedgerDelta,
+    ) {
+        // Determine the pointer for registration-class certificates.  The same
+        // pointer that `process_certificate_with_pointer` inserts into pointer_map
+        // is passed to `process_certificate_recording_delta` so the delta captures
+        // the (slot, tx_index, cert_index) triple for later reconstruction.
+        let pointer = if matches!(
+            cert,
+            Certificate::StakeRegistration(_)
+                | Certificate::ConwayStakeRegistration { .. }
+                | Certificate::RegStakeDeleg { .. }
+                | Certificate::RegStakeVoteDeleg { .. }
+                | Certificate::VoteRegDeleg { .. }
+        ) {
+            Some(Pointer {
+                slot,
+                tx_index,
+                cert_index,
+            })
+        } else {
+            None
+        };
+
+        // Insert into pointer_map for address resolution (mirrors the logic in
+        // `process_certificate_with_pointer`).
+        if let Some(ptr) = pointer {
+            let credential = match cert {
+                Certificate::StakeRegistration(c)
+                | Certificate::ConwayStakeRegistration { credential: c, .. }
+                | Certificate::RegStakeDeleg { credential: c, .. }
+                | Certificate::RegStakeVoteDeleg { credential: c, .. }
+                | Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+                _ => None,
+            };
+            if let Some(c) = credential {
+                let key = credential_to_hash(c);
+                self.pointer_map.insert(ptr, key);
+            }
+        }
+
+        self.process_certificate_recording_delta(cert, pointer, delta);
+    }
+
+    /// Mirror of `process_certificate` that also pushes delta change variants.
+    ///
+    /// All state mutations are byte-for-byte identical to `process_certificate`.
+    /// The `pointer` argument is `Some` only for certificates that create a
+    /// pointer-map entry (i.e. registration certificates); it is forwarded into
+    /// `DelegationChange::Register` so that rollback reconstruction can rebuild
+    /// the pointer_map.
+    ///
+    /// # Adding new certificate arms
+    ///
+    /// When adding a new arm, first add the matching arm to `process_certificate`,
+    /// then mirror it here with the appropriate delta push.  The two methods must
+    /// remain in sync.
+    #[allow(dead_code)]
+    pub(crate) fn process_certificate_recording_delta(
+        &mut self,
+        cert: &Certificate,
+        pointer: Option<Pointer>,
+        delta: &mut LedgerDelta,
+    ) {
+        match cert {
+            Certificate::StakeRegistration(credential) => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                if is_script {
+                    self.script_stake_credentials.insert(key);
+                }
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
+                self.stake_key_deposits
+                    .insert(key, self.protocol_params.key_deposit.0);
+                delta.delegation_changes.push(DelegationChange::Register {
+                    credential_hash: key,
+                    is_script,
+                    pointer,
+                });
+                delta.reward_changes.push(RewardChange::Create {
+                    credential_hash: key,
+                });
+                debug!("Stake key registered: {}", key.to_hex());
+            }
+            Certificate::StakeDeregistration(credential) => {
+                let key = credential_to_hash(credential);
+                let stored_deposit = self
+                    .stake_key_deposits
+                    .remove(&key)
+                    .unwrap_or(self.protocol_params.key_deposit.0);
+                self.total_stake_key_deposits =
+                    self.total_stake_key_deposits.saturating_sub(stored_deposit);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                self.script_stake_credentials.remove(&key);
+                self.pointer_map.retain(|_, v| *v != key);
+                // Pass None for pointer: during deregistration we don't track the
+                // pointer of the original registration (it was recorded at Register time).
+                delta.delegation_changes.push(DelegationChange::Deregister {
+                    credential_hash: key,
+                    pointer: None,
+                });
+                delta.reward_changes.push(RewardChange::Destroy {
+                    credential_hash: key,
+                });
+                debug!("Stake key deregistered: {}", key.to_hex());
+            }
+            Certificate::ConwayStakeRegistration {
+                credential,
+                deposit: _,
+            } => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                if is_script {
+                    self.script_stake_credentials.insert(key);
+                }
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
+                self.stake_key_deposits
+                    .insert(key, self.protocol_params.key_deposit.0);
+                delta.delegation_changes.push(DelegationChange::Register {
+                    credential_hash: key,
+                    is_script,
+                    pointer,
+                });
+                delta.reward_changes.push(RewardChange::Create {
+                    credential_hash: key,
+                });
+                debug!("Stake key registered (Conway): {}", key.to_hex());
+            }
+            Certificate::ConwayStakeDeregistration {
+                credential,
+                refund: _,
+            } => {
+                let key = credential_to_hash(credential);
+                let stored_deposit = self
+                    .stake_key_deposits
+                    .remove(&key)
+                    .unwrap_or(self.protocol_params.key_deposit.0);
+                self.total_stake_key_deposits =
+                    self.total_stake_key_deposits.saturating_sub(stored_deposit);
+                Arc::make_mut(&mut self.delegations).remove(&key);
+                Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                self.script_stake_credentials.remove(&key);
+                self.pointer_map.retain(|_, v| *v != key);
+                delta.delegation_changes.push(DelegationChange::Deregister {
+                    credential_hash: key,
+                    pointer: None,
+                });
+                delta.reward_changes.push(RewardChange::Destroy {
+                    credential_hash: key,
+                });
+                debug!("Stake key deregistered (Conway): {}", key.to_hex());
+            }
+            Certificate::StakeDelegation {
+                credential,
+                pool_hash,
+            } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                delta.delegation_changes.push(DelegationChange::Delegate {
+                    credential_hash: key,
+                    pool_id: *pool_hash,
+                });
+                debug!("Stake delegated to pool: {}", pool_hash.to_hex());
+            }
+            Certificate::PoolRegistration(params) => {
+                let pool_reg = PoolRegistration {
+                    pool_id: params.operator,
+                    vrf_keyhash: params.vrf_keyhash,
+                    pledge: params.pledge,
+                    cost: params.cost,
+                    margin_numerator: params.margin.numerator,
+                    margin_denominator: params.margin.denominator,
+                    reward_account: params.reward_account.clone(),
+                    owners: params.pool_owners.clone(),
+                    relays: params.relays.clone(),
+                    metadata_url: params.pool_metadata.as_ref().map(|m| m.url.clone()),
+                    metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
+                };
+                if self.pool_params.contains_key(&params.operator) {
+                    // Re-registration: cancel any pending retirement and defer params.
+                    let had_retirement =
+                        self.pending_retirements.remove(&params.operator).is_some();
+                    self.future_pool_params
+                        .insert(params.operator, pool_reg.clone());
+                    delta
+                        .pool_changes
+                        .push(PoolChange::Reregister { params: pool_reg });
+                    if had_retirement {
+                        delta.pool_changes.push(PoolChange::CancelRetirement {
+                            pool_id: params.operator,
+                        });
+                    }
+                    debug!(
+                        "Pool re-registered (deferred to next epoch, pending retirement cancelled): {}",
+                        params.operator.to_hex()
+                    );
+                } else {
+                    // First registration: apply immediately.
+                    Arc::make_mut(&mut self.pool_params).insert(params.operator, pool_reg.clone());
+                    self.pool_deposits
+                        .insert(params.operator, self.protocol_params.pool_deposit.0);
+                    delta
+                        .pool_changes
+                        .push(PoolChange::Register { params: pool_reg });
+                    debug!("Pool registered: {}", params.operator.to_hex());
+                }
+            }
+            Certificate::PoolRetirement { pool_hash, epoch } => {
+                debug!(
+                    "Pool retirement scheduled at epoch {}: {}",
+                    epoch,
+                    pool_hash.to_hex()
+                );
+                self.pending_retirements
+                    .insert(*pool_hash, torsten_primitives::time::EpochNo(*epoch));
+                delta.pool_changes.push(PoolChange::Retire {
+                    pool_id: *pool_hash,
+                    epoch: torsten_primitives::time::EpochNo(*epoch),
+                });
+            }
+            Certificate::RegStakeDeleg {
+                credential,
+                pool_hash,
+                ..
+            } => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
+                self.stake_key_deposits
+                    .insert(key, self.protocol_params.key_deposit.0);
+                if is_script {
+                    self.script_stake_credentials.insert(key);
+                }
+                delta.delegation_changes.push(DelegationChange::Register {
+                    credential_hash: key,
+                    is_script,
+                    pointer,
+                });
+                delta.delegation_changes.push(DelegationChange::Delegate {
+                    credential_hash: key,
+                    pool_id: *pool_hash,
+                });
+                delta.reward_changes.push(RewardChange::Create {
+                    credential_hash: key,
+                });
+            }
+            Certificate::RegDRep {
+                credential,
+                deposit,
+                anchor,
+            } => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                let registration = DRepRegistration {
+                    credential: credential.clone(),
+                    deposit: *deposit,
+                    anchor: anchor.clone(),
+                    registered_epoch: self.epoch,
+                    last_active_epoch: self.epoch,
+                    active: true,
+                };
+                Arc::make_mut(&mut self.governance)
+                    .dreps
+                    .insert(key, registration.clone());
+                Arc::make_mut(&mut self.governance).drep_registration_count += 1;
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::DRepRegister {
+                        credential_hash: key,
+                        registration,
+                        is_script,
+                    });
+                debug!("DRep registered: {}", key.to_hex());
+            }
+            Certificate::UnregDRep { credential, refund } => {
+                let key = credential_to_hash(credential);
+                let deposit_amount = Arc::make_mut(&mut self.governance)
+                    .dreps
+                    .remove(&key)
+                    .map(|reg| reg.deposit)
+                    .unwrap_or(*refund);
+                if deposit_amount.0 > 0 {
+                    *Arc::make_mut(&mut self.reward_accounts)
+                        .entry(key)
+                        .or_insert(Lovelace(0)) += deposit_amount;
+                    delta.reward_changes.push(RewardChange::Credit {
+                        credential_hash: key,
+                        amount: deposit_amount,
+                    });
+                    debug!(
+                        "DRep deregistered: {}, deposit {} refunded to reward account",
+                        key.to_hex(),
+                        deposit_amount.0
+                    );
+                } else {
+                    debug!("DRep deregistered: {}", key.to_hex());
+                }
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::DRepUnregister {
+                        credential_hash: key,
+                    });
+            }
+            Certificate::UpdateDRep { credential, anchor } => {
+                let key = credential_to_hash(credential);
+                if let Some(drep) = Arc::make_mut(&mut self.governance).dreps.get_mut(&key) {
+                    drep.anchor = anchor.clone();
+                    drep.last_active_epoch = self.epoch;
+                    debug!("DRep updated: {}", key.to_hex());
+                }
+                delta.governance_changes.push(GovernanceChange::DRepUpdate {
+                    credential_hash: key,
+                    anchor: anchor.clone(),
+                    last_active_epoch: self.epoch,
+                });
+            }
+            Certificate::VoteDelegation { credential, drep } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::VoteDelegate {
+                        credential_hash: key,
+                        drep: drep.clone(),
+                    });
+                debug!("Vote delegated to {:?}", drep);
+            }
+            Certificate::StakeVoteDelegation {
+                credential,
+                pool_hash,
+                drep,
+            } => {
+                let key = credential_to_hash(credential);
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                delta.delegation_changes.push(DelegationChange::Delegate {
+                    credential_hash: key,
+                    pool_id: *pool_hash,
+                });
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::VoteDelegate {
+                        credential_hash: key,
+                        drep: drep.clone(),
+                    });
+                debug!(
+                    "Stake+vote delegated to pool {} and drep {:?}",
+                    pool_hash.to_hex(),
+                    drep
+                );
+            }
+            Certificate::CommitteeHotAuth {
+                cold_credential,
+                hot_credential,
+            } => {
+                let cold_key = credential_to_hash(cold_credential);
+                let hot_key = credential_to_hash(hot_credential);
+                let cold_is_script = matches!(cold_credential, Credential::Script(_));
+                let hot_is_script = matches!(hot_credential, Credential::Script(_));
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_hot_keys.insert(cold_key, hot_key);
+                gov.committee_resigned.remove(&cold_key);
+                if cold_is_script {
+                    gov.script_committee_credentials.insert(cold_key);
+                }
+                if hot_is_script {
+                    gov.script_committee_hot_credentials.insert(hot_key);
+                }
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::CommitteeHotAuth {
+                        cold_credential_hash: cold_key,
+                        hot_credential_hash: hot_key,
+                        cold_is_script,
+                        hot_is_script,
+                    });
+                debug!(
+                    "Committee hot key authorized: {} -> {}",
+                    cold_key.to_hex(),
+                    hot_key.to_hex()
+                );
+            }
+            Certificate::CommitteeColdResign {
+                cold_credential,
+                anchor,
+            } => {
+                let cold_key = credential_to_hash(cold_credential);
+                let is_script = matches!(cold_credential, Credential::Script(_));
+                let gov = Arc::make_mut(&mut self.governance);
+                gov.committee_resigned.insert(cold_key, anchor.clone());
+                gov.committee_hot_keys.remove(&cold_key);
+                if is_script {
+                    gov.script_committee_credentials.insert(cold_key);
+                }
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::CommitteeResign {
+                        cold_credential_hash: cold_key,
+                        anchor: anchor.clone(),
+                        is_script,
+                    });
+                debug!("Committee member resigned: {}", cold_key.to_hex());
+            }
+            Certificate::RegStakeVoteDeleg {
+                credential,
+                pool_hash,
+                drep,
+                ..
+            } => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.delegations).insert(key, *pool_hash);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
+                self.stake_key_deposits
+                    .insert(key, self.protocol_params.key_deposit.0);
+                if is_script {
+                    self.script_stake_credentials.insert(key);
+                }
+                delta.delegation_changes.push(DelegationChange::Register {
+                    credential_hash: key,
+                    is_script,
+                    pointer,
+                });
+                delta.delegation_changes.push(DelegationChange::Delegate {
+                    credential_hash: key,
+                    pool_id: *pool_hash,
+                });
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::VoteDelegate {
+                        credential_hash: key,
+                        drep: drep.clone(),
+                    });
+                delta.reward_changes.push(RewardChange::Create {
+                    credential_hash: key,
+                });
+                debug!(
+                    "Reg+stake+vote delegated: pool={}, drep={:?}",
+                    pool_hash.to_hex(),
+                    drep
+                );
+            }
+            Certificate::VoteRegDeleg {
+                credential, drep, ..
+            } => {
+                let key = credential_to_hash(credential);
+                let is_script = matches!(credential, Credential::Script(_));
+                self.stake_distribution
+                    .stake_map
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.reward_accounts)
+                    .entry(key)
+                    .or_insert(Lovelace(0));
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .insert(key, drep.clone());
+                self.total_stake_key_deposits += self.protocol_params.key_deposit.0;
+                self.stake_key_deposits
+                    .insert(key, self.protocol_params.key_deposit.0);
+                if is_script {
+                    self.script_stake_credentials.insert(key);
+                }
+                delta.delegation_changes.push(DelegationChange::Register {
+                    credential_hash: key,
+                    is_script,
+                    pointer,
+                });
+                delta
+                    .governance_changes
+                    .push(GovernanceChange::VoteDelegate {
+                        credential_hash: key,
+                        drep: drep.clone(),
+                    });
+                delta.reward_changes.push(RewardChange::Create {
+                    credential_hash: key,
+                });
+                debug!("Reg+vote delegated to {:?}", drep);
+            }
+            Certificate::GenesisKeyDelegation {
+                genesis_hash,
+                genesis_delegate_hash,
+                vrf_keyhash,
+            } => {
+                // Genesis key delegation — no delta changes needed (rare, Shelley-era only).
+                debug!(
+                    "Genesis key delegation: {} -> delegate={}, vrf={}",
+                    genesis_hash.to_hex(),
+                    genesis_delegate_hash.to_hex(),
+                    vrf_keyhash.to_hex()
+                );
+            }
+            Certificate::MoveInstantaneousRewards { source, target } => {
+                // MIR — no delta changes recorded (pre-Conway, not replayed via deltas).
+                match target {
+                    MIRTarget::StakeCredentials(creds) => {
+                        let mut total_distributed: u64 = 0;
+                        for (cred, amount) in creds {
+                            let key = credential_to_hash(cred);
+                            let entry = Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0));
+                            if *amount >= 0 {
+                                let amt = *amount as u64;
+                                entry.0 = entry.0.saturating_add(amt);
+                                total_distributed = total_distributed.saturating_add(amt);
+                            } else {
+                                entry.0 = entry.0.saturating_sub(amount.unsigned_abs());
+                            }
+                            debug!(
+                                "MIR: distributed {} lovelace from {:?} to {}",
+                                amount,
+                                source,
+                                key.to_hex()
+                            );
+                        }
+                        if total_distributed > 0 {
+                            match source {
+                                MIRSource::Reserves => {
+                                    self.reserves.0 =
+                                        self.reserves.0.saturating_sub(total_distributed);
+                                }
+                                MIRSource::Treasury => {
+                                    self.treasury.0 =
+                                        self.treasury.0.saturating_sub(total_distributed);
+                                }
+                            }
+                        }
+                    }
+                    MIRTarget::OtherAccountingPot(coin) => match source {
+                        MIRSource::Reserves => {
+                            let actual = (*coin).min(self.reserves.0);
+                            self.reserves.0 = self.reserves.0.saturating_sub(actual);
+                            self.treasury.0 = self.treasury.0.saturating_add(actual);
+                            debug!(
+                                "MIR: transferred {} lovelace from reserves to treasury",
+                                actual
+                            );
+                        }
+                        MIRSource::Treasury => {
+                            let actual = (*coin).min(self.treasury.0);
+                            self.treasury.0 = self.treasury.0.saturating_sub(actual);
+                            self.reserves.0 = self.reserves.0.saturating_add(actual);
+                            debug!(
+                                "MIR: transferred {} lovelace from treasury to reserves",
+                                actual
+                            );
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    /// Process a withdrawal from a reward account, recording the change in `delta`.
+    ///
+    /// Identical to `process_withdrawal` in all state mutations but additionally
+    /// pushes `RewardChange::Withdraw` into the delta so that LedgerSeq reconstruction
+    /// can replay the withdrawal.
+    #[allow(dead_code)]
+    pub(crate) fn process_withdrawal_with_delta(
+        &mut self,
+        reward_account: &[u8],
+        amount: Lovelace,
+        delta: &mut LedgerDelta,
+    ) {
+        let key = Self::reward_account_to_hash(reward_account);
+        if let Some(balance) = Arc::make_mut(&mut self.reward_accounts).get_mut(&key) {
+            if balance.0 != amount.0 {
+                debug!(
+                    account = %key.to_hex(),
+                    balance = balance.0,
+                    withdrawal = amount.0,
+                    "Withdrawal amount does not match reward balance"
+                );
+            }
+            balance.0 = 0;
+        }
+        delta.reward_changes.push(RewardChange::Withdraw {
+            credential_hash: key,
+            amount,
+        });
     }
 
     /// Convert a reward account (raw bytes with network header) to a Hash32 key.

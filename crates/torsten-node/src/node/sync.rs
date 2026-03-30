@@ -420,74 +420,22 @@ impl Node {
             }
         }
 
-        // 2. Attempt the fast diff-based rollback path.
+        // 2. Full-state rollback via snapshot + replay.
         //
-        // Inspect the DiffSeq to determine whether all blocks that need to be
-        // undone are covered by the in-memory diff window.  A diff is "after the
-        // rollback point" if its slot is strictly greater than `rollback_slot`.
+        // The previous fast-path (DiffSeq) only restored UTxO changes — nonce
+        // accumulators, delegation state, reward accounts, governance, and other
+        // LedgerState fields were NOT rolled back.  This caused incorrect epoch
+        // nonces and VRF leader check failures after any rollback.
         //
-        // The DiffSeq stores diffs in chronological order (oldest at front).
-        // We count from the back (most-recent) until we find a diff whose slot
-        // is <= rollback_slot — that's the new tip after rollback.
-        let fast_path_used =
-            {
-                let mut ls = self.ledger_state.write().await;
-
-                // Count how many trailing diffs are after the rollback point.
-                // Also locate the new tip (the diff just at or before rollback_slot).
-                let diffs_to_undo = ls
-                    .diff_seq
-                    .diffs
-                    .iter()
-                    .rev()
-                    .take_while(|(slot, _hash, _diff)| slot.0 > rollback_slot)
-                    .count();
-
-                // The diff window is valid for the fast path when:
-                //   (a) the DiffSeq is non-empty (at least some history is available), AND
-                //   (b) all blocks after the rollback point are covered (i.e., the oldest
-                //       diff we still have is at or before rollback_slot, meaning the
-                //       ledger's state before those diffs is correctly represented
-                //       by the remaining DiffSeq + underlying UTxO store).
-                //
-                // If diffs_to_undo == 0 the ledger is already at or before the rollback
-                // point (handled above by the no-op check, but guard here for safety).
-                //
-                // If diffs_to_undo == ls.diff_seq.len() it means EVERY diff in the window
-                // is after the rollback point, implying the diff window doesn't reach
-                // far enough back to cover the rollback — fall back to slow path.
-                let diff_total = ls.diff_seq.len();
-                let window_covers_rollback = diffs_to_undo > 0 && diffs_to_undo < diff_total;
-
-                if window_covers_rollback {
-                    // Determine the new ledger tip: the most-recent diff that is AT or
-                    // BEFORE the rollback slot becomes the new head.
-                    let new_tip = ls.diff_seq.diffs.iter().rev().nth(diffs_to_undo).map(
-                        |(slot, hash, _diff)| torsten_primitives::block::Tip {
-                            point: torsten_primitives::block::Point::Specific(*slot, *hash),
-                            block_number: torsten_primitives::time::BlockNo(0), // approximate; refreshed on next apply
-                        },
-                    );
-
-                    if let Some(tip) = new_tip {
-                        let rolled = ls.rollback_blocks_to_point(diffs_to_undo, tip);
-                        info!(
-                            rollback_slot,
-                            diffs_undone = rolled,
-                            "Fast diff-based rollback succeeded"
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            };
-
-        if fast_path_used {
-            // Fast path completed — skip snapshot reload.
-        } else {
+        // Issue #308: We now always use the full-state restoration path:
+        // find the best snapshot before the rollback point, load it, and replay
+        // blocks forward.  This is O(snapshot_interval) but guarantees ALL
+        // state fields are correctly restored.
+        //
+        // When LedgerSeq is fully wired as the authoritative state store,
+        // rollback will be delegated to LedgerSeq::rollback(n) + tip_state()
+        // which is O(checkpoint_interval) by design and restores all fields.
+        {
             // 3. Slow path: reload from snapshot and replay to rollback point.
             //
             // Find the best ledger snapshot at or before the rollback point.
@@ -1240,14 +1188,26 @@ impl Node {
                 } else {
                     BlockValidationMode::ApplyOnly
                 };
-                if let Err(e) = ls.apply_block(block, ledger_mode) {
-                    error!(
-                        slot = block.slot().0,
-                        block_no = block.block_number().0,
-                        hash = %block.hash().to_hex(),
-                        "Failed to apply block to ledger: {e} — skipping remaining blocks in batch"
-                    );
-                    break;
+                match ls.apply_block_with_delta(block, ledger_mode) {
+                    Ok(_delta) => {
+                        // Delta produced successfully. The ledger state has been
+                        // mutated by apply_block_with_delta (which delegates to
+                        // apply_block internally). The delta will be pushed to
+                        // LedgerSeq once it is fully wired as the authoritative
+                        // state store (Phase 4 of #308).
+                        //
+                        // TODO(#308-phase4): Push delta to LedgerSeq:
+                        //   self.ledger_seq.write().await.push(delta);
+                    }
+                    Err(e) => {
+                        error!(
+                            slot = block.slot().0,
+                            block_no = block.block_number().0,
+                            hash = %block.hash().to_hex(),
+                            "Failed to apply block to ledger: {e} — skipping remaining blocks in batch"
+                        );
+                        break;
+                    }
                 }
                 // Consume pending era transition and propagate to the HFC state machine.
                 if let Some((prev_era, new_era, epoch)) = ls.pending_era_transition.take() {

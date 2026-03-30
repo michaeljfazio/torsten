@@ -572,35 +572,17 @@ pub fn recover_ledger_seq(
         //
         // TODO(subsystem-4): Replace with apply_block_with_delta when available.
         // Currently we use apply_block (mutates state) + manual delta extraction.
-        // When Subsystem 1's LedgerDelta production is wired in, replace with:
-        //   let (_, delta) = seq.apply_block_with_delta(&block, Skip)?;
-        //   seq.push(delta);
-        //
-        // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
-        let current_tip_state = seq.tip_state();
-        let mut scratch = current_tip_state;
-        scratch
-            .apply_block(&block, BlockValidationMode::ApplyOnly)
+        // Apply the block to a scratch copy and produce a real LedgerDelta.
+        // The delta captures UTxO changes, per-block scalar fields, and epoch
+        // transition state — enabling LedgerSeq to reconstruct any volatile
+        // state point from the anchor + deltas alone.
+        let mut scratch = seq.tip_state();
+        let delta = scratch
+            .apply_block_with_delta(&block, BlockValidationMode::ApplyOnly)
             .map_err(|e| StartupError::BlockApply {
                 slot: slot.0,
                 reason: e.to_string(),
             })?;
-
-        // Build a minimal delta from the state difference. Full delta extraction
-        // is the responsibility of Subsystem 1 (LedgerDelta production). For now
-        // we record only the block header metadata in the delta; the actual state
-        // changes are baked into checkpoints. This is sufficient for the startup
-        // recovery invariant (deltas establish the volatile window's slot/hash
-        // sequence) while avoiding a deep dependency on Subsystem 1.
-        //
-        // When Subsystem 1's apply_block_with_delta is wired in (Subsystem 4
-        // integration), replace this entire block with:
-        //   let (_, delta) = ledger_seq.apply_block_with_delta(&block, Skip)?;
-        let delta = torsten_ledger::ledger_seq::LedgerDelta::new(
-            block.slot(),
-            block.header.header_hash,
-            block.block_number(),
-        );
         seq.push(delta);
     }
 

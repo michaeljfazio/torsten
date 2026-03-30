@@ -1136,6 +1136,15 @@ impl LedgerState {
     ///   Callers that need an exact tip hash after rollback (e.g. for the next
     ///   block's prev_hash check) must supply `rollback_to_tip` via
     ///   `rollback_blocks_to_point`.
+    /// # Deprecation
+    ///
+    /// This method only restores UTxO changes — nonces, delegations, rewards,
+    /// governance, and epoch state are NOT rolled back.  Use
+    /// `LedgerSeq::rollback()` + `tip_state()` instead, which correctly
+    /// restores ALL state fields.  See issue #308.
+    #[deprecated(
+        note = "UTxO-only rollback is incorrect. Use LedgerSeq::rollback() instead (#308)"
+    )]
     pub fn rollback_blocks(&mut self, n: usize) -> usize {
         if n == 0 {
             return 0;
@@ -1166,7 +1175,11 @@ impl LedgerState {
     ///
     /// `n` is the number of blocks to undo (determined by caller from DiffSeq
     /// contents).  `new_tip` is the `Tip` the ledger should report after undo.
+    #[deprecated(
+        note = "UTxO-only rollback is incorrect. Use LedgerSeq::rollback() instead (#308)"
+    )]
     pub fn rollback_blocks_to_point(&mut self, n: usize, new_tip: Tip) -> usize {
+        #[allow(deprecated)]
         let rolled = self.rollback_blocks(n);
         if rolled > 0 {
             self.tip = new_tip;

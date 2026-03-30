@@ -13,6 +13,8 @@ use super::{
     credential_to_hash, stake_routing, BlockValidationMode, LedgerError, LedgerState, StakeRouting,
 };
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
+#[allow(unused_imports)]
+use crate::ledger_seq::{BlockFieldsDelta, LedgerDelta};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::utxo_diff::UtxoDiff;
 use crate::validation::{
@@ -1204,5 +1206,117 @@ impl LedgerState {
         );
 
         Ok(())
+    }
+
+    /// Apply a block and produce a [`LedgerDelta`] capturing all state changes.
+    ///
+    /// Performs the exact same state mutations as [`apply_block`], and additionally
+    /// returns a `LedgerDelta` recording every change. The delta is used by
+    /// `LedgerSeq` for O(1) rollback and O(checkpoint_interval) state reconstruction.
+    ///
+    /// # Implementation
+    ///
+    /// Delegates to `apply_block()` for all state mutations, then extracts the
+    /// UTxO diff from the DiffSeq and builds `BlockFieldsDelta` from post-block state.
+    /// Epoch transition deltas capture absolute post-transition values.
+    pub fn apply_block_with_delta(
+        &mut self,
+        block: &Block,
+        mode: BlockValidationMode,
+    ) -> Result<LedgerDelta, LedgerError> {
+        let mut delta = LedgerDelta::new(block.slot(), *block.hash(), block.block_number());
+
+        // Snapshot pre-block epoch to detect epoch transitions.
+        let pre_epoch = self.epoch;
+
+        // Apply the block (all state mutations happen here).
+        self.apply_block(block, mode)?;
+
+        // Extract the UTxO diff from the DiffSeq entry that apply_block just pushed.
+        if let Some((_slot, _hash, utxo_diff)) = self.diff_seq.diffs.back() {
+            delta.utxo_diff = utxo_diff.clone();
+        }
+
+        // Capture epoch transition delta if an epoch boundary was crossed.
+        if self.epoch > pre_epoch {
+            delta.epoch_transition = Some(crate::ledger_seq::EpochTransitionDelta {
+                new_epoch: self.epoch,
+                treasury: self.treasury,
+                reserves: self.reserves,
+                snapshots: self.snapshots.clone(),
+                protocol_params: self.protocol_params.clone(),
+                prev_protocol_params: self.prev_protocol_params.clone(),
+                prev_d: self.prev_d,
+                prev_protocol_version_major: self.prev_protocol_version_major,
+                pending_pp_updates_cleared: self.pending_pp_updates.is_empty()
+                    && self.future_pp_updates.is_empty(),
+                epoch_nonce: self.epoch_nonce,
+                last_epoch_block_nonce: self.last_epoch_block_nonce,
+                reward_credits: std::collections::HashMap::new(),
+                pools_retired: Vec::new(),
+                future_params_promoted: Vec::new(),
+                drep_activity_updates: self
+                    .governance
+                    .dreps
+                    .iter()
+                    .map(|(cred, drep)| (*cred, drep.active))
+                    .collect(),
+                last_ratified: self.governance.last_ratified.clone(),
+                last_expired: self.governance.last_expired.clone(),
+                last_ratify_delayed: self.governance.last_ratify_delayed,
+                new_constitution: self.governance.constitution.clone(),
+                no_confidence: Some(self.governance.no_confidence),
+                committee_threshold: Some(self.governance.committee_threshold.clone()),
+                proposals_enacted: self
+                    .governance
+                    .last_ratified
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                proposals_expired: self.governance.last_expired.clone(),
+                enacted_pparam_update: Some(self.governance.enacted_pparam_update.clone()),
+                enacted_hard_fork: Some(self.governance.enacted_hard_fork.clone()),
+                enacted_committee: Some(self.governance.enacted_committee.clone()),
+                enacted_constitution: Some(self.governance.enacted_constitution.clone()),
+                stake_distribution: self.stake_distribution.clone(),
+                delegation_changes: Vec::new(),
+            });
+        }
+
+        // Build per-block scalar field delta from post-block state.
+        let pool_block_increment = if !block.header.issuer_vkey.is_empty() {
+            let current_d = if self.protocol_params.protocol_version_major >= 7 {
+                0.0
+            } else {
+                self.protocol_params.d.numerator as f64
+                    / self.protocol_params.d.denominator.max(1) as f64
+            };
+            if current_d < 0.8 {
+                Some(torsten_primitives::hash::blake2b_224(
+                    &block.header.issuer_vkey,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        delta.block_fields = BlockFieldsDelta {
+            fees_collected: block
+                .transactions
+                .iter()
+                .filter(|tx| tx.is_valid)
+                .map(|tx| tx.body.fee)
+                .fold(Lovelace(0), |acc, fee| Lovelace(acc.0 + fee.0)),
+            pool_block_increment,
+            epoch_block_count: self.epoch_block_count,
+            evolving_nonce: self.evolving_nonce,
+            candidate_nonce: self.candidate_nonce,
+            lab_nonce: self.lab_nonce,
+            epoch_fees: self.epoch_fees,
+        };
+
+        Ok(delta)
     }
 }

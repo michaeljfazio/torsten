@@ -1,4 +1,5 @@
 use super::{credential_to_hash, GovernanceState, LedgerState, ProposalState};
+use crate::ledger_seq::{GovernanceChange, LedgerDelta};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
@@ -302,6 +303,271 @@ impl LedgerState {
             "Vote cast by {:?} on {:?}: {:?}",
             voter, action_id, procedure.vote
         );
+    }
+
+    /// Delta-capturing variant of [`process_proposal`].
+    ///
+    /// Performs the exact same validation and state mutations as `process_proposal`.
+    /// Additionally, on successful insertion, pushes a [`GovernanceChange::ProposeAction`]
+    /// entry into `delta` so that the LedgerSeq machinery can reconstruct governance state
+    /// from deltas alone.
+    ///
+    /// When a proposal is rejected (bootstrap restriction, `pvCanFollow` check, or an
+    /// invalid `prev_action_id`), no delta entry is pushed — matching the early-return
+    /// semantics of the underlying method.
+    #[allow(dead_code)]
+    pub(crate) fn process_proposal_with_delta(
+        &mut self,
+        tx_hash: &Hash32,
+        action_index: u32,
+        proposal: &ProposalProcedure,
+        delta: &mut LedgerDelta,
+    ) {
+        // --- Check 1: Bootstrap phase proposal restrictions ---
+        //
+        // Mirrors the identical check in `process_proposal`.  Only ParameterChange,
+        // HardForkInitiation, and InfoAction are allowed while protocol_version.major == 9.
+        if self.is_bootstrap_phase() {
+            let allowed = matches!(
+                &proposal.gov_action,
+                GovAction::ParameterChange { .. }
+                    | GovAction::HardForkInitiation { .. }
+                    | GovAction::InfoAction
+            );
+            if !allowed {
+                debug!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    action_type = ?std::mem::discriminant(&proposal.gov_action),
+                    "DisallowedProposalDuringBootstrap: rejecting governance proposal (protocol == 9)"
+                );
+                return;
+            }
+        }
+
+        // --- Check 2: pvCanFollow for HardForkInitiation ---
+        //
+        // Target version must be reachable from the current version.
+        // Per Haskell `pvCanFollow cur target`:
+        //   (major+1, 0)  — major bump
+        //   (major, minor+1)  — minor bump
+        if let GovAction::HardForkInitiation {
+            protocol_version: (tgt_major, tgt_minor),
+            ..
+        } = &proposal.gov_action
+        {
+            let cur_major = self.protocol_params.protocol_version_major;
+            let cur_minor = self.protocol_params.protocol_version_minor;
+            let can_follow = (*tgt_major == cur_major + 1 && *tgt_minor == 0)
+                || (*tgt_major == cur_major && *tgt_minor > cur_minor);
+            if !can_follow {
+                debug!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    cur_version = %format!("{cur_major}.{cur_minor}"),
+                    target_version = %format!("{tgt_major}.{tgt_minor}"),
+                    "ProposalCantFollow: HardForkInitiation target version does not follow current version"
+                );
+                return;
+            }
+        }
+
+        // --- Check 3: prev_action_id validation at submission ---
+        //
+        // The proposal's prev_action_id must either reference the last enacted action
+        // of the same purpose or an active (in-flight) proposal.
+        let prev_id = match &proposal.gov_action {
+            GovAction::ParameterChange { prev_action_id, .. }
+            | GovAction::HardForkInitiation { prev_action_id, .. }
+            | GovAction::NoConfidence { prev_action_id, .. }
+            | GovAction::UpdateCommittee { prev_action_id, .. }
+            | GovAction::NewConstitution { prev_action_id, .. } => prev_action_id.as_ref(),
+            GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
+        };
+        if let Some(prev) = prev_id {
+            let valid_root =
+                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.governance);
+            let in_flight = self.governance.proposals.contains_key(prev);
+            if !valid_root && !in_flight {
+                debug!(
+                    tx = %tx_hash.to_hex(),
+                    action_index,
+                    prev_action = %prev.transaction_id.to_hex(),
+                    prev_index = prev.action_index,
+                    "InvalidPrevActionId: proposal's prev_action_id is neither an active proposal nor the last enacted action of this purpose"
+                );
+                return;
+            }
+        }
+
+        // CIP-1694: Validate policy_hash matches constitution guardrail script.
+        // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash.
+        let constitution_script = self
+            .governance
+            .constitution
+            .as_ref()
+            .and_then(|c| c.script_hash);
+        match &proposal.gov_action {
+            GovAction::ParameterChange { policy_hash, .. }
+            | GovAction::TreasuryWithdrawals { policy_hash, .. } => {
+                if let Some(required_hash) = constitution_script {
+                    match policy_hash {
+                        Some(provided) if *provided == required_hash => {}
+                        Some(provided) => {
+                            warn!(
+                                "Governance proposal policy_hash {} does not match constitution guardrail {}",
+                                provided.to_hex(),
+                                required_hash.to_hex()
+                            );
+                        }
+                        None => {
+                            debug!(
+                                "Governance proposal missing policy_hash (constitution requires {})",
+                                required_hash.to_hex()
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let action_id = GovActionId {
+            transaction_id: *tx_hash,
+            action_index,
+        };
+
+        let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
+        let expires_epoch = EpochNo(
+            self.epoch
+                .0
+                .saturating_add(gov_action_lifetime)
+                .saturating_add(1),
+        );
+
+        let state = ProposalState {
+            procedure: proposal.clone(),
+            proposed_epoch: self.epoch,
+            expires_epoch,
+            yes_votes: 0,
+            no_votes: 0,
+            abstain_votes: 0,
+        };
+
+        // Clone before moving into the insert so the delta entry carries an identical copy.
+        let state_for_delta = state.clone();
+
+        debug!(
+            "Governance proposal submitted (with delta): {:?} (expires epoch {})",
+            action_id, expires_epoch.0
+        );
+        Arc::make_mut(&mut self.governance)
+            .proposals
+            .insert(action_id.clone(), state);
+        Arc::make_mut(&mut self.governance).proposal_count += 1;
+
+        // Proposal was accepted — record the change in the delta.
+        delta
+            .governance_changes
+            .push(GovernanceChange::ProposeAction {
+                action_id,
+                proposal: state_for_delta,
+            });
+    }
+
+    /// Delta-capturing variant of [`process_vote`].
+    ///
+    /// Performs the exact same validation and state mutations as `process_vote`.
+    /// Additionally, pushes a [`GovernanceChange::CastVote`] entry into `delta` after
+    /// all mutations succeed.
+    ///
+    /// When a vote is rejected (unelected CC member post-bootstrap), no delta entry
+    /// is pushed — matching the early-return semantics of the underlying method.
+    #[allow(dead_code)]
+    pub(crate) fn process_vote_with_delta(
+        &mut self,
+        voter: &Voter,
+        action_id: &GovActionId,
+        procedure: &VotingProcedure,
+        delta: &mut LedgerDelta,
+    ) {
+        // --- Check: Unelected CC member vote rejection (protocol >= 10) ---
+        //
+        // Mirrors the identical check in `process_vote`.
+        if let Voter::ConstitutionalCommittee(cred) = voter {
+            if !self.is_bootstrap_phase() {
+                let hot_hash = credential_to_hash(cred);
+                let is_elected =
+                    self.governance
+                        .committee_hot_keys
+                        .iter()
+                        .any(|(cold_hash, registered_hot)| {
+                            *registered_hot == hot_hash
+                                && !self.governance.committee_resigned.contains_key(cold_hash)
+                                && self
+                                    .governance
+                                    .committee_expiration
+                                    .get(cold_hash)
+                                    .is_some_and(|exp| self.epoch <= *exp)
+                        });
+                if !is_elected {
+                    warn!(
+                        tx = %action_id.transaction_id.to_hex(),
+                        action_index = action_id.action_index,
+                        hot_cred = %hot_hash.to_hex(),
+                        "UnelectedCommitteeVoter: CC vote from unelected hot credential — ignoring"
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Update vote tally on the proposal.
+        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+            .proposals
+            .get_mut(action_id)
+        {
+            match procedure.vote {
+                Vote::Yes => proposal.yes_votes += 1,
+                Vote::No => proposal.no_votes += 1,
+                Vote::Abstain => proposal.abstain_votes += 1,
+            }
+        }
+
+        // Track DRep activity — voting counts as activity per CIP-1694.
+        if let Voter::DRep(cred) = voter {
+            let drep_hash = credential_to_hash(cred);
+            if let Some(drep) = Arc::make_mut(&mut self.governance)
+                .dreps
+                .get_mut(&drep_hash)
+            {
+                drep.last_active_epoch = self.epoch;
+            }
+        }
+
+        // Record the vote (indexed by action_id for efficient ratification).
+        let action_votes = Arc::make_mut(&mut self.governance)
+            .votes_by_action
+            .entry(action_id.clone())
+            .or_default();
+        // Replace existing vote from same voter, or add new.
+        if let Some(existing) = action_votes.iter_mut().find(|(v, _)| v == voter) {
+            existing.1 = procedure.clone();
+        } else {
+            action_votes.push((voter.clone(), procedure.clone()));
+        }
+
+        debug!(
+            "Vote cast (with delta) by {:?} on {:?}: {:?}",
+            voter, action_id, procedure.vote
+        );
+
+        // Vote was recorded — push to delta after all mutations complete.
+        delta.governance_changes.push(GovernanceChange::CastVote {
+            action_id: action_id.clone(),
+            voter: voter.clone(),
+            procedure: procedure.clone(),
+        });
     }
 
     /// Check all active governance proposals for ratification.
