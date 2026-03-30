@@ -105,18 +105,18 @@ impl LocalTxSubmissionServer {
                         }
                         Err(e) => {
                             stats.rejected += 1;
-                            let reason = format!("{e:?}");
-                            tracing::debug!(era_id, reason = %reason, "local tx rejected");
+                            tracing::debug!(era_id, reason = %format!("{e:?}"), "local tx rejected");
 
-                            // Send MsgRejectTx = [2, [era_id, [reason]]]
+                            // Send MsgRejectTx = [2, ApplyTxErr]
+                            // where ApplyTxErr = [[era_id, [failure_0, ...]]]
+                            // encoded as structured CBOR matching Haskell cardano-node.
+                            let apply_tx_err = super::encode::encode_apply_tx_err(&e, era_id);
                             let mut buf = Vec::new();
                             let mut enc = Encoder::new(&mut buf);
                             enc.array(2).expect("infallible");
                             enc.u64(TAG_REJECT_TX).expect("infallible");
-                            enc.array(2).expect("infallible");
-                            enc.u16(era_id).expect("infallible");
-                            enc.array(1).expect("infallible");
-                            enc.str(&reason).expect("infallible");
+                            let writer = enc.writer_mut();
+                            writer.extend_from_slice(&apply_tx_err);
                             channel.send(buf).await.map_err(ProtocolError::from)?;
                         }
                     }
@@ -247,11 +247,30 @@ mod tests {
         let submit = encode_submit_tx(6, &[0xBA, 0xAD]);
         ingress_tx.send(Bytes::from(submit)).await.unwrap();
 
-        // Should get MsgRejectTx
+        // Should get MsgRejectTx with structured CBOR
         let (_, _, resp) = egress_rx.recv().await.unwrap();
         let mut dec = Decoder::new(&resp);
         dec.array().unwrap();
         assert_eq!(dec.u64().unwrap(), TAG_REJECT_TX);
+
+        // Verify ApplyTxErr structure: [[era_id, [failure_0, ...]]]
+        let outer_len = dec.array().unwrap().unwrap();
+        assert_eq!(outer_len, 1, "outer HFC wrapper must be array(1)");
+        let inner_len = dec.array().unwrap().unwrap();
+        assert_eq!(inner_len, 2, "inner must be [era_id, failures]");
+        let era_id = dec.u16().unwrap();
+        assert_eq!(era_id, 6);
+        let n_failures = dec.array().unwrap().unwrap();
+        assert_eq!(n_failures, 1, "one rejection failure");
+
+        // The failure should be ConwayMempoolFailure (tag 7) since RejectAllValidator
+        // returns Other("test rejection") which falls through to mempool fallback.
+        let failure_len = dec.array().unwrap().unwrap();
+        assert_eq!(failure_len, 2);
+        let ledger_tag = dec.u8().unwrap();
+        assert_eq!(ledger_tag, 7, "ConwayMempoolFailure");
+        let text = dec.str().unwrap();
+        assert!(text.contains("test rejection"));
 
         // Send MsgDone
         ingress_tx.send(Bytes::from(encode_done())).await.unwrap();
@@ -259,6 +278,56 @@ mod tests {
         let stats = handle.await.unwrap().unwrap();
         assert_eq!(stats.submitted, 1);
         assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.rejected, 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_with_structured_fee_error() {
+        // Test that a specific validation error produces correct structured CBOR
+        struct FeeTooSmallValidator;
+        impl TxValidator for FeeTooSmallValidator {
+            fn validate_tx(&self, _era_id: u16, _tx_bytes: &[u8]) -> Result<(), TxValidationError> {
+                Err(TxValidationError::FeeTooSmall {
+                    minimum: 200_000,
+                    actual: 170_000,
+                })
+            }
+        }
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let validator = FeeTooSmallValidator;
+
+        let handle = tokio::spawn(async move {
+            LocalTxSubmissionServer::run(&mut channel, &validator, |_, _| {}).await
+        });
+
+        let submit = encode_submit_tx(6, &[0xDE, 0xAD]);
+        ingress_tx.send(Bytes::from(submit)).await.unwrap();
+
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let mut dec = Decoder::new(&resp);
+        dec.array().unwrap(); // MsgRejectTx
+        assert_eq!(dec.u64().unwrap(), TAG_REJECT_TX);
+
+        // ApplyTxErr outer wrapper
+        dec.array().unwrap(); // [[...]]
+        dec.array().unwrap(); // [era_id, [...]]
+        assert_eq!(dec.u16().unwrap(), 6);
+        dec.array().unwrap(); // failures
+
+        // ConwayLedgerPredFailure(1) → ConwayUtxowPredFailure(0) → ConwayUtxoPredFailure(5)
+        dec.array().unwrap();
+        assert_eq!(dec.u8().unwrap(), 1, "ConwayUtxowFailure");
+        dec.array().unwrap();
+        assert_eq!(dec.u8().unwrap(), 0, "UtxoFailure");
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 3);
+        assert_eq!(dec.u8().unwrap(), 5, "FeeTooSmallUTxO");
+        assert_eq!(dec.u64().unwrap(), 200_000, "min fee first");
+        assert_eq!(dec.u64().unwrap(), 170_000, "actual fee second");
+
+        ingress_tx.send(Bytes::from(encode_done())).await.unwrap();
+        let stats = handle.await.unwrap().unwrap();
         assert_eq!(stats.rejected, 1);
     }
 }

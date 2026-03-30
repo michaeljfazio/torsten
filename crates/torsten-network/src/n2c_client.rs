@@ -1195,7 +1195,35 @@ fn decode_conway_utxow_failure(decoder: &mut minicbor::Decoder<'_>) -> Option<St
     let _ = decoder.array().ok()?;
     let tag = decoder.u8().ok()?;
     match tag {
+        // Tag 0: UtxoFailure — delegates to ConwayUtxoPredFailure
         0 => decode_conway_utxo_pred_failure(decoder),
+        // Tag 1: InvalidWitnessesUTXOW — list of invalid vkey witnesses
+        1 => {
+            let _ = decoder.skip(); // skip the vkey list
+            Some("InvalidWitnessesUTXOW: invalid witness signature(s)".to_string())
+        }
+        // Tag 2: MissingVKeyWitnessesUTXOW — tag(258) set of missing keyhashes
+        2 => {
+            let n = decode_tagged_set_count(decoder).unwrap_or(0);
+            // Skip keyhash bytes
+            for _ in 0..n {
+                let _ = decoder.skip();
+            }
+            Some(format!(
+                "MissingVKeyWitnessesUTXOW: {n} missing key witness(es)"
+            ))
+        }
+        // Tag 3: MissingScriptWitnessesUTXOW
+        3 => {
+            let _ = decoder.skip();
+            Some("MissingScriptWitnessesUTXOW: missing script witness(es)".to_string())
+        }
+        // Tag 13: PPViewHashesDontMatch — [supplied_maybe, expected_maybe]
+        13 => {
+            let _ = decoder.skip(); // supplied StrictMaybe
+            let _ = decoder.skip(); // expected StrictMaybe
+            Some("PPViewHashesDontMatch: script data hash mismatch".to_string())
+        }
         other => {
             let _ = decoder.skip();
             Some(format!("ConwayUtxowPredFailure(tag={other})"))
@@ -1208,15 +1236,26 @@ fn decode_conway_utxo_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Optio
     let _ = decoder.array().ok()?;
     let tag = decoder.u8().ok()?;
     match tag {
-        2 => {
-            let _ = decoder.array().ok()?;
-            let _ = decoder.skip();
-            let ttl = decoder.u64().ok().unwrap_or(0);
-            let current = decoder.u64().ok().unwrap_or(0);
-            Some(format!(
-                "OutsideValidityInterval: current slot {current}, TTL {ttl}"
-            ))
+        // Tag 1: BadInputsUTxO — tag(258) set of TxIn
+        1 => {
+            let n = decode_tagged_set_count(decoder).unwrap_or(0);
+            let mut inputs = Vec::new();
+            for _ in 0..n {
+                if let Some(txin) = decode_txin(decoder) {
+                    inputs.push(txin);
+                } else {
+                    let _ = decoder.skip();
+                }
+            }
+            Some(format!("BadInputsUTxO: [{}]", inputs.join(", ")))
         }
+        // Tag 2: OutsideValidityIntervalUTxO — [ValidityInterval, current_slot]
+        2 => {
+            let _ = decoder.skip(); // skip ValidityInterval (complex nested structure)
+            let current = decoder.u64().ok().unwrap_or(0);
+            Some(format!("OutsideValidityInterval: current slot {current}"))
+        }
+        // Tag 3: MaxTxSizeUTxO — [supplied, expected]
         3 => {
             let supplied = decoder.u64().ok().unwrap_or(0);
             let expected = decoder.u64().ok().unwrap_or(0);
@@ -1224,7 +1263,9 @@ fn decode_conway_utxo_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Optio
                 "MaxTxSizeUTxO: tx size {supplied} > max {expected}"
             ))
         }
+        // Tag 4: InputSetEmptyUTxO
         4 => Some("InputSetEmptyUTxO: no inputs".to_string()),
+        // Tag 5: FeeTooSmallUTxO — [min_fee, actual_fee] (swapped)
         5 => {
             let expected = decoder.u64().ok().unwrap_or(0);
             let supplied = decoder.u64().ok().unwrap_or(0);
@@ -1232,13 +1273,38 @@ fn decode_conway_utxo_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Optio
                 "FeeTooSmallUTxO: minimum fee {expected} lovelace, actual fee {supplied} lovelace"
             ))
         }
+        // Tag 6: ValueNotConservedUTxO — [consumed, produced]
         6 => {
-            let supplied = decoder.u64().ok().unwrap_or(0);
-            let expected = decoder.u64().ok().unwrap_or(0);
+            let consumed = decoder.u64().ok().unwrap_or(0);
+            let produced = decoder.u64().ok().unwrap_or(0);
             Some(format!(
-                "ValueNotConservedUTxO: consumed {supplied} lovelace, produced {expected} lovelace"
+                "ValueNotConservedUTxO: consumed {consumed} lovelace, produced {produced} lovelace"
             ))
         }
+        // Tag 9: OutputTooSmallUTxO — list of txouts
+        9 => {
+            let _ = decoder.skip(); // skip txout list
+            Some("OutputTooSmallUTxO: output(s) below minimum value".to_string())
+        }
+        // Tag 11: OutputTooBigUTxO — list of [actual_size, max_size, txout]
+        11 => {
+            let _ = decoder.skip();
+            Some("OutputTooBigUTxO: output value(s) exceed CBOR size limit".to_string())
+        }
+        // Tag 12: InsufficientCollateral — [balance_delta, required_collateral]
+        12 => {
+            let delta = decoder.i64().ok().unwrap_or(0);
+            let required = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "InsufficientCollateral: balance {delta}, required {required} lovelace"
+            ))
+        }
+        // Tag 15: CollateralContainsNonADA — value
+        15 => {
+            let _ = decoder.skip();
+            Some("CollateralContainsNonADA: collateral contains non-ADA tokens".to_string())
+        }
+        // Tag 18: TooManyCollateralInputs — [max, actual] (swapped)
         18 => {
             let expected = decoder.u64().ok().unwrap_or(0);
             let supplied = decoder.u64().ok().unwrap_or(0);
@@ -1246,9 +1312,47 @@ fn decode_conway_utxo_pred_failure(decoder: &mut minicbor::Decoder<'_>) -> Optio
                 "TooManyCollateralInputs: max {expected}, provided {supplied}"
             ))
         }
+        // Tag 19: NoCollateralInputs
         19 => Some("NoCollateralInputs".to_string()),
+        // Tag 20: IncorrectTotalCollateralField — [delta, declared]
+        20 => {
+            let delta = decoder.i64().ok().unwrap_or(0);
+            let declared = decoder.u64().ok().unwrap_or(0);
+            Some(format!(
+                "IncorrectTotalCollateralField: delta {delta}, declared {declared} lovelace"
+            ))
+        }
+        // Tag 22: BabbageNonDisjointRefInputs — set of overlapping TxIn
+        22 => {
+            let _ = decoder.skip();
+            Some("BabbageNonDisjointRefInputs: reference inputs overlap regular inputs".to_string())
+        }
         other => Some(format!("ConwayUtxoPredFailure(tag={other})")),
     }
+}
+
+/// Decode a CBOR tag(258) set header and return the array length.
+/// Consumes the tag and array header, leaving the decoder positioned at the first element.
+fn decode_tagged_set_count(decoder: &mut minicbor::Decoder<'_>) -> Option<u64> {
+    // Try to consume tag 258; if not present, just read the array directly
+    let pos = decoder.position();
+    if let Ok(tag) = decoder.tag() {
+        if tag.as_u64() != 258 {
+            decoder.set_position(pos);
+        }
+    } else {
+        decoder.set_position(pos);
+    }
+    decoder.array().ok()?
+}
+
+/// Decode a single TxIn `[tx_hash_bytes, tx_index]` into a human-readable `"hex#index"` string.
+fn decode_txin(decoder: &mut minicbor::Decoder<'_>) -> Option<String> {
+    let _ = decoder.array().ok()?;
+    let hash_bytes = decoder.bytes().ok()?;
+    let index = decoder.u32().ok()?;
+    let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("{hex}#{index}"))
 }
 
 #[cfg(test)]
