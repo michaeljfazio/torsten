@@ -2049,12 +2049,18 @@ impl Node {
             Arc::new(RwLock::new(HashMap::new()));
 
         let connect_timeout = Duration::from_secs(5);
-        // Read security_param from genesis config; fall back to mainnet default.
+        // Read security_param and active_slots_coeff from genesis config;
+        // fall back to mainnet defaults.
         let security_param = self
             .shelley_genesis
             .as_ref()
             .map(|g| g.security_param)
             .unwrap_or(2160);
+        let active_slots_coeff = self
+            .shelley_genesis
+            .as_ref()
+            .map(|g| g.active_slots_coeff)
+            .unwrap_or(0.05);
         let lifecycle = ConnectionLifecycleManager::new(
             self.network_magic,
             self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorOnly,
@@ -2071,6 +2077,7 @@ impl Node {
             self.ledger_state.clone(),
             self.byron_epoch_length,
             security_param,
+            active_slots_coeff,
             self.metrics.clone(),
             self.mempool.clone(),
         );

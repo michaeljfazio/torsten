@@ -177,6 +177,13 @@ pub struct ConnectionLifecycleManager {
     /// Default: 2160 (mainnet). Preview: 432.
     security_param: u64,
 
+    /// Active slots coefficient from Shelley genesis.
+    ///
+    /// Used to scale the rollback depth threshold from blocks to slots:
+    /// with coeff=0.05, ~20 slots per block on average, so k blocks ≈ k*20 slots.
+    /// Default: 0.05 (mainnet/preview).
+    active_slots_coeff: f64,
+
     /// Active BlockFetch peer flag.
     ///
     /// During bulk sync (matching Haskell's `bfcMaxConcurrencyBulkSync = 1`),
@@ -239,6 +246,7 @@ impl ConnectionLifecycleManager {
     /// * `ledger_state` — Shared LedgerState reference
     /// * `byron_epoch_length` — Byron epoch length in slots
     /// * `security_param` — Ouroboros k (rollback limit); 2160 mainnet, 432 preview
+    /// * `active_slots_coeff` — Shelley genesis active slots coefficient (0.05 on mainnet/preview)
     /// * `metrics` — Prometheus metrics handle for recording peer latencies
     /// * `mempool` — Shared mempool for TxSubmission2 tx relay
     #[allow(clippy::too_many_arguments)]
@@ -254,6 +262,7 @@ impl ConnectionLifecycleManager {
         ledger_state: Arc<RwLock<LedgerState>>,
         byron_epoch_length: u64,
         security_param: u64,
+        active_slots_coeff: f64,
         metrics: Arc<NodeMetrics>,
         mempool: Arc<Mempool>,
     ) -> Self {
@@ -270,6 +279,7 @@ impl ConnectionLifecycleManager {
             ledger_state,
             byron_epoch_length,
             security_param,
+            active_slots_coeff,
             active_fetcher: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             max_fetched_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             metrics,
@@ -785,6 +795,7 @@ impl ConnectionLifecycleManager {
         let ledger_state = self.ledger_state.clone();
         let byron_epoch_length = self.byron_epoch_length;
         let security_param = self.security_param;
+        let active_slots_coeff = self.active_slots_coeff;
 
         Box::new(move |channel, cancel| {
             Box::pin(async move {
@@ -797,6 +808,7 @@ impl ConnectionLifecycleManager {
                     ledger_state,
                     byron_epoch_length,
                     security_param,
+                    active_slots_coeff,
                     cancel,
                 )
                 .await

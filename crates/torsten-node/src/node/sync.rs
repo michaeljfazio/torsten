@@ -2519,6 +2519,10 @@ pub async fn chainsync_client_task(
     // a dishonest peer and result in peer disconnection, matching Haskell's
     // `terminateAfterDrain RolledBackPastIntersection`.
     security_param: u64,
+    // Active slots coefficient from Shelley genesis (0.05 on mainnet/preview).
+    // Used to scale the rollback depth threshold from blocks to slots:
+    // with coeff=0.05, ~20 slots per block, so k blocks ≈ k*20 slots.
+    active_slots_coeff: f64,
     cancel: CancellationToken,
 ) -> Result<()> {
     // ═══════════════════════════════════════════════════════════════════════
@@ -2759,6 +2763,10 @@ pub async fn chainsync_client_task(
     let mut outstanding: usize = 0;
     let mut at_tip = false;
     let mut headers_received: u64 = 0;
+    // The first MsgRollBackward after intersection is expected protocol
+    // behavior — the server rolls the client back to the agreed intersection
+    // point before sending new headers. Skip the depth check for it.
+    let mut initial_rollback = true;
 
     // Send initial pipeline burst.
     for _ in 0..high_mark {
@@ -2892,65 +2900,70 @@ pub async fn chainsync_client_task(
 
                         // ── k-block rollback limit (Haskell: terminateAfterDrain) ──
                         //
-                        // Compute the depth of the requested rollback in slots,
-                        // then convert to an approximate block count using the
-                        // conservative assumption of 1 slot per block (actual
-                        // ratio is lower due to empty slots, so this is a safe
-                        // upper bound — in practice we compare slot distance
-                        // directly to k * active_slots_coeff, but using slots
-                        // here avoids introducing genesis into this function).
+                        // The first MsgRollBackward after intersection is expected
+                        // protocol behavior — the server rolls the client back to
+                        // the agreed intersection point. Skip the depth check for it.
+                        //
+                        // For subsequent rollbacks, compute depth from the ChainDB
+                        // tip (NOT the ledger tip, which can diverge after Mithril
+                        // import or snapshot restore). The threshold accounts for
+                        // active_slots_coeff: with coeff=0.05, ~20 slots per block
+                        // on average, so k blocks ≈ k*20 slots. We use 2x that as
+                        // a safety margin.
                         //
                         // Haskell's `attemptRollback` returns `Nothing` when the
                         // rollback point is before the anchored fragment's anchor
-                        // (= deeper than k), and `ChainSyncClient.rollBackward`
-                        // then calls `terminateAfterDrain RolledBackPastIntersection`
-                        // to disconnect from the peer.
-                        //
-                        // We use `security_param * 2` as a slot-level threshold
-                        // to be generous for networks with many empty slots
-                        // (active_slots_coeff = 0.05 on mainnet → ~20 slots/block
-                        // on average, so k blocks ≈ k*20 slots).  On preview with
-                        // coeff = 0.05 and k = 432, 2k slots ≈ 864 slots, well
-                        // below the ~8640 slots that correspond to k=432 blocks.
-                        // Using 2*k gives a reasonable disconnect threshold that
-                        // rejects clearly-invalid deep rollbacks without being
-                        // overly sensitive to empty-slot variation.
+                        // (deeper than k blocks), causing `ChainSyncClient` to call
+                        // `terminateAfterDrain RolledBackPastIntersection`.
                         {
-                            let ledger_slot = ledger_state
-                                .read()
-                                .await
-                                .tip
-                                .point
-                                .slot()
-                                .map(|s| s.0)
-                                .unwrap_or(0);
+                            if initial_rollback {
+                                initial_rollback = false;
+                                debug!(
+                                    %peer_addr,
+                                    rollback_slot,
+                                    "Skipping rollback depth check for initial \
+                                     post-intersection rollback",
+                                );
+                            } else {
+                                let chain_tip_slot = chain_db
+                                    .read()
+                                    .await
+                                    .get_tip()
+                                    .point
+                                    .slot()
+                                    .map(|s| s.0)
+                                    .unwrap_or(0);
 
-                            // A rollback of Origin is always to slot 0; ledger
-                            // slots are absolute so both are comparable directly.
-                            if ledger_slot > rollback_slot {
-                                let depth_slots = ledger_slot - rollback_slot;
-                                // Use 2*k as a conservative slot-level threshold.
-                                // See comment above for derivation.
-                                let threshold_slots = security_param.saturating_mul(2);
-                                if depth_slots > threshold_slots {
-                                    warn!(
-                                        %peer_addr,
-                                        depth_slots,
-                                        threshold_slots,
-                                        security_param,
-                                        ledger_slot,
-                                        rollback_slot,
-                                        "MsgRollBackward exceeds k-block limit — \
-                                         disconnecting peer (matches Haskell \
-                                         terminateAfterDrain RolledBackPastIntersection)"
-                                    );
-                                    // Return an error to drop this connection.
-                                    // The PeerManager will record the failure and
-                                    // apply a reputation penalty.
-                                    return Err(anyhow::anyhow!(
-                                        "Peer {peer_addr} requested rollback of {depth_slots} \
-                                         slots (> {threshold_slots} threshold, k={security_param})"
-                                    ));
+                                if chain_tip_slot > rollback_slot {
+                                    let depth_slots = chain_tip_slot - rollback_slot;
+                                    // Scale by active_slots_coeff: e.g. 0.05 → 20 slots/block.
+                                    // Use 2x safety margin → k * (1/coeff) * 2.
+                                    let slots_per_block =
+                                        (1.0 / active_slots_coeff).ceil() as u64;
+                                    let threshold_slots = security_param
+                                        .saturating_mul(slots_per_block)
+                                        .saturating_mul(2);
+                                    if depth_slots > threshold_slots {
+                                        warn!(
+                                            %peer_addr,
+                                            depth_slots,
+                                            threshold_slots,
+                                            security_param,
+                                            chain_tip_slot,
+                                            rollback_slot,
+                                            "MsgRollBackward exceeds k-block limit — \
+                                             disconnecting peer (matches Haskell \
+                                             terminateAfterDrain RolledBackPastIntersection)"
+                                        );
+                                        // Return an error to drop this connection.
+                                        // The PeerManager will record the failure and
+                                        // apply a reputation penalty.
+                                        return Err(anyhow::anyhow!(
+                                            "Peer {peer_addr} requested rollback of \
+                                             {depth_slots} slots (> {threshold_slots} \
+                                             threshold, k={security_param})"
+                                        ));
+                                    }
                                 }
                             }
                         }
