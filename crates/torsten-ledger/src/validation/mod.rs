@@ -253,6 +253,8 @@ pub enum ValidationError {
     MissingWithdrawalWitness(String),
     #[error("Missing script witness for script-locked withdrawal: {0}")]
     MissingWithdrawalScriptWitness(String),
+    #[error("Missing VKey witness for certificate credential: {0}")]
+    MissingCertificateWitness(String),
     #[error("Value overflow in transaction accounting")]
     ValueOverflow,
     #[error("Era gating violation: {certificate_type} requires {required_era}, current era is {current_era}")]

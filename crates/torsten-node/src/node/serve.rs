@@ -405,6 +405,9 @@ pub(crate) fn convert_validation_error(
         VE::MissingWithdrawalScriptWitness(credential) => {
             TxValidationError::MissingWithdrawalScriptWitness { credential }
         }
+        VE::MissingCertificateWitness(credential) => {
+            TxValidationError::MissingCertificateWitness { credential }
+        }
         VE::ValueOverflow => TxValidationError::ValueOverflow,
         VE::EraGatingViolation {
             certificate_type,

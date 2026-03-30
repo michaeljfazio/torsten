@@ -253,6 +253,9 @@ pub enum TxValidationError {
     MissingWithdrawalScriptWitness {
         credential: String,
     },
+    MissingCertificateWitness {
+        credential: String,
+    },
     ValueOverflow,
     /// Multiple validation errors collected.
     Multiple(Vec<TxValidationError>),

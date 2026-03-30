@@ -73,6 +73,91 @@ pub(super) fn extract_reward_credential(reward_account: &[u8]) -> Option<Credent
 }
 
 // ---------------------------------------------------------------------------
+// Helper: required VKey witnesses for a certificate (conwayWitsVKeyNeeded)
+// ---------------------------------------------------------------------------
+
+/// Return the set of VKey hashes that must have corresponding witnesses for a
+/// given certificate.  Script credentials return an empty set — their validation
+/// is handled separately via native-script evaluation (Phase-1, Rule 13) or
+/// Plutus redeemer matching (Phase-2).
+///
+/// Matches the Haskell `conwayWitsVKeyNeeded` / `shelleyWitsVKeyNeeded`
+/// specification:
+///
+/// | Certificate                     | Required Witness                        |
+/// |---------------------------------|-----------------------------------------|
+/// | `PoolRegistration`              | All pool owner VKey hashes              |
+/// | `PoolRetirement`                | Pool operator (cold) key hash           |
+/// | `StakeDelegation`               | Delegator credential key hash           |
+/// | `StakeDeregistration`           | Credential key hash                     |
+/// | `ConwayStakeRegistration`       | Registrant credential key hash          |
+/// | `ConwayStakeDeregistration`     | Credential key hash                     |
+/// | `VoteDelegation`                | Delegator credential key hash           |
+/// | `StakeVoteDelegation`           | Delegator credential key hash           |
+/// | `RegStakeDeleg`                 | Registrant credential key hash          |
+/// | `RegStakeVoteDeleg`             | Registrant credential key hash          |
+/// | `VoteRegDeleg`                  | Registrant credential key hash          |
+/// | `RegDRep`                       | DRep credential key hash                |
+/// | `UnregDRep`                     | DRep credential key hash                |
+/// | `UpdateDRep`                    | DRep credential key hash                |
+/// | `CommitteeHotAuth`              | Cold credential key hash                |
+/// | `CommitteeColdResign`           | Cold credential key hash                |
+/// | `StakeRegistration` (Shelley)   | None (free registration)                |
+/// | `GenesisKeyDelegation`          | None (legacy)                           |
+/// | `MoveInstantaneousRewards`      | None (legacy)                           |
+fn cert_required_witnesses(cert: &Certificate) -> Vec<Hash28> {
+    // Helper: extract the key hash from a credential, returning None for scripts.
+    let key_hash = |c: &Credential| -> Option<Hash28> {
+        match c {
+            Credential::VerificationKey(h) => Some(*h),
+            Credential::Script(_) => None,
+        }
+    };
+
+    match cert {
+        // Pool registration: ALL owner key hashes must sign.
+        Certificate::PoolRegistration(params) => params.pool_owners.clone(),
+
+        // Pool retirement: the operator (cold key / pool_id) must sign.
+        Certificate::PoolRetirement { pool_hash, .. } => vec![*pool_hash],
+
+        // DRep certificates: credential key hash.
+        Certificate::RegDRep { credential, .. }
+        | Certificate::UnregDRep { credential, .. }
+        | Certificate::UpdateDRep { credential, .. } => key_hash(credential).into_iter().collect(),
+
+        // Committee certificates: cold credential key hash.
+        Certificate::CommitteeHotAuth {
+            cold_credential, ..
+        }
+        | Certificate::CommitteeColdResign {
+            cold_credential, ..
+        } => key_hash(cold_credential).into_iter().collect(),
+
+        // Delegation and deregistration certificates with credential field.
+        Certificate::StakeDelegation { credential, .. }
+        | Certificate::VoteDelegation { credential, .. }
+        | Certificate::StakeVoteDelegation { credential, .. }
+        | Certificate::RegStakeDeleg { credential, .. }
+        | Certificate::RegStakeVoteDeleg { credential, .. }
+        | Certificate::VoteRegDeleg { credential, .. }
+        | Certificate::StakeDeregistration(credential)
+        | Certificate::ConwayStakeRegistration { credential, .. }
+        | Certificate::ConwayStakeDeregistration { credential, .. } => {
+            key_hash(credential).into_iter().collect()
+        }
+
+        // Shelley stake registration (cert tag 0) — no witness required.
+        Certificate::StakeRegistration(_) => vec![],
+
+        // Legacy certificates — no witness checks.
+        Certificate::GenesisKeyDelegation { .. } | Certificate::MoveInstantaneousRewards { .. } => {
+            vec![]
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: check if the transaction involves any multi-asset tokens
 // ---------------------------------------------------------------------------
 
@@ -819,6 +904,19 @@ pub(super) fn run_phase1_rules(
                             ));
                         }
                     }
+                }
+            }
+        }
+
+        // Check each certificate has matching witnesses for required credentials.
+        // Mirrors Haskell's conwayWitsVKeyNeeded which unions certificate witness
+        // requirements with input/withdrawal witness requirements.
+        for cert in &body.certificates {
+            for required_keyhash in cert_required_witnesses(cert) {
+                if !vkey_witness_hashes.contains(&required_keyhash) {
+                    errors.push(ValidationError::MissingCertificateWitness(
+                        required_keyhash.to_hex(),
+                    ));
                 }
             }
         }

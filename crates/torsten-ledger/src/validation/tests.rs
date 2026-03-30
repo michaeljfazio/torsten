@@ -331,12 +331,19 @@ mod tests {
         let (utxo_set, input) = make_simple_utxo_set();
         let params = ProtocolParameters::mainnet_defaults();
         let key_deposit = params.key_deposit.0;
+        // Create a signing key to produce a valid witness.
+        let sk = torsten_crypto::keys::PaymentSigningKey::from_bytes(&[5u8; 32]).unwrap();
+        let vk = sk.verification_key();
+        let cred_hash = vk.hash();
         let mut tx = make_simple_tx(input, 10_000_000 - 200_000 + key_deposit, 200_000);
         tx.body.certificates.push(Certificate::StakeDeregistration(
-            torsten_primitives::credentials::Credential::VerificationKey(
-                torsten_primitives::hash::Hash28::from_bytes([5u8; 28]),
-            ),
+            torsten_primitives::credentials::Credential::VerificationKey(cred_hash),
         ));
+        let sig = sk.sign(tx.hash.as_bytes());
+        tx.witness_set.vkey_witnesses.push(VKeyWitness {
+            vkey: vk.to_bytes().to_vec(),
+            signature: sig,
+        });
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
     }
@@ -2212,6 +2219,32 @@ mod tests {
     // Pool re-registration
     // ---------------------------------------------------------------------------
 
+    /// Standard pool-owner signing key seed used across pool registration tests.
+    const POOL_OWNER_SEED: [u8; 32] = [42u8; 32];
+
+    /// Create a VKey witness for the standard pool owner with a valid Ed25519
+    /// signature over the given tx hash. Returns (witness, owner_key_hash).
+    fn make_pool_owner_witness_for_tx(tx_hash: &Hash32) -> (VKeyWitness, Hash28) {
+        let sk = torsten_crypto::keys::PaymentSigningKey::from_bytes(&POOL_OWNER_SEED).unwrap();
+        let vk = sk.verification_key();
+        let vk_bytes = vk.to_bytes();
+        let sig = sk.sign(tx_hash.as_bytes());
+        let hash = torsten_primitives::hash::blake2b_224(&vk_bytes);
+        (
+            VKeyWitness {
+                vkey: vk_bytes.to_vec(),
+                signature: sig,
+            },
+            hash,
+        )
+    }
+
+    /// Return the pool owner key hash (blake2b-224 of the standard pool owner vkey).
+    fn pool_owner_hash() -> Hash28 {
+        let sk = torsten_crypto::keys::PaymentSigningKey::from_bytes(&POOL_OWNER_SEED).unwrap();
+        sk.verification_key().hash()
+    }
+
     fn make_pool_params(pool_id: Hash28) -> PoolParams {
         PoolParams {
             operator: pool_id,
@@ -2223,7 +2256,7 @@ mod tests {
                 denominator: 100,
             },
             reward_account: vec![0xe0; 29],
-            pool_owners: vec![pool_id],
+            pool_owners: vec![pool_owner_hash()],
             relays: vec![],
             pool_metadata: None,
         }
@@ -2255,6 +2288,8 @@ mod tests {
         tx.body
             .certificates
             .push(Certificate::PoolRegistration(make_pool_params(pool_id)));
+        let (owner_witness, _) = make_pool_owner_witness_for_tx(&tx.hash);
+        tx.witness_set.vkey_witnesses.push(owner_witness);
         let mut registered = HashSet::new();
         registered.insert(pool_id);
         let result = validate_transaction_with_pools(
@@ -2310,6 +2345,8 @@ mod tests {
         tx.body
             .certificates
             .push(Certificate::PoolRegistration(make_pool_params(pool_id)));
+        let (owner_witness, _) = make_pool_owner_witness_for_tx(&tx.hash);
+        tx.witness_set.vkey_witnesses.push(owner_witness);
         let registered: HashSet<Hash28> = HashSet::new();
         let result = validate_transaction_with_pools(
             &tx,
@@ -9403,7 +9440,7 @@ mod tests {
             },
             // 0xe1 = mainnet reward account (0b1110_0001)
             reward_account: vec![0xe1u8; 29],
-            pool_owners: vec![pool_id],
+            pool_owners: vec![pool_owner_hash()],
             relays: vec![],
             pool_metadata: None,
         }
@@ -9525,6 +9562,8 @@ mod tests {
             .push(Certificate::PoolRegistration(make_pool_params_with_vrf(
                 pool_a, own_vrf,
             )));
+        let (owner_witness, _) = make_pool_owner_witness_for_tx(&tx.hash);
+        tx.witness_set.vkey_witnesses.push(owner_witness);
 
         // VRF key is currently held by pool_a itself — re-registration is fine.
         let mut registered_vrf_keys: std::collections::HashMap<Hash32, Hash28> =
@@ -9822,6 +9861,8 @@ mod tests {
                 pool_id,
                 Hash32::from_bytes([0x00u8; 32]),
             )));
+        let (owner_witness, _) = make_pool_owner_witness_for_tx(&tx.hash);
+        tx.witness_set.vkey_witnesses.push(owner_witness);
 
         let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
 
@@ -9969,6 +10010,8 @@ mod tests {
         tx.body
             .certificates
             .push(Certificate::PoolRegistration(pool_params));
+        let (owner_witness, _) = make_pool_owner_witness_for_tx(&tx.hash);
+        tx.witness_set.vkey_witnesses.push(owner_witness);
 
         let registered_pools: std::collections::HashSet<Hash28> = std::collections::HashSet::new();
 
@@ -11033,5 +11076,556 @@ mod tests {
             !has_deposit_err,
             "Expected no ProposalDepositIncorrect for correct deposit; got: {result:?}"
         );
+    }
+
+    // ======================================================================
+    // Certificate witness requirements (conwayWitsVKeyNeeded) — Issue #304
+    // ======================================================================
+
+    /// Helper: create a VKeyWitness from raw 32-byte vkey bytes, returning
+    /// the witness and its blake2b-224 hash.
+    fn make_cert_vkey_witness(vkey: [u8; 32]) -> (VKeyWitness, Hash28) {
+        let hash = torsten_primitives::hash::blake2b_224(&vkey);
+        let witness = VKeyWitness {
+            vkey: vkey.to_vec(),
+            signature: vec![0u8; 64],
+        };
+        (witness, hash)
+    }
+
+    /// Helper: create a UTxO set and transaction for certificate witness tests.
+    /// The input value is large enough to cover any deposit, and the output
+    /// is adjusted so value conservation passes with the given deposit/refund.
+    ///
+    /// Conservation: inputs + refund = outputs + fee + deposit
+    fn make_cert_test_tx(
+        deposit: u64,
+        refund: u64,
+    ) -> (UtxoSet, TransactionInput, Transaction, ProtocolParameters) {
+        let params = ProtocolParameters::mainnet_defaults();
+        let fee = 200_000u64;
+        // inputs + refund = outputs + fee + deposit
+        // Choose a large input, then compute outputs = inputs + refund - fee - deposit
+        let input_value = 1_000_000_000u64; // 1000 ADA
+        let output_value = input_value + refund - fee - deposit;
+
+        let mut utxo_set = UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(input_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = make_simple_tx(input.clone(), output_value, fee);
+        (utxo_set, input, tx, params)
+    }
+
+    #[test]
+    fn test_cert_witness_pool_registration_with_matching_owner_witnesses() {
+        let pool_deposit = ProtocolParameters::mainnet_defaults().pool_deposit.0;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(pool_deposit, 0);
+
+        let (w1, owner1) = make_cert_vkey_witness([0xA1; 32]);
+        let (w2, owner2) = make_cert_vkey_witness([0xA2; 32]);
+
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(PoolParams {
+                operator: Hash28::from_bytes([0x01; 28]),
+                vrf_keyhash: Hash32::from_bytes([0x02; 32]),
+                pledge: Lovelace(100_000_000),
+                cost: Lovelace(340_000_000),
+                margin: Rational {
+                    numerator: 1,
+                    denominator: 100,
+                },
+                reward_account: {
+                    let mut ra = vec![0xE0u8];
+                    ra.extend_from_slice(&[0x03; 28]);
+                    ra
+                },
+                pool_owners: vec![owner1, owner2],
+                relays: vec![],
+                pool_metadata: None,
+            }));
+        tx.witness_set.vkey_witnesses.push(w1);
+        tx.witness_set.vkey_witnesses.push(w2);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Should not have MissingCertificateWitness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cert_witness_pool_registration_missing_owner_witness() {
+        let pool_deposit = ProtocolParameters::mainnet_defaults().pool_deposit.0;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(pool_deposit, 0);
+
+        let (w1, owner1) = make_cert_vkey_witness([0xB1; 32]);
+        let (w2, owner2) = make_cert_vkey_witness([0xB2; 32]);
+        let owner3 = Hash28::from_bytes([0xB3; 28]); // No witness for this one
+
+        tx.body
+            .certificates
+            .push(Certificate::PoolRegistration(PoolParams {
+                operator: Hash28::from_bytes([0x01; 28]),
+                vrf_keyhash: Hash32::from_bytes([0x02; 32]),
+                pledge: Lovelace(100_000_000),
+                cost: Lovelace(340_000_000),
+                margin: Rational {
+                    numerator: 1,
+                    denominator: 100,
+                },
+                reward_account: {
+                    let mut ra = vec![0xE0u8];
+                    ra.extend_from_slice(&[0x03; 28]);
+                    ra
+                },
+                pool_owners: vec![owner1, owner2, owner3],
+                relays: vec![],
+                pool_metadata: None,
+            }));
+        tx.witness_set.vkey_witnesses.push(w1);
+        tx.witness_set.vkey_witnesses.push(w2);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for missing pool owner, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_pool_retirement_with_matching_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+        let (witness, operator_hash) = make_cert_vkey_witness([0xC1; 32]);
+
+        tx.body.certificates.push(Certificate::PoolRetirement {
+            pool_hash: operator_hash,
+            epoch: 100,
+        });
+        tx.witness_set.vkey_witnesses.push(witness);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Should not have MissingCertificateWitness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cert_witness_pool_retirement_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::PoolRetirement {
+            pool_hash: Hash28::from_bytes([0xDD; 28]),
+            epoch: 100,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for pool retirement, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_reg_drep_vkey_with_matching_witness() {
+        let drep_deposit = 500_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(drep_deposit, 0);
+        let (witness, keyhash) = make_cert_vkey_witness([0xD1; 32]);
+
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(keyhash),
+            deposit: Lovelace(drep_deposit),
+            anchor: None,
+        });
+        tx.witness_set.vkey_witnesses.push(witness);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Should not have MissingCertificateWitness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cert_witness_reg_drep_vkey_missing_witness() {
+        let drep_deposit = 500_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(drep_deposit, 0);
+
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xEE; 28]),
+            ),
+            deposit: Lovelace(drep_deposit),
+            anchor: None,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for RegDRep, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_script_credential_no_vkey_required() {
+        let drep_deposit = 500_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(drep_deposit, 0);
+
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::Script(Hash28::from_bytes(
+                [0xF1; 28],
+            )),
+            deposit: Lovelace(drep_deposit),
+            anchor: None,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Script credential should not require VKey witness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cert_witness_unreg_drep_missing_witness() {
+        let drep_refund = 500_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, drep_refund);
+
+        tx.body.certificates.push(Certificate::UnregDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xAA; 28]),
+            ),
+            refund: Lovelace(drep_refund),
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for UnregDRep, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_update_drep_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::UpdateDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xBB; 28]),
+            ),
+            anchor: None,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for UpdateDRep, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_committee_hot_auth_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::CommitteeHotAuth {
+            cold_credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xCC; 28]),
+            ),
+            hot_credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xDD; 28]),
+            ),
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for CommitteeHotAuth cold credential, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_committee_cold_resign_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::CommitteeColdResign {
+            cold_credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0xEE; 28]),
+            ),
+            anchor: None,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for CommitteeColdResign, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_vote_delegation_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::VoteDelegation {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0x11; 28]),
+            ),
+            drep: DRep::Abstain,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for VoteDelegation, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_conway_stake_registration_missing_witness() {
+        let key_deposit = 2_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(key_deposit, 0);
+
+        tx.body
+            .certificates
+            .push(Certificate::ConwayStakeRegistration {
+                credential: torsten_primitives::credentials::Credential::VerificationKey(
+                    Hash28::from_bytes([0x22; 28]),
+                ),
+                deposit: Lovelace(key_deposit),
+            });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for ConwayStakeRegistration, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_shelley_stake_registration_no_witness_required() {
+        // Shelley StakeRegistration charges key_deposit but does NOT require a witness.
+        let key_deposit = ProtocolParameters::mainnet_defaults().key_deposit.0;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(key_deposit, 0);
+
+        tx.body.certificates.push(Certificate::StakeRegistration(
+            torsten_primitives::credentials::Credential::VerificationKey(Hash28::from_bytes(
+                [0x33; 28],
+            )),
+        ));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors
+                        .iter()
+                        .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Shelley StakeRegistration should not require VKey witness, got: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cert_witness_stake_delegation_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::StakeDelegation {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0x44; 28]),
+            ),
+            pool_hash: Hash28::from_bytes([0x55; 28]),
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for StakeDelegation, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_stake_deregistration_missing_witness() {
+        // StakeDeregistration refunds key_deposit.
+        let key_deposit = ProtocolParameters::mainnet_defaults().key_deposit.0;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, key_deposit);
+
+        tx.body.certificates.push(Certificate::StakeDeregistration(
+            torsten_primitives::credentials::Credential::VerificationKey(Hash28::from_bytes(
+                [0x66; 28],
+            )),
+        ));
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for StakeDeregistration, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_stake_vote_delegation_missing_witness() {
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(0, 0);
+
+        tx.body.certificates.push(Certificate::StakeVoteDelegation {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0x77; 28]),
+            ),
+            pool_hash: Hash28::from_bytes([0x88; 28]),
+            drep: DRep::NoConfidence,
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for StakeVoteDelegation, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_reg_stake_deleg_missing_witness() {
+        let stake_deposit = 2_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(stake_deposit, 0);
+
+        tx.body.certificates.push(Certificate::RegStakeDeleg {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(
+                Hash28::from_bytes([0x99; 28]),
+            ),
+            pool_hash: Hash28::from_bytes([0xAA; 28]),
+            deposit: Lovelace(stake_deposit),
+        });
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+            "Expected MissingCertificateWitness for RegStakeDeleg, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_cert_witness_multiple_certs_all_witnesses_present() {
+        let drep_deposit = 500_000_000u64;
+        let (utxo_set, _input, mut tx, params) = make_cert_test_tx(drep_deposit, 0);
+
+        let (w1, keyhash1) = make_cert_vkey_witness([0xE1; 32]);
+        let (w2, keyhash2) = make_cert_vkey_witness([0xE2; 32]);
+
+        tx.body.certificates.push(Certificate::RegDRep {
+            credential: torsten_primitives::credentials::Credential::VerificationKey(keyhash1),
+            deposit: Lovelace(drep_deposit),
+            anchor: None,
+        });
+        tx.body.certificates.push(Certificate::PoolRetirement {
+            pool_hash: keyhash2,
+            epoch: 200,
+        });
+        tx.witness_set.vkey_witnesses.push(w1);
+        tx.witness_set.vkey_witnesses.push(w2);
+
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        match result {
+            Ok(()) => {}
+            Err(errors) => {
+                assert!(
+                    !errors.iter().any(|e| matches!(e, ValidationError::MissingCertificateWitness(_))),
+                    "Should not have MissingCertificateWitness when all witnesses present, got: {errors:?}"
+                );
+            }
+        }
     }
 }
