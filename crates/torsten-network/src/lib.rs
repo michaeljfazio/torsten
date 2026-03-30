@@ -281,6 +281,12 @@ pub trait UtxoQueryProvider: Send + Sync {
     fn utxos_by_tx_inputs(&self, _inputs: &[(Vec<u8>, u32)]) -> Vec<UtxoSnapshot> {
         vec![]
     }
+
+    /// Return the entire UTxO set (GetUTxOWhole).
+    /// Default implementation returns empty — override if the store supports it.
+    fn utxos_all(&self) -> Vec<UtxoSnapshot> {
+        vec![]
+    }
 }
 
 /// A single asset within a multi-asset value: `(asset_name, quantity)`.

@@ -460,7 +460,7 @@ impl QueryHandler {
             4 => protocol::handle_proposed_pparams_updates(),
             5 => protocol::handle_stake_distribution(&self.state),
             6 => utxo::handle_utxo_by_address(&self.state, &self.utxo_provider, decoder),
-            7 => utxo::handle_utxo_whole(),
+            7 => utxo::handle_utxo_whole(&self.utxo_provider),
             8 => protocol::handle_debug_epoch_state(&self.state),
             9 => self.handle_get_cbor(decoder),
             10 => stake::handle_filtered_delegations(&self.state, decoder),

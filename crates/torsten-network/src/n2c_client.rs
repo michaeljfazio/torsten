@@ -327,6 +327,14 @@ impl N2CClient {
         self.recv_query().await
     }
 
+    /// Query the entire UTxO set (`GetUTxOWhole` -- Shelley query tag 7).
+    ///
+    /// Returns raw MsgResult CBOR payload. Warning: response can be very large
+    /// on mainnet (~10M UTxO entries).
+    pub async fn query_utxo_whole(&mut self) -> Result<Vec<u8>, NetworkError> {
+        self.send_shelley_query(7).await
+    }
+
     /// Query stake pool parameters (`GetStakePoolParams` -- Shelley query tag 17).
     ///
     /// Returns raw MsgResult CBOR payload.

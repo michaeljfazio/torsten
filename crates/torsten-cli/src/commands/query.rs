@@ -29,6 +29,9 @@ enum QuerySubcommand {
         /// Specific UTxO input reference to query (format: tx_hash#index). May be repeated.
         #[arg(long = "tx-in", value_name = "TX_HASH#INDEX")]
         tx_in: Vec<String>,
+        /// Return the entire UTxO set (warning: very large on mainnet)
+        #[arg(long)]
+        whole: bool,
         #[arg(long, default_value = "node.sock")]
         socket_path: PathBuf,
         #[arg(long)]
@@ -588,11 +591,12 @@ impl QueryCmd {
             QuerySubcommand::Utxo {
                 address,
                 tx_in,
+                whole,
                 socket_path,
                 testnet_magic,
             } => {
-                // Validate: must have at least --address or --tx-in
-                if address.is_none() && tx_in.is_empty() {
+                // Validate: must have at least --address, --tx-in, or --whole
+                if address.is_none() && tx_in.is_empty() && !whole {
                     anyhow::bail!(
                         "At least one of --address or --tx-in must be provided.\n\
                          Examples:\n  \
@@ -606,7 +610,12 @@ impl QueryCmd {
                 // Collect all UTxO responses into a single raw CBOR payload.
                 // For --tx-in queries we issue a single GetUTxOByTxIn (tag 15) with all inputs;
                 // for --address we issue GetUTxOByAddress (tag 6).
-                let raw: Vec<u8> = if !tx_in.is_empty() {
+                let raw: Vec<u8> = if whole {
+                    client
+                        .query_utxo_whole()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to query whole UTxO set: {e}"))?
+                } else if !tx_in.is_empty() {
                     // Parse each "tx_hash#index" argument
                     let mut inputs: Vec<(Vec<u8>, u32)> = Vec::new();
                     for arg in &tx_in {

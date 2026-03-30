@@ -52,10 +52,15 @@ pub(crate) fn handle_utxo_by_address(
 
 /// Handle GetUTxOWhole (tag 7).
 ///
-/// Too large to serve in practice -- returns empty.
-pub(crate) fn handle_utxo_whole() -> QueryResult {
-    debug!("Query: GetUTxOWhole (returning empty)");
-    QueryResult::UtxoByAddress(vec![])
+/// Returns the entire UTxO set as a CBOR map. Used by chain indexers
+/// (db-sync, Ogmios, Oura) to bootstrap their UTxO state.
+pub(crate) fn handle_utxo_whole(utxo_provider: &Option<Arc<dyn UtxoQueryProvider>>) -> QueryResult {
+    debug!("Query: GetUTxOWhole");
+    if let Some(provider) = utxo_provider {
+        QueryResult::UtxoByAddress(provider.utxos_all())
+    } else {
+        QueryResult::UtxoByAddress(vec![])
+    }
 }
 
 /// Handle GetUTxOByTxIn (tag 15).
@@ -123,6 +128,10 @@ mod tests {
                 })
                 .cloned()
                 .collect()
+        }
+
+        fn utxos_all(&self) -> Vec<super::super::types::UtxoSnapshot> {
+            self.utxos.clone()
         }
     }
 
@@ -231,8 +240,33 @@ mod tests {
     }
 
     #[test]
-    fn test_utxo_whole_returns_empty() {
-        let result = handle_utxo_whole();
+    fn test_utxo_whole_no_provider() {
+        let result = handle_utxo_whole(&None);
+        match result {
+            QueryResult::UtxoByAddress(utxos) => assert!(utxos.is_empty()),
+            _ => panic!("Expected UtxoByAddress"),
+        }
+    }
+
+    #[test]
+    fn test_utxo_whole_returns_all() {
+        let provider = make_provider(vec![
+            make_utxo(vec![1u8; 32], 0, vec![0x61; 29], 5_000_000),
+            make_utxo(vec![2u8; 32], 1, vec![0x62; 29], 3_000_000),
+        ]);
+        let result = handle_utxo_whole(&provider);
+        match result {
+            QueryResult::UtxoByAddress(utxos) => {
+                assert_eq!(utxos.len(), 2);
+            }
+            _ => panic!("Expected UtxoByAddress"),
+        }
+    }
+
+    #[test]
+    fn test_utxo_whole_empty_store() {
+        let provider = make_provider(vec![]);
+        let result = handle_utxo_whole(&provider);
         match result {
             QueryResult::UtxoByAddress(utxos) => assert!(utxos.is_empty()),
             _ => panic!("Expected UtxoByAddress"),

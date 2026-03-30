@@ -221,6 +221,20 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
             results
         })
     }
+
+    fn utxos_all(&self) -> Vec<UtxoSnapshot> {
+        tokio::task::block_in_place(|| {
+            let ledger = self.ledger.blocking_read();
+            let results: Vec<_> = ledger
+                .utxo_set
+                .iter()
+                .into_iter()
+                .map(|(input, output)| utxo_to_snapshot(&input, &output))
+                .collect();
+            tracing::debug!(utxos_found = results.len(), "UTxO query: whole set");
+            results
+        })
+    }
 }
 
 // ─── LedgerTxValidator ───────────────────────────────────────────────────────
