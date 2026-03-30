@@ -434,6 +434,38 @@ pub enum ValidationError {
         /// Hex-encoded DRep credential hash (zero-padded to 32 bytes).
         credential_hash: String,
     },
+    /// Haskell `ConwayDRepIncorrectDeposit`: a `RegDRep` certificate declares a
+    /// deposit amount that does not match the current `drep_deposit` protocol
+    /// parameter.
+    ///
+    /// Reference: Haskell `ConwayDRepIncorrectDeposit` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.GovCert`.
+    #[error(
+        "DRep registration rejected: declared deposit {declared} does not match \
+         drep_deposit parameter {expected} (ConwayDRepIncorrectDeposit)"
+    )]
+    DRepIncorrectDeposit {
+        /// Deposit amount declared in the `RegDRep` certificate.
+        declared: u64,
+        /// Expected deposit from `drep_deposit` protocol parameter.
+        expected: u64,
+    },
+    /// Haskell `ProposalDepositIncorrect`: a governance proposal declares a
+    /// deposit amount that does not match the current `gov_action_deposit`
+    /// protocol parameter.
+    ///
+    /// Reference: Haskell `ProposalDepositIncorrect` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
+    #[error(
+        "Governance proposal rejected: declared deposit {declared} does not match \
+         gov_action_deposit parameter {expected} (ProposalDepositIncorrect)"
+    )]
+    ProposalDepositIncorrect {
+        /// Deposit amount declared in the `ProposalProcedure`.
+        declared: u64,
+        /// Expected deposit from `gov_action_deposit` protocol parameter.
+        expected: u64,
+    },
     /// Conway+ POOL rule: a `PoolRegistration` certificate uses a VRF key hash
     /// that is already registered to a different pool.
     ///
@@ -787,6 +819,21 @@ pub fn validate_transaction_with_pools(
                     credential: cred,
                     ..
                 } => Some(cred),
+                // Combined registration certificates also register a stake key
+                // and must be rejected if the credential is already registered.
+                // Reference: Haskell `AlreadyRegisteredKey` in Conway DELEG rule.
+                torsten_primitives::transaction::Certificate::RegStakeDeleg {
+                    credential: cred,
+                    ..
+                } => Some(cred),
+                torsten_primitives::transaction::Certificate::VoteRegDeleg {
+                    credential: cred,
+                    ..
+                } => Some(cred),
+                torsten_primitives::transaction::Certificate::RegStakeVoteDeleg {
+                    credential: cred,
+                    ..
+                } => Some(cred),
                 _ => None,
             };
             if let Some(credential) = opt_cred {
@@ -870,6 +917,28 @@ pub fn validate_transaction_with_pools(
                             credential_hash: key.to_hex(),
                         });
                     }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // DRep deposit amount validation (Haskell `ConwayDRepIncorrectDeposit`)
+        //
+        // Each `RegDRep` certificate's inline deposit must exactly match the
+        // current `drep_deposit` protocol parameter. Value conservation uses
+        // the declared deposit for accounting, but the GOVCERT rule separately
+        // validates that it equals the parameter.
+        //
+        // Reference: Haskell `ConwayDRepIncorrectDeposit` in
+        // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.GovCert`.
+        // ------------------------------------------------------------------
+        for cert in &tx.body.certificates {
+            if let torsten_primitives::transaction::Certificate::RegDRep { deposit, .. } = cert {
+                if *deposit != params.drep_deposit {
+                    errors.push(ValidationError::DRepIncorrectDeposit {
+                        declared: deposit.0,
+                        expected: params.drep_deposit.0,
+                    });
                 }
             }
         }

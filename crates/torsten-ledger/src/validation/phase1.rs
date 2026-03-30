@@ -422,6 +422,26 @@ pub(super) fn run_phase1_rules(
     }
 
     // ------------------------------------------------------------------
+    // Per-proposal deposit validation (Haskell `ProposalDepositIncorrect`)
+    //
+    // Each governance proposal's inline deposit must exactly match the current
+    // `gov_action_deposit` protocol parameter. Conway+ only.
+    //
+    // Reference: Haskell `ProposalDepositIncorrect` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        for proposal in &body.proposal_procedures {
+            if proposal.deposit != params.gov_action_deposit {
+                errors.push(ValidationError::ProposalDepositIncorrect {
+                    declared: proposal.deposit.0,
+                    expected: params.gov_action_deposit.0,
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Rule 3: ADA value conservation
     // consumed = Σ(inputs) + Σ(withdrawals) + Σ(refunds)
     // produced = Σ(outputs) + fee + Σ(deposits) + proposal_deposits + donation

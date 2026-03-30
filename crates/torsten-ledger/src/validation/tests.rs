@@ -10676,4 +10676,362 @@ mod tests {
             "Expected WrongNetworkWithdrawal {{Mainnet, Testnet}}; got: {result:?}"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Combined registration duplicate check: StakeKeyAlreadyRegistered
+    //
+    // Haskell `AlreadyRegisteredKey` — combined registration certificates
+    // (RegStakeDeleg, VoteRegDeleg, RegStakeVoteDeleg) that register a stake
+    // key must be rejected when the credential is already registered.
+    //
+    // Reference: Haskell Conway DELEG rule `AlreadyRegisteredKey`.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_combined_reg_stake_deleg_duplicate() {
+        // RegStakeDeleg with an already-registered credential must produce
+        // StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x40u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let pool_hash = Hash28::from_bytes([0x50u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::RegStakeDeleg {
+                credential,
+                pool_hash,
+                deposit: Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate RegStakeDeleg; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_combined_vote_reg_deleg_duplicate() {
+        // VoteRegDeleg with an already-registered credential must produce
+        // StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x41u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::VoteRegDeleg {
+                credential,
+                drep: DRep::Abstain,
+                deposit: Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate VoteRegDeleg; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_combined_reg_stake_vote_deleg_duplicate() {
+        // RegStakeVoteDeleg with an already-registered credential must produce
+        // StakeKeyAlreadyRegistered.
+        let cred_bytes = [0x42u8; 28];
+        let credential = torsten_primitives::credentials::Credential::VerificationKey(
+            Hash28::from_bytes(cred_bytes),
+        );
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let key_deposit = params.key_deposit.0;
+
+        let pool_hash = Hash28::from_bytes([0x51u8; 28]);
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_reg_tx(
+            &mut utxo_set,
+            Certificate::RegStakeVoteDeleg {
+                credential,
+                pool_hash,
+                drep: DRep::Abstain,
+                deposit: Lovelace(key_deposit),
+            },
+            key_deposit,
+        );
+
+        let reward_accounts = make_reward_accounts(cred_bytes, 0);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            Some(&reward_accounts),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected StakeKeyAlreadyRegistered for duplicate RegStakeVoteDeleg; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StakeKeyAlreadyRegistered { .. })),
+            "Expected StakeKeyAlreadyRegistered; got: {errors:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // DRep deposit amount validation: DRepIncorrectDeposit
+    //
+    // Haskell `ConwayDRepIncorrectDeposit` — RegDRep certificate deposit must
+    // match the current drep_deposit protocol parameter.
+    //
+    // Reference: Haskell `ConwayDRepIncorrectDeposit` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.GovCert`.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_drep_incorrect_deposit_rejected() {
+        // RegDRep with a deposit that doesn't match drep_deposit must produce
+        // DRepIncorrectDeposit.
+        let cred_bytes = [0x43u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let wrong_deposit = params.drep_deposit.0 - 1; // one lovelace short
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, wrong_deposit);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
+            None, None, None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected DRepIncorrectDeposit for wrong DRep deposit; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DRepIncorrectDeposit { .. })),
+            "Expected DRepIncorrectDeposit; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_drep_correct_deposit_accepted() {
+        // RegDRep with the correct deposit must not produce DRepIncorrectDeposit.
+        let cred_bytes = [0x44u8; 28];
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let correct_deposit = params.drep_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_drep_reg_tx(&mut utxo_set, cred_bytes, correct_deposit);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
+            None, None, None,
+        );
+
+        let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::DRepIncorrectDeposit { .. })
+        }));
+        assert!(
+            !has_deposit_err,
+            "Expected no DRepIncorrectDeposit for correct deposit; got: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Per-proposal deposit validation: ProposalDepositIncorrect
+    //
+    // Haskell `ProposalDepositIncorrect` — each governance proposal's deposit
+    // must match the current gov_action_deposit protocol parameter.
+    //
+    // Reference: Haskell `ProposalDepositIncorrect` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: build a transaction with a governance proposal, balanced for
+    /// value conservation. Uses `gov_action_deposit` from params for the
+    /// proposal_deposits side of the balance.
+    fn make_proposal_tx(
+        utxo_set: &mut UtxoSet,
+        proposal_deposit: u64,
+        params: &ProtocolParameters,
+    ) -> Transaction {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xEEu8; 32]),
+            index: 0,
+        };
+        // Use a large UTxO to accommodate the gov_action_deposit (100B lovelace).
+        let utxo_value = 200_000_000_000u64;
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(utxo_value),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+        let fee = 200_000u64;
+        // Value conservation: consumed = utxo_value, produced = output + fee + proposal_deposit
+        // Use the protocol param for the proposal_deposits accounting side
+        // (phase1.rs multiplies count * gov_action_deposit, not the declared deposit).
+        let output_value = utxo_value - fee - params.gov_action_deposit.0;
+        let mut tx = make_simple_tx(input, output_value, fee);
+        tx.body.proposal_procedures.push(ProposalProcedure {
+            deposit: Lovelace(proposal_deposit),
+            return_addr: vec![0u8; 29], // dummy return address
+            gov_action: GovAction::InfoAction,
+            anchor: Anchor {
+                url: String::new(),
+                data_hash: Hash32::ZERO,
+            },
+        });
+        tx
+    }
+
+    #[test]
+    fn test_proposal_incorrect_deposit_rejected() {
+        // A proposal with a deposit that doesn't match gov_action_deposit must
+        // produce ProposalDepositIncorrect.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let wrong_deposit = params.gov_action_deposit.0 - 1; // one lovelace short
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_proposal_tx(&mut utxo_set, wrong_deposit, &params);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
+            None, None, None,
+        );
+
+        assert!(
+            result.is_err(),
+            "Expected ProposalDepositIncorrect for wrong proposal deposit; got Ok"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ProposalDepositIncorrect { .. })),
+            "Expected ProposalDepositIncorrect; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_proposal_correct_deposit_accepted() {
+        // A proposal with the correct deposit must not produce
+        // ProposalDepositIncorrect.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9; // Conway
+        let correct_deposit = params.gov_action_deposit.0;
+
+        let mut utxo_set = UtxoSet::new();
+        let tx = make_proposal_tx(&mut utxo_set, correct_deposit, &params);
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
+            None, None, None,
+        );
+
+        let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
+            matches!(e, ValidationError::ProposalDepositIncorrect { .. })
+        }));
+        assert!(
+            !has_deposit_err,
+            "Expected no ProposalDepositIncorrect for correct deposit; got: {result:?}"
+        );
+    }
 }

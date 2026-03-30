@@ -500,6 +500,18 @@ pub(crate) fn convert_validation_error(
                 "DRep registration rejected: credential {credential_hash} is already registered"
             ),
         },
+        VE::DRepIncorrectDeposit { declared, expected } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "DRep registration rejected: declared deposit {declared} does not match \
+                 drep_deposit parameter {expected} (ConwayDRepIncorrectDeposit)"
+            ),
+        },
+        VE::ProposalDepositIncorrect { declared, expected } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Governance proposal rejected: declared deposit {declared} does not match \
+                 gov_action_deposit parameter {expected} (ProposalDepositIncorrect)"
+            ),
+        },
         VE::CommitteeHasPreviouslyResigned { cold_credential_hash } => {
             TxValidationError::ScriptFailed {
                 reason: format!(
