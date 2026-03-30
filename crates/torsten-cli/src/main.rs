@@ -18,7 +18,7 @@ enum Commands {
     /// Key generation commands
     Key(commands::key::KeyCmd),
     /// Transaction commands
-    Transaction(commands::transaction::TransactionCmd),
+    Transaction(Box<commands::transaction::TransactionCmd>),
     /// Query commands
     Query(commands::query::QueryCmd),
     /// Stake address commands

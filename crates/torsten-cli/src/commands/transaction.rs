@@ -94,6 +94,32 @@ struct BuildArgs {
     /// Mint/burn tokens (format: policy_id.asset_name+quantity or policy_id.asset_name-quantity)
     #[arg(long)]
     mint: Vec<String>,
+    /// Reference inputs visible to Plutus scripts but not consumed (CIP-31).
+    /// Format: tx_hash#index (repeatable).
+    #[arg(long)]
+    read_only_tx_in_reference: Vec<String>,
+    /// Inline datum value for a transaction output (CIP-32).
+    /// Format: INDEX:JSON or just JSON (defaults to output 0).
+    /// Uses the cardano-cli JSON PlutusData schema.
+    #[arg(long)]
+    tx_out_inline_datum_value: Vec<String>,
+    /// Inline datum file for a transaction output (CIP-32).
+    /// Format: INDEX:FILE or just FILE (defaults to output 0).
+    #[arg(long)]
+    tx_out_inline_datum_file: Vec<String>,
+    /// Reference script file for a transaction output (CIP-33).
+    /// Format: INDEX:FILE or just FILE (defaults to output 0).
+    /// Must be a Plutus script text-envelope file.
+    #[arg(long)]
+    tx_out_reference_script_file: Vec<String>,
+    /// Vote file(s) to include in the transaction (Conway governance).
+    /// Text-envelope file with type containing "Vote".
+    #[arg(long)]
+    vote_file: Vec<PathBuf>,
+    /// Proposal file(s) to include in the transaction (Conway governance).
+    /// Text-envelope file with type containing "Proposal".
+    #[arg(long)]
+    proposal_file: Vec<PathBuf>,
     /// Output file for the transaction body
     #[arg(long)]
     out_file: PathBuf,
@@ -274,6 +300,10 @@ pub(crate) struct ParsedTxOutput {
     pub(crate) lovelace: u64,
     /// Native tokens: Vec<(policy_hex, asset_name_hex, quantity)>
     pub(crate) tokens: Vec<(String, String, u64)>,
+    /// Inline datum CBOR bytes (CIP-32), set via --tx-out-inline-datum-value/file
+    pub(crate) inline_datum_cbor: Option<Vec<u8>>,
+    /// Reference script (CIP-33): (PlutusVersion, raw_script_bytes)
+    pub(crate) script_ref: Option<(PlutusVersion, Vec<u8>)>,
 }
 
 /// Parse a tx output string into address, lovelace, and optional native tokens.
@@ -329,7 +359,140 @@ fn parse_tx_output(s: &str) -> Result<ParsedTxOutput> {
         address,
         lovelace,
         tokens,
+        inline_datum_cbor: None,
+        script_ref: None,
     })
+}
+
+/// Parse an indexed argument string of the form `"INDEX:VALUE"` or just `"VALUE"`
+/// (defaults to index 0).  The prefix is only treated as an index when it parses
+/// as a non-negative integer, so JSON values containing colons are handled safely.
+fn parse_indexed_arg(s: &str) -> Result<(usize, &str)> {
+    if let Some(colon_pos) = s.find(':') {
+        let prefix = &s[..colon_pos];
+        if let Ok(idx) = prefix.parse::<usize>() {
+            return Ok((idx, &s[colon_pos + 1..]));
+        }
+    }
+    Ok((0, s))
+}
+
+/// Attach inline datums (CIP-32) and reference scripts (CIP-33) to the parsed
+/// outputs at the positions specified by the indexed arguments.
+fn attach_output_metadata(
+    outputs: &mut [ParsedTxOutput],
+    inline_datum_values: &[String],
+    inline_datum_files: &[String],
+    script_ref_files: &[String],
+) -> Result<()> {
+    for arg in inline_datum_values {
+        let (idx, json_str) = parse_indexed_arg(arg)?;
+        if idx >= outputs.len() {
+            bail!(
+                "--tx-out-inline-datum-value index {idx} out of range (only {} outputs)",
+                outputs.len()
+            );
+        }
+        let json: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in --tx-out-inline-datum-value: {e}"))?;
+        let datum = parse_plutus_data_json(&json)?;
+        let cbor = encode_plutus_data_to_cbor(&datum);
+        outputs[idx].inline_datum_cbor = Some(cbor);
+    }
+    for arg in inline_datum_files {
+        let (idx, file_str) = parse_indexed_arg(arg)?;
+        if idx >= outputs.len() {
+            bail!(
+                "--tx-out-inline-datum-file index {idx} out of range (only {} outputs)",
+                outputs.len()
+            );
+        }
+        let datum = load_plutus_data_file(&PathBuf::from(file_str))?;
+        let cbor = encode_plutus_data_to_cbor(&datum);
+        outputs[idx].inline_datum_cbor = Some(cbor);
+    }
+    for arg in script_ref_files {
+        let (idx, file_str) = parse_indexed_arg(arg)?;
+        if idx >= outputs.len() {
+            bail!(
+                "--tx-out-reference-script-file index {idx} out of range (only {} outputs)",
+                outputs.len()
+            );
+        }
+        let (version, script_bytes) = load_plutus_script(&PathBuf::from(file_str))?;
+        outputs[idx].script_ref = Some((version, script_bytes));
+    }
+    Ok(())
+}
+
+/// Load a Conway vote file (text envelope) and return the raw CBOR bytes.
+fn load_vote_file(path: &PathBuf) -> Result<Vec<u8>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read vote file '{}': {e}", path.display()))?;
+    let env: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid JSON in vote file '{}': {e}", path.display()))?;
+    let type_str = env["type"].as_str().unwrap_or("");
+    if !type_str.contains("Vote") {
+        bail!(
+            "Expected a vote file but got type '{}' in '{}'",
+            type_str,
+            path.display()
+        );
+    }
+    let cbor_hex = env["cborHex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing cborHex in '{}'", path.display()))?;
+    hex::decode(cbor_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid hex in vote file '{}': {e}", path.display()))
+}
+
+/// Load a Conway proposal file (text envelope) and return the raw CBOR bytes.
+fn load_proposal_file(path: &PathBuf) -> Result<Vec<u8>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read proposal file '{}': {e}", path.display()))?;
+    let env: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid JSON in proposal file '{}': {e}", path.display()))?;
+    let type_str = env["type"].as_str().unwrap_or("");
+    if !type_str.contains("Proposal") {
+        bail!(
+            "Expected a proposal file but got type '{}' in '{}'",
+            type_str,
+            path.display()
+        );
+    }
+    let cbor_hex = env["cborHex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing cborHex in '{}'", path.display()))?;
+    hex::decode(cbor_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid hex in proposal file '{}': {e}", path.display()))
+}
+
+/// Encode a multi-asset token map into the CBOR encoder.
+/// Produces: `map { policy_id_bytes => map { asset_name_bytes => quantity } }`
+fn encode_multiasset_tokens(
+    enc: &mut minicbor::Encoder<&mut Vec<u8>>,
+    tokens: &[(String, String, u64)],
+) -> Result<()> {
+    let mut policy_map: std::collections::BTreeMap<Vec<u8>, Vec<(Vec<u8>, u64)>> =
+        std::collections::BTreeMap::new();
+    for (policy_hex, asset_name_hex, qty) in tokens {
+        let policy_bytes = hex::decode(policy_hex)?;
+        let asset_bytes = hex::decode(asset_name_hex).unwrap_or_default();
+        policy_map
+            .entry(policy_bytes)
+            .or_default()
+            .push((asset_bytes, *qty));
+    }
+    enc.map(policy_map.len() as u64)?;
+    for (policy_bytes, assets) in &policy_map {
+        enc.bytes(policy_bytes)?;
+        enc.map(assets.len() as u64)?;
+        for (asset_name, qty) in assets {
+            enc.bytes(asset_name)?;
+            enc.u64(*qty)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build a CBOR transaction body
@@ -346,6 +509,9 @@ fn build_tx_body_cbor(
     required_signers: &[Vec<u8>],
     mint: &[MintEntry],
     script_data_hash: Option<&Hash32>,
+    reference_inputs: &[(Hash32, u32)],
+    votes: &[Vec<u8>],
+    proposals: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
@@ -379,6 +545,15 @@ fn build_tx_body_cbor(
     if !required_signers.is_empty() {
         field_count += 1;
     }
+    if !reference_inputs.is_empty() {
+        field_count += 1;
+    }
+    if !votes.is_empty() {
+        field_count += 1;
+    }
+    if !proposals.is_empty() {
+        field_count += 1;
+    }
     enc.map(field_count)?;
 
     // Field 0: inputs
@@ -391,13 +566,71 @@ fn build_tx_body_cbor(
     }
 
     // Field 1: outputs (post-Alonzo format)
+    //
+    // Outputs without inline datum or script ref use the legacy array format:
+    //   [address, value]
+    // Outputs with inline datum and/or script ref use the Babbage+ map format:
+    //   {0: address, 1: value, ?2: datum_option, ?3: script_ref}
     enc.u32(1)?;
     enc.array(outputs.len() as u64)?;
     for output in outputs {
         let (_hrp, addr_bytes) = bech32::decode(&output.address)
             .map_err(|e| anyhow::anyhow!("Invalid bech32 address '{}': {e}", output.address))?;
 
-        if output.tokens.is_empty() {
+        let needs_map_format = output.inline_datum_cbor.is_some() || output.script_ref.is_some();
+
+        if needs_map_format {
+            // Post-Alonzo map format: {0: address, 1: value, ?2: datum_option, ?3: script_ref}
+            let mut map_count = 2u64; // 0: address, 1: value (always present)
+            if output.inline_datum_cbor.is_some() {
+                map_count += 1;
+            }
+            if output.script_ref.is_some() {
+                map_count += 1;
+            }
+            enc.map(map_count)?;
+
+            // Key 0: address
+            enc.u32(0)?;
+            enc.bytes(&addr_bytes)?;
+
+            // Key 1: value
+            enc.u32(1)?;
+            if output.tokens.is_empty() {
+                enc.u64(output.lovelace)?;
+            } else {
+                enc.array(2)?;
+                enc.u64(output.lovelace)?;
+                encode_multiasset_tokens(&mut enc, &output.tokens)?;
+            }
+
+            // Key 2: inline datum — [1, #6.24(datum_cbor)]
+            if let Some(ref datum_cbor) = output.inline_datum_cbor {
+                enc.u32(2)?;
+                enc.array(2)?;
+                enc.u64(1)?; // 1 = inline datum (0 would be datum hash)
+                enc.tag(minicbor::data::Tag::new(24))?;
+                enc.bytes(datum_cbor)?;
+            }
+
+            // Key 3: script_ref — #6.24([script_type, script_bytes])
+            if let Some((ref version, ref script_bytes)) = output.script_ref {
+                enc.u32(3)?;
+                let script_type: u64 = match version {
+                    PlutusVersion::V1 => 1,
+                    PlutusVersion::V2 => 2,
+                    PlutusVersion::V3 => 3,
+                };
+                // Build the inner [type, bytes] CBOR, then wrap in tag(24)(bytes)
+                let mut inner = Vec::new();
+                let mut senc = minicbor::Encoder::new(&mut inner);
+                senc.array(2)?;
+                senc.u64(script_type)?;
+                senc.bytes(script_bytes)?;
+                enc.tag(minicbor::data::Tag::new(24))?;
+                enc.bytes(&inner)?;
+            }
+        } else if output.tokens.is_empty() {
             // Simple output: [address, amount]
             enc.array(2)?;
             enc.bytes(&addr_bytes)?;
@@ -406,32 +639,9 @@ fn build_tx_body_cbor(
             // Multi-asset output: [address, [lovelace, {policy: {asset: qty}}]]
             enc.array(2)?;
             enc.bytes(&addr_bytes)?;
-
-            // Value: [lovelace, multi_asset_map]
             enc.array(2)?;
             enc.u64(output.lovelace)?;
-
-            // Group tokens by policy
-            let mut policy_map: std::collections::BTreeMap<Vec<u8>, Vec<(Vec<u8>, u64)>> =
-                std::collections::BTreeMap::new();
-            for (policy_hex, asset_name_hex, qty) in &output.tokens {
-                let policy_bytes = hex::decode(policy_hex)?;
-                let asset_bytes = hex::decode(asset_name_hex).unwrap_or_default();
-                policy_map
-                    .entry(policy_bytes)
-                    .or_default()
-                    .push((asset_bytes, *qty));
-            }
-
-            enc.map(policy_map.len() as u64)?;
-            for (policy_bytes, assets) in &policy_map {
-                enc.bytes(policy_bytes)?;
-                enc.map(assets.len() as u64)?;
-                for (asset_name, qty) in assets {
-                    enc.bytes(asset_name)?;
-                    enc.u64(*qty)?;
-                }
-            }
+            encode_multiasset_tokens(&mut enc, &output.tokens)?;
         }
     }
 
@@ -522,6 +732,45 @@ fn build_tx_body_cbor(
         enc.array(required_signers.len() as u64)?;
         for signer_hash in required_signers {
             enc.bytes(signer_hash)?;
+        }
+    }
+
+    // Field 18: reference inputs (CIP-31) — Conway tag 258 set
+    if !reference_inputs.is_empty() {
+        enc.u32(18)?;
+        enc.tag(minicbor::data::Tag::new(258))?;
+        enc.array(reference_inputs.len() as u64)?;
+        for (hash, index) in reference_inputs {
+            enc.array(2)?;
+            enc.bytes(hash.as_bytes())?;
+            enc.u32(*index)?;
+        }
+    }
+
+    // Field 19: voting procedures (Conway governance) — raw CBOR passthrough
+    if !votes.is_empty() {
+        enc.u32(19)?;
+        // Each vote file contains a complete voting_procedures map entry;
+        // when there is exactly one vote file, pass through its raw CBOR directly.
+        // Multiple vote files: merge into a single map would require decoding;
+        // for now we support the single-file case (most common).
+        if votes.len() == 1 {
+            enc.writer_mut().extend_from_slice(&votes[0]);
+        } else {
+            // Multiple vote files: write as raw CBOR concatenation.
+            // The caller is responsible for ensuring this produces valid CBOR.
+            for vote_cbor in votes {
+                enc.writer_mut().extend_from_slice(vote_cbor);
+            }
+        }
+    }
+
+    // Field 20: proposal procedures (Conway governance) — array of raw CBOR proposals
+    if !proposals.is_empty() {
+        enc.u32(20)?;
+        enc.array(proposals.len() as u64)?;
+        for proposal_cbor in proposals {
+            enc.writer_mut().extend_from_slice(proposal_cbor);
         }
     }
 
@@ -1500,37 +1749,48 @@ pub(crate) fn estimate_fee(
 /// for the key/value UTxO entry overhead in the ledger state.
 pub(crate) fn min_ada_for_output(
     tokens: &[(String, String, u64)],
+    inline_datum_cbor_len: usize,
+    script_ref_len: usize,
     coins_per_utxo_byte: u64,
 ) -> u64 {
     // Estimate the serialised byte size of the value field.
     //
     // When there are no tokens the output is a plain coin output; the minimum
     // is then the flat 1 ADA floor (no formula needed, just the floor).
-    let output_size_bytes: u64 = if tokens.is_empty() {
-        0
-    } else {
-        // Base: CBOR array(2) header (1 byte) + coin u64 (up to 9 bytes)
-        let mut size: u64 = 10;
-        // Group tokens by policy to mirror the actual CBOR grouping
-        let mut policy_map: HashMap<&str, Vec<&str>> = HashMap::new();
-        for (policy, asset_name, _) in tokens {
-            policy_map
-                .entry(policy.as_str())
-                .or_default()
-                .push(asset_name.as_str());
-        }
-        for (policy_hex, assets) in &policy_map {
-            // 28-byte policy ID bytes + 1-byte CBOR header
-            size += 29;
-            // Policy-ID hex length is always 56 chars → 28 bytes; ignore hex_len / 2
-            let _ = policy_hex;
-            // Per-asset: name bytes + 1-byte header + 8-byte quantity + 1 overhead
-            for asset_name_hex in assets {
-                size += (asset_name_hex.len() as u64) / 2 + 10;
+    let output_size_bytes: u64 =
+        if tokens.is_empty() && inline_datum_cbor_len == 0 && script_ref_len == 0 {
+            0
+        } else {
+            // Base: CBOR array(2) header (1 byte) + coin u64 (up to 9 bytes)
+            let mut size: u64 = 10;
+            // Group tokens by policy to mirror the actual CBOR grouping
+            let mut policy_map: HashMap<&str, Vec<&str>> = HashMap::new();
+            for (policy, asset_name, _) in tokens {
+                policy_map
+                    .entry(policy.as_str())
+                    .or_default()
+                    .push(asset_name.as_str());
             }
-        }
-        size
-    };
+            for (policy_hex, assets) in &policy_map {
+                // 28-byte policy ID bytes + 1-byte CBOR header
+                size += 29;
+                // Policy-ID hex length is always 56 chars → 28 bytes; ignore hex_len / 2
+                let _ = policy_hex;
+                // Per-asset: name bytes + 1-byte header + 8-byte quantity + 1 overhead
+                for asset_name_hex in assets {
+                    size += (asset_name_hex.len() as u64) / 2 + 10;
+                }
+            }
+            // Add inline datum size (CBOR key + array header + tag24 + bytes wrapper ≈ 12 bytes overhead)
+            if inline_datum_cbor_len > 0 {
+                size += inline_datum_cbor_len as u64 + 12;
+            }
+            // Add script reference size (CBOR key + tag24 + inner array + type + bytes ≈ 12 bytes overhead)
+            if script_ref_len > 0 {
+                size += script_ref_len as u64 + 12;
+            }
+            size
+        };
 
     const LEDGER_KEY_OVERHEAD: u64 = 160;
     const FLAT_MIN: u64 = 1_000_000;
@@ -1662,7 +1922,7 @@ pub(crate) fn calculate_change(
     token_change.sort();
 
     // ── Minimum-ADA check ──────────────────────────────────────────────────
-    let min_ada = min_ada_for_output(&token_change, coins_per_utxo_byte);
+    let min_ada = min_ada_for_output(&token_change, 0, 0, coins_per_utxo_byte);
 
     if lovelace_change < min_ada && !token_change.is_empty() {
         bail!(
@@ -1690,6 +1950,8 @@ pub(crate) fn calculate_change(
         address: change_address.to_string(),
         lovelace: lovelace_change,
         tokens: token_change,
+        inline_datum_cbor: None,
+        script_ref: None,
     }))
 }
 
@@ -1885,6 +2147,12 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         tx_in_collateral,
         required_signer_hash,
         mint,
+        read_only_tx_in_reference,
+        tx_out_inline_datum_value,
+        tx_out_inline_datum_file,
+        tx_out_reference_script_file,
+        vote_file,
+        proposal_file,
         out_file,
         socket_path,
         mainnet,
@@ -1915,7 +2183,20 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         .map(|s| parse_tx_output(s))
         .collect::<Result<_>>()?;
 
+    // Attach inline datums and reference scripts to outputs by index
+    attach_output_metadata(
+        &mut outputs,
+        &tx_out_inline_datum_value,
+        &tx_out_inline_datum_file,
+        &tx_out_reference_script_file,
+    )?;
+
     let collateral_inputs: Vec<(Hash32, u32)> = tx_in_collateral
+        .iter()
+        .map(|s| parse_tx_input(s))
+        .collect::<Result<_>>()?;
+
+    let reference_inputs: Vec<(Hash32, u32)> = read_only_tx_in_reference
         .iter()
         .map(|s| parse_tx_input(s))
         .collect::<Result<_>>()?;
@@ -2028,6 +2309,17 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         None
     };
 
+    // ── Load Conway governance files ────────────────────────────────────────
+    let votes: Vec<Vec<u8>> = vote_file
+        .iter()
+        .map(load_vote_file)
+        .collect::<Result<_>>()?;
+
+    let proposals: Vec<Vec<u8>> = proposal_file
+        .iter()
+        .map(load_proposal_file)
+        .collect::<Result<_>>()?;
+
     // ── Determine the effective fee ─────────────────────────────────────────
 
     let fee = if let Some(f) = explicit_fee {
@@ -2124,6 +2416,9 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             &required_signers,
             &parsed_mint,
             script_data_hash.as_ref(),
+            &reference_inputs,
+            &votes,
+            &proposals,
         )?;
         // Assume 1 witness (the payment key). SPO tools can override with --fee.
         let fee_estimate_1 = estimate_fee(&body_no_change, 1, min_fee_a, min_fee_b);
@@ -2164,6 +2459,9 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             &required_signers,
             &parsed_mint,
             script_data_hash.as_ref(),
+            &reference_inputs,
+            &votes,
+            &proposals,
         )?;
         let fee_final = estimate_fee(&body_with_change, 1, min_fee_a, min_fee_b);
 
@@ -2213,6 +2511,9 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         &required_signers,
         &parsed_mint,
         script_data_hash.as_ref(),
+        &reference_inputs,
+        &votes,
+        &proposals,
     )?;
 
     // Write as text envelope (cardano-cli compatible format)
@@ -2544,7 +2845,7 @@ impl TransactionCmd {
 
                 // Compute minimum ADA using the Babbage/Conway formula via the
                 // shared helper function.
-                let min_ada = min_ada_for_output(&parsed.tokens, coins_per_utxo_byte);
+                let min_ada = min_ada_for_output(&parsed.tokens, 0, 0, coins_per_utxo_byte);
 
                 // cardano-cli output format: a JSON object with a "lovelace" key
                 // matching `cardano-cli transaction calculate-min-required-utxo`.
@@ -3093,6 +3394,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         );
         assert!(result.is_ok());
     }
@@ -3109,6 +3413,8 @@ mod tests {
             .unwrap(),
             lovelace: 2_000_000,
             tokens: vec![(policy, "deadbeef".to_string(), 100)],
+            inline_datum_cbor: None,
+            script_ref: None,
         }];
         let result = build_tx_body_cbor(
             &inputs,
@@ -3122,6 +3428,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         );
         assert!(result.is_ok());
     }
@@ -3145,6 +3454,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         );
         assert!(result.is_ok());
         let cbor = result.unwrap();
@@ -3398,6 +3710,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -3425,6 +3740,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -3449,6 +3767,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -3467,6 +3788,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -3692,7 +4016,7 @@ mod tests {
         // and scales with the number of tokens.
 
         // ADA-only output → always 1 ADA floor.
-        assert_eq!(min_ada_for_output(&[], 4_310), 1_000_000);
+        assert_eq!(min_ada_for_output(&[], 0, 0, 4_310), 1_000_000);
 
         // Single-token output: formula should exceed 1 ADA.
         let tokens_one: Vec<(String, String, u64)> = vec![(
@@ -3700,7 +4024,7 @@ mod tests {
             "484f534b59".to_string(),
             100,
         )];
-        let min_one = min_ada_for_output(&tokens_one, 4_310);
+        let min_one = min_ada_for_output(&tokens_one, 0, 0, 4_310);
         // size = 10 (base) + 29 (policy) + (5/2=2 + 10) = 51 bytes → formula = 4310*(51+160) = 909_410 → below 1M floor → 1_000_000
         assert!(
             min_one >= 1_000_000,
@@ -3716,7 +4040,7 @@ mod tests {
                 u64::from(i) + 1,
             ));
         }
-        let min_many = min_ada_for_output(&many_tokens, 4_310);
+        let min_many = min_ada_for_output(&many_tokens, 0, 0, 4_310);
         assert!(
             min_many >= 1_000_000,
             "multi-token min ADA must be at least 1 ADA, got {min_many}"
@@ -4581,6 +4905,9 @@ mod tests {
             &[],
             &[],
             Some(&hash),
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -4622,6 +4949,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
         let large_body = build_tx_body_cbor(
@@ -4640,6 +4970,9 @@ mod tests {
             &[],
             &[],
             None,
+            &[],
+            &[],
+            &[],
         )
         .unwrap();
         let fee_small = estimate_fee(&small_body, 1, 44, 155_381);
@@ -4657,7 +4990,7 @@ mod tests {
         // ADA-only output: formula is max(1_000_000, coins_per_utxo_byte * (0 + 160)).
         // With the current mainnet/preview default of 4_310:
         //   4_310 * 160 = 689_600 < 1_000_000 → floor at 1 ADA.
-        let result = min_ada_for_output(&[], 4_310);
+        let result = min_ada_for_output(&[], 0, 0, 4_310);
         assert_eq!(result, 1_000_000, "ADA-only output must floor at 1 ADA");
     }
 
@@ -4670,7 +5003,7 @@ mod tests {
             "".to_string(),
             1_000u64,
         )];
-        let result = min_ada_for_output(&tokens, 4_310);
+        let result = min_ada_for_output(&tokens, 0, 0, 4_310);
         assert!(
             result >= 1_000_000,
             "min ADA with tokens must be at least 1 ADA, got {result}"
@@ -4681,7 +5014,7 @@ mod tests {
     fn test_min_ada_for_output_coins_per_utxo_byte_zero() {
         // If coinsPerUTxOByte is 0 (pathological), the formula is 0 but the
         // floor at 1 ADA still applies.
-        let result = min_ada_for_output(&[], 0);
+        let result = min_ada_for_output(&[], 0, 0, 0);
         assert_eq!(
             result, 1_000_000,
             "floor must hold even for zero cost param"
@@ -4708,11 +5041,363 @@ mod tests {
                 1u64,
             ),
         ];
-        let single = min_ada_for_output(&one_policy, 4_310);
-        let multi = min_ada_for_output(&two_policies, 4_310);
+        let single = min_ada_for_output(&one_policy, 0, 0, 4_310);
+        let multi = min_ada_for_output(&two_policies, 0, 0, 4_310);
         assert!(
             multi >= single,
             "two policies must require at least as much ADA as one"
         );
+    }
+
+    // ── Tests for new CIP-31/32/33 and governance flags ─────────────────────
+
+    #[test]
+    fn test_parse_indexed_arg_with_index() {
+        let (idx, val) = parse_indexed_arg("0:value").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(val, "value");
+
+        let (idx, val) = parse_indexed_arg("1:file.json").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(val, "file.json");
+
+        let (idx, val) = parse_indexed_arg("42:hello:world").unwrap();
+        assert_eq!(idx, 42);
+        assert_eq!(val, "hello:world");
+    }
+
+    #[test]
+    fn test_parse_indexed_arg_defaults_to_zero() {
+        // No valid integer prefix → defaults to output 0
+        let (idx, val) = parse_indexed_arg("{\"int\": 42}").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(val, "{\"int\": 42}");
+
+        let (idx, val) = parse_indexed_arg("just-a-value").unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(val, "just-a-value");
+    }
+
+    #[test]
+    fn test_build_tx_body_with_reference_inputs() {
+        let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
+        let ref_inputs = vec![(Hash32::from_bytes([0xcd; 32]), 1)];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &[],
+            200_000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &ref_inputs,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Decode CBOR map and verify field 18 (reference_inputs) is present
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        let mut found_key_18 = false;
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            if key == 18 {
+                found_key_18 = true;
+                // Should be tag(258) wrapping an array
+                let tag = dec.tag().unwrap();
+                assert_eq!(tag.as_u64(), 258, "reference inputs must use tag 258 (set)");
+                let arr_len = dec.array().unwrap().unwrap();
+                assert_eq!(arr_len, 1, "expected 1 reference input");
+                // Each input is [hash, index]
+                let inner_len = dec.array().unwrap().unwrap();
+                assert_eq!(inner_len, 2);
+                let hash_bytes = dec.bytes().unwrap();
+                assert_eq!(hash_bytes, &[0xcd; 32]);
+                let idx = dec.u32().unwrap();
+                assert_eq!(idx, 1);
+            } else {
+                dec.skip().unwrap();
+            }
+        }
+        assert!(found_key_18, "field 18 (reference_inputs) must be present");
+    }
+
+    #[test]
+    fn test_build_tx_body_with_inline_datum() {
+        let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
+        let addr =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("addr_test").unwrap(), &[0x00; 57])
+                .unwrap();
+        // Inline datum: PlutusData Integer(42) → CBOR encoding: 0x18 0x2a
+        let datum_cbor = encode_plutus_data_to_cbor(&PlutusData::Integer(42));
+        let outputs = vec![ParsedTxOutput {
+            address: addr,
+            lovelace: 2_000_000,
+            tokens: vec![],
+            inline_datum_cbor: Some(datum_cbor.clone()),
+            script_ref: None,
+        }];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200_000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Decode and verify the output uses map format with key 2 (inline datum)
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            if key == 1 {
+                // outputs array
+                let arr_len = dec.array().unwrap().unwrap();
+                assert_eq!(arr_len, 1);
+                // Output should be a map (not array) since it has inline datum
+                let output_map_len = dec.map().unwrap().unwrap();
+                assert_eq!(
+                    output_map_len, 3,
+                    "map format: keys 0 (addr), 1 (value), 2 (datum)"
+                );
+                // Key 0: address
+                let k0 = dec.u32().unwrap();
+                assert_eq!(k0, 0);
+                dec.skip().unwrap(); // skip address bytes
+                                     // Key 1: value
+                let k1 = dec.u32().unwrap();
+                assert_eq!(k1, 1);
+                dec.skip().unwrap(); // skip value
+                                     // Key 2: inline datum = [1, #6.24(datum_cbor)]
+                let k2 = dec.u32().unwrap();
+                assert_eq!(k2, 2);
+                let datum_arr_len = dec.array().unwrap().unwrap();
+                assert_eq!(datum_arr_len, 2);
+                let datum_tag = dec.u64().unwrap();
+                assert_eq!(datum_tag, 1, "1 = inline datum option");
+                let tag = dec.tag().unwrap();
+                assert_eq!(tag.as_u64(), 24, "must be CBOR tag 24 for encoded CBOR");
+                let inner_bytes = dec.bytes().unwrap();
+                assert_eq!(inner_bytes, datum_cbor.as_slice());
+            } else {
+                dec.skip().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_tx_body_with_script_ref() {
+        let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
+        let addr =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("addr_test").unwrap(), &[0x00; 57])
+                .unwrap();
+        let script_bytes = vec![0x01, 0x02, 0x03, 0x04]; // dummy script
+        let outputs = vec![ParsedTxOutput {
+            address: addr,
+            lovelace: 5_000_000,
+            tokens: vec![],
+            inline_datum_cbor: None,
+            script_ref: Some((PlutusVersion::V2, script_bytes.clone())),
+        }];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200_000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Decode and verify the output uses map format with key 3 (script_ref)
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            if key == 1 {
+                let arr_len = dec.array().unwrap().unwrap();
+                assert_eq!(arr_len, 1);
+                let output_map_len = dec.map().unwrap().unwrap();
+                assert_eq!(output_map_len, 3, "map format: keys 0, 1, 3");
+                // Key 0: address
+                let k0 = dec.u32().unwrap();
+                assert_eq!(k0, 0);
+                dec.skip().unwrap();
+                // Key 1: value
+                let k1 = dec.u32().unwrap();
+                assert_eq!(k1, 1);
+                dec.skip().unwrap();
+                // Key 3: script_ref = #6.24([type, script_bytes])
+                let k3 = dec.u32().unwrap();
+                assert_eq!(k3, 3);
+                let tag = dec.tag().unwrap();
+                assert_eq!(tag.as_u64(), 24, "script_ref must be wrapped in tag 24");
+                let ref_bytes = dec.bytes().unwrap();
+                // Decode the inner [type, script_bytes]
+                let mut inner_dec = minicbor::Decoder::new(ref_bytes);
+                let inner_arr_len = inner_dec.array().unwrap().unwrap();
+                assert_eq!(inner_arr_len, 2);
+                let script_type = inner_dec.u64().unwrap();
+                assert_eq!(script_type, 2, "PlutusV2 = type 2");
+                let decoded_script = inner_dec.bytes().unwrap();
+                assert_eq!(decoded_script, script_bytes.as_slice());
+            } else {
+                dec.skip().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_tx_body_with_tokens_and_inline_datum() {
+        // Multi-asset output with inline datum should use map format with
+        // value encoded as [lovelace, multiasset_map] under key 1
+        let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
+        let addr =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("addr_test").unwrap(), &[0x00; 57])
+                .unwrap();
+        let policy = "a".repeat(56);
+        let datum_cbor = encode_plutus_data_to_cbor(&PlutusData::Integer(99));
+        let outputs = vec![ParsedTxOutput {
+            address: addr,
+            lovelace: 3_000_000,
+            tokens: vec![(policy, "cafe".to_string(), 500)],
+            inline_datum_cbor: Some(datum_cbor),
+            script_ref: None,
+        }];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            200_000,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Decode and verify the output uses map format
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            if key == 1 {
+                let arr_len = dec.array().unwrap().unwrap();
+                assert_eq!(arr_len, 1);
+                let output_map_len = dec.map().unwrap().unwrap();
+                assert_eq!(output_map_len, 3, "keys: 0=addr, 1=value, 2=datum");
+                // Key 0: address
+                assert_eq!(dec.u32().unwrap(), 0);
+                dec.skip().unwrap();
+                // Key 1: value (should be [lovelace, multiasset_map])
+                assert_eq!(dec.u32().unwrap(), 1);
+                let val_arr = dec.array().unwrap().unwrap();
+                assert_eq!(val_arr, 2, "value must be [lovelace, multiasset]");
+                let lovelace = dec.u64().unwrap();
+                assert_eq!(lovelace, 3_000_000);
+                dec.skip().unwrap(); // skip multiasset map
+                                     // Key 2: inline datum
+                assert_eq!(dec.u32().unwrap(), 2);
+                dec.skip().unwrap();
+            } else {
+                dec.skip().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_tx_body_all_new_fields() {
+        // Combined test: reference inputs + inline datum + script ref
+        let inputs = vec![(Hash32::from_bytes([0xab; 32]), 0)];
+        let ref_inputs = vec![(Hash32::from_bytes([0xef; 32]), 2)];
+        let addr =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("addr_test").unwrap(), &[0x00; 57])
+                .unwrap();
+        let datum_cbor = encode_plutus_data_to_cbor(&PlutusData::Bytes(vec![0xde, 0xad]));
+        let outputs = vec![ParsedTxOutput {
+            address: addr,
+            lovelace: 10_000_000,
+            tokens: vec![],
+            inline_datum_cbor: Some(datum_cbor),
+            script_ref: Some((PlutusVersion::V3, vec![0xff; 16])),
+        }];
+        let cbor = build_tx_body_cbor(
+            &inputs,
+            &outputs,
+            300_000,
+            Some(1_000_000),
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &ref_inputs,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Count fields: inputs(0) + outputs(1) + fee(2) + ttl(3) + ref_inputs(18) = 5
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap() as usize;
+        assert_eq!(map_len, 5);
+
+        // Walk the map and verify both 18 and output map format
+        let mut keys = Vec::new();
+        for _ in 0..map_len {
+            let key = dec.u32().unwrap();
+            keys.push(key);
+            dec.skip().unwrap();
+        }
+        assert!(keys.contains(&0), "must have inputs");
+        assert!(keys.contains(&1), "must have outputs");
+        assert!(keys.contains(&2), "must have fee");
+        assert!(keys.contains(&3), "must have ttl");
+        assert!(keys.contains(&18), "must have reference_inputs");
+    }
+
+    #[test]
+    fn test_min_ada_for_output_with_datum_and_script() {
+        // Output with inline datum and script ref requires more min-ADA
+        let base = min_ada_for_output(&[], 0, 0, 4_310);
+        let with_datum = min_ada_for_output(&[], 100, 0, 4_310);
+        let with_script = min_ada_for_output(&[], 0, 200, 4_310);
+        let with_both = min_ada_for_output(&[], 100, 200, 4_310);
+
+        assert!(with_datum > base, "datum should increase min-ADA");
+        assert!(with_script > base, "script ref should increase min-ADA");
+        assert!(with_both > with_datum, "both should exceed datum-only");
+        assert!(with_both > with_script, "both should exceed script-only");
     }
 }
