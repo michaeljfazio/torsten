@@ -657,6 +657,14 @@ impl LedgerState {
                     let committee_resigned_keys: std::collections::HashSet<
                         torsten_primitives::hash::Hash32,
                     > = self.governance.committee_resigned.keys().copied().collect();
+                    // Extract the constitution's guardrail script hash for policy_hash
+                    // validation in Phase-1.  This ensures ParameterChange and
+                    // TreasuryWithdrawals proposals carry the correct policy_hash.
+                    let constitution_script_hash = self
+                        .governance
+                        .constitution
+                        .as_ref()
+                        .and_then(|c| c.script_hash);
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
@@ -674,6 +682,7 @@ impl LedgerState {
                         Some(&committee_member_keys),
                         Some(&committee_resigned_keys),
                         Some(&self.stake_key_deposits),
+                        constitution_script_hash,
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

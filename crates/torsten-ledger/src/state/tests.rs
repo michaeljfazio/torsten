@@ -3288,7 +3288,7 @@ fn test_guardrail_script_policy_validation() {
     state.process_proposal(&Hash32::from_bytes([1u8; 32]), 0, &proposal_with_match);
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Submit a proposal with mismatched policy_hash — still accepted (logged as warning)
+    // Submit a proposal with mismatched policy_hash — REJECTED (dropped)
     let proposal_mismatch = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
         return_addr: vec![0u8; 29],
@@ -3303,9 +3303,10 @@ fn test_guardrail_script_policy_validation() {
         },
     };
     state.process_proposal(&Hash32::from_bytes([2u8; 32]), 0, &proposal_mismatch);
-    assert_eq!(state.governance.proposals.len(), 2);
+    // Proposal count should remain 1 — mismatched proposal was dropped
+    assert_eq!(state.governance.proposals.len(), 1);
 
-    // Submit a proposal with no policy_hash — still accepted (logged as debug)
+    // Submit a proposal with no policy_hash — REJECTED (dropped)
     let proposal_no_hash = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
         return_addr: vec![0u8; 29],
@@ -3320,7 +3321,8 @@ fn test_guardrail_script_policy_validation() {
         },
     };
     state.process_proposal(&Hash32::from_bytes([3u8; 32]), 0, &proposal_no_hash);
-    assert_eq!(state.governance.proposals.len(), 3);
+    // Proposal count should still be 1 — missing policy_hash proposal was dropped
+    assert_eq!(state.governance.proposals.len(), 1);
 }
 
 #[test]

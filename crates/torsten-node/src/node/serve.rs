@@ -560,6 +560,12 @@ pub(crate) fn convert_validation_error(
                  {expected:?} (WrongNetworkWithdrawal)"
             ),
         },
+        VE::ConstitutionPolicyMismatch { expected, actual } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Governance proposal policy_hash mismatch: constitution requires {expected}, \
+                 proposal has {actual} (ConstitutionPolicyMismatch)"
+            ),
+        },
     }
 }
 

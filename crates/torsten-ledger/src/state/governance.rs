@@ -132,8 +132,9 @@ impl LedgerState {
             }
         }
 
-        // CIP-1694: Validate policy_hash matches constitution guardrail script
-        // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash
+        // CIP-1694: Validate policy_hash matches constitution guardrail script.
+        // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash.
+        // Mismatches are rejected (proposal dropped), matching Haskell's GOV rule.
         let constitution_script = self
             .governance
             .constitution
@@ -149,16 +150,22 @@ impl LedgerState {
                         }
                         Some(provided) => {
                             warn!(
-                                "Governance proposal policy_hash {} does not match constitution guardrail {}",
-                                provided.to_hex(),
-                                required_hash.to_hex()
+                                tx = %tx_hash.to_hex(),
+                                action_index,
+                                provided = %provided.to_hex(),
+                                required = %required_hash.to_hex(),
+                                "ConstitutionPolicyMismatch: proposal policy_hash does not match constitution guardrail — dropping proposal"
                             );
+                            return;
                         }
                         None => {
-                            debug!(
-                                "Governance proposal missing policy_hash (constitution requires {})",
-                                required_hash.to_hex()
+                            warn!(
+                                tx = %tx_hash.to_hex(),
+                                action_index,
+                                required = %required_hash.to_hex(),
+                                "ConstitutionPolicyMismatch: proposal missing policy_hash (constitution requires guardrail) — dropping proposal"
                             );
+                            return;
                         }
                     }
                 }
@@ -402,6 +409,7 @@ impl LedgerState {
 
         // CIP-1694: Validate policy_hash matches constitution guardrail script.
         // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash.
+        // Mismatches are rejected (proposal dropped), matching Haskell's GOV rule.
         let constitution_script = self
             .governance
             .constitution
@@ -415,16 +423,22 @@ impl LedgerState {
                         Some(provided) if *provided == required_hash => {}
                         Some(provided) => {
                             warn!(
-                                "Governance proposal policy_hash {} does not match constitution guardrail {}",
-                                provided.to_hex(),
-                                required_hash.to_hex()
+                                tx = %tx_hash.to_hex(),
+                                action_index,
+                                provided = %provided.to_hex(),
+                                required = %required_hash.to_hex(),
+                                "ConstitutionPolicyMismatch: proposal policy_hash does not match constitution guardrail — dropping proposal"
                             );
+                            return;
                         }
                         None => {
-                            debug!(
-                                "Governance proposal missing policy_hash (constitution requires {})",
-                                required_hash.to_hex()
+                            warn!(
+                                tx = %tx_hash.to_hex(),
+                                action_index,
+                                required = %required_hash.to_hex(),
+                                "ConstitutionPolicyMismatch: proposal missing policy_hash (constitution requires guardrail) — dropping proposal"
                             );
+                            return;
                         }
                     }
                 }

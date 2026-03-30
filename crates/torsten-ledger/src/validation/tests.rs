@@ -2309,6 +2309,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
         assert!(
             result.is_ok(),
@@ -2365,6 +2366,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
         assert!(
             result.is_ok(),
@@ -2416,6 +2418,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -8214,6 +8217,7 @@ mod tests {
             None,      // committee_members
             None,      // committee_resigned
             None,      // stake_key_deposits
+            None,      // constitution_script_hash
         );
 
         assert!(
@@ -8279,6 +8283,7 @@ mod tests {
             None,      // committee_members
             None,      // committee_resigned
             None,      // stake_key_deposits
+            None,      // constitution_script_hash
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8332,6 +8337,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8445,6 +8451,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8494,6 +8501,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -8536,6 +8544,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8587,6 +8596,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8643,6 +8653,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -8700,6 +8711,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -8756,6 +8768,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8842,6 +8855,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -8895,6 +8909,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8934,6 +8949,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8986,6 +9002,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9071,6 +9088,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9125,6 +9143,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9164,6 +9183,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9256,6 +9276,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9306,6 +9327,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9337,6 +9359,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9411,6 +9434,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9512,6 +9536,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9592,6 +9617,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9663,6 +9689,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9733,6 +9760,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // The only expected error is VRF dedup — all other checks should pass.
@@ -9808,6 +9836,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9883,6 +9912,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -9955,6 +9985,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10032,6 +10063,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10098,6 +10130,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10192,6 +10225,7 @@ mod tests {
             Some(&committee_members),
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10242,6 +10276,7 @@ mod tests {
             Some(&committee_members),
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10292,6 +10327,7 @@ mod tests {
             Some(&committee_members),
             Some(&committee_resigned),
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10325,6 +10361,7 @@ mod tests {
             None, // committee_members = None → check skipped
             None, // committee_resigned = None → check skipped
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10374,6 +10411,7 @@ mod tests {
             Some(&committee_members),
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
@@ -10424,6 +10462,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10468,6 +10507,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // Content matches — no mismatch error.
@@ -10507,6 +10547,7 @@ mod tests {
             None, // committee_members
             None, // committee_resigned
             None, // stake_key_deposits
+            None, // constitution_script_hash
         );
 
         // The content check is skipped when raw_cbor is absent; this should
@@ -10567,6 +10608,7 @@ mod tests {
             None,                     // committee_members
             None,                     // committee_resigned
             None,                     // stake_key_deposits
+            None,                     // constitution_script_hash
         );
 
         assert!(
@@ -10627,6 +10669,7 @@ mod tests {
             None,                     // committee_members
             None,                     // committee_resigned
             None,                     // stake_key_deposits
+            None,                     // constitution_script_hash
         );
 
         let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
@@ -10701,6 +10744,7 @@ mod tests {
             None,                     // committee_members
             None,                     // committee_resigned
             None,                     // stake_key_deposits
+            None,                     // constitution_script_hash
         );
 
         // The network check fires regardless of whether other withdrawal
@@ -10773,6 +10817,7 @@ mod tests {
             None,
             None,
             None,
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10830,6 +10875,7 @@ mod tests {
             None,
             None,
             None,
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10889,6 +10935,7 @@ mod tests {
             None,
             None,
             None,
+            None, // constitution_script_hash
         );
 
         assert!(
@@ -10928,7 +10975,7 @@ mod tests {
 
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
-            None, None, None,
+            None, None, None, None, // constitution_script_hash
         );
 
         assert!(
@@ -10957,7 +11004,7 @@ mod tests {
 
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
-            None, None, None,
+            None, None, None, None, // constitution_script_hash
         );
 
         let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -11037,7 +11084,7 @@ mod tests {
 
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
-            None, None, None,
+            None, None, None, None, // constitution_script_hash
         );
 
         assert!(
@@ -11066,7 +11113,7 @@ mod tests {
 
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
-            None, None, None,
+            None, None, None, None, // constitution_script_hash
         );
 
         let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -11626,6 +11673,339 @@ mod tests {
                     "Should not have MissingCertificateWitness when all witnesses present, got: {errors:?}"
                 );
             }
+        }
+    }
+
+    // ─── Constitution guardrail policy_hash validation tests ────────────────────
+
+    /// Helper: create a Conway-era transaction with a ParameterChange proposal.
+    fn make_guardrail_proposal_tx(
+        policy_hash: Option<Hash28>,
+    ) -> (UtxoSet, TransactionInput, Transaction, ProtocolParameters) {
+        let (utxo_set, input) = make_simple_utxo_set();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        // Set gov_action_deposit so proposal deposit validation doesn't interfere.
+        params.gov_action_deposit = Lovelace(1_000_000);
+
+        let anchor = Anchor {
+            url: "https://example.com".to_string(),
+            data_hash: Hash32::ZERO,
+        };
+
+        let tx = Transaction {
+            era: torsten_primitives::era::Era::Conway,
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input.clone()],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(8_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![ProposalProcedure {
+                    deposit: Lovelace(1_000_000),
+                    return_addr: vec![0xE0; 29], // Shelley reward address
+                    gov_action: GovAction::ParameterChange {
+                        prev_action_id: None,
+                        protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                        policy_hash,
+                    },
+                    anchor: anchor.clone(),
+                }],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+        };
+
+        (utxo_set, input, tx, params)
+    }
+
+    #[test]
+    fn test_constitution_policy_hash_match_accepted() {
+        // When the constitution has a guardrail script and the proposal provides
+        // a matching policy_hash, validation should NOT produce a
+        // ConstitutionPolicyMismatch error.
+        let script_hash = Hash28::from_bytes([0xAB; 28]);
+        let (utxo_set, _input, tx, params) = make_guardrail_proposal_tx(Some(script_hash));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(script_hash), // constitution_script_hash matches policy_hash
+        );
+        // Should not have ConstitutionPolicyMismatch (may have other errors
+        // like MissingWitness — that's fine, we only care about the policy check).
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(e, ValidationError::ConstitutionPolicyMismatch { .. })),
+                "Should not have ConstitutionPolicyMismatch when policy_hash matches, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_constitution_policy_hash_mismatch_rejected() {
+        // When the constitution has a guardrail script and the proposal provides
+        // a DIFFERENT policy_hash, validation must produce a
+        // ConstitutionPolicyMismatch error.
+        let constitution_hash = Hash28::from_bytes([0xAB; 28]);
+        let wrong_hash = Hash28::from_bytes([0xCD; 28]);
+        let (utxo_set, _input, tx, params) = make_guardrail_proposal_tx(Some(wrong_hash));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(constitution_hash), // constitution expects 0xAB, proposal has 0xCD
+        );
+        let errors = result.expect_err("should reject mismatched policy_hash");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ConstitutionPolicyMismatch { .. })),
+            "Should have ConstitutionPolicyMismatch, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_constitution_policy_hash_missing_rejected() {
+        // When the constitution has a guardrail script but the proposal has
+        // no policy_hash (None), validation must produce a
+        // ConstitutionPolicyMismatch error.
+        let constitution_hash = Hash28::from_bytes([0xAB; 28]);
+        let (utxo_set, _input, tx, params) = make_guardrail_proposal_tx(None);
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(constitution_hash), // constitution requires guardrail, proposal has None
+        );
+        let errors = result.expect_err("should reject missing policy_hash");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ConstitutionPolicyMismatch { .. })),
+            "Should have ConstitutionPolicyMismatch for missing policy_hash, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_no_constitution_no_policy_required() {
+        // When the constitution has no guardrail script (None), proposals with
+        // or without policy_hash should NOT trigger ConstitutionPolicyMismatch.
+        let (utxo_set, _input, tx, params) =
+            make_guardrail_proposal_tx(Some(Hash28::from_bytes([0xAB; 28])));
+
+        let result = validate_transaction_with_pools(
+            &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
+            None, None, None, None, // no constitution script hash
+        );
+        // Should not have ConstitutionPolicyMismatch.
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::ConstitutionPolicyMismatch { .. })),
+                "Should not have ConstitutionPolicyMismatch when no constitution, got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_treasury_withdrawals_policy_hash_mismatch_rejected() {
+        // TreasuryWithdrawals with wrong policy_hash should also be rejected.
+        let constitution_hash = Hash28::from_bytes([0xAB; 28]);
+        let wrong_hash = Hash28::from_bytes([0xCD; 28]);
+        let (utxo_set, _input, mut tx, params) = make_guardrail_proposal_tx(None);
+
+        // Replace the ParameterChange with a TreasuryWithdrawals
+        tx.body.proposal_procedures[0].gov_action = GovAction::TreasuryWithdrawals {
+            withdrawals: BTreeMap::new(),
+            policy_hash: Some(wrong_hash),
+        };
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(constitution_hash),
+        );
+        let errors = result.expect_err("should reject mismatched TreasuryWithdrawals policy_hash");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ConstitutionPolicyMismatch { .. })),
+            "Should have ConstitutionPolicyMismatch for TreasuryWithdrawals, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_propose_redeemer_bounds_full_proposal_list() {
+        // Propose redeemer indices are positional in the FULL proposal_procedures
+        // list, not renumbered.  A tx with [InfoAction, InfoAction, ParameterChange(hash)]
+        // should accept a Propose redeemer at index 2.
+        let script_hash = Hash28::from_bytes([0xAB; 28]);
+        let (utxo_set, _input, mut tx, params) = make_guardrail_proposal_tx(Some(script_hash));
+
+        let anchor = Anchor {
+            url: "https://example.com".to_string(),
+            data_hash: Hash32::ZERO,
+        };
+
+        // Insert two InfoAction proposals before the ParameterChange
+        tx.body.proposal_procedures.insert(
+            0,
+            ProposalProcedure {
+                deposit: Lovelace(1_000_000),
+                return_addr: vec![0xE0; 29],
+                gov_action: GovAction::InfoAction,
+                anchor: anchor.clone(),
+            },
+        );
+        tx.body.proposal_procedures.insert(
+            1,
+            ProposalProcedure {
+                deposit: Lovelace(1_000_000),
+                return_addr: vec![0xE0; 29],
+                gov_action: GovAction::InfoAction,
+                anchor: anchor.clone(),
+            },
+        );
+        // Now proposals = [InfoAction, InfoAction, ParameterChange(hash)]
+        // The Propose redeemer at index 2 should be within bounds (max = 3).
+
+        // Add a Propose redeemer at index 2 (the ParameterChange position)
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Propose,
+            index: 2,
+            data: PlutusData::Integer(0),
+            ex_units: ExUnits {
+                mem: 100_000,
+                steps: 100_000,
+            },
+        });
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(script_hash),
+        );
+        // The redeemer at index 2 should NOT trigger RedeemerIndexOutOfRange
+        // (it may trigger other errors, but not a bounds error).
+        if let Err(errors) = result {
+            assert!(
+                !errors.iter().any(|e| matches!(e,
+                    ValidationError::RedeemerIndexOutOfRange { tag, index, .. }
+                    if tag == "Propose" && *index == 2
+                )),
+                "Propose redeemer at index 2 should be within bounds (3 proposals), got: {errors:?}"
+            );
         }
     }
 }

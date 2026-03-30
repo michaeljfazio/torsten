@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::network::NetworkId;
 use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::Transaction;
+use torsten_primitives::transaction::{GovAction, Transaction};
 use torsten_primitives::value::Lovelace;
 use tracing::{debug, trace, warn};
 
@@ -65,6 +65,12 @@ pub struct ValidationContext {
     pub committee_members: Option<HashSet<Hash32>>,
     pub committee_resigned: Option<HashSet<Hash32>>,
     pub stake_key_deposits: Option<HashMap<Hash32, u64>>,
+    /// The constitution's guardrail script hash, if any.
+    ///
+    /// When `Some`, governance proposals of type `ParameterChange` or
+    /// `TreasuryWithdrawals` must carry a matching `policy_hash`.  When `None`,
+    /// the constitution policy-hash check is skipped.
+    pub constitution_script_hash: Option<Hash28>,
 }
 
 impl ValidationContext {
@@ -119,6 +125,11 @@ impl ValidationContext {
 
     pub fn with_stake_key_deposits(mut self, deposits: HashMap<Hash32, u64>) -> Self {
         self.stake_key_deposits = Some(deposits);
+        self
+    }
+
+    pub fn with_constitution_script_hash(mut self, hash: Hash28) -> Self {
+        self.constitution_script_hash = Some(hash);
         self
     }
 
@@ -569,6 +580,26 @@ pub enum ValidationError {
         expected: torsten_primitives::network::NetworkId,
         actual: torsten_primitives::network::NetworkId,
     },
+    /// Conway GOV rule: a `ParameterChange` or `TreasuryWithdrawals` proposal's
+    /// `policy_hash` does not match the constitution's guardrail script hash.
+    ///
+    /// When the constitution carries a guardrail script, every governed proposal
+    /// must include a `policy_hash` that equals the constitution's script hash.
+    /// A mismatch or omission prevents the guardrail from being executed during
+    /// Phase-2, bypassing the constitutionality check.
+    ///
+    /// Reference: Haskell `ConwayGovFailure` predicate —
+    /// `GovActionsDoNotExist` / policy-hash mismatch in the GOV rule.
+    #[error(
+        "Governance proposal policy_hash mismatch: constitution requires {expected}, \
+         proposal has {actual} (ConstitutionPolicyMismatch)"
+    )]
+    ConstitutionPolicyMismatch {
+        /// Hex-encoded expected constitution script hash.
+        expected: String,
+        /// Hex-encoded provided policy hash, or "None" if absent.
+        actual: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +629,7 @@ pub fn validate_transaction(
         current_slot,
         tx_size,
         slot_config,
+        None,
         None,
         None,
         None,
@@ -665,6 +697,7 @@ pub fn validate_transaction_with_context(
         context.committee_members.as_ref(),
         context.committee_resigned.as_ref(),
         context.stake_key_deposits.as_ref(),
+        context.constitution_script_hash,
     )
 }
 
@@ -722,6 +755,7 @@ pub fn validate_transaction_with_pools(
     committee_members: Option<&HashSet<Hash32>>,
     committee_resigned: Option<&HashSet<Hash32>>,
     stake_key_deposits: Option<&HashMap<Hash32, u64>>,
+    constitution_script_hash: Option<Hash28>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -1098,6 +1132,46 @@ pub fn validate_transaction_with_pools(
                     declared: declared.0,
                     actual,
                 });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Conway GOV rule: constitution guardrail policy_hash validation.
+    //
+    // ParameterChange and TreasuryWithdrawals proposals must carry a
+    // `policy_hash` matching the constitution's guardrail script hash.
+    // Without this check, a transaction could reference an arbitrary script
+    // (or omit the policy_hash entirely), bypassing the guardrail.
+    //
+    // Reference: Haskell GOV rule — policy hash must match the constitution's
+    // script hash for governed governance actions.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 9 {
+        if let Some(required_hash) = constitution_script_hash {
+            for (idx, proposal) in tx.body.proposal_procedures.iter().enumerate() {
+                let policy_hash = match &proposal.gov_action {
+                    GovAction::ParameterChange { policy_hash, .. }
+                    | GovAction::TreasuryWithdrawals { policy_hash, .. } => policy_hash.as_ref(),
+                    _ => continue,
+                };
+                match policy_hash {
+                    Some(provided) if *provided == required_hash => {
+                        // Valid — policy hash matches constitution guardrail
+                    }
+                    Some(provided) => {
+                        errors.push(ValidationError::ConstitutionPolicyMismatch {
+                            expected: required_hash.to_hex(),
+                            actual: provided.to_hex(),
+                        });
+                    }
+                    None => {
+                        errors.push(ValidationError::ConstitutionPolicyMismatch {
+                            expected: required_hash.to_hex(),
+                            actual: format!("None (proposal index {idx})"),
+                        });
+                    }
+                }
             }
         }
     }

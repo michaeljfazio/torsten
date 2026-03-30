@@ -190,14 +190,10 @@ fn check_redeemer_indices(tx: &Transaction, errors: &mut Vec<ValidationError>) {
     // `conwayVotesNeeded` which enumerates all voters, we bound by the total voter count.
     let vote_voter_count = body.voting_procedures.len();
 
-    // Count proposal procedures that carry a policy_hash — the upper bound for Propose
-    // redeemer indices.  Only ParameterChange and TreasuryWithdrawals with a non-None
-    // policy_hash are governed by a constitutionality script and require a redeemer.
-    let propose_count = body
-        .proposal_procedures
-        .iter()
-        .filter(|p| govaction_has_policy_hash(&p.gov_action))
-        .count();
+    // Propose redeemer indices are positional in the full `proposal_procedures` list,
+    // matching Haskell's `zip [0..] (toList (txProposalProcedures txb))`.  The index
+    // is NOT renumbered to skip non-governed proposals — it is the raw position.
+    let propose_count = body.proposal_procedures.len();
 
     for redeemer in &tx.witness_set.redeemers {
         let (max, tag_name) = match redeemer.tag {
