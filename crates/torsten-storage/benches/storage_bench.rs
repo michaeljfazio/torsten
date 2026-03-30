@@ -734,14 +734,21 @@ fn bench_immutabledb_append(c: &mut Criterion) {
                 || {
                     let dir = tempfile::tempdir().unwrap();
                     std::fs::create_dir_all(dir.path()).unwrap();
-                    let db =
-                        ImmutableDB::open_for_writing_with_config(dir.path(), &config).unwrap();
+                    let db = ImmutableDB::open_for_writing_with_config(
+                        dir.path(),
+                        &config,
+                        0,
+                        432_000,
+                        0,
+                    )
+                    .unwrap();
                     (dir, db)
                 },
                 |(_dir, mut db)| {
                     for i in 0..1_000u64 {
                         let hash = make_hash(i);
-                        db.append_block(i + 1, i + 1, &hash, &block_data).unwrap();
+                        db.append_block(i + 1, i + 1, &hash, &block_data, false)
+                            .unwrap();
                     }
                     black_box(db.total_blocks());
                 },

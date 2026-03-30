@@ -660,10 +660,11 @@ fn import_chunk_files(extract_dir: &Path, database_path: &Path) -> Result<()> {
             continue;
         }
 
-        // Build batch refs for put_blocks_batch
-        let batch: Vec<(SlotNo, &Hash32, BlockNo, &[u8])> = blocks_to_import
+        // Build batch refs for put_blocks_batch.
+        // Mithril snapshots are post-Byron, so is_ebb is always false.
+        let batch: Vec<(SlotNo, &Hash32, BlockNo, &[u8], bool)> = blocks_to_import
             .iter()
-            .map(|(slot, hash, block_no, cbor)| (*slot, hash, *block_no, cbor.as_slice()))
+            .map(|(slot, hash, block_no, cbor)| (*slot, hash, *block_no, cbor.as_slice(), false))
             .collect();
 
         chain_db.put_blocks_batch(&batch)?;

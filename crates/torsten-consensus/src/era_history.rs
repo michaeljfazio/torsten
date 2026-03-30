@@ -359,6 +359,12 @@ impl EraHistory {
         Ok(SlotNo(slot))
     }
 
+    /// Return the epoch size (slots per epoch) for the given epoch.
+    pub fn epoch_size(&self, epoch: EpochNo) -> Result<u64, PastHorizonError> {
+        let entry = self.find_era_for_epoch(epoch.0)?;
+        Ok(entry.params.epoch_size)
+    }
+
     // -----------------------------------------------------------------------
     // N2C export
     // -----------------------------------------------------------------------

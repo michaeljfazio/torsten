@@ -162,7 +162,7 @@ impl CopyToImmutable {
         // path) — which is exactly what we want here: a single already-verified
         // block being moved from volatile to immutable storage.
         chain_db
-            .put_blocks_batch(&[(oldest_slot, &oldest_hash, oldest_block_no, &cbor)])
+            .put_blocks_batch(&[(oldest_slot, &oldest_hash, oldest_block_no, &cbor, false)])
             .map_err(|e| {
                 format!("CopyToImmutable: ImmutableDB append failed for block {oldest_hash}: {e}")
             })?;

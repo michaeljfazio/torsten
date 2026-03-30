@@ -72,6 +72,9 @@ impl ChainDB {
     /// Opens ImmutableDB from `<path>/immutable/` for both reading existing
     /// chunk files and writing new ones. VolatileDB starts empty (re-synced
     /// from peers on restart).
+    ///
+    /// Uses default epoch parameters (epoch 0, length 432000, first slot 0).
+    /// For production use, prefer `open_with_config` with accurate epoch info.
     pub fn open(db_path: &Path) -> Result<Self, ChainDBError> {
         Self::open_with_config(
             db_path,
@@ -82,10 +85,31 @@ impl ChainDB {
 
     /// Open or create a ChainDB at the given path with the given ImmutableDB config
     /// and security parameter k (number of blocks to retain in volatile storage).
+    ///
+    /// Uses default epoch parameters (epoch 0, length 432000, first slot 0).
+    /// For production use with accurate chunk naming, use `open_with_epoch_config`.
     pub fn open_with_config(
         db_path: &Path,
         config: &ImmutableConfig,
         k: usize,
+    ) -> Result<Self, ChainDBError> {
+        Self::open_with_epoch_config(db_path, config, k, 0, 432_000, 0)
+    }
+
+    /// Open or create a ChainDB with full epoch configuration for
+    /// Haskell-compatible chunk numbering.
+    ///
+    /// # Parameters
+    /// - `current_epoch`: Epoch number for the active chunk being written
+    /// - `epoch_length`: Slots per epoch for the current era
+    /// - `epoch_first_slot`: Absolute slot of the current epoch's first slot
+    pub fn open_with_epoch_config(
+        db_path: &Path,
+        config: &ImmutableConfig,
+        k: usize,
+        current_epoch: u64,
+        epoch_length: u64,
+        epoch_first_slot: u64,
     ) -> Result<Self, ChainDBError> {
         debug!(path = %db_path.display(), k, index_type = ?config.index_type, "Opening ChainDB");
         std::fs::create_dir_all(db_path)?;
@@ -93,7 +117,13 @@ impl ChainDB {
         let immutable_dir = db_path.join("immutable");
         std::fs::create_dir_all(&immutable_dir)?;
 
-        let immutable = ImmutableDB::open_for_writing_with_config(&immutable_dir, config)?;
+        let immutable = ImmutableDB::open_for_writing_with_config(
+            &immutable_dir,
+            config,
+            current_epoch,
+            epoch_length,
+            epoch_first_slot,
+        )?;
 
         let immutable_tip = if immutable.total_blocks() > 0 {
             Some((
@@ -207,17 +237,21 @@ impl ChainDB {
 
     /// Store multiple blocks for bulk import (directly to ImmutableDB).
     /// Used by Mithril import where blocks are known to be unique and ordered.
+    ///
+    /// The `is_ebb` flag in each tuple should be `true` for Byron Epoch
+    /// Boundary Blocks (which store epoch number instead of slot in the
+    /// secondary index).
     pub fn put_blocks_batch(
         &mut self,
-        blocks: &[(SlotNo, &BlockHeaderHash, BlockNo, &[u8])],
+        blocks: &[(SlotNo, &BlockHeaderHash, BlockNo, &[u8], bool)],
     ) -> Result<(), ChainDBError> {
         if blocks.is_empty() {
             return Ok(());
         }
 
-        for &(slot, hash, block_no, cbor) in blocks {
+        for &(slot, hash, block_no, cbor, is_ebb) in blocks {
             self.immutable
-                .append_block(slot.0, block_no.0, hash, cbor)?;
+                .append_block(slot.0, block_no.0, hash, cbor, is_ebb)?;
             self.immutable_tip = Some((slot, *hash, block_no));
         }
         Ok(())
@@ -685,7 +719,8 @@ impl ChainDB {
 
         // Append canonical-chain blocks to ImmutableDB in oldest-first order.
         for (slot, hash, block_no, cbor) in &to_finalize {
-            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+            self.immutable
+                .append_block(*slot, *block_no, hash, cbor, false)?;
         }
 
         // Update immutable tip and last-flushed tracking.
@@ -756,7 +791,8 @@ impl ChainDB {
         let count = to_finalize.len() as u64;
 
         for (slot, hash, block_no, cbor) in &to_finalize {
-            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+            self.immutable
+                .append_block(*slot, *block_no, hash, cbor, false)?;
         }
 
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
@@ -825,7 +861,8 @@ impl ChainDB {
         let count = to_finalize.len() as u64;
 
         for (slot, hash, block_no, cbor) in &to_finalize {
-            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+            self.immutable
+                .append_block(*slot, *block_no, hash, cbor, false)?;
         }
 
         if let Some((slot, hash, block_no, _)) = to_finalize.last() {
@@ -918,7 +955,8 @@ impl ChainDB {
         let count = to_finalize.len() as u64;
 
         for (slot, hash, block_no, cbor) in &to_finalize {
-            self.immutable.append_block(*slot, *block_no, hash, cbor)?;
+            self.immutable
+                .append_block(*slot, *block_no, hash, cbor, false)?;
         }
 
         // Update immutable tip and last-flushed tracking.
@@ -980,8 +1018,19 @@ impl ChainDB {
 
     /// Finalize the current ImmutableDB chunk and start a new one.
     /// Call this at epoch boundaries.
-    pub fn finalize_immutable_chunk(&mut self) -> Result<(), ChainDBError> {
-        self.immutable.finalize_chunk()?;
+    ///
+    /// # Parameters
+    /// - `next_epoch`: Epoch number for the next chunk
+    /// - `next_epoch_length`: Slots per epoch for the next chunk's era
+    /// - `next_epoch_first_slot`: Absolute slot of the next epoch's first slot
+    pub fn finalize_immutable_chunk(
+        &mut self,
+        next_epoch: u64,
+        next_epoch_length: u64,
+        next_epoch_first_slot: u64,
+    ) -> Result<(), ChainDBError> {
+        self.immutable
+            .finalize_chunk(next_epoch, next_epoch_length, next_epoch_first_slot)?;
         Ok(())
     }
 
@@ -1522,7 +1571,7 @@ mod tests {
 
         // Put a block directly into immutable via bulk import
         let imm_hash = make_hash(1);
-        db.put_blocks_batch(&[(SlotNo(10), &imm_hash, BlockNo(1), b"immutable_block")])
+        db.put_blocks_batch(&[(SlotNo(10), &imm_hash, BlockNo(1), b"immutable_block", false)])
             .unwrap();
 
         // Put a block in volatile
@@ -1555,7 +1604,7 @@ mod tests {
         {
             let mut db = ChainDB::open(dir.path()).unwrap();
             let hash = make_hash(1);
-            db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1")])
+            db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1", false)])
                 .unwrap();
             db.persist().unwrap();
         }
@@ -1609,8 +1658,20 @@ mod tests {
         let hash2 = make_hash(2);
 
         let blocks = vec![
-            (SlotNo(100), &hash1, BlockNo(10), b"block1".as_slice()),
-            (SlotNo(200), &hash2, BlockNo(20), b"block2".as_slice()),
+            (
+                SlotNo(100),
+                &hash1,
+                BlockNo(10),
+                b"block1".as_slice(),
+                false,
+            ),
+            (
+                SlotNo(200),
+                &hash2,
+                BlockNo(20),
+                b"block2".as_slice(),
+                false,
+            ),
         ];
 
         db.put_blocks_batch(&blocks).unwrap();
@@ -1627,7 +1688,7 @@ mod tests {
 
         {
             let mut db = ChainDB::open(dir.path()).unwrap();
-            db.put_blocks_batch(&[(SlotNo(500), &hash, BlockNo(100), b"block")])
+            db.put_blocks_batch(&[(SlotNo(500), &hash, BlockNo(100), b"block", false)])
                 .unwrap();
             db.persist().unwrap();
         }
@@ -1677,7 +1738,7 @@ mod tests {
         {
             let mut db =
                 ChainDB::open_with_config(dir.path(), &config, DEFAULT_SECURITY_PARAM_K).unwrap();
-            db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1")])
+            db.put_blocks_batch(&[(SlotNo(100), &hash, BlockNo(1), b"block1", false)])
                 .unwrap();
             db.persist().unwrap();
         }
@@ -1720,7 +1781,7 @@ mod tests {
 
         // Put a block directly into immutable
         let imm_hash = make_hash(1);
-        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm_block")])
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm_block", false)])
             .unwrap();
 
         // Put a block in volatile with higher slot
@@ -1746,7 +1807,7 @@ mod tests {
         let mut db = ChainDB::open(dir.path()).unwrap();
 
         let imm_hash = make_hash(1);
-        db.put_blocks_batch(&[(SlotNo(500), &imm_hash, BlockNo(50), b"imm_block")])
+        db.put_blocks_batch(&[(SlotNo(500), &imm_hash, BlockNo(50), b"imm_block", false)])
             .unwrap();
 
         let vol_hash = make_hash(2);
@@ -1770,7 +1831,7 @@ mod tests {
         let mut db = ChainDB::open(dir.path()).unwrap();
 
         let imm_hash = make_hash(10);
-        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm")])
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm", false)])
             .unwrap();
 
         let vol_hash = make_hash(20);
@@ -1810,7 +1871,7 @@ mod tests {
             let mut hash_bytes = [0u8; 32];
             hash_bytes[0..8].copy_from_slice(&i.to_be_bytes());
             let hash = Hash32::from_bytes(hash_bytes);
-            db.put_blocks_batch(&[(SlotNo(i * 10), &hash, BlockNo(i), b"imm")])
+            db.put_blocks_batch(&[(SlotNo(i * 10), &hash, BlockNo(i), b"imm", false)])
                 .unwrap();
         }
 
@@ -1882,8 +1943,8 @@ mod tests {
             let h1 = make_hash(1);
             let h2 = make_hash(2);
             db.put_blocks_batch(&[
-                (SlotNo(100), &h1, BlockNo(1), b"b1"),
-                (SlotNo(200), &h2, BlockNo(2), b"b2"),
+                (SlotNo(100), &h1, BlockNo(1), b"b1", false),
+                (SlotNo(200), &h2, BlockNo(2), b"b2", false),
             ])
             .unwrap();
             db.persist().unwrap();
@@ -1950,7 +2011,7 @@ mod tests {
 
         // Put a block in immutable
         let imm_hash = make_hash(1);
-        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm")])
+        db.put_blocks_batch(&[(SlotNo(100), &imm_hash, BlockNo(1), b"imm", false)])
             .unwrap();
 
         // Put a volatile block on top (prev_hash = imm_hash, but imm block
@@ -2102,8 +2163,14 @@ mod tests {
         for i in 1u8..=3 {
             let hash = make_hash(i);
             let cbor = format!("imm_{}", i).into_bytes();
-            db.put_blocks_batch(&[(SlotNo(i as u64 * 100), &hash, BlockNo(i as u64), &cbor)])
-                .unwrap();
+            db.put_blocks_batch(&[(
+                SlotNo(i as u64 * 100),
+                &hash,
+                BlockNo(i as u64),
+                &cbor,
+                false,
+            )])
+            .unwrap();
         }
 
         // Add volatile blocks on top, chaining from make_hash(3)
@@ -2198,8 +2265,14 @@ mod tests {
         for i in 1u8..=5 {
             let hash = make_hash(i);
             let cbor = format!("block{}", i).into_bytes();
-            db.put_blocks_batch(&[(SlotNo(i as u64 * 10), &hash, BlockNo(i as u64), &cbor)])
-                .unwrap();
+            db.put_blocks_batch(&[(
+                SlotNo(i as u64 * 10),
+                &hash,
+                BlockNo(i as u64),
+                &cbor,
+                false,
+            )])
+            .unwrap();
         }
 
         // Add more volatile blocks on top of the immutable chain

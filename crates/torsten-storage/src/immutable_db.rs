@@ -66,7 +66,12 @@ struct ChunkMeta {
 
 /// Active chunk being written to.
 struct ActiveChunk {
+    /// Chunk number — equals the epoch number for Haskell-compatible naming.
     chunk_num: u64,
+    /// Number of slots per epoch for this chunk's era.
+    epoch_length: u64,
+    /// Absolute slot number of this epoch's first slot (for relative slot calc).
+    first_slot_of_epoch: u64,
     chunk_file: std::io::BufWriter<std::fs::File>,
     secondary_entries: Vec<SecondaryEntry>,
     current_offset: u64,
@@ -80,6 +85,8 @@ struct ActiveChunk {
 struct SecondaryEntry {
     block_offset: u64,
     header_hash: [u8; 32],
+    /// For regular blocks: absolute slot number.
+    /// For EBBs (Epoch Boundary Blocks): epoch number.
     slot: u64,
     /// CRC32 checksum of the block CBOR data (0 for legacy entries).
     checksum: u32,
@@ -89,6 +96,9 @@ struct SecondaryEntry {
     /// Byte size of the header CBOR element.
     /// Used by db-sync for efficient header extraction. 0 if unknown.
     header_size: u16,
+    /// True if this is a Byron Epoch Boundary Block.
+    /// Not serialized to disk — used for primary index generation.
+    is_ebb: bool,
 }
 
 impl SecondaryEntry {
@@ -1005,20 +1015,45 @@ impl ImmutableDB {
     /// Open an ImmutableDB for writing, appending to existing chunk files.
     ///
     /// Scans existing chunks read-only (like `open`), then prepares the
-    /// next chunk number for writing.
-    pub fn open_for_writing(dir: &Path) -> Result<Self, ImmutableDBError> {
-        Self::open_for_writing_with_config(dir, &ImmutableConfig::default())
+    /// next chunk for writing. Chunks are named by epoch number for
+    /// Haskell ImmutableDB compatibility.
+    ///
+    /// # Parameters
+    /// - `current_epoch`: Epoch number for the chunk being written to
+    /// - `epoch_length`: Slots per epoch for the current era
+    /// - `epoch_first_slot`: Absolute slot of the current epoch's first slot
+    pub fn open_for_writing(
+        dir: &Path,
+        current_epoch: u64,
+        epoch_length: u64,
+        epoch_first_slot: u64,
+    ) -> Result<Self, ImmutableDBError> {
+        Self::open_for_writing_with_config(
+            dir,
+            &ImmutableConfig::default(),
+            current_epoch,
+            epoch_length,
+            epoch_first_slot,
+        )
     }
 
     /// Open an ImmutableDB for writing with the given config.
+    ///
+    /// Chunks are named by epoch number for Haskell ImmutableDB compatibility.
     pub fn open_for_writing_with_config(
         dir: &Path,
         config: &ImmutableConfig,
+        current_epoch: u64,
+        epoch_length: u64,
+        epoch_first_slot: u64,
     ) -> Result<Self, ImmutableDBError> {
         let mut db = Self::open_with_config(dir, config)?;
 
-        // Determine next chunk number
-        let next_chunk = db.chunks.last().map_or(0, |c| c.chunk_num + 1);
+        // Use epoch number as chunk number for Haskell-compatible naming.
+        // Ensure we never overwrite an existing finalized chunk — use the
+        // greater of the requested epoch and one past the last chunk.
+        let min_safe_chunk = db.chunks.last().map_or(0, |c| c.chunk_num + 1);
+        let next_chunk = current_epoch.max(min_safe_chunk);
 
         let chunk_path = dir.join(format!("{next_chunk:05}.chunk"));
         let file = std::fs::File::create(&chunk_path)?;
@@ -1026,6 +1061,8 @@ impl ImmutableDB {
 
         db.active_chunk = Some(ActiveChunk {
             chunk_num: next_chunk,
+            epoch_length,
+            first_slot_of_epoch: epoch_first_slot,
             chunk_file: writer,
             secondary_entries: Vec::new(),
             current_offset: 0,
@@ -1034,6 +1071,7 @@ impl ImmutableDB {
 
         debug!(
             next_chunk,
+            epoch_length,
             existing_chunks = db.chunks.len(),
             "ImmutableDB opened for writing"
         );
@@ -1045,12 +1083,17 @@ impl ImmutableDB {
     ///
     /// Updates the in-memory hash index immediately so the block is
     /// readable before the secondary index is flushed.
+    ///
+    /// For Byron Epoch Boundary Blocks (EBBs), set `is_ebb = true` and
+    /// pass the epoch number as the `slot` parameter. The secondary index
+    /// `block_or_ebb` field will contain the epoch number (not a slot).
     pub fn append_block(
         &mut self,
         slot: u64,
         _block_no: u64,
         hash: &Hash32,
         cbor: &[u8],
+        is_ebb: bool,
     ) -> Result<(), ImmutableDBError> {
         use std::io::Write;
 
@@ -1068,7 +1111,8 @@ impl ImmutableDB {
         // Extract header offset and size for db-sync compatibility
         let (header_offset, header_size) = extract_header_bounds(cbor);
 
-        // Buffer secondary entry and block data for reads
+        // Buffer secondary entry and block data for reads.
+        // For EBBs, `slot` contains the epoch number (per Haskell convention).
         active.secondary_entries.push(SecondaryEntry {
             block_offset,
             header_hash: *hash.as_bytes(),
@@ -1076,6 +1120,7 @@ impl ImmutableDB {
             checksum,
             header_offset,
             header_size,
+            is_ebb,
         });
         active.pending_blocks.insert(*hash, cbor.to_vec());
 
@@ -1103,9 +1148,19 @@ impl ImmutableDB {
         Ok(())
     }
 
-    /// Finalize the current chunk: write its `.secondary` index and open
-    /// a new chunk file. Call this at epoch boundaries.
-    pub fn finalize_chunk(&mut self) -> Result<(), ImmutableDBError> {
+    /// Finalize the current chunk: write its `.secondary` and `.primary`
+    /// indexes and open a new chunk file. Call this at epoch boundaries.
+    ///
+    /// # Parameters
+    /// - `next_epoch`: Epoch number for the next chunk
+    /// - `next_epoch_length`: Slots per epoch for the next chunk's era
+    /// - `next_epoch_first_slot`: Absolute slot of the next epoch's first slot
+    pub fn finalize_chunk(
+        &mut self,
+        next_epoch: u64,
+        next_epoch_length: u64,
+        next_epoch_first_slot: u64,
+    ) -> Result<(), ImmutableDBError> {
         use std::io::Write;
 
         let active = match self.active_chunk.take() {
@@ -1132,6 +1187,15 @@ impl ImmutableDB {
         // on restart even if the OS crashes immediately after this call.
         secondary_file.get_ref().sync_data()?;
 
+        // Write primary index for Haskell ImmutableDB interoperability
+        Self::write_primary_index(
+            &self.dir,
+            active.chunk_num,
+            active.epoch_length,
+            active.first_slot_of_epoch,
+            &active.secondary_entries,
+        )?;
+
         // Update chunk metadata
         if let (Some(first), Some(last)) = (
             active.secondary_entries.first(),
@@ -1144,12 +1208,13 @@ impl ImmutableDB {
             });
         }
 
-        // Open new chunk for writing
-        let next_chunk = active.chunk_num + 1;
-        let chunk_path = self.dir.join(format!("{next_chunk:05}.chunk"));
+        // Open new chunk for writing — named by epoch number
+        let chunk_path = self.dir.join(format!("{next_epoch:05}.chunk"));
         let file = std::fs::File::create(&chunk_path)?;
         self.active_chunk = Some(ActiveChunk {
-            chunk_num: next_chunk,
+            chunk_num: next_epoch,
+            epoch_length: next_epoch_length,
+            first_slot_of_epoch: next_epoch_first_slot,
             chunk_file: std::io::BufWriter::new(file),
             secondary_entries: Vec::new(),
             current_offset: 0,
@@ -1158,7 +1223,8 @@ impl ImmutableDB {
 
         debug!(
             finalized_chunk = active.chunk_num,
-            next_chunk, "ImmutableDB: chunk finalized"
+            next_chunk = next_epoch,
+            "ImmutableDB: chunk finalized"
         );
         Ok(())
     }
@@ -1187,6 +1253,15 @@ impl ImmutableDB {
         }
         secondary_file.flush()?;
         secondary_file.get_ref().sync_data()?;
+
+        // Write primary index for Haskell ImmutableDB interoperability
+        Self::write_primary_index(
+            &self.dir,
+            active.chunk_num,
+            active.epoch_length,
+            active.first_slot_of_epoch,
+            &active.secondary_entries,
+        )?;
 
         // Update chunk metadata (replace existing entry for this chunk if present)
         if let (Some(first), Some(last)) = (
@@ -1219,6 +1294,111 @@ impl ImmutableDB {
             entries = active.secondary_entries.len(),
             "ImmutableDB: flushed active chunk"
         );
+        Ok(())
+    }
+
+    /// Write the `.primary` index file for a finalized chunk.
+    ///
+    /// Uses the exact Haskell ImmutableDB format from
+    /// `Ouroboros.Consensus.Storage.ImmutableDB.Impl.Index.Primary`:
+    ///
+    /// ## On-disk format
+    /// - **Version byte**: `0x01` (1 byte)
+    /// - **Entries**: sequence of `u32 BE` values — each is a **byte offset**
+    ///   into the `.secondary` file (always a multiple of 56)
+    ///
+    /// ## Entry layout
+    /// For Shelley+ chunks (no EBB capability, epoch_length = E):
+    /// - `E + 1` entries: slots `0..E-1` plus one sentinel
+    /// - Entry `r`: byte offset of the secondary entry for relative slot `r`
+    /// - Entry `E` (sentinel): total byte size of the secondary file
+    ///
+    /// For Byron chunks (EBB-capable, epoch_length = E):
+    /// - `E + 2` entries: slot 0 = EBB, slots `1..E` = regular, plus sentinel
+    ///
+    /// ## Slot lookup
+    /// To check if slot `r` has a block: `offset[r+1] > offset[r]`
+    /// The secondary entry is at byte `offset[r]` in the `.secondary` file.
+    fn write_primary_index(
+        dir: &Path,
+        chunk_num: u64,
+        epoch_length: u64,
+        first_slot_of_epoch: u64,
+        secondary_entries: &[SecondaryEntry],
+    ) -> Result<(), ImmutableDBError> {
+        use std::io::Write;
+
+        // Build a map from relative slot → secondary entry index for filled slots.
+        let mut has_ebb = false;
+        let mut slot_to_entry_idx: HashMap<u64, usize> = HashMap::new();
+        for (idx, entry) in secondary_entries.iter().enumerate() {
+            if entry.is_ebb {
+                has_ebb = true;
+            } else {
+                let relative_slot = entry.slot.saturating_sub(first_slot_of_epoch);
+                slot_to_entry_idx.insert(relative_slot, idx);
+            }
+        }
+
+        // Determine the number of relative slots in this chunk.
+        // Shelley+ chunks (no EBB): E slots (0..E-1), E+1 offsets (including sentinel).
+        // Byron chunks (with EBB): slot 0 = EBB, E regular slots (1..E), E+2 offsets.
+        let num_offsets = if has_ebb {
+            epoch_length as usize + 2
+        } else {
+            epoch_length as usize + 1
+        };
+        let mut offsets: Vec<u32> = Vec::with_capacity(num_offsets);
+
+        // Track the running byte offset into the secondary index.
+        // Each secondary entry is SECONDARY_ENTRY_SIZE (56) bytes.
+        let mut current_offset: u32 = 0;
+
+        if has_ebb {
+            // Slot 0 = EBB position. The EBB is always the first secondary entry
+            // when present, so offset[0] = 0.
+            offsets.push(current_offset);
+            current_offset += SECONDARY_ENTRY_SIZE as u32;
+
+            // Regular slots 0..epoch_length-1 map to entries 1..epoch_length
+            for r in 0..epoch_length {
+                offsets.push(current_offset);
+                if slot_to_entry_idx.contains_key(&r) {
+                    current_offset += SECONDARY_ENTRY_SIZE as u32;
+                }
+            }
+        } else {
+            // No EBB: slots 0..epoch_length-1
+            for r in 0..epoch_length {
+                offsets.push(current_offset);
+                if slot_to_entry_idx.contains_key(&r) {
+                    current_offset += SECONDARY_ENTRY_SIZE as u32;
+                }
+            }
+        }
+
+        // Sentinel: total size of the secondary file
+        offsets.push(current_offset);
+
+        // Write to disk: version byte + u32 BE offsets
+        let primary_path = dir.join(format!("{chunk_num:05}.primary"));
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&primary_path)?);
+        // Version byte (matches Haskell currentVersionNumber = 1)
+        file.write_all(&[0x01])?;
+        for &offset in &offsets {
+            file.write_all(&offset.to_be_bytes())?;
+        }
+        file.flush()?;
+        file.get_ref().sync_data()?;
+
+        debug!(
+            chunk = chunk_num,
+            entries = offsets.len(),
+            blocks = secondary_entries.len(),
+            has_ebb,
+            "ImmutableDB: primary index written"
+        );
+
         Ok(())
     }
 
@@ -1818,13 +1998,15 @@ mod tests {
             mmap_load_factor: 0.7,
             mmap_initial_capacity: 0,
         };
-        let mut db = ImmutableDB::open_for_writing_with_config(dir.path(), &config).unwrap();
+        let mut db =
+            ImmutableDB::open_for_writing_with_config(dir.path(), &config, 0, 432_000, 0).unwrap();
         assert!(db.is_writable());
         assert_eq!(db.total_blocks(), 1);
 
         // Append a block
         let new_hash = Hash32::from_bytes([99u8; 32]);
-        db.append_block(20, 2, &new_hash, b"new_block").unwrap();
+        db.append_block(20, 2, &new_hash, b"new_block", false)
+            .unwrap();
         assert!(db.has_block(&new_hash));
         assert_eq!(db.get_block(&new_hash).unwrap(), b"new_block");
         assert_eq!(db.total_blocks(), 2);
@@ -1888,11 +2070,11 @@ mod tests {
     fn test_crc32_write_and_verify() {
         // Blocks written via append_block should have CRC32 stored
         let dir = tempfile::tempdir().unwrap();
-        let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
 
         let hash = Hash32::from_bytes([42u8; 32]);
         let cbor = b"test block data with CRC";
-        db.append_block(100, 1, &hash, cbor).unwrap();
+        db.append_block(100, 1, &hash, cbor, false).unwrap();
 
         // Read back — should succeed with valid CRC
         let result = db.get_block(&hash).unwrap();
@@ -1910,8 +2092,8 @@ mod tests {
         let cbor = b"block for CRC persistence test";
 
         {
-            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
-            db.append_block(100, 1, &hash, cbor).unwrap();
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
+            db.append_block(100, 1, &hash, cbor, false).unwrap();
             db.flush().unwrap();
         }
 
@@ -1986,9 +2168,9 @@ mod tests {
         ];
 
         {
-            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
             for (i, (hash, cbor)) in blocks.iter().enumerate() {
-                db.append_block((i as u64 + 1) * 10, i as u64 + 1, hash, cbor)
+                db.append_block((i as u64 + 1) * 10, i as u64 + 1, hash, cbor, false)
                     .unwrap();
             }
             db.flush().unwrap();
@@ -2011,10 +2193,11 @@ mod tests {
     fn test_append_block_at_slot_zero() {
         // First block at slot 0 should work correctly
         let dir = tempfile::tempdir().unwrap();
-        let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
 
         let hash = Hash32::from_bytes([1u8; 32]);
-        db.append_block(0, 0, &hash, b"genesis_block").unwrap();
+        db.append_block(0, 0, &hash, b"genesis_block", false)
+            .unwrap();
 
         assert_eq!(db.total_blocks(), 1);
         assert_eq!(db.tip_slot(), 0);
@@ -2026,10 +2209,10 @@ mod tests {
     fn test_append_block_at_max_slot() {
         // Block at u64::MAX slot should work
         let dir = tempfile::tempdir().unwrap();
-        let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
 
         let hash = Hash32::from_bytes([1u8; 32]);
-        db.append_block(u64::MAX, 1, &hash, b"far_future_block")
+        db.append_block(u64::MAX, 1, &hash, b"far_future_block", false)
             .unwrap();
 
         assert_eq!(db.total_blocks(), 1);
@@ -2045,11 +2228,17 @@ mod tests {
         let hashes: Vec<Hash32> = (1..=5u8).map(|i| Hash32::from_bytes([i; 32])).collect();
 
         {
-            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
             for (i, hash) in hashes.iter().enumerate() {
                 let cbor = format!("block_{}", i + 1);
-                db.append_block((i as u64 + 1) * 100, i as u64 + 1, hash, cbor.as_bytes())
-                    .unwrap();
+                db.append_block(
+                    (i as u64 + 1) * 100,
+                    i as u64 + 1,
+                    hash,
+                    cbor.as_bytes(),
+                    false,
+                )
+                .unwrap();
             }
             db.flush().unwrap();
         }
@@ -2090,8 +2279,8 @@ mod tests {
         let original = b"original_block_data_here";
 
         {
-            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
-            db.append_block(100, 1, &hash, original).unwrap();
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
+            db.append_block(100, 1, &hash, original, false).unwrap();
             db.flush().unwrap();
         }
 
@@ -2116,11 +2305,14 @@ mod tests {
         let h3 = Hash32::from_bytes([3u8; 32]);
 
         {
-            let mut db = ImmutableDB::open_for_writing(dir.path()).unwrap();
-            db.append_block(10, 1, &h1, b"epoch0_block1").unwrap();
-            db.append_block(20, 2, &h2, b"epoch0_block2").unwrap();
-            db.finalize_chunk().unwrap();
-            db.append_block(30, 3, &h3, b"epoch1_block1").unwrap();
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 432_000, 0).unwrap();
+            db.append_block(10, 1, &h1, b"epoch0_block1", false)
+                .unwrap();
+            db.append_block(20, 2, &h2, b"epoch0_block2", false)
+                .unwrap();
+            db.finalize_chunk(1, 432_000, 432_000).unwrap();
+            db.append_block(30, 3, &h3, b"epoch1_block1", false)
+                .unwrap();
             db.flush().unwrap();
         }
 
@@ -2146,5 +2338,275 @@ mod tests {
 
         // All-zero CRC field
         assert_eq!(read_crc32_from_entry(&[0u8; 56]), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Primary index, EBB, and chunk numbering tests (issue #312)
+    // -----------------------------------------------------------------------
+
+    /// Helper to read a u32 BE at a given byte offset within the primary index data.
+    fn read_primary_offset(data: &[u8], entry_index: usize) -> u32 {
+        // Skip the 1-byte version header, then each entry is 4 bytes
+        let offset = 1 + entry_index * 4;
+        u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ])
+    }
+
+    #[test]
+    fn test_primary_index_written_on_finalize() {
+        // Finalize a chunk → verify .primary file exists with correct Haskell format.
+        // Format: 1 version byte + (epoch_length+1) u32 BE entries (byte offsets).
+        let dir = tempfile::tempdir().unwrap();
+        let epoch_length = 1000u64;
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, epoch_length, 0).unwrap();
+        db.append_block(100, 1, &Hash32::from_bytes([1u8; 32]), b"b1", false)
+            .unwrap();
+        db.append_block(200, 2, &Hash32::from_bytes([2u8; 32]), b"b2", false)
+            .unwrap();
+        db.append_block(300, 3, &Hash32::from_bytes([3u8; 32]), b"b3", false)
+            .unwrap();
+        db.finalize_chunk(1, epoch_length, epoch_length).unwrap();
+
+        let primary_path = dir.path().join("00000.primary");
+        assert!(
+            primary_path.exists(),
+            ".primary file should exist after finalize"
+        );
+
+        let data = fs::read(&primary_path).unwrap();
+
+        // Non-EBB chunk: epoch_length + 1 entries + 1 version byte
+        let num_entries = epoch_length as usize + 1;
+        assert_eq!(data.len(), 1 + num_entries * 4);
+
+        // Version byte
+        assert_eq!(data[0], 0x01, "Version byte should be 0x01");
+
+        // Entries are byte offsets into the .secondary file.
+        // Slots 0-99: empty → offset stays 0
+        assert_eq!(read_primary_offset(&data, 99), 0);
+
+        // Slot 100 has a block → offset[100] = 0, offset[101] = 56
+        assert_eq!(read_primary_offset(&data, 100), 0);
+        assert_eq!(read_primary_offset(&data, 101), 56);
+
+        // Slot 200: offset[200] = 56, offset[201] = 112
+        assert_eq!(read_primary_offset(&data, 200), 56);
+        assert_eq!(read_primary_offset(&data, 201), 112);
+
+        // Slot 300: offset[300] = 112, offset[301] = 168
+        assert_eq!(read_primary_offset(&data, 300), 112);
+        assert_eq!(read_primary_offset(&data, 301), 168);
+
+        // Sentinel (last entry) = total secondary file size = 3 * 56 = 168
+        assert_eq!(read_primary_offset(&data, num_entries - 1), 168);
+    }
+
+    #[test]
+    fn test_primary_index_written_on_flush() {
+        // flush() should also write .primary for the active chunk.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 1000, 0).unwrap();
+        db.append_block(50, 1, &Hash32::from_bytes([1u8; 32]), b"b1", false)
+            .unwrap();
+        db.flush().unwrap();
+
+        let primary_path = dir.path().join("00000.primary");
+        assert!(
+            primary_path.exists(),
+            ".primary file should exist after flush"
+        );
+    }
+
+    #[test]
+    fn test_primary_index_ebb_entry() {
+        // EBB-capable chunk (has_ebb=true): epoch_length + 2 entries.
+        // Slot 0 = EBB, slots 1..epoch_length = regular.
+        let dir = tempfile::tempdir().unwrap();
+        let epoch_length = 500u64;
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, epoch_length, 0).unwrap();
+        // EBB: pass epoch number (0) as slot, is_ebb=true
+        db.append_block(0, 0, &Hash32::from_bytes([1u8; 32]), b"ebb", true)
+            .unwrap();
+        // Regular block at slot 100
+        db.append_block(100, 1, &Hash32::from_bytes([2u8; 32]), b"regular", false)
+            .unwrap();
+        db.finalize_chunk(1, epoch_length, epoch_length).unwrap();
+
+        let data = fs::read(dir.path().join("00000.primary")).unwrap();
+
+        // EBB chunk: epoch_length + 2 entries + version byte
+        let num_entries = epoch_length as usize + 2;
+        assert_eq!(data.len(), 1 + num_entries * 4);
+        assert_eq!(data[0], 0x01, "Version byte");
+
+        // Entry 0 (EBB position): offset = 0 (EBB is first secondary entry)
+        assert_eq!(read_primary_offset(&data, 0), 0);
+        // Entry 1 (after EBB): offset = 56 (EBB consumed one secondary entry)
+        assert_eq!(read_primary_offset(&data, 1), 56);
+
+        // Slot 100 maps to entry[101] in EBB-capable chunk (offset by 1 for EBB slot)
+        // No blocks between slot 0 and slot 100, so offset stays at 56
+        assert_eq!(read_primary_offset(&data, 100), 56);
+        // Entry after slot 100: offset = 56 + 56 = 112
+        assert_eq!(read_primary_offset(&data, 101), 56);
+        assert_eq!(read_primary_offset(&data, 102), 112);
+
+        // Sentinel = total secondary size = 2 * 56 = 112
+        assert_eq!(read_primary_offset(&data, num_entries - 1), 112);
+    }
+
+    #[test]
+    fn test_secondary_entry_ebb_stores_epoch_number() {
+        // For EBBs, the secondary index slot field should contain the epoch number.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 5, 1000, 5000).unwrap();
+        // EBB for epoch 5: pass epoch number (5) as slot
+        db.append_block(5, 0, &Hash32::from_bytes([1u8; 32]), b"ebb_epoch5", true)
+            .unwrap();
+        db.flush().unwrap();
+
+        // Read the secondary index and verify slot field = 5 (epoch number)
+        let secondary_data = fs::read(dir.path().join("00005.secondary")).unwrap();
+        assert_eq!(secondary_data.len(), SECONDARY_ENTRY_SIZE);
+
+        let slot_bytes: [u8; 8] = secondary_data[48..56].try_into().unwrap();
+        let slot_value = u64::from_be_bytes(slot_bytes);
+        assert_eq!(
+            slot_value, 5,
+            "EBB block_or_ebb should contain epoch number"
+        );
+    }
+
+    #[test]
+    fn test_epoch_based_chunk_numbering() {
+        // Finalize with next_epoch=5 → new chunk should be named 00005.chunk.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 1000, 0).unwrap();
+        db.append_block(10, 1, &Hash32::from_bytes([1u8; 32]), b"b1", false)
+            .unwrap();
+        db.finalize_chunk(5, 2000, 1000).unwrap();
+
+        // Chunk 0 finalized, chunk 5 opened
+        assert!(
+            dir.path().join("00000.chunk").exists(),
+            "Finalized chunk 0 should exist"
+        );
+        assert!(
+            dir.path().join("00000.secondary").exists(),
+            "Secondary index for chunk 0 should exist"
+        );
+        assert!(
+            dir.path().join("00000.primary").exists(),
+            "Primary index for chunk 0 should exist"
+        );
+        assert!(
+            dir.path().join("00005.chunk").exists(),
+            "New chunk 5 should be opened"
+        );
+    }
+
+    #[test]
+    fn test_primary_index_round_trip() {
+        // Write, finalize, reopen → verify all three index files exist
+        // and the DB reads correctly.
+        let dir = tempfile::tempdir().unwrap();
+        let h1 = Hash32::from_bytes([1u8; 32]);
+        let h2 = Hash32::from_bytes([2u8; 32]);
+        let h3 = Hash32::from_bytes([3u8; 32]);
+
+        {
+            let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 1000, 0).unwrap();
+            db.append_block(10, 1, &h1, b"block1", false).unwrap();
+            db.append_block(20, 2, &h2, b"block2", false).unwrap();
+            db.finalize_chunk(1, 1000, 1000).unwrap();
+            db.append_block(1050, 3, &h3, b"block3", false).unwrap();
+            db.flush().unwrap();
+        }
+
+        // Verify all index files exist
+        assert!(dir.path().join("00000.chunk").exists());
+        assert!(dir.path().join("00000.secondary").exists());
+        assert!(dir.path().join("00000.primary").exists());
+        assert!(dir.path().join("00001.chunk").exists());
+        assert!(dir.path().join("00001.secondary").exists());
+        assert!(dir.path().join("00001.primary").exists());
+
+        // Reopen and verify all blocks readable
+        let db = ImmutableDB::open(dir.path()).unwrap();
+        assert_eq!(db.total_blocks(), 3);
+        assert_eq!(db.get_block(&h1).unwrap(), b"block1");
+        assert_eq!(db.get_block(&h2).unwrap(), b"block2");
+        assert_eq!(db.get_block(&h3).unwrap(), b"block3");
+    }
+
+    #[test]
+    fn test_primary_index_empty_chunk() {
+        // An empty chunk should produce a valid primary index with all offsets = 0.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut db = ImmutableDB::open_for_writing(dir.path(), 0, 100, 0).unwrap();
+        db.finalize_chunk(1, 100, 100).unwrap();
+
+        let primary_path = dir.path().join("00000.primary");
+        assert!(primary_path.exists());
+
+        let data = fs::read(&primary_path).unwrap();
+        // Non-EBB: 101 entries (epoch_length + 1) + version byte
+        assert_eq!(data.len(), 1 + 101 * 4);
+        assert_eq!(data[0], 0x01, "Version byte");
+        for i in 0..101 {
+            assert_eq!(
+                read_primary_offset(&data, i),
+                0,
+                "Empty chunk: all offsets should be 0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_primary_index_nonzero_epoch_start() {
+        // Verify relative slot computation works with non-zero first_slot_of_epoch.
+        let dir = tempfile::tempdir().unwrap();
+        let epoch_length = 500u64;
+        let epoch_first_slot = 5000u64;
+
+        let mut db =
+            ImmutableDB::open_for_writing(dir.path(), 10, epoch_length, epoch_first_slot).unwrap();
+        // Blocks at absolute slots 5100, 5200, 5300 → relative slots 100, 200, 300
+        db.append_block(5100, 1, &Hash32::from_bytes([1u8; 32]), b"b1", false)
+            .unwrap();
+        db.append_block(5200, 2, &Hash32::from_bytes([2u8; 32]), b"b2", false)
+            .unwrap();
+        db.append_block(5300, 3, &Hash32::from_bytes([3u8; 32]), b"b3", false)
+            .unwrap();
+        db.finalize_chunk(11, epoch_length, epoch_first_slot + epoch_length)
+            .unwrap();
+
+        let data = fs::read(dir.path().join("00010.primary")).unwrap();
+        assert_eq!(data[0], 0x01);
+
+        // Relative slot 100 → entry[100] = 0, entry[101] = 56
+        assert_eq!(read_primary_offset(&data, 100), 0);
+        assert_eq!(read_primary_offset(&data, 101), 56);
+
+        // Relative slot 200 → entry[201] = 112
+        assert_eq!(read_primary_offset(&data, 201), 112);
+
+        // Relative slot 300 → entry[301] = 168
+        assert_eq!(read_primary_offset(&data, 301), 168);
+
+        // Sentinel = 3 * 56 = 168
+        let sentinel_idx = epoch_length as usize; // last entry
+        assert_eq!(read_primary_offset(&data, sentinel_idx), 168);
     }
 }

@@ -268,7 +268,10 @@ impl Node {
                 Vec::new()
             };
 
-        // Open ChainDB with the security parameter k from Byron genesis
+        // Open ChainDB with the security parameter k from Byron genesis.
+        // Uses default epoch parameters (epoch 0, length 432000) since era_history
+        // isn't built yet. The active chunk gets correctly named at the first
+        // finalize_chunk() call during epoch transitions, which passes real epoch info.
         let chain_db = Arc::new(RwLock::new(ChainDB::open_with_config(
             &args.database_path,
             &args.storage_config.immutable,

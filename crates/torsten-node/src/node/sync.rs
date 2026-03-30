@@ -1539,10 +1539,23 @@ impl Node {
                 self.live_epoch_transitions =
                     self.live_epoch_transitions.saturating_add(epochs_crossed);
 
-                // Finalize immutable chunk at epoch boundary and persist
+                // Finalize immutable chunk at epoch boundary and persist.
+                // Pass the new epoch's parameters for Haskell-compatible
+                // chunk naming and primary index generation.
                 {
+                    let (next_epoch_length, next_epoch_first_slot) = {
+                        let eh = self.era_history.read().await;
+                        let epoch_no = torsten_primitives::EpochNo(current_epoch);
+                        let length = eh.epoch_size(epoch_no).unwrap_or(432_000);
+                        let first_slot = eh.epoch_first_slot(epoch_no).map(|s| s.0).unwrap_or(0);
+                        (length, first_slot)
+                    };
                     let mut db = self.chain_db.write().await;
-                    if let Err(e) = db.finalize_immutable_chunk() {
+                    if let Err(e) = db.finalize_immutable_chunk(
+                        current_epoch,
+                        next_epoch_length,
+                        next_epoch_first_slot,
+                    ) {
                         warn!(error = %e, "Failed to finalize immutable chunk at epoch transition");
                     }
                     match db.persist() {
