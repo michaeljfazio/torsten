@@ -20,7 +20,7 @@ use crate::plutus::SlotConfig;
 use crate::utxo::UtxoSet;
 use crate::utxo_diff::DiffSeq;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 #[cfg(test)]
 use torsten_primitives::block::Block;
@@ -352,6 +352,96 @@ pub struct PendingRewardUpdate {
     pub delta_reserves: u64,
 }
 
+// ── Governance proposal priority forest types ─────────────────────────
+//
+// Per Haskell `Cardano.Ledger.Conway.Governance.Proposals`:
+//   Proposals { pProps, pRoots :: GovRelation PRoot, pGraph :: GovRelation PGraph }
+//
+// Each governance purpose (PParam, HardFork, Committee, Constitution) maintains
+// a tree of proposals rooted at the last enacted action.  This enables O(k)
+// descendant removal for both expiry and sibling cleanup after enactment.
+
+/// Parent-child edges for a proposal node within a governance purpose tree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PEdges {
+    /// Parent proposal ID (None if this proposal is a direct child of the root).
+    pub parent: Option<GovActionId>,
+    /// Direct children — proposals whose `prev_action_id` points to this one.
+    pub children: BTreeSet<GovActionId>,
+}
+
+/// Root of a governance purpose tree — tracks the last enacted action and its
+/// direct children (proposals whose `prev_action_id` matches the root).
+///
+/// Matches Haskell's `PRoot { prRoot, prChildren }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PRoot {
+    /// Last enacted GovActionId for this purpose (None = genesis / no enactment yet).
+    pub root: Option<GovActionId>,
+    /// Direct children of the root (proposals whose `prev_action_id == root`).
+    pub children: BTreeSet<GovActionId>,
+}
+
+/// Per-purpose DAG of proposal parent-child relationships for non-root proposals.
+///
+/// Matches Haskell's `PGraph { unPGraph :: Map (GovPurposeId p) PEdges }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PGraph {
+    /// Map from proposal ID to its edges (parent + children).
+    pub nodes: HashMap<GovActionId, PEdges>,
+}
+
+/// One value per governance purpose (4 purposes).
+///
+/// Mirrors Haskell's `GovRelation f` which holds one `f` per `GovActionPurpose`:
+///   0 = PParamUpdate, 1 = HardForkInitiation, 2 = Committee (shared by
+///   NoConfidence + UpdateCommittee), 3 = Constitution.
+///
+/// `TreasuryWithdrawals` and `InfoAction` have no purpose tree.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GovRelation<T: Default> {
+    /// ParameterChange proposals.
+    pub pparam: T,
+    /// HardForkInitiation proposals.
+    pub hard_fork: T,
+    /// Committee-purpose proposals (NoConfidence + UpdateCommittee share this).
+    pub committee: T,
+    /// NewConstitution proposals.
+    pub constitution: T,
+}
+
+impl<T: Default> GovRelation<T> {
+    /// Access the value for a governance purpose by tag.
+    ///
+    /// Tags match `gov_action_purpose_tag()`: 0=PParam, 1=HardFork, 2=Committee, 3=Constitution.
+    ///
+    /// # Panics
+    /// Panics if `purpose > 3`.
+    pub fn get(&self, purpose: u8) -> &T {
+        match purpose {
+            0 => &self.pparam,
+            1 => &self.hard_fork,
+            2 => &self.committee,
+            3 => &self.constitution,
+            _ => panic!("invalid governance purpose tag: {purpose}"),
+        }
+    }
+
+    /// Mutable access to the value for a governance purpose by tag.
+    ///
+    /// # Panics
+    /// Panics if `purpose > 3`.
+    pub fn get_mut(&mut self, purpose: u8) -> &mut T {
+        match purpose {
+            0 => &mut self.pparam,
+            1 => &mut self.hard_fork,
+            2 => &mut self.committee,
+            3 => &mut self.constitution,
+            _ => panic!("invalid governance purpose tag: {purpose}"),
+        }
+    }
+}
+
 /// Conway-era governance state (CIP-1694)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceState {
@@ -392,6 +482,24 @@ pub struct GovernanceState {
     pub proposals: BTreeMap<GovActionId, ProposalState>,
     /// Votes cast, indexed by action ID for efficient ratification lookup
     pub votes_by_action: BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+    /// Proposal forest roots: last enacted action per governance purpose + direct children.
+    ///
+    /// Per Haskell `pRoots :: GovRelation PRoot`.  Each of the 4 purposes tracks the
+    /// last enacted `GovActionId` (the root) and proposals whose `prev_action_id`
+    /// matches that root.  Used for O(1) sibling lookups during enactment.
+    ///
+    /// `serde(default)` for backward compatibility with pre-forest snapshots.
+    #[serde(default)]
+    pub proposal_roots: GovRelation<PRoot>,
+    /// Proposal forest graph: parent-child edges per governance purpose for non-root proposals.
+    ///
+    /// Per Haskell `pGraph :: GovRelation PGraph`.  Proposals deeper than one level
+    /// (i.e. their `prev_action_id` points to another proposal rather than the enacted
+    /// root) are tracked here.  Used for O(k) descendant collection during removal.
+    ///
+    /// `serde(default)` for backward compatibility with pre-forest snapshots.
+    #[serde(default)]
+    pub proposal_graph: GovRelation<PGraph>,
     /// Total DRep registrations count (including deregistered)
     pub drep_registration_count: u64,
     /// Total proposals submitted

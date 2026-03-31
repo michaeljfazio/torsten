@@ -579,79 +579,11 @@ impl LedgerState {
         }
 
         // Ratify governance proposals that have met their voting thresholds.
+        // Also handles proposal expiry (with descendant removal) and sibling
+        // cleanup after enactment, per Haskell `proposalsApplyEnactment`.
         // The ratification skip uses self.epoch (the old epoch), matching
         // Haskell's reCurrentEpoch from the DRep pulser.
         self.ratify_proposals();
-
-        // Expire governance proposals that have passed their lifetime
-        // and refund deposits to the return address.
-        //
-        // Per Haskell: gasExpiresAfter = proposedIn + govActionLifetime.
-        // A proposal is active while currentEpoch <= gasExpiresAfter.
-        // At the epoch boundary, `self.epoch` is still the old (completing) epoch.
-        // Removal uses `gasExpiresAfter < self.epoch`: the proposal has expired
-        // if its expires_epoch is strictly before the current (old) epoch.
-        // This means a proposal with expires_epoch = N is active through epoch N,
-        // and removed at the N+1→N+2 boundary (when self.epoch = N+1).
-        let current_epoch = self.epoch;
-        let expired: Vec<torsten_primitives::transaction::GovActionId> = self
-            .governance
-            .proposals
-            .iter()
-            .filter(|(_, state)| state.expires_epoch < current_epoch)
-            .map(|(id, _)| id.clone())
-            .collect();
-        if !expired.is_empty() {
-            for action_id in &expired {
-                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
-                    .proposals
-                    .remove(action_id)
-                {
-                    // Per Haskell `returnProposalDeposits`: refund deposit to
-                    // the return address's reward account if the credential is
-                    // registered.  If the credential is NOT registered, the
-                    // deposit goes to treasury (unregistered return address).
-                    let deposit = proposal_state.procedure.deposit;
-                    if deposit.0 > 0 {
-                        let return_addr = &proposal_state.procedure.return_addr;
-                        if return_addr.len() >= 29 {
-                            let key = Self::reward_account_to_hash(return_addr);
-                            if self.reward_accounts.contains_key(&key) {
-                                *Arc::make_mut(&mut self.reward_accounts)
-                                    .entry(key)
-                                    .or_insert(Lovelace(0)) += deposit;
-                            } else {
-                                self.treasury += deposit;
-                                debug!(
-                                    "Governance proposal {:?} deposit {} -> treasury \
-                                     (unregistered return address)",
-                                    action_id, deposit.0
-                                );
-                            }
-                        }
-                    }
-                    debug!(
-                        "Governance proposal expired: {:?} (deposit {} returned)",
-                        action_id, deposit.0
-                    );
-                }
-            }
-            // Remove all votes for expired proposals
-            for id in &expired {
-                Arc::make_mut(&mut self.governance)
-                    .votes_by_action
-                    .remove(id);
-            }
-            debug!(
-                "Expired {} governance proposals at epoch {}",
-                expired.len(),
-                new_epoch.0
-            );
-        }
-
-        // Store expired proposal IDs for GetRatifyState query (tag 32).
-        // This is set regardless of whether proposals expired (clears stale data).
-        Arc::make_mut(&mut self.governance).last_expired = expired;
 
         // Update dormant epoch counter per Haskell Conway.Rules.Epoch `updateNumDormantEpochs`.
         //

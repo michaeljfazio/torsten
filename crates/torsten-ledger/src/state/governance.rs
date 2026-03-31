@@ -1,6 +1,8 @@
-use super::{credential_to_hash, GovernanceState, LedgerState, ProposalState};
+use super::{
+    credential_to_hash, GovRelation, GovernanceState, LedgerState, PGraph, PRoot, ProposalState,
+};
 use crate::ledger_seq::{GovernanceChange, LedgerDelta};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use torsten_primitives::hash::{Hash28, Hash32};
 use torsten_primitives::time::EpochNo;
@@ -202,10 +204,21 @@ impl LedgerState {
             "Governance proposal submitted: {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        Arc::make_mut(&mut self.governance)
-            .proposals
-            .insert(action_id, state);
-        Arc::make_mut(&mut self.governance).proposal_count += 1;
+        let gov = Arc::make_mut(&mut self.governance);
+        gov.proposals.insert(action_id.clone(), state);
+        gov.proposal_count += 1;
+
+        // Maintain the proposal priority forest (PRoot / PGraph).
+        if let Some(tag) = gov_action_purpose_tag(&proposal.gov_action) {
+            let prev = gov_action_raw_prev_id(&proposal.gov_action);
+            forest_add_proposal(
+                &action_id,
+                prev.as_ref(),
+                tag,
+                &mut gov.proposal_roots,
+                &mut gov.proposal_graph,
+            );
+        }
     }
 
     /// Process a governance vote.
@@ -464,10 +477,21 @@ impl LedgerState {
             "Governance proposal submitted (with delta): {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        Arc::make_mut(&mut self.governance)
-            .proposals
-            .insert(action_id.clone(), state);
-        Arc::make_mut(&mut self.governance).proposal_count += 1;
+        let gov = Arc::make_mut(&mut self.governance);
+        gov.proposals.insert(action_id.clone(), state);
+        gov.proposal_count += 1;
+
+        // Maintain the proposal priority forest (PRoot / PGraph).
+        if let Some(tag) = gov_action_purpose_tag(&proposal.gov_action) {
+            let prev = gov_action_raw_prev_id(&proposal.gov_action);
+            forest_add_proposal(
+                &action_id,
+                prev.as_ref(),
+                tag,
+                &mut gov.proposal_roots,
+                &mut gov.proposal_graph,
+            );
+        }
 
         // Proposal was accepted — record the change in the delta.
         delta
@@ -596,6 +620,25 @@ impl LedgerState {
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
     pub(crate) fn ratify_proposals(&mut self) {
+        // Lazy forest reconstruction for backward compatibility with old snapshots
+        // that lack proposal_roots / proposal_graph.  Runs once per node startup
+        // from a pre-forest snapshot, then the forest is persisted in subsequent saves.
+        if self.governance.proposal_roots == GovRelation::default()
+            && !self.governance.proposals.is_empty()
+        {
+            let (roots, graph) = rebuild_forest_from_flat(
+                &self.governance.proposals,
+                &self.governance.enacted_pparam_update,
+                &self.governance.enacted_hard_fork,
+                &self.governance.enacted_committee,
+                &self.governance.enacted_constitution,
+            );
+            let gov = Arc::make_mut(&mut self.governance);
+            gov.proposal_roots = roots;
+            gov.proposal_graph = graph;
+            debug!("Governance forest rebuilt from flat proposals map (backward compat)");
+        }
+
         let total_drep_stake = self.compute_total_drep_stake();
         let total_spo_stake = self.compute_total_spo_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
@@ -792,14 +835,108 @@ impl LedgerState {
             gov.enacted_constitution = enacted_constitution;
         }
 
-        // Capture ratified proposal states before removal (for GetRatifyState query tag 32)
+        // ── proposalsApplyEnactment ──────────────────────────────────────
+        //
+        // Per Haskell `proposalsApplyEnactment` in Conway.Governance.Proposals:
+        //   1. Remove expired proposals + all transitive descendants
+        //   2. Remove enacted proposals + refund deposits
+        //   3. For each enacted proposal (sequentially):
+        //      a. Find siblings (other children of same root in purpose tree)
+        //      b. Remove siblings + all descendants
+        //      c. Promote enacted proposal to new root
+        //
+        // Step 1 was previously in epoch.rs; it is now here to match Haskell
+        // ordering (expired-with-descendants before enactment processing).
+
+        // ── Step 1: Expire proposals with descendants ─────────────────────
+        //
+        // Per Haskell: gasExpiresAfter = proposedIn + govActionLifetime.
+        // A proposal is active while currentEpoch <= gasExpiresAfter.
+        // `self.epoch` is the old (completing) epoch.
+        // Removal: `gasExpiresAfter < self.epoch` (strictly less-than).
+        //
+        // Note: if a ratified proposal happens to be a descendant of an expired
+        // proposal, it will be removed here and its deposit refunded.  This is
+        // correct because: (a) the enacted effects (`enact_gov_action`) were
+        // already applied in the ratification loop above, and (b) the ratified
+        // set was fixed before this removal runs, so step 2's `proposals.remove`
+        // will harmlessly return None for already-removed proposals.  This matches
+        // Haskell's `proposalsApplyEnactment` which also removes expired+descendants
+        // before processing the enacted sequence.
+        let current_epoch = self.epoch;
+        let expired_ids: Vec<GovActionId> = self
+            .governance
+            .proposals
+            .iter()
+            .filter(|(_, state)| state.expires_epoch < current_epoch)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let expired_removed = if !expired_ids.is_empty() {
+            let gov = Arc::make_mut(&mut self.governance);
+            let removed = forest_remove_with_descendants(
+                &expired_ids,
+                &mut gov.proposals,
+                &mut gov.proposal_roots,
+                &mut gov.proposal_graph,
+                &mut gov.votes_by_action,
+            );
+            // Refund deposits for expired proposals (and their descendants).
+            for (action_id, proposal_state) in &removed {
+                let deposit = proposal_state.procedure.deposit;
+                if deposit.0 > 0 {
+                    let return_addr = &proposal_state.procedure.return_addr;
+                    if return_addr.len() >= 29 {
+                        let key = Self::reward_account_to_hash(return_addr);
+                        if self.reward_accounts.contains_key(&key) {
+                            *Arc::make_mut(&mut self.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
+                        } else {
+                            self.treasury += deposit;
+                            debug!(
+                                "Governance proposal {:?} deposit {} -> treasury \
+                                 (unregistered return address)",
+                                action_id, deposit.0
+                            );
+                        }
+                    }
+                }
+                debug!(
+                    "Governance proposal expired: {:?} (deposit {} returned)",
+                    action_id, proposal_state.procedure.deposit.0
+                );
+            }
+            if !removed.is_empty() {
+                debug!(
+                    "Expired {} governance proposal(s) (incl. descendants) at epoch {}",
+                    removed.len(),
+                    current_epoch.0
+                );
+            }
+            removed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        // ── Step 2: Remove enacted proposals + refund deposits ────────────
         let mut ratified_with_state = Vec::new();
 
-        // Remove ratified proposals from LIVE state and refund deposits.
-        // Per Haskell `returnProposalDeposits`: if the return address credential
-        // is NOT registered, the deposit goes to treasury instead.
         if !ratified.is_empty() {
             for action_id in &ratified {
+                // Remove from forest first.
+                if let Some(state) = self.governance.proposals.get(action_id) {
+                    let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
+                    if let Some(tag) = purpose {
+                        let gov = Arc::make_mut(&mut self.governance);
+                        forest_remove_node(
+                            action_id,
+                            tag,
+                            &mut gov.proposal_roots,
+                            &mut gov.proposal_graph,
+                        );
+                    }
+                }
                 if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
                     .proposals
                     .remove(action_id)
@@ -834,64 +971,42 @@ impl LedgerState {
                 ratified.len()
             );
 
-            // Per Haskell `proposalsApplyEnactment`: when a proposal is enacted,
-            // all sibling proposals (same governance purpose, same prev_action_id)
-            // and their descendants are removed.  These are proposals that can
-            // never ratify because the enacted root for their purpose has changed.
-            let mut siblings_removed: Vec<GovActionId> = Vec::new();
+            // ── Step 3: Per-enacted sibling removal + root promotion ──────
+            //
+            // Per Haskell `proposalsApplyEnactment.enact`: for each enacted
+            // proposal, find siblings (other children of the same purpose root)
+            // and remove them plus all descendants.  Then promote the enacted
+            // proposal to the new root of its purpose tree.
             for (enacted_id, enacted_state) in &ratified_with_state {
                 let enacted_action = &enacted_state.procedure.gov_action;
-                let enacted_purpose = gov_action_purpose_tag(enacted_action);
-                // TreasuryWithdrawals and InfoAction have no purpose tree (no siblings)
-                if enacted_purpose.is_none() {
+                let Some(tag) = gov_action_purpose_tag(enacted_action) else {
+                    // TreasuryWithdrawals and InfoAction have no purpose tree.
                     continue;
-                }
-                // Get the enacted action's raw prev_action_id (may be None for genesis root)
-                let enacted_prev_raw = gov_action_raw_prev_id(enacted_action);
+                };
 
-                // Find siblings: same purpose + same prev_action_id, excluding enacted
-                let sibling_ids: Vec<GovActionId> = self
-                    .governance
-                    .proposals
-                    .iter()
-                    .filter(|(id, state)| {
-                        *id != enacted_id
-                            && gov_action_purpose_tag(&state.procedure.gov_action)
-                                == enacted_purpose
-                            && gov_action_raw_prev_id(&state.procedure.gov_action)
-                                == enacted_prev_raw
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
+                // Siblings = other children of the same root (before promotion),
+                // i.e. PRoot.children minus the enacted proposal.
+                let siblings: Vec<GovActionId> = {
+                    let root = self.governance.proposal_roots.get(tag);
+                    root.children
+                        .iter()
+                        .filter(|id| *id != enacted_id)
+                        .cloned()
+                        .collect()
+                };
 
-                // Collect siblings + all descendants (transitive closure)
-                let mut to_remove: Vec<GovActionId> = sibling_ids.clone();
-                let mut frontier = sibling_ids;
-                while !frontier.is_empty() {
-                    let mut next_frontier = Vec::new();
-                    for parent_id in &frontier {
-                        // Find proposals whose prev_action_id points to this parent
-                        for (id, state) in self.governance.proposals.iter() {
-                            let prev = gov_action_raw_prev_id(&state.procedure.gov_action);
-                            if prev.as_ref() == Some(parent_id) && !to_remove.contains(id) {
-                                to_remove.push(id.clone());
-                                next_frontier.push(id.clone());
-                            }
-                        }
-                    }
-                    frontier = next_frontier;
-                }
-
-                siblings_removed.extend(to_remove);
-            }
-
-            // Remove siblings and refund deposits
-            if !siblings_removed.is_empty() {
-                for action_id in &siblings_removed {
-                    if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
-                        .proposals
-                        .remove(action_id)
-                    {
+                // Remove siblings + all descendants using the forest.
+                if !siblings.is_empty() {
+                    let gov = Arc::make_mut(&mut self.governance);
+                    let removed = forest_remove_with_descendants(
+                        &siblings,
+                        &mut gov.proposals,
+                        &mut gov.proposal_roots,
+                        &mut gov.proposal_graph,
+                        &mut gov.votes_by_action,
+                    );
+                    // Refund deposits for removed sibling/descendant proposals.
+                    for (_action_id, proposal_state) in &removed {
                         let deposit = proposal_state.procedure.deposit;
                         if deposit.0 > 0 {
                             let return_addr = &proposal_state.procedure.return_addr;
@@ -907,20 +1022,30 @@ impl LedgerState {
                             }
                         }
                     }
-                    Arc::make_mut(&mut self.governance)
-                        .votes_by_action
-                        .remove(action_id);
+                    if !removed.is_empty() {
+                        debug!(
+                            "Governance   {} sibling/descendant proposal(s) removed due to enactment of {:?}",
+                            removed.len(),
+                            enacted_id
+                        );
+                    }
                 }
-                debug!(
-                    "Governance   {} sibling/descendant proposal(s) removed due to enactment",
-                    siblings_removed.len()
+
+                // Promote enacted proposal to new root of its purpose tree.
+                let gov = Arc::make_mut(&mut self.governance);
+                forest_promote_root(
+                    enacted_id,
+                    tag,
+                    &mut gov.proposal_roots,
+                    &mut gov.proposal_graph,
                 );
             }
         }
 
-        // Store ratification results for GetRatifyState query (tag 32)
+        // Store ratification and expiry results for GetRatifyState query (tag 32).
         let gov = Arc::make_mut(&mut self.governance);
         gov.last_ratified = ratified_with_state;
+        gov.last_expired = expired_removed;
         gov.last_ratify_delayed = delayed;
     }
 
@@ -2258,6 +2383,252 @@ pub(crate) fn gov_action_priority(action: &GovAction) -> u8 {
         GovAction::TreasuryWithdrawals { .. } => 5,
         GovAction::InfoAction => 6,
     }
+}
+
+// ── Governance proposal priority forest operations ─────────────────────
+//
+// These functions maintain the `proposal_roots` / `proposal_graph` forest
+// alongside the flat `proposals` BTreeMap, matching Haskell's Proposals.hs
+// operations: proposalsAddAction, proposalsRemoveWithDescendants, and the
+// root promotion in the `enact` helper of `proposalsApplyEnactment`.
+
+/// Insert a proposal into the governance purpose forest.
+///
+/// Determines whether the proposal is a direct child of the purpose root
+/// (its `prev_action_id` matches `roots[purpose].root`) or a deeper node
+/// (its `prev_action_id` points to another active proposal in the graph).
+///
+/// Mirrors the insert path of Haskell's `proposalsAddAction`.
+pub(crate) fn forest_add_proposal(
+    action_id: &GovActionId,
+    prev_action_id: Option<&GovActionId>,
+    purpose_tag: u8,
+    roots: &mut GovRelation<PRoot>,
+    graph: &mut GovRelation<PGraph>,
+) {
+    let root = roots.get_mut(purpose_tag);
+    let g = graph.get_mut(purpose_tag);
+
+    if prev_action_id == root.root.as_ref() {
+        // Direct child of the purpose root (last enacted action or genesis).
+        root.children.insert(action_id.clone());
+    } else {
+        // Deeper node — add as child of its parent in the graph.
+        // Create PEdges for the new node.
+        let edges = super::PEdges {
+            parent: prev_action_id.cloned(),
+            children: BTreeSet::new(),
+        };
+        g.nodes.insert(action_id.clone(), edges);
+
+        // Register as a child of the parent node.
+        if let Some(parent_id) = prev_action_id {
+            if let Some(parent_edges) = g.nodes.get_mut(parent_id) {
+                parent_edges.children.insert(action_id.clone());
+            } else {
+                // Parent is a root-level child (in PRoot.children but not in PGraph).
+                // Create a PGraph entry for the parent so it can track children.
+                let parent_edges = super::PEdges {
+                    parent: None, // Parent's parent is the root
+                    children: {
+                        let mut s = BTreeSet::new();
+                        s.insert(action_id.clone());
+                        s
+                    },
+                };
+                g.nodes.insert(parent_id.clone(), parent_edges);
+            }
+        }
+    }
+}
+
+/// Remove a set of proposal IDs and ALL their transitive descendants from the
+/// proposal forest and the flat `proposals` / `votes_by_action` maps.
+///
+/// Returns the removed `(GovActionId, ProposalState)` pairs for deposit refunding.
+///
+/// Mirrors Haskell's `proposalsRemoveWithDescendants`:
+///   proposalsRemoveIds (gais <> foldMap getAllDescendants gais) ps
+///
+/// The descendant collection uses the `PGraph` (and `PRoot.children` for root-level
+/// nodes) for O(k) traversal where k is the subtree size.
+pub(crate) fn forest_remove_with_descendants(
+    ids: &[GovActionId],
+    proposals: &mut BTreeMap<GovActionId, ProposalState>,
+    roots: &mut GovRelation<PRoot>,
+    graph: &mut GovRelation<PGraph>,
+    votes_by_action: &mut BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+) -> Vec<(GovActionId, ProposalState)> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect the full removal set: ids + all transitive descendants.
+    let mut to_remove = BTreeSet::new();
+    for id in ids {
+        to_remove.insert(id.clone());
+        // Determine the purpose from the proposal's action (if still in the map).
+        if let Some(state) = proposals.get(id) {
+            let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
+            if let Some(tag) = purpose {
+                collect_descendants(id, tag, roots, graph, &mut to_remove);
+            }
+        }
+    }
+
+    // Remove from the forest structure.
+    for id in &to_remove {
+        if let Some(state) = proposals.get(id) {
+            let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
+            if let Some(tag) = purpose {
+                forest_remove_node(id, tag, roots, graph);
+            }
+        }
+    }
+
+    // Remove from proposals map and votes, collecting removed states.
+    let mut removed = Vec::with_capacity(to_remove.len());
+    for id in &to_remove {
+        if let Some(state) = proposals.remove(id) {
+            removed.push((id.clone(), state));
+        }
+        votes_by_action.remove(id);
+    }
+    removed
+}
+
+/// Collect all transitive descendants of `id` in the purpose tree into `out`.
+///
+/// Traverses both `PRoot.children` (for root-level nodes) and `PGraph.nodes`
+/// (for deeper nodes), following children edges recursively.
+fn collect_descendants(
+    id: &GovActionId,
+    purpose_tag: u8,
+    roots: &GovRelation<PRoot>,
+    graph: &GovRelation<PGraph>,
+    out: &mut BTreeSet<GovActionId>,
+) {
+    let root = roots.get(purpose_tag);
+    let g = graph.get(purpose_tag);
+
+    // Collect direct children of `id`.
+    let children: Vec<GovActionId> = if root.children.contains(id) {
+        // `id` is a root-level child.  Its children are in PGraph (if any).
+        if let Some(edges) = g.nodes.get(id) {
+            edges.children.iter().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    } else if let Some(edges) = g.nodes.get(id) {
+        edges.children.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+
+    for child in children {
+        if out.insert(child.clone()) {
+            // Recurse — child's children are always in PGraph.
+            collect_descendants(&child, purpose_tag, roots, graph, out);
+        }
+    }
+}
+
+/// Remove a single node from the forest structure (PRoot.children / PGraph.nodes).
+/// Does NOT touch the `proposals` BTreeMap — caller handles that.
+fn forest_remove_node(
+    id: &GovActionId,
+    purpose_tag: u8,
+    roots: &mut GovRelation<PRoot>,
+    graph: &mut GovRelation<PGraph>,
+) {
+    let root = roots.get_mut(purpose_tag);
+    let g = graph.get_mut(purpose_tag);
+
+    // Remove from PRoot.children if present.
+    root.children.remove(id);
+
+    // Remove from PGraph.nodes if present, and clean up parent's children set.
+    if let Some(edges) = g.nodes.remove(id) {
+        if let Some(parent_id) = &edges.parent {
+            if let Some(parent_edges) = g.nodes.get_mut(parent_id) {
+                parent_edges.children.remove(id);
+            }
+        }
+        // Note: children of the removed node are also being removed
+        // (they're in `to_remove`), so we don't need to re-parent them.
+    }
+}
+
+/// Promote an enacted proposal to the root of its governance purpose tree.
+///
+/// After a proposal is ratified and enacted:
+/// 1. It becomes the new root for its purpose (`PRoot.root = Some(enacted_id)`).
+/// 2. Its children (from `PGraph`) become the new `PRoot.children`.
+/// 3. Its own `PGraph` entry is removed.
+///
+/// Mirrors the root promotion in Haskell's `enact` helper within
+/// `proposalsApplyEnactment`.
+pub(crate) fn forest_promote_root(
+    enacted_id: &GovActionId,
+    purpose_tag: u8,
+    roots: &mut GovRelation<PRoot>,
+    graph: &mut GovRelation<PGraph>,
+) {
+    let root = roots.get_mut(purpose_tag);
+    let g = graph.get_mut(purpose_tag);
+
+    // The enacted proposal's children (if any) become the new root's children.
+    let new_children = if let Some(edges) = g.nodes.remove(enacted_id) {
+        // Clear parent references for promoted children.
+        for child_id in &edges.children {
+            if let Some(child_edges) = g.nodes.get_mut(child_id) {
+                child_edges.parent = None;
+            }
+        }
+        edges.children
+    } else {
+        BTreeSet::new()
+    };
+
+    // Remove enacted_id from old root's children (it was a root-level child).
+    root.children.remove(enacted_id);
+
+    // Set new root.
+    root.root = Some(enacted_id.clone());
+    root.children = new_children;
+}
+
+/// Rebuild the proposal forest from a flat `proposals` BTreeMap and enacted roots.
+///
+/// Used for backward compatibility when loading old snapshots that lack forest data.
+/// Iterates all proposals once, determines each proposal's purpose and `prev_action_id`,
+/// and reconstructs the complete `GovRelation<PRoot>` and `GovRelation<PGraph>`.
+pub(crate) fn rebuild_forest_from_flat(
+    proposals: &BTreeMap<GovActionId, ProposalState>,
+    enacted_pparam: &Option<GovActionId>,
+    enacted_hard_fork: &Option<GovActionId>,
+    enacted_committee: &Option<GovActionId>,
+    enacted_constitution: &Option<GovActionId>,
+) -> (GovRelation<PRoot>, GovRelation<PGraph>) {
+    let mut roots = GovRelation::<PRoot>::default();
+    let mut graph = GovRelation::<PGraph>::default();
+
+    // Initialize roots from enacted action IDs.
+    roots.pparam.root = enacted_pparam.clone();
+    roots.hard_fork.root = enacted_hard_fork.clone();
+    roots.committee.root = enacted_committee.clone();
+    roots.constitution.root = enacted_constitution.clone();
+
+    // Insert each proposal into the forest.
+    for (action_id, state) in proposals {
+        let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
+        if let Some(tag) = purpose {
+            let prev = gov_action_raw_prev_id(&state.procedure.gov_action);
+            forest_add_proposal(action_id, prev.as_ref(), tag, &mut roots, &mut graph);
+        }
+    }
+
+    (roots, graph)
 }
 
 /// Whether enacting this action should delay all further ratification for this epoch.
@@ -4853,5 +5224,248 @@ mod tests {
             !state.governance.proposals.is_empty(),
             "Proposal with excessive member expiry must not ratify"
         );
+    }
+
+    // ── Proposal forest tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_forest_add_and_structure() {
+        // Build a tree:
+        //   root (enacted) -> A -> C
+        //                  -> B
+        let root_id = make_action_id(0x01, 0);
+        let a_id = make_action_id(0x0a, 0);
+        let b_id = make_action_id(0x0b, 0);
+        let c_id = make_action_id(0x0c, 0);
+
+        let mut roots = GovRelation::<PRoot>::default();
+        let mut graph = GovRelation::<PGraph>::default();
+
+        // Set enacted root for purpose 0 (PParam).
+        roots.pparam.root = Some(root_id.clone());
+
+        // Add A as child of root.
+        forest_add_proposal(&a_id, Some(&root_id), 0, &mut roots, &mut graph);
+        assert!(roots.pparam.children.contains(&a_id));
+        assert!(!graph.pparam.nodes.contains_key(&a_id));
+
+        // Add B as child of root.
+        forest_add_proposal(&b_id, Some(&root_id), 0, &mut roots, &mut graph);
+        assert!(roots.pparam.children.contains(&b_id));
+
+        // Add C as child of A (deeper level).
+        forest_add_proposal(&c_id, Some(&a_id), 0, &mut roots, &mut graph);
+        assert!(!roots.pparam.children.contains(&c_id));
+        assert!(graph.pparam.nodes.contains_key(&c_id));
+        // A should now have a graph entry with C as child.
+        let a_edges = graph.pparam.nodes.get(&a_id).unwrap();
+        assert!(a_edges.children.contains(&c_id));
+        // C's parent should be A.
+        let c_edges = graph.pparam.nodes.get(&c_id).unwrap();
+        assert_eq!(c_edges.parent, Some(a_id.clone()));
+    }
+
+    #[test]
+    fn test_forest_remove_with_descendants() {
+        // Tree:  root -> A -> C -> D
+        //             -> B
+        // Remove A: should remove A, C, D but not B.
+        let root_id = make_action_id(0x01, 0);
+        let a_id = make_action_id(0x0a, 0);
+        let b_id = make_action_id(0x0b, 0);
+        let c_id = make_action_id(0x0c, 0);
+        let d_id = make_action_id(0x0d, 0);
+
+        let mut roots = GovRelation::<PRoot>::default();
+        let mut graph = GovRelation::<PGraph>::default();
+        roots.pparam.root = Some(root_id.clone());
+
+        forest_add_proposal(&a_id, Some(&root_id), 0, &mut roots, &mut graph);
+        forest_add_proposal(&b_id, Some(&root_id), 0, &mut roots, &mut graph);
+        forest_add_proposal(&c_id, Some(&a_id), 0, &mut roots, &mut graph);
+        forest_add_proposal(&d_id, Some(&c_id), 0, &mut roots, &mut graph);
+
+        // Build proposals map with matching actions.
+        let mut proposals = BTreeMap::new();
+        let mut votes = BTreeMap::new();
+        for (id, prev) in [
+            (&a_id, Some(root_id.clone())),
+            (&b_id, Some(root_id.clone())),
+            (&c_id, Some(a_id.clone())),
+            (&d_id, Some(c_id.clone())),
+        ] {
+            proposals.insert(
+                id.clone(),
+                ProposalState {
+                    procedure: ProposalProcedure {
+                        deposit: Lovelace(100),
+                        return_addr: vec![0; 29],
+                        gov_action: GovAction::ParameterChange {
+                            prev_action_id: prev,
+                            protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                            policy_hash: None,
+                        },
+                        anchor: make_anchor(),
+                    },
+                    proposed_epoch: EpochNo(0),
+                    expires_epoch: EpochNo(10),
+                    yes_votes: 0,
+                    no_votes: 0,
+                    abstain_votes: 0,
+                },
+            );
+        }
+
+        let removed = forest_remove_with_descendants(
+            std::slice::from_ref(&a_id),
+            &mut proposals,
+            &mut roots,
+            &mut graph,
+            &mut votes,
+        );
+
+        // A, C, D removed.
+        assert_eq!(removed.len(), 3);
+        let removed_ids: BTreeSet<_> = removed.iter().map(|(id, _)| id.clone()).collect();
+        assert!(removed_ids.contains(&a_id));
+        assert!(removed_ids.contains(&c_id));
+        assert!(removed_ids.contains(&d_id));
+
+        // B still present.
+        assert!(proposals.contains_key(&b_id));
+        assert!(!proposals.contains_key(&a_id));
+
+        // Forest: B should still be in root.children.
+        assert!(roots.pparam.children.contains(&b_id));
+        assert!(!roots.pparam.children.contains(&a_id));
+    }
+
+    #[test]
+    fn test_forest_promote_root() {
+        // Tree: root -> A -> C
+        //            -> B
+        // Promote A to root: new root = A, new root.children = {C}, B removed.
+        let root_id = make_action_id(0x01, 0);
+        let a_id = make_action_id(0x0a, 0);
+        let b_id = make_action_id(0x0b, 0);
+        let c_id = make_action_id(0x0c, 0);
+
+        let mut roots = GovRelation::<PRoot>::default();
+        let mut graph = GovRelation::<PGraph>::default();
+        roots.pparam.root = Some(root_id.clone());
+
+        forest_add_proposal(&a_id, Some(&root_id), 0, &mut roots, &mut graph);
+        forest_add_proposal(&b_id, Some(&root_id), 0, &mut roots, &mut graph);
+        forest_add_proposal(&c_id, Some(&a_id), 0, &mut roots, &mut graph);
+
+        // Simulate: B was already removed as sibling.
+        roots.pparam.children.remove(&b_id);
+
+        // Promote A.
+        forest_promote_root(&a_id, 0, &mut roots, &mut graph);
+
+        assert_eq!(roots.pparam.root, Some(a_id.clone()));
+        assert!(roots.pparam.children.contains(&c_id));
+        assert!(!roots.pparam.children.contains(&a_id));
+        assert!(!roots.pparam.children.contains(&b_id));
+    }
+
+    #[test]
+    fn test_rebuild_forest_from_flat() {
+        let root_id = make_action_id(0x01, 0);
+        let a_id = make_action_id(0x0a, 0);
+        let c_id = make_action_id(0x0c, 0);
+
+        let mut proposals = BTreeMap::new();
+        for (id, prev) in [(&a_id, Some(root_id.clone())), (&c_id, Some(a_id.clone()))] {
+            proposals.insert(
+                id.clone(),
+                ProposalState {
+                    procedure: ProposalProcedure {
+                        deposit: Lovelace(100),
+                        return_addr: vec![0; 29],
+                        gov_action: GovAction::ParameterChange {
+                            prev_action_id: prev,
+                            protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+                            policy_hash: None,
+                        },
+                        anchor: make_anchor(),
+                    },
+                    proposed_epoch: EpochNo(0),
+                    expires_epoch: EpochNo(10),
+                    yes_votes: 0,
+                    no_votes: 0,
+                    abstain_votes: 0,
+                },
+            );
+        }
+
+        let (roots, graph) =
+            rebuild_forest_from_flat(&proposals, &Some(root_id.clone()), &None, &None, &None);
+
+        assert_eq!(roots.pparam.root, Some(root_id));
+        assert!(roots.pparam.children.contains(&a_id));
+        assert!(graph.pparam.nodes.contains_key(&c_id));
+        assert!(graph
+            .pparam
+            .nodes
+            .get(&a_id)
+            .unwrap()
+            .children
+            .contains(&c_id));
+    }
+
+    #[test]
+    fn test_forest_committee_purpose_shared() {
+        // NoConfidence and UpdateCommittee share purpose tag 2.
+        let root_id = make_action_id(0x01, 0);
+        let nc_id = make_action_id(0x0a, 0);
+        let uc_id = make_action_id(0x0b, 0);
+
+        let mut roots = GovRelation::<PRoot>::default();
+        let mut graph = GovRelation::<PGraph>::default();
+        roots.committee.root = Some(root_id.clone());
+
+        // Add NoConfidence as child of root (purpose 2).
+        forest_add_proposal(&nc_id, Some(&root_id), 2, &mut roots, &mut graph);
+        // Add UpdateCommittee as child of root (purpose 2).
+        forest_add_proposal(&uc_id, Some(&root_id), 2, &mut roots, &mut graph);
+
+        // Both should be in the same tree.
+        assert!(roots.committee.children.contains(&nc_id));
+        assert!(roots.committee.children.contains(&uc_id));
+        assert_eq!(roots.committee.children.len(), 2);
+    }
+
+    #[test]
+    fn test_forest_treasury_info_no_tree() {
+        // TreasuryWithdrawals and InfoAction have no purpose tree (tag = None).
+        let action = GovAction::TreasuryWithdrawals {
+            withdrawals: BTreeMap::new(),
+            policy_hash: None,
+        };
+        assert!(gov_action_purpose_tag(&action).is_none());
+
+        let action2 = GovAction::InfoAction;
+        assert!(gov_action_purpose_tag(&action2).is_none());
+    }
+
+    #[test]
+    fn test_forest_genesis_root_siblings() {
+        // When prev_action_id is None (genesis root), siblings should match.
+        let a_id = make_action_id(0x0a, 0);
+        let b_id = make_action_id(0x0b, 0);
+
+        let mut roots = GovRelation::<PRoot>::default();
+        let mut graph = GovRelation::<PGraph>::default();
+        // Root is None (genesis).
+
+        forest_add_proposal(&a_id, None, 0, &mut roots, &mut graph);
+        forest_add_proposal(&b_id, None, 0, &mut roots, &mut graph);
+
+        // Both should be root children (genesis root).
+        assert!(roots.pparam.children.contains(&a_id));
+        assert!(roots.pparam.children.contains(&b_id));
+        assert_eq!(roots.pparam.root, None);
     }
 }
