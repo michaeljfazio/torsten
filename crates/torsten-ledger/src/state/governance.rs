@@ -595,7 +595,7 @@ impl LedgerState {
     ///
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
-    pub(crate) fn ratify_proposals(&mut self) {
+    pub(crate) fn ratify_proposals(&mut self, new_epoch: EpochNo) {
         let total_drep_stake = self.compute_total_drep_stake();
         let total_spo_stake = self.compute_total_spo_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
@@ -687,9 +687,9 @@ impl LedgerState {
 
         for (action_id, action, expires) in &candidates {
             // Per Haskell RATIFY: skip proposals whose expiry epoch has passed.
-            // `gasExpiresAfter < reCurrentEpoch` — proposals are active through
-            // their expires_epoch and checked for expiry at the NEXT boundary.
-            if *expires < self.epoch {
+            // `gasExpiresAfter < reCurrentEpoch` — Haskell's `reCurrentEpoch` is
+            // the epoch being transitioned INTO (new_epoch), not the current one.
+            if *expires < new_epoch {
                 continue;
             }
 

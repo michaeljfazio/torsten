@@ -578,8 +578,10 @@ impl LedgerState {
             }
         }
 
-        // Ratify governance proposals that have met their voting thresholds
-        self.ratify_proposals();
+        // Ratify governance proposals that have met their voting thresholds.
+        // Pass new_epoch so the expiry skip uses the Haskell-correct
+        // `reCurrentEpoch` (the epoch being transitioned into).
+        self.ratify_proposals(new_epoch);
 
         // Expire governance proposals that have passed their lifetime
         // and refund deposits to the return address
