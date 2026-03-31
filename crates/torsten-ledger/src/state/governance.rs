@@ -841,47 +841,48 @@ impl LedgerState {
             let mut siblings_removed: Vec<GovActionId> = Vec::new();
             for (enacted_id, enacted_state) in &ratified_with_state {
                 let enacted_action = &enacted_state.procedure.gov_action;
-                if let Some(enacted_prev) = gov_action_prev_id(enacted_action) {
-                    // Find siblings: same purpose + same prev_action_id, excluding enacted
-                    let sibling_ids: Vec<GovActionId> = self
-                        .governance
-                        .proposals
-                        .iter()
-                        .filter(|(id, state)| {
-                            *id != enacted_id
-                                && gov_action_prev_id(&state.procedure.gov_action)
-                                    == Some(enacted_prev)
-                                && gov_action_purpose_tag(&state.procedure.gov_action)
-                                    == gov_action_purpose_tag(enacted_action)
-                        })
-                        .map(|(id, _)| id.clone())
-                        .collect();
+                let enacted_purpose = gov_action_purpose_tag(enacted_action);
+                // TreasuryWithdrawals and InfoAction have no purpose tree (no siblings)
+                if enacted_purpose.is_none() {
+                    continue;
+                }
+                // Get the enacted action's raw prev_action_id (may be None for genesis root)
+                let enacted_prev_raw = gov_action_raw_prev_id(enacted_action);
 
-                    // Collect siblings + all descendants (transitive closure)
-                    let mut to_remove: Vec<GovActionId> = sibling_ids.clone();
-                    let mut frontier = sibling_ids;
-                    while !frontier.is_empty() {
-                        let mut next_frontier = Vec::new();
-                        for parent_id in &frontier {
-                            // Find proposals whose prev_action_id points to this parent
-                            for (id, state) in self.governance.proposals.iter() {
-                                if let Some(prev) = gov_action_prev_id(&state.procedure.gov_action)
-                                {
-                                    if prev.transaction_id == parent_id.transaction_id
-                                        && prev.action_index == parent_id.action_index
-                                        && !to_remove.contains(id)
-                                    {
-                                        to_remove.push(id.clone());
-                                        next_frontier.push(id.clone());
-                                    }
-                                }
+                // Find siblings: same purpose + same prev_action_id, excluding enacted
+                let sibling_ids: Vec<GovActionId> = self
+                    .governance
+                    .proposals
+                    .iter()
+                    .filter(|(id, state)| {
+                        *id != enacted_id
+                            && gov_action_purpose_tag(&state.procedure.gov_action)
+                                == enacted_purpose
+                            && gov_action_raw_prev_id(&state.procedure.gov_action)
+                                == enacted_prev_raw
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+
+                // Collect siblings + all descendants (transitive closure)
+                let mut to_remove: Vec<GovActionId> = sibling_ids.clone();
+                let mut frontier = sibling_ids;
+                while !frontier.is_empty() {
+                    let mut next_frontier = Vec::new();
+                    for parent_id in &frontier {
+                        // Find proposals whose prev_action_id points to this parent
+                        for (id, state) in self.governance.proposals.iter() {
+                            let prev = gov_action_raw_prev_id(&state.procedure.gov_action);
+                            if prev.as_ref() == Some(parent_id) && !to_remove.contains(id) {
+                                to_remove.push(id.clone());
+                                next_frontier.push(id.clone());
                             }
                         }
-                        frontier = next_frontier;
                     }
-
-                    siblings_removed.extend(to_remove);
+                    frontier = next_frontier;
                 }
+
+                siblings_removed.extend(to_remove);
             }
 
             // Remove siblings and refund deposits
@@ -2217,15 +2218,17 @@ enum DefaultVote {
     No,
 }
 
-/// Extract the `prev_action_id` from a governance action, if it has one.
-/// TreasuryWithdrawals and InfoAction have no prev_action_id.
-fn gov_action_prev_id(action: &GovAction) -> Option<&GovActionId> {
+/// Extract the raw `Option<GovActionId>` prev_action_id from a governance action.
+/// Returns `None` for both "prev_action_id = None" (genesis root) and actions
+/// without a prev_action_id field (TreasuryWithdrawals, InfoAction).
+/// Used for sibling matching where None == None (genesis root siblings).
+fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
     match action {
         GovAction::ParameterChange { prev_action_id, .. }
         | GovAction::HardForkInitiation { prev_action_id, .. }
         | GovAction::NoConfidence { prev_action_id }
         | GovAction::UpdateCommittee { prev_action_id, .. }
-        | GovAction::NewConstitution { prev_action_id, .. } => prev_action_id.as_ref(),
+        | GovAction::NewConstitution { prev_action_id, .. } => prev_action_id.clone(),
         GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
     }
 }
