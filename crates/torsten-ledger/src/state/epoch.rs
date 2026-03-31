@@ -598,15 +598,27 @@ impl LedgerState {
                     .proposals
                     .remove(action_id)
                 {
-                    // Refund deposit to return address's reward account
+                    // Per Haskell `returnProposalDeposits`: refund deposit to
+                    // the return address's reward account if the credential is
+                    // registered.  If the credential is NOT registered, the
+                    // deposit goes to treasury (unregistered return address).
                     let deposit = proposal_state.procedure.deposit;
                     if deposit.0 > 0 {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *Arc::make_mut(&mut self.reward_accounts)
-                                .entry(key)
-                                .or_insert(Lovelace(0)) += deposit;
+                            if self.reward_accounts.contains_key(&key) {
+                                *Arc::make_mut(&mut self.reward_accounts)
+                                    .entry(key)
+                                    .or_insert(Lovelace(0)) += deposit;
+                            } else {
+                                self.treasury += deposit;
+                                debug!(
+                                    "Governance proposal {:?} deposit {} -> treasury \
+                                     (unregistered return address)",
+                                    action_id, deposit.0
+                                );
+                            }
                         }
                     }
                     debug!(

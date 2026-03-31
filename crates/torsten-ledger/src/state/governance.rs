@@ -805,7 +805,9 @@ impl LedgerState {
         // Capture ratified proposal states before removal (for GetRatifyState query tag 32)
         let mut ratified_with_state = Vec::new();
 
-        // Remove ratified proposals from LIVE state and refund deposits
+        // Remove ratified proposals from LIVE state and refund deposits.
+        // Per Haskell `returnProposalDeposits`: if the return address credential
+        // is NOT registered, the deposit goes to treasury instead.
         if !ratified.is_empty() {
             for action_id in &ratified {
                 if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
@@ -817,9 +819,18 @@ impl LedgerState {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            *Arc::make_mut(&mut self.reward_accounts)
-                                .entry(key)
-                                .or_insert(Lovelace(0)) += deposit;
+                            if self.reward_accounts.contains_key(&key) {
+                                *Arc::make_mut(&mut self.reward_accounts)
+                                    .entry(key)
+                                    .or_insert(Lovelace(0)) += deposit;
+                            } else {
+                                self.treasury += deposit;
+                                debug!(
+                                    "Governance proposal {:?} deposit {} -> treasury \
+                                     (unregistered return address)",
+                                    action_id, deposit.0
+                                );
+                            }
                         }
                     }
                     ratified_with_state.push((action_id.clone(), proposal_state));
@@ -3607,6 +3618,9 @@ mod tests {
 
         let return_addr = vec![0u8; 29];
         let return_key = LedgerState::reward_account_to_hash(&return_addr);
+        // Register the return credential so the deposit refund goes to the
+        // reward account (not treasury, per Haskell `returnProposalDeposits`).
+        Arc::make_mut(&mut state.reward_accounts).insert(return_key, Lovelace(0));
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -3643,6 +3657,9 @@ mod tests {
 
         let return_addr = vec![0u8; 29];
         let return_key = LedgerState::reward_account_to_hash(&return_addr);
+        // Register the return credential so the deposit refund goes to the
+        // reward account (not treasury, per Haskell `returnProposalDeposits`).
+        Arc::make_mut(&mut state.reward_accounts).insert(return_key, Lovelace(0));
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(

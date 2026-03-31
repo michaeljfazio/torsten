@@ -1459,6 +1459,9 @@ fn test_governance_proposal_deposit_refund() {
     return_addr.extend_from_slice(&[42u8; 28]); // 28-byte key hash
 
     let reward_key = Hash28::from_bytes([42u8; 28]).to_hash32_padded();
+    // Register the return credential so the deposit refund goes to the
+    // reward account (not treasury, per Haskell `returnProposalDeposits`).
+    Arc::make_mut(&mut state.reward_accounts).insert(reward_key, Lovelace(0));
 
     // Submit a proposal with deposit
     let proposal = ProposalProcedure {
@@ -13783,11 +13786,17 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     let mut reward_addr = vec![0xe1u8]; // Conway mainnet reward address type byte
     reward_addr.extend_from_slice(withdrawal_target_key.as_bytes());
 
+    // Register the proposal's return credential so the deposit refund goes
+    // to the reward account (not treasury, per Haskell `returnProposalDeposits`).
+    let proposal_return_addr = vec![0u8; 29];
+    let proposal_return_key = LedgerState::reward_account_to_hash(&proposal_return_addr);
+    Arc::make_mut(&mut state.reward_accounts).insert(proposal_return_key, Lovelace(0));
+
     // Submit a TreasuryWithdrawals governance proposal
     let tx_hash = Hash32::from_bytes([0xCCu8; 32]);
     let proposal = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
-        return_addr: vec![0u8; 29],
+        return_addr: proposal_return_addr,
         gov_action: GovAction::TreasuryWithdrawals {
             withdrawals: {
                 let mut m = BTreeMap::new();
