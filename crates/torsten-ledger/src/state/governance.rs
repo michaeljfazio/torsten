@@ -640,9 +640,31 @@ impl LedgerState {
         }
 
         let total_drep_stake = self.compute_total_drep_stake();
-        let total_spo_stake = self.compute_total_spo_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
         let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
+
+        // SPO voting power: use the **set** snapshot (= previous epoch's mark),
+        // matching Haskell's `dpStakePoolDistr` in the DRep pulser.
+        //
+        // After SNAP rotation (mark→set→go), `self.snapshots.mark` is the NEW
+        // mark for the upcoming epoch, while `self.snapshots.set` holds the mark
+        // from the PREVIOUS boundary — which is when the Haskell DRep pulser was
+        // initialized and captured `ssStakeMarkPoolDistr`.  Using `mark` here
+        // caused a one-epoch SPO stake mismatch, leading to HardForkInitiation
+        // proposals being ratified one epoch early (see #332).
+        //
+        // We clone the pool_stake map to avoid holding an immutable borrow on
+        // `self.snapshots` across the mutable `self.enact_gov_action()` calls.
+        let ratify_pool_stake: Option<HashMap<Hash28, Lovelace>> =
+            self.snapshots.set.as_ref().map(|s| s.pool_stake.clone());
+        let ratify_pool_stake_ref = ratify_pool_stake.as_ref();
+        let total_spo_stake: u64 = ratify_pool_stake_ref
+            .map(|ps| {
+                ps.values()
+                    .fold(0u64, |acc, s| acc.saturating_add(s.0))
+                    .max(1)
+            })
+            .unwrap_or_else(|| self.compute_total_spo_stake());
 
         // Determine the source of proposals, votes, and committee state:
         // prefer the frozen ratification snapshot, fall back to live state.
@@ -772,6 +794,7 @@ impl LedgerState {
                         &drep_power_cache,
                         no_confidence_stake,
                         &snap_votes,
+                        ratify_pool_stake_ref,
                     );
                 let remaining_treasury = self.treasury.0.saturating_sub(enacted_withdrawals_total);
                 let met = self.check_ratification(
@@ -787,6 +810,7 @@ impl LedgerState {
                     &snap_committee_resigned,
                     &snap_committee_threshold,
                     remaining_treasury,
+                    ratify_pool_stake_ref,
                 );
                 if met {
                     debug!(
@@ -1087,10 +1111,11 @@ impl LedgerState {
         committee_resigned: &HashMap<Hash32, Option<Anchor>>,
         committee_threshold: &Option<Rational>,
         remaining_treasury: u64,
+        pool_stake_override: Option<&HashMap<Hash28, Lovelace>>,
     ) -> bool {
         // Count votes by voter type (uses pre-computed DRep power cache).
-        // SPO votes now iterate ALL pools in the mark snapshot, not just explicit
-        // voters, matching Haskell's `spoAcceptedRatio` accumStake fold.
+        // SPO votes iterate ALL pools in the provided pool stake distribution,
+        // not just explicit voters, matching Haskell's `spoAcceptedRatio`.
         let (drep_yes, drep_total, spo_yes, spo_abstain, _cc_yes, _cc_total) = self
             .count_votes_by_type(
                 action_id,
@@ -1098,6 +1123,7 @@ impl LedgerState {
                 drep_power_cache,
                 no_confidence_stake,
                 votes_by_action,
+                pool_stake_override,
             );
 
         let bootstrap = self.is_bootstrap_phase();
@@ -1295,7 +1321,7 @@ impl LedgerState {
     /// Per Haskell `dRepAcceptedRatio` / `spoAcceptedRatio`:
     /// - DRep denominator = total active DRep-delegated stake - abstain stake
     ///   (non-voting active DReps count as implicit No in denominator)
-    /// - SPO: iterates ALL pools in the mark snapshot distribution, classifying
+    /// - SPO: iterates ALL pools in the provided pool stake distribution, classifying
     ///   non-voters per Haskell rules (bootstrap → Abstain for non-HardFork,
     ///   post-bootstrap → `defaultStakePoolVote` based on DRep delegation)
     /// - SPO denominator = totalActiveStake - abstainStake (always)
@@ -1306,6 +1332,14 @@ impl LedgerState {
     /// The `votes_by_action` parameter is passed explicitly so that `ratify_proposals()`
     /// can supply either live votes or a [`RatificationSnapshot`]'s frozen votes.
     ///
+    /// The `pool_stake_override` parameter, when `Some`, provides the SPO stake
+    /// distribution to use instead of `self.snapshots.mark`.  During ratification
+    /// this MUST be the **set** snapshot (= the mark from the PREVIOUS epoch
+    /// boundary), matching Haskell's `dpStakePoolDistr` which is captured when
+    /// the DRep pulser is initialized at the prior boundary.  After SNAP rotation,
+    /// `self.snapshots.mark` is the NEW mark for the upcoming epoch, not the one
+    /// the Haskell pulser would have used.
+    ///
     /// Returns `(drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)`.
     pub(crate) fn count_votes_by_type(
         &self,
@@ -1314,6 +1348,7 @@ impl LedgerState {
         drep_power_cache: &HashMap<Hash32, u64>,
         no_confidence_stake: u64,
         votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+        pool_stake_override: Option<&HashMap<Hash28, Lovelace>>,
     ) -> (u64, u64, u64, u64, u64, u64) {
         let mut cc_yes = 0u64;
         let mut cc_total = 0u64;
@@ -1369,10 +1404,12 @@ impl LedgerState {
         let mut spo_yes = 0u64;
         let mut spo_abstain = 0u64;
 
-        // Get the pool distribution from the mark snapshot (same source as
-        // compute_spo_voting_power and compute_total_spo_stake).
+        // Get the pool distribution.  When a caller supplies pool_stake_override
+        // (ratification path — uses the *set* snapshot, i.e. the previous epoch's
+        // mark, matching Haskell's dpStakePoolDistr), prefer that.  Otherwise fall
+        // back to self.snapshots.mark for non-ratification contexts (e.g. queries).
         let mark_pool_stake: Option<&HashMap<Hash28, Lovelace>> =
-            self.snapshots.mark.as_ref().map(|s| &s.pool_stake);
+            pool_stake_override.or_else(|| self.snapshots.mark.as_ref().map(|s| &s.pool_stake));
 
         if let Some(pool_stake) = mark_pool_stake {
             for (pool_id, stake) in pool_stake {
@@ -1678,16 +1715,18 @@ impl LedgerState {
 
     /// Compute the voting power of a stake pool: total delegated stake.
     ///
-    /// Per CIP-1694 and the Haskell Ratify.hs implementation, SPO voting power
-    /// is measured against the **mark** snapshot (the stake distribution captured
-    /// at the beginning of the current epoch, immediately before the epoch
-    /// transition). Using `set` (two epochs prior) would delay the effect of new
-    /// delegations by an extra epoch compared to the specification.
+    /// Uses the `mark` snapshot (current epoch's stake distribution).
+    ///
+    /// **NOTE:** During ratification (`ratify_proposals`), SPO voting power is
+    /// read from the **set** snapshot (previous epoch's mark) via the
+    /// `pool_stake_override` parameter on `count_votes_by_type`, matching
+    /// Haskell's `dpStakePoolDistr` in the DRep pulser.  This function is a
+    /// fallback for non-ratification contexts (queries, first-epoch bootstrap).
     ///
     /// Reference: Haskell `spoVotingPower` in `Cardano.Ledger.Conway.Governance.Procedures`
     /// uses `ssStakeMarkPoolDistr` (the mark pool distribution).
     pub(crate) fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
-        // Use the "mark" snapshot (current epoch stake) for voting power — CIP-1694 spec.
+        // Use the "mark" snapshot — non-ratification fallback.
         if let Some(ref snapshot) = self.snapshots.mark {
             if let Some(stake) = snapshot.pool_stake.get(pool_id) {
                 return stake.0;
@@ -1705,15 +1744,15 @@ impl LedgerState {
         total
     }
 
-    /// Compute total active SPO stake across all pools.
-    /// Used as the denominator for SPO voting thresholds.
+    /// Compute total active SPO stake across all pools from the `mark` snapshot.
     ///
-    /// Per CIP-1694, the denominator is derived from the **mark** snapshot
-    /// (same snapshot used for individual pool voting power) to keep the
-    /// ratio consistent. Haskell uses `ssStakeMarkPoolDistr` for both the
-    /// numerator (per-pool power) and this denominator.
+    /// **NOTE:** During ratification, total SPO stake is computed from the
+    /// **set** snapshot directly inside `ratify_proposals()`, not via this
+    /// function.  This ensures ratification uses the previous epoch's mark
+    /// (matching Haskell's `dpStakePoolDistr`).  This function is used as a
+    /// fallback for non-ratification contexts and early epochs.
     fn compute_total_spo_stake(&self) -> u64 {
-        // Use "mark" snapshot if available (current epoch), else fall back.
+        // Use "mark" snapshot if available, else fall back.
         if let Some(ref snapshot) = self.snapshots.mark {
             let total: u64 = snapshot
                 .pool_stake
@@ -3224,6 +3263,7 @@ mod tests {
             &cache,
             nc_stake,
             &state.governance.votes_by_action,
+            None,
         );
 
         assert_eq!(yes, 3_000_000_000); // 3 DReps * 1B
@@ -3263,6 +3303,7 @@ mod tests {
             &cache,
             nc_stake,
             &state.governance.votes_by_action,
+            None,
         );
 
         // Denominator = total active (10B) - abstain (4B) = 6B
@@ -3310,6 +3351,7 @@ mod tests {
             &cache,
             nc_stake,
             &state.governance.votes_by_action,
+            None,
         );
 
         // Total should only include active DRep stake (5B), not AlwaysAbstain (6B)
@@ -3357,6 +3399,7 @@ mod tests {
             &cache,
             nc_stake,
             &state.governance.votes_by_action,
+            None,
         );
 
         // NoConfidence action: AlwaysNoConfidence counts as Yes
@@ -3398,6 +3441,7 @@ mod tests {
             &cache,
             nc_stake,
             &state.governance.votes_by_action,
+            None,
         );
 
         // Non-NoConfidence: AlwaysNoConfidence counts as No (in denominator, not numerator)
@@ -4848,6 +4892,107 @@ mod tests {
         );
     }
 
+    /// Verify that `count_votes_by_type` uses the `pool_stake_override` when
+    /// provided, NOT `self.snapshots.mark`.  This matches Haskell's RATIFY which
+    /// uses `dpStakePoolDistr` (the mark from the PREVIOUS boundary, stored in
+    /// the DRep pulser) rather than the current mark.
+    ///
+    /// Regression test for #332: HardFork enactment timing mismatch caused by
+    /// using the wrong (post-SNAP-rotation) mark snapshot for SPO voting.
+    #[test]
+    fn test_spo_pool_stake_override_used_during_ratification() {
+        use crate::state::StakeSnapshot;
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.protocol_params.protocol_version_major = 9; // bootstrap
+        let pool_id = Hash28::from_bytes([42u8; 28]);
+
+        // Register the pool so SPO votes are recognized
+        Arc::make_mut(&mut state.pool_params).insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::ZERO,
+                pledge: Lovelace(1_000_000),
+                cost: Lovelace(340_000_000),
+                margin_numerator: 1,
+                margin_denominator: 100,
+                reward_account: vec![],
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+
+        // Mark snapshot: pool has 10B (this is the WRONG snapshot for ratification)
+        let mut mark_pool_stake = HashMap::new();
+        mark_pool_stake.insert(pool_id, Lovelace(10_000_000_000));
+        state.snapshots.mark = Some(StakeSnapshot {
+            epoch: EpochNo(2),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: mark_pool_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        });
+
+        // Override: pool has 3B (simulates the set snapshot = previous mark)
+        let mut override_pool_stake = HashMap::new();
+        override_pool_stake.insert(pool_id, Lovelace(3_000_000_000));
+
+        // Add a Yes vote from this pool
+        let action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([1u8; 32]),
+            action_index: 0,
+        };
+        let voter = Voter::StakePool(pool_id.to_hash32_padded());
+        let procedure = VotingProcedure {
+            vote: Vote::Yes,
+            anchor: None,
+        };
+        let mut votes = BTreeMap::new();
+        votes.insert(action_id.clone(), vec![(voter, procedure)]);
+
+        let cache = HashMap::new();
+
+        // WITHOUT override: should use mark (10B)
+        let (_, _, spo_yes_mark, _, _, _) = state.count_votes_by_type(
+            &action_id,
+            &GovAction::HardForkInitiation {
+                prev_action_id: None,
+                protocol_version: (10, 0),
+            },
+            &cache,
+            0,
+            &votes,
+            None,
+        );
+        assert_eq!(
+            spo_yes_mark, 10_000_000_000,
+            "Without override: must use mark (10B)"
+        );
+
+        // WITH override: should use the override (3B)
+        let (_, _, spo_yes_override, _, _, _) = state.count_votes_by_type(
+            &action_id,
+            &GovAction::HardForkInitiation {
+                prev_action_id: None,
+                protocol_version: (10, 0),
+            },
+            &cache,
+            0,
+            &votes,
+            Some(&override_pool_stake),
+        );
+        assert_eq!(
+            spo_yes_override, 3_000_000_000,
+            "With override: must use set (3B), not mark"
+        );
+    }
+
     // ─── SPO vote counting tests (spoAcceptedRatio) ───
 
     /// Build a state with pools in the mark snapshot for SPO vote counting tests.
@@ -4941,7 +5086,7 @@ mod tests {
 
         let cache = HashMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         assert_eq!(spo_yes, 1_000_000_000, "Only pool 0 voted Yes");
         assert_eq!(spo_abstain, 1_000_000_000, "Only pool 1 voted Abstain");
@@ -4986,7 +5131,7 @@ mod tests {
 
         let cache = HashMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         assert_eq!(spo_yes, 1_000_000_000);
         assert_eq!(
@@ -5023,7 +5168,7 @@ mod tests {
 
         let cache = HashMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         assert_eq!(spo_yes, 1_000_000_000);
         assert_eq!(
@@ -5081,7 +5226,7 @@ mod tests {
 
         let cache = HashMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         assert_eq!(spo_yes, 1_000_000_000, "Only pool 0 voted Yes");
         assert_eq!(
@@ -5129,7 +5274,7 @@ mod tests {
         let cache = HashMap::new();
         let votes = BTreeMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         // Pool 0 has AlwaysAbstain delegation → Abstain
         // Pool 1 has no reward account → No (default)
@@ -5168,7 +5313,7 @@ mod tests {
         let cache = HashMap::new();
         let votes = BTreeMap::new();
         let (_, _, spo_yes, spo_abstain, _, _) =
-            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes, None);
 
         assert_eq!(
             spo_yes, 1_000_000_000,

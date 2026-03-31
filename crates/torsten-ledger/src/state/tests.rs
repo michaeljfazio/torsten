@@ -5221,6 +5221,7 @@ fn test_drep_denominator_yes_no_only() {
         &drep_power_cache,
         no_confidence_stake,
         &state.governance.votes_by_action,
+        None,
     );
 
     assert_eq!(drep_yes, 3_000_000_000);
@@ -5270,6 +5271,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
         &drep_power_cache,
         no_confidence_stake,
         &state.governance.votes_by_action,
+        None,
     );
 
     // NoConfidence stake = 3B (counts as Yes for NoConfidence actions)
@@ -5333,6 +5335,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
         &drep_power_cache,
         no_confidence_stake,
         &state.governance.votes_by_action,
+        None,
     );
 
     // 2B yes (voted), 3B no (AlwaysNoConfidence), 3B implicit no (non-voting DReps)
@@ -6887,6 +6890,7 @@ fn test_abstain_excluded_from_denominator() {
         &cache,
         no_conf,
         &state.governance.votes_by_action,
+        None,
     );
 
     // DRep1 voted Yes (100), DRep3 voted No (100), DRep2 Abstain (excluded)
@@ -6961,6 +6965,7 @@ fn test_all_dreps_abstain() {
         &cache,
         no_conf,
         &state.governance.votes_by_action,
+        None,
     );
 
     // All abstain: yes=0, total=0
@@ -7069,6 +7074,7 @@ fn test_mix_yes_no_abstain_votes() {
         &cache,
         no_conf,
         &state.governance.votes_by_action,
+        None,
     );
 
     // 3 * 100 = 300 yes, 1 * 100 = 100 no, total = 400 (abstain excluded)
@@ -7224,6 +7230,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
         &cache,
         no_conf_stake,
         &state.governance.votes_by_action,
+        None,
     );
     assert_eq!(
         drep_yes, 500,
@@ -7238,6 +7245,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
         &cache,
         no_conf_stake,
         &state.governance.votes_by_action,
+        None,
     );
     assert_eq!(
         drep_yes_info, 0,
