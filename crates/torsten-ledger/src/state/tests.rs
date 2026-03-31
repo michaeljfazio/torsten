@@ -1477,10 +1477,14 @@ fn test_governance_proposal_deposit_refund() {
     assert_eq!(state.governance.proposals.len(), 1);
 
     // Advance past expiry (default lifetime is 6, expires_epoch = 0+6=6)
-    // Proposal expires when expires_epoch < new_epoch, i.e. at epoch 7.
+    // Expiry filter: expires_epoch < self.epoch (old epoch before transition)
+    // At transition to 7, self.epoch=6, 6 < 6 = false → still active
+    // At transition to 8, self.epoch=7, 6 < 7 = true → expired
     state.process_epoch_transition(EpochNo(6));
     assert_eq!(state.governance.proposals.len(), 1); // still active through epoch 6
     state.process_epoch_transition(EpochNo(7));
+    assert_eq!(state.governance.proposals.len(), 1); // still active (6 < 6 = false)
+    state.process_epoch_transition(EpochNo(8));
 
     // Proposal should be expired
     assert!(state.governance.proposals.is_empty());
@@ -1835,16 +1839,17 @@ fn test_governance_proposal_expiry() {
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Advance to epoch 6 — should still be active (expires_epoch = 6, active through epoch 6)
-    // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — proposals are active
-    // through their expiresAfter epoch.
-    for e in 1..=6 {
+    // Advance to epoch 7 — should still be active (expires_epoch = 6, active through epoch 7)
+    // Expiry filter: expires_epoch < self.epoch (old epoch before transition)
+    // At transition to 7, self.epoch=6, 6 < 6 = false → still active
+    // At transition to 8, self.epoch=7, 6 < 7 = true → expired
+    for e in 1..=7 {
         state.process_epoch_transition(EpochNo(e));
     }
     assert_eq!(state.governance.proposals.len(), 1);
 
-    // Advance to epoch 7 — should expire (6 < 7)
-    state.process_epoch_transition(EpochNo(7));
+    // Advance to epoch 8 — should expire (self.epoch=7, 6 < 7 = true)
+    state.process_epoch_transition(EpochNo(8));
     assert_eq!(state.governance.proposals.len(), 0);
 }
 
@@ -1959,13 +1964,17 @@ fn test_info_action_never_ratified() {
     assert_eq!(state.governance.proposals.len(), 1); // still active
     assert!(state.governance.last_ratified.is_empty()); // not ratified
 
-    // Should expire at proposed_epoch(0) + lifetime(3) = epoch 3
+    // expires_epoch = 0 + 3 = 3; expiry filter: expires_epoch < self.epoch (old epoch)
+    // At transition to 4, self.epoch=3, 3 < 3 = false → still active
+    // At transition to 5, self.epoch=4, 3 < 4 = true → expired
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(state.governance.proposals.len(), 1); // still active
     state.process_epoch_transition(EpochNo(3));
-    assert_eq!(state.governance.proposals.len(), 1); // expires_epoch = 3, 3 < 3 = false
+    assert_eq!(state.governance.proposals.len(), 1); // still active (self.epoch=2, 3 < 2 = false)
     state.process_epoch_transition(EpochNo(4));
-    assert_eq!(state.governance.proposals.len(), 0); // expired: 3 < 4 = true
+    assert_eq!(state.governance.proposals.len(), 1); // still active (self.epoch=3, 3 < 3 = false)
+    state.process_epoch_transition(EpochNo(5));
+    assert_eq!(state.governance.proposals.len(), 0); // expired (self.epoch=4, 3 < 4 = true)
     assert_eq!(state.governance.last_expired.len(), 1);
 }
 
@@ -2002,15 +2011,20 @@ fn test_ratify_state_tracks_expired_proposals() {
     assert!(state.governance.last_ratified.is_empty());
     assert!(state.governance.last_expired.is_empty());
 
-    // Epoch 2: still active (expires_epoch = 2, active through epoch 2)
-    // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — 2 < 2 is false
+    // Epoch 2: still active (expires_epoch = 2, self.epoch=1, 2 < 1 = false)
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(state.governance.proposals.len(), 1);
     assert!(state.governance.last_ratified.is_empty());
     assert!(state.governance.last_expired.is_empty());
 
-    // Epoch 3: proposal expires (2 < 3)
+    // Epoch 3: still active (self.epoch=2, 2 < 2 = false)
     state.process_epoch_transition(EpochNo(3));
+    assert_eq!(state.governance.proposals.len(), 1);
+    assert!(state.governance.last_ratified.is_empty());
+    assert!(state.governance.last_expired.is_empty());
+
+    // Epoch 4: proposal expires (self.epoch=3, 2 < 3 = true)
+    state.process_epoch_transition(EpochNo(4));
     assert_eq!(state.governance.proposals.len(), 0);
     assert!(state.governance.last_ratified.is_empty());
     assert_eq!(state.governance.last_expired.len(), 1);

@@ -595,7 +595,7 @@ impl LedgerState {
     ///
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
-    pub(crate) fn ratify_proposals(&mut self, new_epoch: EpochNo) {
+    pub(crate) fn ratify_proposals(&mut self) {
         let total_drep_stake = self.compute_total_drep_stake();
         let total_spo_stake = self.compute_total_spo_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
@@ -688,8 +688,9 @@ impl LedgerState {
         for (action_id, action, expires) in &candidates {
             // Per Haskell RATIFY: skip proposals whose expiry epoch has passed.
             // `gasExpiresAfter < reCurrentEpoch` — Haskell's `reCurrentEpoch` is
-            // the epoch being transitioned INTO (new_epoch), not the current one.
-            if *expires < new_epoch {
+            // the epoch during which the DRep pulser ran (self.epoch = old epoch),
+            // matching `currentEpoch` at the time RATIFY is evaluated.
+            if *expires < self.epoch {
                 continue;
             }
 
@@ -3575,8 +3576,10 @@ mod tests {
         );
 
         // expires_epoch = 0 + 3 = 3 (per Haskell gasExpiresAfter)
-        // Active through epoch 3, expires at epoch 4
-        for e in 1..=3 {
+        // Expiry filter uses self.epoch (old epoch): expires_epoch < self.epoch
+        // A proposal with expires_epoch = 3 is active through epoch 4
+        // (at transition to 5, self.epoch=4, 3 < 4 = true → expired)
+        for e in 1..=4 {
             state.process_epoch_transition(EpochNo(e));
             assert_eq!(
                 state.governance.proposals.len(),
@@ -3586,7 +3589,7 @@ mod tests {
             );
         }
 
-        state.process_epoch_transition(EpochNo(4));
+        state.process_epoch_transition(EpochNo(5));
         assert_eq!(state.governance.proposals.len(), 0); // Expired
     }
 
@@ -3664,12 +3667,17 @@ mod tests {
             },
         );
 
-        // Expire at epoch 2 (expires_epoch = 0 + 1 = 1, expired when 1 < 2)
+        // expires_epoch = 0 + 1 = 1; expiry filter: expires_epoch < self.epoch (old epoch)
+        // At transition to 2, self.epoch=1, 1 < 1 = false → still active
+        // At transition to 3, self.epoch=2, 1 < 2 = true → expired
         state.process_epoch_transition(EpochNo(1));
-        assert_eq!(state.governance.proposals.len(), 1); // Still active at epoch 1
+        assert_eq!(state.governance.proposals.len(), 1); // Still active
 
         state.process_epoch_transition(EpochNo(2));
-        assert_eq!(state.governance.proposals.len(), 0); // Expired
+        assert_eq!(state.governance.proposals.len(), 1); // Still active (1 < 1 = false)
+
+        state.process_epoch_transition(EpochNo(3));
+        assert_eq!(state.governance.proposals.len(), 0); // Expired (1 < 2 = true)
 
         // Deposit should be refunded
         assert_eq!(

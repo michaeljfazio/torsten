@@ -579,19 +579,26 @@ impl LedgerState {
         }
 
         // Ratify governance proposals that have met their voting thresholds.
-        // Pass new_epoch so the expiry skip uses the Haskell-correct
-        // `reCurrentEpoch` (the epoch being transitioned into).
-        self.ratify_proposals(new_epoch);
+        // The ratification skip uses self.epoch (the old epoch), matching
+        // Haskell's reCurrentEpoch from the DRep pulser.
+        self.ratify_proposals();
 
         // Expire governance proposals that have passed their lifetime
-        // and refund deposits to the return address
+        // and refund deposits to the return address.
+        //
+        // Per Haskell: gasExpiresAfter = proposedIn + govActionLifetime.
+        // A proposal is active while currentEpoch <= gasExpiresAfter.
+        // At the epoch boundary, `self.epoch` is still the old (completing) epoch.
+        // Removal uses `gasExpiresAfter < self.epoch`: the proposal has expired
+        // if its expires_epoch is strictly before the current (old) epoch.
+        // This means a proposal with expires_epoch = N is active through epoch N,
+        // and removed at the N+1→N+2 boundary (when self.epoch = N+1).
+        let current_epoch = self.epoch;
         let expired: Vec<torsten_primitives::transaction::GovActionId> = self
             .governance
             .proposals
             .iter()
-            // Per Haskell: `gasExpiresAfter < reCurrentEpoch` — proposals are active
-            // through their expires_epoch and expire at the NEXT epoch boundary.
-            .filter(|(_, state)| state.expires_epoch < new_epoch)
+            .filter(|(_, state)| state.expires_epoch < current_epoch)
             .map(|(id, _)| id.clone())
             .collect();
         if !expired.is_empty() {
