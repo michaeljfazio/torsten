@@ -254,11 +254,11 @@
 </ol>
 <p>Only blocks in the VolatileDB (the last k=2160 blocks) can be rolled back. Blocks that have been flushed to the ImmutableDB are permanent.</p>
 <h2 id="pipelined-chainsync"><a class="header" href="#pipelined-chainsync">Pipelined ChainSync</a></h2>
-<p>Torsten uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each <code>MsgRollForward</code> before requesting the next header, the node sends up to 150 <code>MsgRequestNext</code> messages concurrently (configurable via <code>TORSTEN_PIPELINE_DEPTH</code>).</p>
+<p>Torsten uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each <code>MsgRollForward</code> before requesting the next header, the node sends up to 300 <code>MsgRequestNext</code> messages concurrently (configurable via <code>TORSTEN_PIPELINE_DEPTH</code>).</p>
 <p>This bypasses pallas' serial ChainSync state machine in favor of a custom implementation that manages the pipeline depth directly.</p>
 <h2 id="performance-characteristics"><a class="header" href="#performance-characteristics">Performance Characteristics</a></h2>
 <ul>
-<li><strong>Header collection</strong> is pipelined per peer (up to 150 in-flight requests, configurable via <code>TORSTEN_PIPELINE_DEPTH</code>)</li>
+<li><strong>Header collection</strong> is pipelined per peer (up to 300 in-flight requests, configurable via <code>TORSTEN_PIPELINE_DEPTH</code>)</li>
 <li><strong>Block fetching</strong> is parallelized across up to 4 concurrent peers</li>
 <li><strong>Block processing</strong> is batched (500 blocks per batch) with single-lock acquisition</li>
 <li><strong>Throughput</strong> depends on network latency, peer count, and block sizes</li>

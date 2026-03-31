@@ -431,7 +431,7 @@ TxSubmission2 section for full table), and <code>serialised_header_bytes</code> 
 <p>Source: <code>ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/PipelineDecision.hs</code></p>
 <p>ChainSync uses the <code>pipelineDecisionLowHighMark</code> strategy with default marks
 <code>lowMark=200, highMark=300</code> (Torsten uses configurable depth via
-<code>TORSTEN_PIPELINE_DEPTH</code>, default 150).</p>
+<code>TORSTEN_PIPELINE_DEPTH</code>, default 300).</p>
 <pre><code>pipelineDecisionLowHighMark :: Word16 -&gt; Word16 -&gt; MkPipelineDecision
 </code></pre>
 <p>Decision logic (given <code>n</code> outstanding requests, <code>clientTip</code>, <code>serverTip</code>):</p>
