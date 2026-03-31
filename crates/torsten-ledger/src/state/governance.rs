@@ -732,21 +732,14 @@ impl LedgerState {
             // Check voting thresholds using snapshot data
             if let Some(state) = snap_proposals.get(action_id) {
                 // Compute vote counts for logging
-                let (
-                    _drep_yes,
-                    _drep_total,
-                    _spo_yes,
-                    _spo_voted,
-                    _spo_abstain,
-                    _cc_yes,
-                    _cc_total,
-                ) = self.count_votes_by_type(
-                    action_id,
-                    &state.procedure.gov_action,
-                    &drep_power_cache,
-                    no_confidence_stake,
-                    &snap_votes,
-                );
+                let (_drep_yes, _drep_total, _spo_yes, _spo_abstain, _cc_yes, _cc_total) = self
+                    .count_votes_by_type(
+                        action_id,
+                        &state.procedure.gov_action,
+                        &drep_power_cache,
+                        no_confidence_stake,
+                        &snap_votes,
+                    );
                 let remaining_treasury = self.treasury.0.saturating_sub(enacted_withdrawals_total);
                 let met = self.check_ratification(
                     action_id,
@@ -886,8 +879,10 @@ impl LedgerState {
         committee_threshold: &Option<Rational>,
         remaining_treasury: u64,
     ) -> bool {
-        // Count votes by voter type (uses pre-computed DRep power cache)
-        let (drep_yes, drep_total, spo_yes, spo_voted, spo_abstain, _cc_yes, _cc_total) = self
+        // Count votes by voter type (uses pre-computed DRep power cache).
+        // SPO votes now iterate ALL pools in the mark snapshot, not just explicit
+        // voters, matching Haskell's `spoAcceptedRatio` accumStake fold.
+        let (drep_yes, drep_total, spo_yes, spo_abstain, _cc_yes, _cc_total) = self
             .count_votes_by_type(
                 action_id,
                 &state.procedure.gov_action,
@@ -898,14 +893,9 @@ impl LedgerState {
 
         let bootstrap = self.is_bootstrap_phase();
 
-        // Compute effective SPO denominator based on action type and bootstrap state.
-        let effective_spo_denom = |action: &GovAction| -> u64 {
-            if matches!(action, GovAction::HardForkInitiation { .. }) {
-                total_spo_stake
-            } else {
-                spo_voted.saturating_sub(spo_abstain)
-            }
-        };
+        // SPO denominator = totalActiveStake − abstainStake (always, for all
+        // action types). This matches Haskell's `spoAcceptedRatio` formula.
+        let spo_denom = total_spo_stake.saturating_sub(spo_abstain);
 
         // Helper closure for CC approval checks using snapshot committee data
         let cc_met_fn = |aid: &GovActionId| -> bool {
@@ -945,11 +935,7 @@ impl LedgerState {
                 let spo_met = if let Some(ref spo_threshold) =
                     pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
                 {
-                    check_threshold(
-                        spo_yes,
-                        effective_spo_denom(&state.procedure.gov_action),
-                        spo_threshold,
-                    )
+                    check_threshold(spo_yes, spo_denom, spo_threshold)
                 } else {
                     true
                 };
@@ -970,7 +956,6 @@ impl LedgerState {
                 };
                 let spo_threshold = &self.protocol_params.pvt_hard_fork;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_denom = effective_spo_denom(&state.procedure.gov_action);
                 let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 let cc_met = cc_met_fn(action_id);
                 debug!(
@@ -998,14 +983,23 @@ impl LedgerState {
                 };
                 let spo_threshold = &self.protocol_params.pvt_motion_no_confidence;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_met = check_threshold(
-                    spo_yes,
-                    effective_spo_denom(&state.procedure.gov_action),
-                    spo_threshold,
-                );
+                let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 drep_met && spo_met
             }
-            GovAction::UpdateCommittee { .. } => {
+            GovAction::UpdateCommittee { members_to_add, .. } => {
+                // Haskell RATIFY: `validCommitteeTerm` — all new members' expiry epochs
+                // must be ≤ currentEpoch + committeeMaxTermLength. Only new members are
+                // checked (retained members are not re-validated).
+                let max_expiry = self.epoch.0 + self.protocol_params.committee_max_term_length;
+                if members_to_add.values().any(|&exp| exp > max_expiry) {
+                    debug!(
+                        action_id = %action_id.transaction_id.to_hex(),
+                        max_expiry,
+                        "UpdateCommittee rejected: member expiry exceeds committeeMaxTermLength"
+                    );
+                    return false;
+                }
+
                 let rational_zero = Rational {
                     numerator: 0,
                     denominator: 1,
@@ -1037,11 +1031,7 @@ impl LedgerState {
                     )
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
-                let spo_met = check_threshold(
-                    spo_yes,
-                    effective_spo_denom(&state.procedure.gov_action),
-                    spo_threshold,
-                );
+                let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 drep_met && spo_met
             }
             GovAction::NewConstitution { .. } => {
@@ -1096,13 +1086,18 @@ impl LedgerState {
     /// Per Haskell `dRepAcceptedRatio` / `spoAcceptedRatio`:
     /// - DRep denominator = total active DRep-delegated stake - abstain stake
     ///   (non-voting active DReps count as implicit No in denominator)
-    /// - SPO: returns explicit yes votes; total SPO stake used as denominator
+    /// - SPO: iterates ALL pools in the mark snapshot distribution, classifying
+    ///   non-voters per Haskell rules (bootstrap → Abstain for non-HardFork,
+    ///   post-bootstrap → `defaultStakePoolVote` based on DRep delegation)
+    /// - SPO denominator = totalActiveStake - abstainStake (always)
     /// - AlwaysNoConfidence stake counts as Yes for NoConfidence, No otherwise
     /// - AlwaysAbstain stake is excluded from both numerator and denominator
     /// - Inactive/expired DReps are excluded (handled by drep_power_cache)
     ///
     /// The `votes_by_action` parameter is passed explicitly so that `ratify_proposals()`
     /// can supply either live votes or a [`RatificationSnapshot`]'s frozen votes.
+    ///
+    /// Returns `(drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)`.
     pub(crate) fn count_votes_by_type(
         &self,
         action_id: &GovActionId,
@@ -1110,15 +1105,13 @@ impl LedgerState {
         drep_power_cache: &HashMap<Hash32, u64>,
         no_confidence_stake: u64,
         votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
-    ) -> (u64, u64, u64, u64, u64, u64, u64) {
-        let mut spo_yes = 0u64;
-        let mut spo_total = 0u64;
-        let mut spo_abstain = 0u64;
+    ) -> (u64, u64, u64, u64, u64, u64) {
         let mut cc_yes = 0u64;
         let mut cc_total = 0u64;
 
-        // Build DRep hash -> Vote map for this specific action
+        // Build DRep hash -> Vote and SPO pool_id -> Vote maps for this action
         let mut drep_votes: HashMap<Hash32, Vote> = HashMap::new();
+        let mut spo_votes: HashMap<Hash28, Vote> = HashMap::new();
 
         let empty = vec![];
         let action_votes = votes_by_action.get(action_id).unwrap_or(&empty);
@@ -1136,13 +1129,7 @@ impl LedgerState {
                         b.copy_from_slice(&pool_hash.as_bytes()[..28]);
                         b
                     });
-                    let pool_stake = self.compute_spo_voting_power(&pool_id);
-                    spo_total += pool_stake;
-                    match &procedure.vote {
-                        Vote::Yes => spo_yes += pool_stake,
-                        Vote::Abstain => spo_abstain += pool_stake,
-                        _ => {} // Explicit No: in denominator but not numerator
-                    }
+                    spo_votes.insert(pool_id, procedure.vote.clone());
                 }
                 Voter::ConstitutionalCommittee(_) => {
                     cc_total += 1;
@@ -1153,7 +1140,85 @@ impl LedgerState {
             }
         }
 
-        // Compute DRep ratio per Haskell `dRepAcceptedRatio`:
+        // ── SPO ratio per Haskell `spoAcceptedRatio` ──
+        //
+        // Iterate ALL pools in the mark snapshot distribution (not just explicit
+        // voters). For each pool, classify its vote per Haskell's accumStake:
+        //
+        //   Explicit Yes    → yes += stake
+        //   Explicit No     → (neither yes nor abstain — stays in denominator)
+        //   Explicit Abstain → abstain += stake
+        //   No vote + HardFork (any era)  → No
+        //   No vote + bootstrap + non-HardFork → Abstain
+        //   No vote + post-bootstrap + non-HardFork → defaultStakePoolVote
+        //
+        // Denominator = totalActiveStake − abstainStake (always, for all action types).
+        let bootstrap = self.is_bootstrap_phase();
+        let is_hardfork = matches!(action, GovAction::HardForkInitiation { .. });
+        let is_no_confidence = matches!(action, GovAction::NoConfidence { .. });
+
+        let mut spo_yes = 0u64;
+        let mut spo_abstain = 0u64;
+
+        // Get the pool distribution from the mark snapshot (same source as
+        // compute_spo_voting_power and compute_total_spo_stake).
+        let mark_pool_stake: Option<&HashMap<Hash28, Lovelace>> =
+            self.snapshots.mark.as_ref().map(|s| &s.pool_stake);
+
+        if let Some(pool_stake) = mark_pool_stake {
+            for (pool_id, stake) in pool_stake {
+                let stake = stake.0;
+                match spo_votes.get(pool_id) {
+                    Some(Vote::Yes) => {
+                        spo_yes += stake;
+                    }
+                    Some(Vote::Abstain) => {
+                        spo_abstain += stake;
+                    }
+                    Some(Vote::No) => {
+                        // Explicit No: in denominator but not numerator or abstain.
+                    }
+                    None => {
+                        // Non-voter: classify per Haskell rules.
+                        // HardFork guard fires BEFORE bootstrap guard.
+                        if is_hardfork {
+                            // No vote on HardFork → No (in denom, not num)
+                        } else if bootstrap {
+                            // No vote during bootstrap on non-HardFork → Abstain
+                            spo_abstain += stake;
+                        } else {
+                            // Post-bootstrap: defaultStakePoolVote
+                            match self.default_spo_vote(pool_id) {
+                                DefaultVote::NoConfidence if is_no_confidence => {
+                                    spo_yes += stake;
+                                }
+                                DefaultVote::Abstain => {
+                                    spo_abstain += stake;
+                                }
+                                _ => {
+                                    // DefaultVote::No or NoConfidence on non-NoConfidence
+                                    // action: No (in denom, not num)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback: no mark snapshot (first epoch). Only count explicit voters
+            // with a simple delegation scan (matches pre-snapshot behavior).
+            for (pool_id, vote) in &spo_votes {
+                let stake = self.compute_spo_voting_power(pool_id);
+                match vote {
+                    Vote::Yes => spo_yes += stake,
+                    Vote::Abstain => spo_abstain += stake,
+                    Vote::No => {}
+                }
+            }
+        }
+
+        // ── DRep ratio per Haskell `dRepAcceptedRatio` ──
+        //
         // Iterate ALL active DRep stake (from drep_power_cache), not just voters.
         // Non-voting DReps are implicit No (in denominator, not numerator).
         let mut drep_yes = 0u64;
@@ -1179,7 +1244,6 @@ impl LedgerState {
         // - For NoConfidence actions: counts as Yes
         // - For all other actions: counts as No (in denominator, not numerator)
         // AlwaysNoConfidence is always in the denominator.
-        let is_no_confidence = matches!(action, GovAction::NoConfidence { .. });
         if no_confidence_stake > 0 {
             drep_total_all += no_confidence_stake;
             if is_no_confidence {
@@ -1192,15 +1256,32 @@ impl LedgerState {
         // DRep denominator = total active stake - abstain stake
         let drep_total = drep_total_all.saturating_sub(drep_abstain);
 
-        (
-            drep_yes,
-            drep_total,
-            spo_yes,
-            spo_total,
-            spo_abstain,
-            cc_yes,
-            cc_total,
-        )
+        (drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)
+    }
+
+    /// Determine the default vote for a non-voting SPO, per Haskell
+    /// `defaultStakePoolVote` from `Cardano.Ledger.Conway.Governance.Procedures`.
+    ///
+    /// Looks up the pool's reward account credential in `vote_delegations` to find
+    /// the DRep delegation. If the credential delegates to `AlwaysNoConfidence`,
+    /// returns `NoConfidence`; if `AlwaysAbstain`, returns `Abstain`; otherwise `No`.
+    fn default_spo_vote(&self, pool_id: &Hash28) -> DefaultVote {
+        // Look up the pool's reward account from pool_params
+        let pool_reg = self.pool_params.get(pool_id);
+        let reward_account = match pool_reg {
+            Some(reg) if reg.reward_account.len() >= 29 => &reg.reward_account,
+            _ => return DefaultVote::No,
+        };
+
+        // Extract the stake credential hash from the reward account
+        let cred_hash = Self::reward_account_to_hash(reward_account);
+
+        // Check DRep delegation for this credential
+        match self.governance.vote_delegations.get(&cred_hash) {
+            Some(DRep::NoConfidence) => DefaultVote::NoConfidence,
+            Some(DRep::Abstain) => DefaultVote::Abstain,
+            _ => DefaultVote::No,
+        }
     }
 
     /// Get the total stake for a credential: UTxO stake + reward balance.
@@ -2041,6 +2122,18 @@ fn prev_action_matches_enacted_root(
     enacted.is_some_and(|e| e == prev_id)
 }
 
+/// Default vote classification for non-voting SPOs, per Haskell
+/// `defaultStakePoolVote` from `Cardano.Ledger.Conway.Governance.Procedures`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefaultVote {
+    /// Pool's reward account delegates to AlwaysAbstain DRep
+    Abstain,
+    /// Pool's reward account delegates to AlwaysNoConfidence DRep
+    NoConfidence,
+    /// Pool not found, reward account not found, or delegates to a normal DRep
+    No,
+}
+
 /// Returns the governance action priority for ratification ordering.
 /// Lower number = higher priority, per Haskell's `actionPriority`.
 pub(crate) fn gov_action_priority(action: &GovAction) -> u8 {
@@ -2070,7 +2163,9 @@ pub(crate) fn is_delaying_action(action: &GovAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{credential_to_hash, DRepRegistration, LedgerState, PoolRegistration};
+    use crate::state::{
+        credential_to_hash, DRepRegistration, LedgerState, PoolRegistration, StakeSnapshot,
+    };
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use torsten_primitives::credentials::Credential;
@@ -2636,7 +2731,7 @@ mod tests {
         }
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::ParameterChange {
                 prev_action_id: None,
@@ -2679,7 +2774,7 @@ mod tests {
         }
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::InfoAction,
             &cache,
@@ -2726,7 +2821,7 @@ mod tests {
                                                   // DRep power cache should only have the 5 registered DReps
         assert_eq!(cache.len(), 5);
 
-        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::InfoAction,
             &cache,
@@ -2771,7 +2866,7 @@ mod tests {
         let (cache, nc_stake, _) = state.build_drep_power_cache();
         assert_eq!(nc_stake, 6_000_000_000); // 3 * 2B
 
-        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::NoConfidence {
                 prev_action_id: None,
@@ -2814,7 +2909,7 @@ mod tests {
         );
 
         let (cache, nc_stake, _) = state.build_drep_power_cache();
-        let (yes, total, _, _, _, _, _) = state.count_votes_by_type(
+        let (yes, total, _, _, _, _) = state.count_votes_by_type(
             &action_id,
             &GovAction::InfoAction,
             &cache,
@@ -3094,7 +3189,9 @@ mod tests {
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         let new_cred = Credential::VerificationKey(Hash28::from_bytes([30u8; 28]));
         let mut members_to_add = BTreeMap::new();
-        members_to_add.insert(new_cred, 500u64);
+        // Expiry must be ≤ currentEpoch + committeeMaxTermLength (Haskell
+        // `validCommitteeTerm`).  Default max term = 146.
+        members_to_add.insert(new_cred, 100u64);
 
         state.process_proposal(
             &tx_hash,
@@ -4255,6 +4352,384 @@ mod tests {
         assert_eq!(
             power, 9_000_000,
             "fallback scan must return live stake when no mark snapshot exists"
+        );
+    }
+
+    // ─── SPO vote counting tests (spoAcceptedRatio) ───
+
+    /// Build a state with pools in the mark snapshot for SPO vote counting tests.
+    /// Creates `n` pools with 1B stake each in the mark snapshot.
+    /// Pool IDs are Hash28([100+i; 28]).
+    fn spo_vote_test_state(n: usize, bootstrap: bool) -> LedgerState {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = if bootstrap { 9 } else { 10 };
+        params.committee_min_size = 0;
+        let mut state = LedgerState::new(params);
+        state.epoch_length = 100;
+        state.needs_stake_rebuild = false;
+
+        let mut mark_pool_stake = HashMap::new();
+        for i in 0..n {
+            let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
+            Arc::make_mut(&mut state.pool_params).insert(
+                pool_id,
+                PoolRegistration {
+                    pool_id,
+                    vrf_keyhash: Hash32::ZERO,
+                    pledge: Lovelace(1_000_000),
+                    cost: Lovelace(340_000_000),
+                    margin_numerator: 1,
+                    margin_denominator: 100,
+                    reward_account: vec![],
+                    owners: vec![],
+                    relays: vec![],
+                    metadata_url: None,
+                    metadata_hash: None,
+                },
+            );
+            mark_pool_stake.insert(pool_id, Lovelace(1_000_000_000));
+        }
+
+        state.snapshots.mark = Some(StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: mark_pool_stake,
+            pool_params: Arc::clone(&state.pool_params),
+            stake_distribution: Arc::new(HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        });
+
+        state
+    }
+
+    #[test]
+    fn test_spo_hardfork_abstain_excluded_from_denominator() {
+        // Per Haskell `spoAcceptedRatio`: SPO denominator is always
+        // totalActiveStake − abstainStake. For HardForkInitiation, non-voting
+        // pools count as No, but explicitly abstaining pools must be subtracted
+        // from the denominator.
+        //
+        // Setup: 5 pools × 1B each = 5B total
+        //   Pool 0: votes Yes (1B)
+        //   Pool 1: votes Abstain (1B)
+        //   Pools 2-4: don't vote (HardFork → No)
+        //
+        // Expected: spo_yes = 1B, spo_abstain = 1B
+        //   denom = 5B − 1B = 4B → ratio = 1/4 = 25%
+        let state = spo_vote_test_state(5, true);
+        let action_id = make_action_id(1, 0);
+        let action = GovAction::HardForkInitiation {
+            prev_action_id: None,
+            protocol_version: (10, 0),
+        };
+
+        let mut votes = BTreeMap::new();
+        votes.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::StakePool(Hash28::from_bytes([100u8; 28]).to_hash32_padded()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::StakePool(Hash28::from_bytes([101u8; 28]).to_hash32_padded()),
+                    VotingProcedure {
+                        vote: Vote::Abstain,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+
+        let cache = HashMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        assert_eq!(spo_yes, 1_000_000_000, "Only pool 0 voted Yes");
+        assert_eq!(spo_abstain, 1_000_000_000, "Only pool 1 voted Abstain");
+
+        // Denominator should be totalActive - abstain = 5B - 1B = 4B
+        let total_spo = state.compute_total_spo_stake();
+        let denom = total_spo.saturating_sub(spo_abstain);
+        assert_eq!(denom, 4_000_000_000, "HardFork denom excludes abstain");
+    }
+
+    #[test]
+    fn test_spo_bootstrap_nonvoters_abstain_for_non_hardfork() {
+        // During bootstrap (PV 9), non-voting pools on non-HardFork actions
+        // count as Abstain per Haskell. This effectively removes them from
+        // the denominator.
+        //
+        // Setup: 4 pools × 1B each = 4B total
+        //   Pool 0: votes Yes
+        //   Pools 1-3: don't vote → Abstain (bootstrap, non-HardFork)
+        //
+        // Expected: spo_yes = 1B, spo_abstain = 3B
+        //   denom = 4B − 3B = 1B → ratio = 1/1 = 100%
+        let state = spo_vote_test_state(4, true);
+        let action_id = make_action_id(2, 0);
+        let action = GovAction::ParameterChange {
+            prev_action_id: None,
+            protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+            policy_hash: None,
+        };
+
+        let mut votes = BTreeMap::new();
+        votes.insert(
+            action_id.clone(),
+            vec![(
+                Voter::StakePool(Hash28::from_bytes([100u8; 28]).to_hash32_padded()),
+                VotingProcedure {
+                    vote: Vote::Yes,
+                    anchor: None,
+                },
+            )],
+        );
+
+        let cache = HashMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        assert_eq!(spo_yes, 1_000_000_000);
+        assert_eq!(
+            spo_abstain, 3_000_000_000,
+            "Non-voting pools during bootstrap on non-HardFork count as Abstain"
+        );
+    }
+
+    #[test]
+    fn test_spo_bootstrap_nonvoters_no_for_hardfork() {
+        // During bootstrap, non-voting pools on HardForkInitiation count as No
+        // (the HardFork guard fires before the bootstrap guard in Haskell).
+        //
+        // Setup: 4 pools × 1B, 1 votes Yes, 3 don't vote
+        // Expected: spo_yes = 1B, spo_abstain = 0
+        let state = spo_vote_test_state(4, true);
+        let action_id = make_action_id(3, 0);
+        let action = GovAction::HardForkInitiation {
+            prev_action_id: None,
+            protocol_version: (10, 0),
+        };
+
+        let mut votes = BTreeMap::new();
+        votes.insert(
+            action_id.clone(),
+            vec![(
+                Voter::StakePool(Hash28::from_bytes([100u8; 28]).to_hash32_padded()),
+                VotingProcedure {
+                    vote: Vote::Yes,
+                    anchor: None,
+                },
+            )],
+        );
+
+        let cache = HashMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        assert_eq!(spo_yes, 1_000_000_000);
+        assert_eq!(
+            spo_abstain, 0,
+            "Non-voting pools on HardFork count as No even during bootstrap"
+        );
+    }
+
+    #[test]
+    fn test_spo_explicit_no_in_denominator_not_abstain() {
+        // Pools that explicitly vote No should remain in the denominator
+        // (they are not counted as abstain).
+        //
+        // Setup: 3 pools × 1B each = 3B total
+        //   Pool 0: votes Yes
+        //   Pool 1: votes No
+        //   Pool 2: votes Abstain
+        //
+        // Expected: spo_yes = 1B, spo_abstain = 1B
+        //   denom = 3B − 1B = 2B → ratio = 1/2 = 50%
+        let state = spo_vote_test_state(3, false);
+        let action_id = make_action_id(4, 0);
+        let action = GovAction::HardForkInitiation {
+            prev_action_id: None,
+            protocol_version: (11, 0),
+        };
+
+        let mut votes = BTreeMap::new();
+        votes.insert(
+            action_id.clone(),
+            vec![
+                (
+                    Voter::StakePool(Hash28::from_bytes([100u8; 28]).to_hash32_padded()),
+                    VotingProcedure {
+                        vote: Vote::Yes,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::StakePool(Hash28::from_bytes([101u8; 28]).to_hash32_padded()),
+                    VotingProcedure {
+                        vote: Vote::No,
+                        anchor: None,
+                    },
+                ),
+                (
+                    Voter::StakePool(Hash28::from_bytes([102u8; 28]).to_hash32_padded()),
+                    VotingProcedure {
+                        vote: Vote::Abstain,
+                        anchor: None,
+                    },
+                ),
+            ],
+        );
+
+        let cache = HashMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        assert_eq!(spo_yes, 1_000_000_000, "Only pool 0 voted Yes");
+        assert_eq!(
+            spo_abstain, 1_000_000_000,
+            "Only pool 2 is Abstain — explicit No is NOT Abstain"
+        );
+    }
+
+    #[test]
+    fn test_spo_default_vote_always_abstain() {
+        // Post-bootstrap: non-voting pool whose reward account delegates to
+        // AlwaysAbstain DRep should count as Abstain.
+        let mut state = spo_vote_test_state(2, false);
+        let pool_id = Hash28::from_bytes([100u8; 28]);
+
+        // Set up pool's reward account with an AlwaysAbstain DRep delegation
+        let reward_account = {
+            let mut ra = vec![0xe0u8]; // key-hash reward account header
+            ra.extend_from_slice(&[50u8; 28]);
+            ra
+        };
+        Arc::make_mut(&mut state.pool_params)
+            .get_mut(&pool_id)
+            .unwrap()
+            .reward_account = reward_account;
+
+        let cred_hash = LedgerState::reward_account_to_hash(
+            &[0xe0u8; 1]
+                .iter()
+                .chain(&[50u8; 28])
+                .copied()
+                .collect::<Vec<u8>>(),
+        );
+        Arc::make_mut(&mut state.governance)
+            .vote_delegations
+            .insert(cred_hash, DRep::Abstain);
+
+        let action_id = make_action_id(5, 0);
+        let action = GovAction::ParameterChange {
+            prev_action_id: None,
+            protocol_param_update: Box::new(ProtocolParamUpdate::default()),
+            policy_hash: None,
+        };
+
+        let cache = HashMap::new();
+        let votes = BTreeMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        // Pool 0 has AlwaysAbstain delegation → Abstain
+        // Pool 1 has no reward account → No (default)
+        assert_eq!(spo_yes, 0);
+        assert_eq!(
+            spo_abstain, 1_000_000_000,
+            "Pool with AlwaysAbstain delegation should count as Abstain"
+        );
+    }
+
+    #[test]
+    fn test_spo_default_vote_no_confidence_on_no_confidence_action() {
+        // Post-bootstrap: non-voting pool whose reward account delegates to
+        // AlwaysNoConfidence should count as Yes on NoConfidence actions.
+        let mut state = spo_vote_test_state(2, false);
+        let pool_id = Hash28::from_bytes([100u8; 28]);
+
+        // Set up pool's reward account
+        let mut reward_account = vec![0xe0u8];
+        reward_account.extend_from_slice(&[60u8; 28]);
+        Arc::make_mut(&mut state.pool_params)
+            .get_mut(&pool_id)
+            .unwrap()
+            .reward_account = reward_account.clone();
+
+        let cred_hash = LedgerState::reward_account_to_hash(&reward_account);
+        Arc::make_mut(&mut state.governance)
+            .vote_delegations
+            .insert(cred_hash, DRep::NoConfidence);
+
+        let action_id = make_action_id(6, 0);
+        let action = GovAction::NoConfidence {
+            prev_action_id: None,
+        };
+
+        let cache = HashMap::new();
+        let votes = BTreeMap::new();
+        let (_, _, spo_yes, spo_abstain, _, _) =
+            state.count_votes_by_type(&action_id, &action, &cache, 0, &votes);
+
+        assert_eq!(
+            spo_yes, 1_000_000_000,
+            "AlwaysNoConfidence pool counts as Yes on NoConfidence action"
+        );
+        assert_eq!(spo_abstain, 0);
+    }
+
+    #[test]
+    fn test_valid_committee_term_rejects_excessive_expiry() {
+        // UpdateCommittee proposals where new members' expiry exceeds
+        // currentEpoch + committeeMaxTermLength should fail ratification.
+        let mut state = gov_test_state(10, 10);
+        state.epoch = EpochNo(5);
+
+        let max_term = state.protocol_params.committee_max_term_length;
+        let too_long_expiry = state.epoch.0 + max_term + 1;
+
+        let tx_hash = Hash32::from_bytes([80u8; 32]);
+        let new_cred = Credential::VerificationKey(Hash28::from_bytes([31u8; 28]));
+        let mut members = BTreeMap::new();
+        members.insert(new_cred, too_long_expiry);
+
+        state.process_proposal(
+            &tx_hash,
+            0,
+            &ProposalProcedure {
+                deposit: Lovelace(100_000_000_000),
+                return_addr: vec![0u8; 29],
+                gov_action: GovAction::UpdateCommittee {
+                    prev_action_id: None,
+                    members_to_remove: vec![],
+                    members_to_add: members,
+                    threshold: Rational {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                },
+                anchor: make_anchor(),
+            },
+        );
+
+        let action_id = make_action_id(80, 0);
+        // Vote unanimously in favor
+        for i in 0..10 {
+            drep_vote(&mut state, i, &action_id, Vote::Yes);
+            spo_vote(&mut state, i, &action_id, Vote::Yes);
+        }
+
+        state.process_epoch_transition(EpochNo(6));
+        // Should NOT ratify — validCommitteeTerm check fails
+        assert!(
+            !state.governance.proposals.is_empty(),
+            "Proposal with excessive member expiry must not ratify"
         );
     }
 }

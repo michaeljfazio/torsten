@@ -5203,7 +5203,7 @@ fn test_drep_denominator_yes_no_only() {
     }
 
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::TreasuryWithdrawals {
             withdrawals: BTreeMap::new(),
@@ -5253,7 +5253,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
     assert_eq!(no_confidence_stake, 3_000_000_000);
 
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::NoConfidence {
             prev_action_id: None,
@@ -5315,7 +5315,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
     }
 
     let (drep_power_cache, no_confidence_stake, _) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::TreasuryWithdrawals {
             withdrawals: BTreeMap::new(),
@@ -6872,7 +6872,7 @@ fn test_abstain_excluded_from_denominator() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::InfoAction,
         &cache,
@@ -6946,7 +6946,7 @@ fn test_all_dreps_abstain() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::InfoAction,
         &cache,
@@ -7054,7 +7054,7 @@ fn test_mix_yes_no_abstain_votes() {
     );
 
     let (cache, no_conf, _abstain) = state.build_drep_power_cache();
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::InfoAction,
         &cache,
@@ -7207,7 +7207,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     let (cache, no_conf_stake, _) = state.build_drep_power_cache();
 
     // For NoConfidence action
-    let (drep_yes, drep_total, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes, drep_total, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::NoConfidence {
             prev_action_id: None,
@@ -7223,7 +7223,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     assert_eq!(drep_total, 500, "Total should include NoConfidence stake");
 
     // For InfoAction (non-NoConfidence)
-    let (drep_yes_info, drep_total_info, _, _, _, _, _) = state.count_votes_by_type(
+    let (drep_yes_info, drep_total_info, _, _, _, _) = state.count_votes_by_type(
         &action_id,
         &GovAction::InfoAction,
         &cache,
@@ -7651,7 +7651,9 @@ fn test_update_committee_no_cc_required() {
     let tx_hash = Hash32::from_bytes([43u8; 32]);
     let new_cc_cred = Credential::VerificationKey(Hash28::from_bytes([30u8; 28]));
     let mut members_to_add = std::collections::BTreeMap::new();
-    members_to_add.insert(new_cc_cred, 500u64); // expires epoch 500
+    // Expiry must be ≤ currentEpoch + committeeMaxTermLength (Haskell
+    // `validCommitteeTerm`).  Default max term = 146.
+    members_to_add.insert(new_cc_cred, 100u64); // expires epoch 100
 
     let proposal = ProposalProcedure {
         deposit: Lovelace(100_000_000_000),
@@ -7724,7 +7726,7 @@ fn test_update_committee_no_cc_required() {
     );
     assert_eq!(
         state.governance.committee_expiration[&new_cc_key],
-        EpochNo(500),
+        EpochNo(100),
         "CC member expiration should match"
     );
     // enacted_committee should be set
