@@ -833,6 +833,88 @@ impl LedgerState {
                 "Governance   {} proposal(s) ratified and enacted",
                 ratified.len()
             );
+
+            // Per Haskell `proposalsApplyEnactment`: when a proposal is enacted,
+            // all sibling proposals (same governance purpose, same prev_action_id)
+            // and their descendants are removed.  These are proposals that can
+            // never ratify because the enacted root for their purpose has changed.
+            let mut siblings_removed: Vec<GovActionId> = Vec::new();
+            for (enacted_id, enacted_state) in &ratified_with_state {
+                let enacted_action = &enacted_state.procedure.gov_action;
+                if let Some(enacted_prev) = gov_action_prev_id(enacted_action) {
+                    // Find siblings: same purpose + same prev_action_id, excluding enacted
+                    let sibling_ids: Vec<GovActionId> = self
+                        .governance
+                        .proposals
+                        .iter()
+                        .filter(|(id, state)| {
+                            *id != enacted_id
+                                && gov_action_prev_id(&state.procedure.gov_action)
+                                    == Some(enacted_prev)
+                                && gov_action_purpose_tag(&state.procedure.gov_action)
+                                    == gov_action_purpose_tag(enacted_action)
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+
+                    // Collect siblings + all descendants (transitive closure)
+                    let mut to_remove: Vec<GovActionId> = sibling_ids.clone();
+                    let mut frontier = sibling_ids;
+                    while !frontier.is_empty() {
+                        let mut next_frontier = Vec::new();
+                        for parent_id in &frontier {
+                            // Find proposals whose prev_action_id points to this parent
+                            for (id, state) in self.governance.proposals.iter() {
+                                if let Some(prev) = gov_action_prev_id(&state.procedure.gov_action)
+                                {
+                                    if prev.transaction_id == parent_id.transaction_id
+                                        && prev.action_index == parent_id.action_index
+                                        && !to_remove.contains(id)
+                                    {
+                                        to_remove.push(id.clone());
+                                        next_frontier.push(id.clone());
+                                    }
+                                }
+                            }
+                        }
+                        frontier = next_frontier;
+                    }
+
+                    siblings_removed.extend(to_remove);
+                }
+            }
+
+            // Remove siblings and refund deposits
+            if !siblings_removed.is_empty() {
+                for action_id in &siblings_removed {
+                    if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                        .proposals
+                        .remove(action_id)
+                    {
+                        let deposit = proposal_state.procedure.deposit;
+                        if deposit.0 > 0 {
+                            let return_addr = &proposal_state.procedure.return_addr;
+                            if return_addr.len() >= 29 {
+                                let key = Self::reward_account_to_hash(return_addr);
+                                if self.reward_accounts.contains_key(&key) {
+                                    *Arc::make_mut(&mut self.reward_accounts)
+                                        .entry(key)
+                                        .or_insert(Lovelace(0)) += deposit;
+                                } else {
+                                    self.treasury += deposit;
+                                }
+                            }
+                        }
+                    }
+                    Arc::make_mut(&mut self.governance)
+                        .votes_by_action
+                        .remove(action_id);
+                }
+                debug!(
+                    "Governance   {} sibling/descendant proposal(s) removed due to enactment",
+                    siblings_removed.len()
+                );
+            }
         }
 
         // Store ratification results for GetRatifyState query (tag 32)
@@ -2133,6 +2215,32 @@ enum DefaultVote {
     NoConfidence,
     /// Pool not found, reward account not found, or delegates to a normal DRep
     No,
+}
+
+/// Extract the `prev_action_id` from a governance action, if it has one.
+/// TreasuryWithdrawals and InfoAction have no prev_action_id.
+fn gov_action_prev_id(action: &GovAction) -> Option<&GovActionId> {
+    match action {
+        GovAction::ParameterChange { prev_action_id, .. }
+        | GovAction::HardForkInitiation { prev_action_id, .. }
+        | GovAction::NoConfidence { prev_action_id }
+        | GovAction::UpdateCommittee { prev_action_id, .. }
+        | GovAction::NewConstitution { prev_action_id, .. } => prev_action_id.as_ref(),
+        GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
+    }
+}
+
+/// Return a purpose tag for grouping governance actions by their governance
+/// purpose tree. Actions with the same tag share the same enacted root chain.
+/// Returns None for TreasuryWithdrawals and InfoAction (no purpose tree).
+fn gov_action_purpose_tag(action: &GovAction) -> Option<u8> {
+    match action {
+        GovAction::ParameterChange { .. } => Some(0),
+        GovAction::HardForkInitiation { .. } => Some(1),
+        GovAction::NoConfidence { .. } | GovAction::UpdateCommittee { .. } => Some(2),
+        GovAction::NewConstitution { .. } => Some(3),
+        GovAction::TreasuryWithdrawals { .. } | GovAction::InfoAction => None,
+    }
 }
 
 /// Returns the governance action priority for ratification ordering.
