@@ -316,17 +316,13 @@ impl LedgerState {
             epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
         });
 
-        // Capture the DRep distribution snapshot from the current live state.
-        //
-        // Per Haskell `snapDRepDistr` in `Conway.Rules.Epoch`, the DRep voting power
-        // used during ratification for the new epoch is measured against the stake
-        // distribution at the *start* of that epoch (i.e. now, after the mark snapshot
-        // is taken).  This snapshot is consumed by `build_drep_power_cache` during
-        // `ratify_proposals` so that mid-epoch delegation changes do not affect
-        // in-progress governance votes.
-        if self.protocol_params.protocol_version_major >= 9 {
-            self.capture_drep_distribution_snapshot();
-        }
+        // NOTE: DRep distribution snapshot is NOT captured here.  It is captured
+        // at the END of the epoch transition (alongside the ratification snapshot),
+        // matching Haskell's `setFreshDRepPulsingState` which initialises the DRep
+        // pulser from the post-EPOCH state.  The snapshot captured at the end of the
+        // N-1→N transition is consumed by `build_drep_power_cache()` during RATIFY
+        // at the N→N+1 boundary, giving it a one-epoch lag that matches the Haskell
+        // pulser's lifecycle.
 
         // Apply future pool parameters (re-registrations deferred from previous epoch).
         //
@@ -675,16 +671,51 @@ impl LedgerState {
             );
         }
 
-        // Capture the ratification snapshot for the NEXT epoch boundary.
+        // Capture the ratification snapshot AND DRep distribution for the NEXT
+        // epoch boundary.
         //
         // Per Haskell `setFreshDRepPulsingState`, the pulser is created from the
         // post-transition state — after ratification/expiry have pruned proposals,
         // enacted roots have been updated, DRep activity has been updated, and
-        // committee members have been expired.  This snapshot will be consumed by
-        // `ratify_proposals()` at the NEXT epoch boundary so that proposals/votes
-        // submitted during the new epoch are not considered until then.
+        // committee members have been expired.  Both snapshots will be consumed at
+        // the NEXT epoch boundary: the ratification snapshot by `ratify_proposals()`
+        // (so proposals/votes submitted during the new epoch are not considered),
+        // and the DRep distribution by `build_drep_power_cache()` (matching the
+        // one-epoch-lagged DRep pulser lifecycle in Haskell).
         if self.protocol_params.protocol_version_major >= 9 {
+            self.capture_drep_distribution_snapshot();
             self.capture_ratification_snapshot();
+        }
+
+        // Recalculate totalObligation (deposits) from scratch, matching Haskell's
+        // EPOCH rule which replaces utxosDeposited with a fresh sum.  This serves
+        // as both a correctness fix and a cross-check of incremental tracking.
+        {
+            let obl_stake: u64 = self.stake_key_deposits.values().sum();
+            let obl_pool: u64 = self.pool_deposits.values().sum();
+            let obl_drep: u64 = self.governance.dreps.values().map(|d| d.deposit.0).sum();
+            let obl_proposal: u64 = self
+                .governance
+                .proposals
+                .values()
+                .map(|p| p.procedure.deposit.0)
+                .sum();
+            let recalculated = obl_stake + obl_pool + obl_drep + obl_proposal;
+            let running = self.total_stake_key_deposits + obl_pool + obl_drep + obl_proposal;
+            if recalculated != running {
+                debug!(
+                    epoch = new_epoch.0,
+                    recalculated,
+                    running,
+                    diff = recalculated as i64 - running as i64,
+                    obl_stake,
+                    total_stake_key_deposits = self.total_stake_key_deposits,
+                    "totalObligation recalculation: deposit drift detected"
+                );
+            }
+            // Replace the running counter with the recalculated value,
+            // matching Haskell's `utxosDepositedL .~ totalObligation`.
+            self.total_stake_key_deposits = obl_stake;
         }
 
         // Compute new epoch nonce per Haskell TICKN rule:

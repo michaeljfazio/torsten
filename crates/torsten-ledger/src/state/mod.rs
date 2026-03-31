@@ -612,6 +612,13 @@ pub struct RatificationSnapshot {
     pub enacted_constitution: Option<GovActionId>,
     /// The epoch when this snapshot was captured.
     pub snapshot_epoch: EpochNo,
+    /// Vote delegations (credential → DRep) at snapshot time.
+    ///
+    /// Used by `default_spo_vote()` during ratification to determine the
+    /// implicit vote for non-voting SPOs, matching Haskell's
+    /// `dpDefaultDRepVoteDelegs` captured in the DRep pulser.
+    #[serde(default)]
+    pub vote_delegations: HashMap<Hash32, DRep>,
 }
 
 /// Registration state for a DRep

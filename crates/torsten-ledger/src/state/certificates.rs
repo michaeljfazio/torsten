@@ -131,6 +131,11 @@ impl LedgerState {
                     self.total_stake_key_deposits.saturating_sub(stored_deposit);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                // Remove DRep delegation — Haskell's unified map clears all credential
+                // data on deregistration, including vote delegations.
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .remove(&key);
                 self.script_stake_credentials.remove(&key);
                 // Remove pointer entries for this credential
                 self.pointer_map.retain(|_, v| *v != key);
@@ -174,6 +179,11 @@ impl LedgerState {
                     self.total_stake_key_deposits.saturating_sub(stored_deposit);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                // Remove DRep delegation — Haskell's unified map clears all credential
+                // data on deregistration, including vote delegations.
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .remove(&key);
                 self.script_stake_credentials.remove(&key);
                 // Remove pointer entries for this credential (matching StakeDeregistration).
                 // Even though ptr_stake is empty in Conway, the pointer_map should reflect
@@ -668,6 +678,9 @@ impl LedgerState {
                     self.total_stake_key_deposits.saturating_sub(stored_deposit);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .remove(&key);
                 self.script_stake_credentials.remove(&key);
                 self.pointer_map.retain(|_, v| *v != key);
                 // Pass None for pointer: during deregistration we don't track the
@@ -723,6 +736,9 @@ impl LedgerState {
                     self.total_stake_key_deposits.saturating_sub(stored_deposit);
                 Arc::make_mut(&mut self.delegations).remove(&key);
                 Arc::make_mut(&mut self.reward_accounts).remove(&key);
+                Arc::make_mut(&mut self.governance)
+                    .vote_delegations
+                    .remove(&key);
                 self.script_stake_credentials.remove(&key);
                 self.pointer_map.retain(|_, v| *v != key);
                 delta.delegation_changes.push(DelegationChange::Deregister {

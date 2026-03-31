@@ -890,6 +890,50 @@ fn build_epoch_snapshot(
         .sum();
     let deposit_total = deposit_stake_key + deposit_pool + deposit_drep + deposit_proposal;
 
+    // DRep distribution for cross-validation.
+    let (drep_cache, drep_no_conf, drep_abstain_val) = ledger.build_drep_power_cache();
+    let mut drep_distr_map = serde_json::Map::new();
+    for (hash, power) in &drep_cache {
+        drep_distr_map.insert(
+            format!("drep-keyHash-{}", &hash.to_hex()[..30]),
+            serde_json::Value::Number((*power).into()),
+        );
+    }
+    drep_distr_map.insert(
+        "drep-alwaysNoConfidence".to_string(),
+        serde_json::Value::Number(drep_no_conf.into()),
+    );
+    drep_distr_map.insert(
+        "drep-alwaysAbstain".to_string(),
+        serde_json::Value::Number(drep_abstain_val.into()),
+    );
+    let drep_distr = serde_json::Value::Object(drep_distr_map);
+
+    // Proposal details for cross-validation debugging.
+    let proposal_details: Vec<serde_json::Value> = ledger
+        .governance
+        .proposals
+        .iter()
+        .map(|(id, state)| {
+            serde_json::json!({
+                "txId": id.transaction_id.to_hex(),
+                "index": id.action_index,
+                "expiresEpoch": state.expires_epoch.0,
+                "proposedEpoch": state.proposed_epoch.0,
+                "deposit": state.procedure.deposit.0,
+                "actionType": match &state.procedure.gov_action {
+                    torsten_primitives::transaction::GovAction::ParameterChange { .. } => "ParameterChange",
+                    torsten_primitives::transaction::GovAction::HardForkInitiation { .. } => "HardForkInitiation",
+                    torsten_primitives::transaction::GovAction::TreasuryWithdrawals { .. } => "TreasuryWithdrawals",
+                    torsten_primitives::transaction::GovAction::NoConfidence { .. } => "NoConfidence",
+                    torsten_primitives::transaction::GovAction::UpdateCommittee { .. } => "UpdateCommittee",
+                    torsten_primitives::transaction::GovAction::NewConstitution { .. } => "NewConstitution",
+                    torsten_primitives::transaction::GovAction::InfoAction => "InfoAction",
+                },
+            })
+        })
+        .collect();
+
     // Protocol params summary.
     // Use prev_protocol_params (esPrevPp) to match cstreamer's convention:
     // cstreamer dumps the params that governed the PREVIOUS epoch, not the
@@ -985,6 +1029,8 @@ fn build_epoch_snapshot(
             "proposal": deposit_proposal,
             "total": deposit_total,
         },
+        "proposals": proposal_details,
+        "drepDistr": drep_distr,
         "protocolParams": protocol_params,
         "rupdNext": rupd_next,
         "snapshots": {
