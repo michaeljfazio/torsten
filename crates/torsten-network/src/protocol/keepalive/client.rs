@@ -36,12 +36,26 @@ pub struct KeepAliveClient {
     interval: Duration,
     /// Cancellation token for graceful shutdown.
     cancel: CancellationToken,
+    /// Optional sender for reporting each RTT measurement (in milliseconds).
+    /// Fires on every successful pong so the caller can track current peer latency.
+    rtt_tx: Option<tokio::sync::mpsc::Sender<f64>>,
 }
 
 impl KeepAliveClient {
     /// Create a new KeepAlive client with the given ping interval.
     pub fn new(interval: Duration, cancel: CancellationToken) -> Self {
-        Self { interval, cancel }
+        Self {
+            interval,
+            cancel,
+            rtt_tx: None,
+        }
+    }
+
+    /// Attach an RTT reporting channel. Each successful pong will send the
+    /// round-trip time in milliseconds on this channel (non-blocking).
+    pub fn with_rtt_sender(mut self, tx: tokio::sync::mpsc::Sender<f64>) -> Self {
+        self.rtt_tx = Some(tx);
+        self
     }
 
     /// Run the keepalive loop. Returns the last measured RTT on clean shutdown.
@@ -92,12 +106,18 @@ impl KeepAliveClient {
                             }
                             // Successful pong — reset failure counter.
                             consecutive_failures = 0;
-                            last_rtt = Some(start.elapsed());
+                            let elapsed = start.elapsed();
+                            last_rtt = Some(elapsed);
+                            let rtt_ms = elapsed.as_secs_f64() * 1000.0;
                             tracing::debug!(
                                 cookie,
-                                rtt_ms = start.elapsed().as_millis(),
+                                rtt_ms = rtt_ms as u64,
                                 "keepalive: pong received"
                             );
+                            // Report RTT to the caller for live latency tracking.
+                            if let Some(ref tx) = self.rtt_tx {
+                                let _ = tx.try_send(rtt_ms);
+                            }
                         }
                         other => {
                             return Err(ProtocolError::StateViolation {

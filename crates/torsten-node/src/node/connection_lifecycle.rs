@@ -219,6 +219,13 @@ pub struct ConnectionLifecycleManager {
     /// for the mux to die via `cleanup_dead_connections()`.
     peer_failure_tx: mpsc::Sender<SocketAddr>,
 
+    /// Channel for KeepAlive tasks to report per-pong RTT measurements.
+    ///
+    /// Each successful KeepAlive pong sends `(peer_addr, rtt_ms)` here so the
+    /// main run loop can update PeerManager EWMA latency and Prometheus gauges
+    /// with current peer RTT values (not cumulative histogram counts).
+    keepalive_rtt_tx: mpsc::Sender<(SocketAddr, f64)>,
+
     /// GSM event sender — passed to ChainSync tasks so they can emit
     /// PeerRegistered, BlockReceived, PeerTipUpdated, PeerActive, PeerIdling
     /// events to the GSM actor.
@@ -273,6 +280,7 @@ impl ConnectionLifecycleManager {
     /// * `metrics` — Prometheus metrics handle for recording peer latencies
     /// * `mempool` — Shared mempool for TxSubmission2 tx relay
     /// * `peer_failure_tx` — Channel for protocol tasks to report peer failures
+    /// * `keepalive_rtt_tx` — Channel for KeepAlive tasks to report per-pong RTT
     /// * `gsm_event_tx` — GSM event sender for ChainSync tasks
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -291,6 +299,7 @@ impl ConnectionLifecycleManager {
         metrics: Arc<NodeMetrics>,
         mempool: Arc<Mempool>,
         peer_failure_tx: mpsc::Sender<SocketAddr>,
+        keepalive_rtt_tx: mpsc::Sender<(SocketAddr, f64)>,
         gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
     ) -> Self {
         Self {
@@ -312,6 +321,7 @@ impl ConnectionLifecycleManager {
             metrics,
             mempool,
             peer_failure_tx,
+            keepalive_rtt_tx,
             gsm_event_tx,
         }
     }
@@ -781,6 +791,7 @@ impl ConnectionLifecycleManager {
     /// monitors RTT measurements from responses.
     fn make_keepalive_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let peer_failure_tx = self.peer_failure_tx.clone();
+        let keepalive_rtt_tx = self.keepalive_rtt_tx.clone();
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
                 // CRITICAL: Delay the first KeepAlive ping until AFTER Hot protocols
@@ -797,10 +808,25 @@ impl ConnectionLifecycleManager {
                 // We delay 2 seconds to ensure Hot protocols are active first.
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+                // Per-peer RTT channel: each pong sends the RTT here, which the
+                // spawned forwarder relays to the main loop with the peer address.
+                let (rtt_tx, mut rtt_rx) = tokio::sync::mpsc::channel::<f64>(8);
+
+                // Forwarder task: tags each RTT measurement with the peer address
+                // and sends it to the main run loop for PeerManager EWMA + gauge updates.
+                let ka_rtt_tx = keepalive_rtt_tx;
+                let fwd_addr = addr;
+                tokio::spawn(async move {
+                    while let Some(rtt_ms) = rtt_rx.recv().await {
+                        let _ = ka_rtt_tx.try_send((fwd_addr, rtt_ms));
+                    }
+                });
+
                 let client = torsten_network::KeepAliveClient::new(
                     std::time::Duration::from_secs(30),
                     cancel,
-                );
+                )
+                .with_rtt_sender(rtt_tx);
                 match client.run(&mut channel).await {
                     Ok(_rtt) => debug!(%addr, "keepalive task completed"),
                     Err(torsten_network::error::ProtocolError::KeepAliveTimeout {

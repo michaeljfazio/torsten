@@ -118,6 +118,9 @@ pub struct Node {
     /// Receiver for peer failure reports from protocol tasks (e.g. fetch timeout).
     /// The main run loop drains this to call `peer_failed()` for reputation scoring.
     peer_failure_rx: Option<mpsc::Receiver<SocketAddr>>,
+    /// Receiver for KeepAlive RTT measurements from connected peers.
+    /// The main run loop uses these to update PeerManager EWMA and RTT gauges.
+    keepalive_rtt_rx: Option<mpsc::Receiver<(SocketAddr, f64)>>,
     pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
     pub(crate) peer_manager: Arc<RwLock<NodePeerManager>>,
     pub(crate) socket_path: PathBuf,
@@ -1225,6 +1228,7 @@ impl Node {
             block_fetch_task: None,
             fetched_blocks_rx: None,
             peer_failure_rx: None,
+            keepalive_rtt_rx: None,
             query_handler,
             peer_manager: Arc::new(RwLock::new({
                 let mut pm = NodePeerManager::new(PeerManagerConfig::default());
@@ -2130,6 +2134,7 @@ impl Node {
         // mux connection.
         let (fetched_blocks_tx, fetched_blocks_rx) = mpsc::channel::<FetchedBlock>(1000);
         let (peer_failure_tx, peer_failure_rx) = mpsc::channel::<SocketAddr>(64);
+        let (keepalive_rtt_tx, keepalive_rtt_rx) = mpsc::channel::<(SocketAddr, f64)>(256);
         let candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
@@ -2166,11 +2171,13 @@ impl Node {
             self.metrics.clone(),
             self.mempool.clone(),
             peer_failure_tx,
+            keepalive_rtt_tx,
             self.gsm_event_tx.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
         self.peer_failure_rx = Some(peer_failure_rx);
+        self.keepalive_rtt_rx = Some(keepalive_rtt_rx);
 
         // ─── Spawn BlockFetch Decision Task ──────────────────────────────
         //
@@ -2357,6 +2364,10 @@ impl Node {
             .peer_failure_rx
             .take()
             .expect("peer_failure_rx was just set");
+        let mut keepalive_rtt_rx = self
+            .keepalive_rtt_rx
+            .take()
+            .expect("keepalive_rtt_rx was just set");
 
         // Forge ticker — fires every second (slot granularity) to check
         // for block production opportunities.  Only active when the node
@@ -2586,6 +2597,20 @@ impl Node {
                     let mut pm = peer_manager.write().await;
                     warn!(%failed_addr, "peer reported as failed by protocol task");
                     pm.peer_failed(&failed_addr);
+                }
+
+                // ── KeepAlive RTT reports ──────────────────────────────
+                //
+                // Each pong from a connected peer sends (addr, rtt_ms).
+                // Update PeerManager EWMA latency and refresh the gauge
+                // metrics so Prometheus/monitor reflect current RTT, not
+                // cumulative handshake history.
+                Some((rtt_addr, rtt_ms)) = keepalive_rtt_rx.recv() => {
+                    let mut pm = peer_manager.write().await;
+                    pm.record_handshake_rtt(&rtt_addr, rtt_ms);
+                    // Refresh gauge metrics from current EWMA values.
+                    let latencies = pm.connected_peer_latencies();
+                    self.metrics.update_peer_rtt_gauges(&latencies);
                 }
 
                 // ── Forge ticker (block production) ─────────────────────

@@ -522,6 +522,18 @@ impl NodePeerManager {
         }
     }
 
+    /// Collect current EWMA latency values (ms) for all connected peers
+    /// (warm or hot) that have at least one RTT measurement.
+    pub fn connected_peer_latencies(&self) -> Vec<f64> {
+        use torsten_network::peer::PeerState;
+        self.inner
+            .peers_in_state(PeerState::Warm)
+            .iter()
+            .chain(self.inner.peers_in_state(PeerState::Hot).iter())
+            .filter_map(|addr| self.inner.get_peer(addr).and_then(|p| p.latency_ms))
+            .collect()
+    }
+
     /// Recompute reputation scores for all peers.
     pub fn recompute_reputations(&mut self) {
         self.inner.decay_all_failures();

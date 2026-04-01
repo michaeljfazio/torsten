@@ -303,16 +303,35 @@ impl RttBands {
         } else {
             None
         };
-        let min_ms = snap
-            .values
-            .get("torsten_peer_handshake_rtt_ms_min")
-            .copied()
-            .or(min_approx);
-        let max_ms = snap
-            .values
-            .get("torsten_peer_handshake_rtt_ms_max")
-            .copied()
-            .or(max_approx);
+        // Prefer live gauge metrics (from KeepAlive EWMA) over cumulative
+        // histogram-derived values. The gauges reflect current peer RTT,
+        // not all-time handshake history.
+        let gauge_avg = snap.values.get("torsten_peer_rtt_avg_ms").copied();
+        let gauge_min = snap.values.get("torsten_peer_rtt_min_ms").copied();
+        let gauge_max = snap.values.get("torsten_peer_rtt_max_ms").copied();
+
+        // Use gauge values when available and non-zero (zero means no connected
+        // peers have RTT measurements yet). Fall back to histogram approximations.
+        let avg_ms = match gauge_avg {
+            Some(v) if v > 0.0 => Some(v),
+            _ => avg_ms,
+        };
+        let min_ms = match gauge_min {
+            Some(v) if v > 0.0 => Some(v),
+            _ => snap
+                .values
+                .get("torsten_peer_handshake_rtt_ms_min")
+                .copied()
+                .or(min_approx),
+        };
+        let max_ms = match gauge_max {
+            Some(v) if v > 0.0 => Some(v),
+            _ => snap
+                .values
+                .get("torsten_peer_handshake_rtt_ms_max")
+                .copied()
+                .or(max_approx),
+        };
 
         RttBands {
             band_0_50,

@@ -399,10 +399,17 @@ pub struct NodeMetrics {
     pub n2c_txs_rejected: AtomicU64,
     /// Per-protocol-error-type counts (label → count).
     protocol_errors: std::sync::Mutex<HashMap<String, u64>>,
-    /// Peer handshake RTT histogram (milliseconds)
+    /// Peer handshake RTT histogram (milliseconds) — cumulative, for Prometheus.
     pub peer_handshake_rtt_ms: Histogram,
     /// Block fetch latency histogram (milliseconds per block)
     pub peer_block_fetch_ms: Histogram,
+    /// Current average RTT across connected peers (milliseconds, gauge).
+    /// Updated on each KeepAlive pong from the PeerManager's EWMA values.
+    pub peer_rtt_avg_ms: AtomicU64,
+    /// Current minimum RTT across connected peers (milliseconds, gauge).
+    pub peer_rtt_min_ms: AtomicU64,
+    /// Current maximum RTT across connected peers (milliseconds, gauge).
+    pub peer_rtt_max_ms: AtomicU64,
     /// Node uptime in seconds
     startup_instant: std::time::Instant,
     /// Per-validation-error-type rejection counts (label → count).
@@ -505,6 +512,9 @@ impl NodeMetrics {
             protocol_errors: std::sync::Mutex::new(HashMap::new()),
             peer_handshake_rtt_ms: Histogram::new(),
             peer_block_fetch_ms: Histogram::new(),
+            peer_rtt_avg_ms: AtomicU64::new(0),
+            peer_rtt_min_ms: AtomicU64::new(0),
+            peer_rtt_max_ms: AtomicU64::new(0),
             startup_instant: std::time::Instant::now(),
             validation_errors: std::sync::Mutex::new(HashMap::new()),
             last_block_received_at: AtomicU64::new(0),
@@ -558,6 +568,31 @@ impl NodeMetrics {
     /// Record a per-block fetch latency observation.
     pub fn record_block_fetch_latency(&self, ms_per_block: f64) {
         self.peer_block_fetch_ms.observe(ms_per_block);
+    }
+
+    /// Update the current peer RTT gauge metrics from PeerManager EWMA values.
+    ///
+    /// Called from the main run loop after processing KeepAlive RTT reports.
+    /// `latencies` is the set of EWMA latency values (ms) for all connected
+    /// peers that have at least one measurement.
+    pub fn update_peer_rtt_gauges(&self, latencies: &[f64]) {
+        if latencies.is_empty() {
+            self.peer_rtt_avg_ms.store(0, Ordering::Relaxed);
+            self.peer_rtt_min_ms.store(0, Ordering::Relaxed);
+            self.peer_rtt_max_ms.store(0, Ordering::Relaxed);
+            return;
+        }
+        let sum: f64 = latencies.iter().sum();
+        let avg = sum / latencies.len() as f64;
+        // unwrap safe: latencies is non-empty
+        let min = latencies.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = latencies.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        self.peer_rtt_avg_ms
+            .store(f64::to_bits(avg), Ordering::Relaxed);
+        self.peer_rtt_min_ms
+            .store(f64::to_bits(min), Ordering::Relaxed);
+        self.peer_rtt_max_ms
+            .store(f64::to_bits(max), Ordering::Relaxed);
     }
 
     pub fn add_blocks_received(&self, count: u64) {
@@ -1184,6 +1219,26 @@ impl NodeMetrics {
             "torsten_peer_block_fetch_ms",
             "Per-block fetch latency in milliseconds",
         ));
+
+        // Current peer RTT gauges (from KeepAlive EWMA, not cumulative histogram).
+        let rtt_avg = f64::from_bits(self.peer_rtt_avg_ms.load(Ordering::Relaxed));
+        let rtt_min = f64::from_bits(self.peer_rtt_min_ms.load(Ordering::Relaxed));
+        let rtt_max = f64::from_bits(self.peer_rtt_max_ms.load(Ordering::Relaxed));
+        out.push_str(
+            "# HELP torsten_peer_rtt_avg_ms Current average peer RTT in milliseconds (EWMA)\n",
+        );
+        out.push_str("# TYPE torsten_peer_rtt_avg_ms gauge\n");
+        out.push_str(&format!("torsten_peer_rtt_avg_ms {rtt_avg:.1}\n"));
+        out.push_str(
+            "# HELP torsten_peer_rtt_min_ms Current minimum peer RTT in milliseconds (EWMA)\n",
+        );
+        out.push_str("# TYPE torsten_peer_rtt_min_ms gauge\n");
+        out.push_str(&format!("torsten_peer_rtt_min_ms {rtt_min:.1}\n"));
+        out.push_str(
+            "# HELP torsten_peer_rtt_max_ms Current maximum peer RTT in milliseconds (EWMA)\n",
+        );
+        out.push_str("# TYPE torsten_peer_rtt_max_ms gauge\n");
+        out.push_str(&format!("torsten_peer_rtt_max_ms {rtt_max:.1}\n"));
 
         // cardano-node compatibility aliases.
         //
@@ -1813,5 +1868,25 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         assert!(now_ms - ts < 1000);
+    }
+
+    #[test]
+    fn test_peer_rtt_gauges_update_and_emit() {
+        let metrics = NodeMetrics::new();
+
+        // No latencies — gauges should be zero.
+        metrics.update_peer_rtt_gauges(&[]);
+        let output = metrics.to_prometheus();
+        assert!(output.contains("torsten_peer_rtt_avg_ms 0.0"));
+        assert!(output.contains("torsten_peer_rtt_min_ms 0.0"));
+        assert!(output.contains("torsten_peer_rtt_max_ms 0.0"));
+
+        // Two peers with different latencies.
+        metrics.update_peer_rtt_gauges(&[40.0, 120.0]);
+        let output = metrics.to_prometheus();
+        // avg = (40 + 120) / 2 = 80
+        assert!(output.contains("torsten_peer_rtt_avg_ms 80.0"));
+        assert!(output.contains("torsten_peer_rtt_min_ms 40.0"));
+        assert!(output.contains("torsten_peer_rtt_max_ms 120.0"));
     }
 }
