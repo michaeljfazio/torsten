@@ -3070,6 +3070,7 @@ pub async fn chainsync_client_task(
                         // rollback point is before the anchored fragment's anchor
                         // (deeper than k blocks), causing `ChainSyncClient` to call
                         // `terminateAfterDrain RolledBackPastIntersection`.
+                        let is_initial = initial_rollback;
                         {
                             if initial_rollback {
                                 initial_rollback = false;
@@ -3134,7 +3135,7 @@ pub async fn chainsync_client_task(
                         // Count non-initial rollbacks for observability.
                         // The first MsgRollBackward after intersection is
                         // expected protocol behavior — not a real fork.
-                        if !initial_rollback {
+                        if !is_initial {
                             metrics
                                 .rollback_count
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
