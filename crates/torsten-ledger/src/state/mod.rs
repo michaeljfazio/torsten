@@ -172,6 +172,18 @@ pub struct LedgerState {
     /// Used by `stake_credential_hash` to resolve Pointer addresses.
     #[serde(default)]
     pub pointer_map: HashMap<torsten_primitives::credentials::Pointer, Hash32>,
+    /// Genesis delegates: genesis_key_hash (28 bytes) → (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
+    ///
+    /// Loaded from the Shelley genesis file. Used for BFT overlay schedule
+    /// validation during early Shelley era (when d > 0). Genesis delegates
+    /// produce blocks on overlay slots; the delegate_key_hash is Blake2b-224
+    /// of the delegate's cold verification key, and the vrf_key_hash is
+    /// Blake2b-256 of the delegate's VRF verification key.
+    ///
+    /// Not mutated after initialization — the genesis delegation map is static
+    /// for the lifetime of the Shelley-based eras.
+    #[serde(default)]
+    pub genesis_delegates: HashMap<Hash28, (Hash28, Hash32)>,
     /// Fees collected in the current epoch
     pub epoch_fees: Lovelace,
     /// Number of blocks produced by each pool in the current epoch (Arc for copy-on-write)
@@ -835,6 +847,7 @@ impl LedgerState {
             snapshots: EpochSnapshots::default(),
             reward_accounts: Arc::new(HashMap::new()),
             pointer_map: HashMap::new(),
+            genesis_delegates: HashMap::new(),
             epoch_fees: Lovelace(0),
             epoch_blocks_by_pool: Arc::new(HashMap::new()),
             epoch_block_count: 0,
@@ -1067,6 +1080,34 @@ impl LedgerState {
     pub fn set_update_quorum(&mut self, quorum: u64) {
         self.update_quorum = quorum;
         debug!("Ledger: update quorum={quorum}");
+    }
+
+    /// Load genesis delegates from Shelley genesis data.
+    ///
+    /// Each entry is (genesis_key_hash_28, delegate_key_hash_28, vrf_key_hash_32)
+    /// as raw bytes. Called during node initialization from `ShelleyGenesis::gen_delegs_entries()`.
+    pub fn set_genesis_delegates(&mut self, entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) {
+        self.genesis_delegates.clear();
+        for (genesis_hash, delegate_hash, vrf_hash) in entries {
+            if genesis_hash.len() == 28 && delegate_hash.len() == 28 && vrf_hash.len() == 32 {
+                let gkey = Hash28::from_bytes({
+                    let mut buf = [0u8; 28];
+                    buf.copy_from_slice(genesis_hash);
+                    buf
+                });
+                let dkey = Hash28::from_bytes({
+                    let mut buf = [0u8; 28];
+                    buf.copy_from_slice(delegate_hash);
+                    buf
+                });
+                let vrf = Hash32::from_bytes({
+                    let mut buf = [0u8; 32];
+                    buf.copy_from_slice(vrf_hash);
+                    buf
+                });
+                self.genesis_delegates.insert(gkey, (dkey, vrf));
+            }
+        }
     }
 
     /// Seed the UTxO set with genesis UTxOs (from Byron genesis nonAvvmBalances).

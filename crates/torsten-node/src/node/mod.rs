@@ -400,6 +400,14 @@ impl Node {
                         state.set_epoch_length(genesis.epoch_length, genesis.security_param);
                         state.set_slot_config(genesis.slot_config());
                         state.set_update_quorum(genesis.update_quorum);
+                        let gen_deleg_entries = genesis.gen_delegs_entries();
+                        if !gen_deleg_entries.is_empty() {
+                            tracing::debug!(
+                                count = gen_deleg_entries.len(),
+                                "Loaded genesis delegates for overlay schedule validation"
+                            );
+                            state.set_genesis_delegates(&gen_deleg_entries);
+                        }
                     }
                     let ste = epoch::shelley_transition_epoch_for_magic(network_magic);
                     state.set_shelley_transition(ste, byron_epoch_length);
@@ -3272,6 +3280,14 @@ impl Node {
             ledger.set_epoch_length(genesis.epoch_length, genesis.security_param);
             ledger.set_slot_config(genesis.slot_config());
             ledger.set_update_quorum(genesis.update_quorum);
+            let gen_deleg_entries = genesis.gen_delegs_entries();
+            if !gen_deleg_entries.is_empty() {
+                tracing::debug!(
+                    count = gen_deleg_entries.len(),
+                    "Loaded genesis delegates for overlay schedule validation"
+                );
+                ledger.set_genesis_delegates(&gen_deleg_entries);
+            }
         }
         // Set Byron→Shelley transition boundary for correct HFC epoch numbering
         let shelley_transition_epoch = epoch::shelley_transition_epoch_for_magic(network_magic);
