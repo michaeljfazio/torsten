@@ -1037,7 +1037,7 @@ impl Node {
         // with zero overhead.
         let loe_limit: Option<u64> = {
             let gsm = self.gsm.read().await;
-            gsm.loe_limit(std::slice::from_ref(&tip.point))
+            gsm.compute_loe_slot()
         };
 
         // Now apply blocks to ledger — storage is confirmed

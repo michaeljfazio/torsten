@@ -2177,7 +2177,7 @@ impl Node {
                         .chainsync_idle_secs
                         .load(std::sync::atomic::Ordering::Relaxed);
                     let all_idle = chainsync_idle > 30;
-                    gsm_w.evaluate(active_blp, all_idle, tip_age_secs);
+                    gsm_w.evaluate(active_blp, all_idle, tip_age_secs, 0);
                 }
             });
         }
