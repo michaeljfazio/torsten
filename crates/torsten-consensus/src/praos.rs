@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use torsten_crypto::keys::PaymentVerificationKey;
 use torsten_primitives::block::{BlockHeader, Tip};
-use torsten_primitives::hash::{blake2b_256, Hash28, Hash32};
+use torsten_primitives::hash::{blake2b_224, blake2b_256, Hash28, Hash32};
+
+use crate::overlay::{self, OBftSlot, OverlayContext};
 use torsten_primitives::time::{EpochLength, EpochNo, SlotNo};
 use tracing::{debug, error, trace, warn};
 
@@ -84,6 +86,20 @@ pub enum ConsensusError {
     BlockHeaderTooLarge {
         header_size: u64,
         max_block_header_size: u64,
+    },
+    #[error("Not an active overlay slot: slot {slot} is in the overlay schedule but has no assigned signer")]
+    NotActiveOverlaySlot { slot: u64 },
+    #[error("Wrong genesis delegate for overlay slot: expected delegate for genesis key {genesis_key}, got issuer {issuer}")]
+    WrongGenesisDelegate {
+        genesis_key: Hash28,
+        issuer: Hash28,
+    },
+    #[error("Unknown genesis key in overlay schedule: {0}")]
+    UnknownGenesisKey(Hash28),
+    #[error("Genesis delegate VRF key mismatch: expected {expected}, got {got}")]
+    GenesisVrfKeyMismatch {
+        expected: Hash32,
+        got: Hash32,
     },
 }
 
@@ -421,12 +437,43 @@ impl OuroborosPraos {
         Ok(())
     }
 
+    /// Run opcert counter, KES period, and cryptographic verification checks.
+    ///
+    /// Shared by both the BFT overlay path and the Praos path to avoid
+    /// code duplication. In `Replay` mode, only opcert counter and KES period
+    /// are checked; in `Full` mode, VRF proofs, opcert signature, and KES
+    /// signature are also verified.
+    fn run_tail_checks(
+        &mut self,
+        header: &BlockHeader,
+        issuer_info: Option<&BlockIssuerInfo>,
+        mode: ValidationMode,
+    ) -> Result<(), ConsensusError> {
+        self.check_opcert_counter(header, issuer_info)?;
+        self.validate_kes_period(header)?;
+        if mode == ValidationMode::Full {
+            self.verify_vrf_proof(header)?;
+            self.verify_nonce_vrf_proof(header)?;
+            self.validate_operational_cert(header)?;
+            self.verify_kes_signature(header)?;
+        }
+        Ok(())
+    }
+
     /// Full block header validation with pool registration context.
     ///
     /// Performs all checks from `validate_header` plus:
     /// - VRF key binding: header's VRF key matches pool's registered VRF key hash
     /// - Leader eligibility: VRF output satisfies Praos threshold for pool's stake
     /// - Opcert counter monotonicity: sequence number has not regressed
+    ///
+    /// When `overlay_ctx` is `Some` and the decentralization parameter `d > 0`,
+    /// the function first checks the BFT overlay schedule (Haskell's OVERLAY rule):
+    /// - **Praos slot** (not in overlay): falls through to normal pool-based validation
+    /// - **Active overlay slot**: verifies the block issuer is the correct genesis
+    ///   delegate, VRF key matches, but does NOT check the VRF leader threshold
+    ///   (the delegate is entitled by schedule assignment)
+    /// - **Non-active overlay slot**: rejects the block (no block allowed in this slot)
     ///
     /// Pool-aware checks and opcert counter are evaluated BEFORE cryptographic
     /// verification so that binding/eligibility failures are reported accurately.
@@ -442,6 +489,7 @@ impl OuroborosPraos {
         header: &BlockHeader,
         current_slot: SlotNo,
         issuer_info: Option<&BlockIssuerInfo>,
+        overlay_ctx: Option<&OverlayContext>,
         mode: ValidationMode,
         ledger_pv_major: Option<u64>,
     ) -> Result<(), ConsensusError> {
@@ -487,6 +535,120 @@ impl OuroborosPraos {
                         supplied: header.protocol_version.major,
                         max_expected: next_pv,
                     });
+                }
+            }
+        }
+
+        // 1c. BFT overlay schedule check (Haskell's OVERLAY rule).
+        // When d > 0, some slots are designated as overlay slots where genesis
+        // delegates produce blocks instead of stake pools.
+        if let Some(ctx) = overlay_ctx {
+            let (d_num, d_den) = ctx.d;
+            if d_num > 0 && d_den > 0 {
+                let (f_num, f_den) = self.active_slot_coeff_rational;
+                let schedule_result = overlay::lookup_in_overlay_schedule(
+                    ctx.first_slot_of_epoch,
+                    &ctx.genesis_keys,
+                    d_num,
+                    d_den,
+                    f_num,
+                    f_den,
+                    header.slot.0,
+                );
+
+                match schedule_result {
+                    Some(OBftSlot::NonActiveSlot) => {
+                        // Overlay slot with no assigned signer — no block allowed
+                        if self.strict_verification {
+                            return Err(ConsensusError::NotActiveOverlaySlot {
+                                slot: header.slot.0,
+                            });
+                        }
+                        debug!(
+                            slot = header.slot.0,
+                            "Praos: non-active overlay slot (non-fatal during sync)"
+                        );
+                        return Ok(());
+                    }
+                    Some(OBftSlot::ActiveSlot(genesis_key)) => {
+                        // BFT overlay slot — validate that the block issuer is the
+                        // correct genesis delegate for this slot.
+
+                        // a. Look up the delegate for this genesis key
+                        let delegate = match ctx.genesis_delegates.get(&genesis_key) {
+                            Some(d) => d,
+                            None => {
+                                if self.strict_verification {
+                                    return Err(ConsensusError::UnknownGenesisKey(genesis_key));
+                                }
+                                debug!(
+                                    slot = header.slot.0,
+                                    genesis_key = %genesis_key,
+                                    "Praos: unknown genesis key in overlay schedule (non-fatal during sync)"
+                                );
+                                // Fall through — cannot validate delegate, skip BFT checks
+                                // but still do opcert/KES/crypto below
+                                self.run_tail_checks(header, issuer_info, mode)?;
+                                return Ok(());
+                            }
+                        };
+
+                        let (delegate_key_hash, delegate_vrf_hash) = delegate;
+
+                        // b. Verify issuer matches the delegate key hash
+                        let issuer_hash = blake2b_224(&header.issuer_vkey);
+                        if issuer_hash != *delegate_key_hash {
+                            if self.strict_verification {
+                                return Err(ConsensusError::WrongGenesisDelegate {
+                                    genesis_key,
+                                    issuer: issuer_hash,
+                                });
+                            }
+                            debug!(
+                                slot = header.slot.0,
+                                expected = %delegate_key_hash,
+                                got = %issuer_hash,
+                                "Praos: wrong genesis delegate for overlay slot (non-fatal during sync)"
+                            );
+                        }
+
+                        // c. Verify VRF key matches the delegate's registered VRF key hash
+                        if header.vrf_vkey.len() == 32 {
+                            let header_vrf_hash = blake2b_256(&header.vrf_vkey);
+                            if header_vrf_hash != *delegate_vrf_hash {
+                                if self.strict_verification {
+                                    return Err(ConsensusError::GenesisVrfKeyMismatch {
+                                        expected: *delegate_vrf_hash,
+                                        got: header_vrf_hash,
+                                    });
+                                }
+                                debug!(
+                                    slot = header.slot.0,
+                                    expected = %delegate_vrf_hash,
+                                    got = %header_vrf_hash,
+                                    "Praos: genesis delegate VRF key mismatch (non-fatal during sync)"
+                                );
+                            }
+                        }
+
+                        // d. NO leader threshold check — BFT delegate is entitled by schedule
+
+                        // e. Still do: opcert counter, KES period, crypto verification
+                        self.run_tail_checks(header, issuer_info, mode)?;
+
+                        trace!(
+                            slot = header.slot.0,
+                            block_no = header.block_number.0,
+                            genesis_key = %genesis_key,
+                            "Praos: BFT overlay slot validation passed"
+                        );
+
+                        // f. Return Ok — skip the Praos pool-based checks below
+                        return Ok(());
+                    }
+                    None => {
+                        // Not an overlay slot — fall through to Praos path
+                    }
                 }
             }
         }
@@ -581,22 +743,8 @@ impl OuroborosPraos {
             }
         }
 
-        // 4. Opcert counter monotonicity check
-        self.check_opcert_counter(header, issuer_info)?;
-
-        // 5. KES period validation (always fatal — cheap structural check)
-        self.validate_kes_period(header)?;
-
-        // 6. Cryptographic verification (VRF proof, opcert signature, KES signature)
-        // In Replay mode (Haskell's reupdateChainDepState), skip all crypto verification.
-        // This is used for blocks replayed from local storage (ImmutableDB/ChainDB) where
-        // the blocks were previously validated or are from a trusted source (Mithril).
-        if mode == ValidationMode::Full {
-            self.verify_vrf_proof(header)?;
-            self.verify_nonce_vrf_proof(header)?;
-            self.validate_operational_cert(header)?;
-            self.verify_kes_signature(header)?;
-        }
+        // 4. Opcert counter, KES period, and cryptographic verification
+        self.run_tail_checks(header, issuer_info, mode)?;
 
         trace!(
             slot = header.slot.0,
@@ -1790,7 +1938,7 @@ mod tests {
         let mut praos = OuroborosPraos::new();
         let header = make_valid_header(100);
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
     }
 
@@ -1812,6 +1960,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Full,
             Some(9),
         );
@@ -1838,6 +1987,7 @@ mod tests {
                 &header,
                 SlotNo(200),
                 Some(&info),
+                None,
                 ValidationMode::Full,
                 Some(9)
             )
@@ -1868,6 +2018,7 @@ mod tests {
                 &header,
                 SlotNo(200),
                 Some(&info),
+                None,
                 ValidationMode::Full,
                 Some(9)
             )
@@ -1882,21 +2033,21 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Second block from same pool with seq=6 (forward, OK)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Third block from same pool with seq=4 (regression, non-strict: OK)
         let mut header3 = make_valid_header(300);
         header3.operational_cert.sequence_number = 4;
         assert!(praos
-            .validate_header_full(&header3, SlotNo(400), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header3, SlotNo(400), None, None, ValidationMode::Full, Some(9))
             .is_ok());
     }
 
@@ -1913,6 +2064,7 @@ mod tests {
                 &header1,
                 SlotNo(200),
                 Some(&info1),
+                None,
                 ValidationMode::Full,
                 Some(9)
             )
@@ -1929,6 +2081,7 @@ mod tests {
             &header2,
             SlotNo(300),
             Some(&info2),
+            None,
             ValidationMode::Full,
             Some(9),
         );
@@ -1953,14 +2106,14 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Same seq=5 is allowed (not a regression, same cert can sign multiple blocks)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Verify counter was tracked
@@ -1978,7 +2131,7 @@ mod tests {
         header_a.issuer_vkey = vec![1u8; 32];
         header_a.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header_a, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header_a, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Pool B (different issuer key) with seq=2 — should be fine (different pool)
@@ -1986,7 +2139,7 @@ mod tests {
         header_b.issuer_vkey = vec![2u8; 32];
         header_b.operational_cert.sequence_number = 2;
         assert!(praos
-            .validate_header_full(&header_b, SlotNo(300), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header_b, SlotNo(300), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Verify each pool tracked separately
@@ -2022,6 +2175,7 @@ mod tests {
                 &header,
                 SlotNo(200),
                 Some(&info),
+                None,
                 ValidationMode::Full,
                 Some(9)
             )
@@ -2047,14 +2201,14 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         // Jump from 5 to 10 (over-increment by 5) — non-fatal during sync
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 10;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
             .is_ok());
     }
 
@@ -2070,6 +2224,7 @@ mod tests {
                 &header1,
                 SlotNo(200),
                 Some(&info1),
+                None,
                 ValidationMode::Full,
                 Some(9)
             )
@@ -2085,6 +2240,7 @@ mod tests {
             &header2,
             SlotNo(300),
             Some(&info2),
+            None,
             ValidationMode::Full,
             Some(9),
         );
@@ -2111,13 +2267,13 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, ValidationMode::Full, Some(9))
+            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
             .is_ok());
 
         let pool_id = torsten_primitives::hash::blake2b_224(&header1.issuer_vkey);
@@ -2147,6 +2303,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Replay,
             Some(9),
         );
@@ -2178,6 +2335,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Replay,
             Some(9),
         );
@@ -2203,6 +2361,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Replay,
             Some(9),
         );
@@ -2233,6 +2392,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Full,
             Some(9),
         );
@@ -2255,7 +2415,7 @@ mod tests {
         // No issuer_info → unknown pool
 
         let result =
-            praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full, Some(9));
+            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
         assert!(
             result.is_ok(),
             "Unknown pool during sync should be non-fatal regardless of counter, got: {result:?}"
@@ -2283,6 +2443,7 @@ mod tests {
                     &header0,
                     SlotNo(200),
                     Some(&info0),
+                    None,
                     ValidationMode::Replay,
                     Some(9)
                 )
@@ -2301,6 +2462,7 @@ mod tests {
                         &h,
                         SlotNo(200 + seq * 100),
                         Some(&info),
+                        None,
                         ValidationMode::Replay,
                         Some(9),
                     )
@@ -2317,6 +2479,7 @@ mod tests {
             &header6,
             SlotNo(800),
             Some(&info6),
+            None,
             ValidationMode::Replay,
             Some(9),
         );
@@ -2345,6 +2508,7 @@ mod tests {
                     &header0,
                     SlotNo(200),
                     Some(&info0),
+                    None,
                     ValidationMode::Replay,
                     Some(9)
                 )
@@ -2363,6 +2527,7 @@ mod tests {
                         &h,
                         SlotNo(200 + seq * 100),
                         Some(&info),
+                        None,
                         ValidationMode::Replay,
                         Some(9),
                     )
@@ -2379,6 +2544,7 @@ mod tests {
             &header_regress,
             SlotNo(800),
             Some(&info_regress),
+            None,
             ValidationMode::Replay,
             Some(9),
         );
@@ -2506,7 +2672,7 @@ mod tests {
 
         // No issuer info = unregistered pool
         let result =
-            praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full, Some(9));
+            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
         match result {
             Err(ConsensusError::UnregisteredPool { pool_id }) => {
                 assert_eq!(pool_id, expected_pool_id);
@@ -2524,7 +2690,7 @@ mod tests {
 
         let header = make_valid_header(100);
         let result =
-            praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full, Some(9));
+            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
         assert!(
             result.is_ok(),
             "Unregistered pool should be non-fatal during sync, got: {result:?}"
@@ -2548,6 +2714,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Full,
             Some(9),
         );
@@ -2564,7 +2731,7 @@ mod tests {
 
         let header = make_valid_header(100);
         let result =
-            praos.validate_header_full(&header, SlotNo(200), None, ValidationMode::Full, Some(9));
+            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
         assert!(result.is_err());
 
         let err_msg = format!("{}", result.unwrap_err());
@@ -2616,6 +2783,7 @@ mod tests {
             &header,
             SlotNo(200),
             Some(&info),
+            None,
             ValidationMode::Full,
             Some(9),
         );

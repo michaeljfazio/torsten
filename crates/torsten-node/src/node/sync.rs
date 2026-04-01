@@ -866,6 +866,7 @@ impl Node {
                     &header_with_nonce,
                     block.slot(),
                     issuer_info.as_ref(),
+                    None,
                     mode,
                     Some(ls.protocol_params.protocol_version_major),
                 ) {

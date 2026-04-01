@@ -423,6 +423,7 @@ fn test_opcert_counter_tracking() {
             &make_header(counter),
             current_slot,
             Some(&issuer_info),
+            None,
             ValidationMode::Replay,
             Some(9),
         )
