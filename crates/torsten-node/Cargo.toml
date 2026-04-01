@@ -61,6 +61,7 @@ rayon = { workspace = true }
 libc.workspace = true
 num-bigint = { workspace = true }
 tokio-util = { workspace = true }
+mithril-client = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }

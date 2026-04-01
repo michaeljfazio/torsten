@@ -31,6 +31,36 @@ const PREPROD_AGGREGATOR: &str =
     "https://aggregator.release-preprod.api.mithril.network/aggregator";
 
 // ---------------------------------------------------------------------------
+// Mithril genesis verification keys (from mithril-infra/configuration/)
+// ---------------------------------------------------------------------------
+
+/// Mainnet genesis verification key (Ed25519, JSON hex-encoded).
+/// Source: https://github.com/input-output-hk/mithril/blob/main/mithril-infra/configuration/release-mainnet/genesis.vkey
+const MAINNET_GENESIS_VKEY: &str =
+    "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d";
+
+/// Preview genesis verification key (Ed25519, JSON hex-encoded).
+/// Source: https://github.com/input-output-hk/mithril/blob/main/mithril-infra/configuration/pre-release-preview/genesis.vkey
+const PREVIEW_GENESIS_VKEY: &str =
+    "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d";
+
+/// Preprod genesis verification key (Ed25519, JSON hex-encoded).
+/// Same key as preview.
+/// Source: https://github.com/input-output-hk/mithril/blob/main/mithril-infra/configuration/release-preprod/genesis.vkey
+const PREPROD_GENESIS_VKEY: &str =
+    "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d";
+
+/// Get the genesis verification key for a given network magic.
+fn genesis_verification_key(network_magic: u64) -> Option<&'static str> {
+    match network_magic {
+        764824073 => Some(MAINNET_GENESIS_VKEY),
+        2 => Some(PREVIEW_GENESIS_VKEY),
+        1 => Some(PREPROD_GENESIS_VKEY),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // API response types
 // ---------------------------------------------------------------------------
 
@@ -38,6 +68,7 @@ const PREPROD_AGGREGATOR: &str =
 #[derive(Debug, serde::Deserialize)]
 struct SnapshotListItem {
     digest: String,
+    certificate_hash: String,
     #[serde(rename = "network")]
     _network: String,
     size: u64,
@@ -144,6 +175,8 @@ pub async fn import_snapshot(
     network_magic: u64,
     database_path: &Path,
     temp_dir: Option<&Path>,
+    genesis_vkey_override: Option<&str>,
+    skip_verification: bool,
 ) -> Result<()> {
     let aggregator = aggregator_url(network_magic);
     info!(aggregator = %aggregator, "Fetching latest Mithril snapshot");
@@ -208,41 +241,69 @@ pub async fn import_snapshot(
     let network_name = mithril_network_name(network_magic);
     verify_snapshot_digest(&extract_dir, network_name, &latest.beacon, &detail.digest)?;
 
-    // SECURITY NOTE: STM certificate chain verification is NOT implemented.
+    // Step 5b: Verify the Mithril STM certificate chain.
     //
-    // Mithril uses a Stake-Based Threshold Multi-Signature (STM) scheme where
-    // the aggregator provides a certificate chain proving that ≥ 2/3 of stake
-    // signed the snapshot. Full verification would require:
-    //   1. Downloading the genesis certificate (trust anchor from IOHK)
-    //   2. Walking the certificate chain from genesis to the target snapshot
-    //   3. Verifying each STM multi-signature against the registered signers
-    //   4. Checking stake distribution at each epoch boundary
-    //
-    // Currently, we trust the snapshot digest as-is from the aggregator API
-    // without cryptographic proof that the chain of trust back to genesis holds.
-    // This is acceptable for testnet use and fast initial sync, but for
-    // production security the full STM chain MUST be verified.
-    //
-    // TODO: implement full STM certificate chain verification using the Mithril
-    // client library once it stabilises or by implementing the STM protocol
-    // directly against the aggregator's /certificate endpoint.
-    //
-    // Required steps:
-    // 1. Fetch the full certificate chain from /certificate endpoint
-    // 2. Verify each certificate's signature against the signing key at that epoch
-    // 3. Verify the aggregate signature on the snapshot using the participant keys
-    // 4. Ensure the certificate chain links back to genesis (or a known checkpoint)
-    //
-    // This is a security-critical feature for production deployments. Currently
-    // appropriate for testnet/development use only.
-    //
-    // Tracked in: https://github.com/torsten-project/torsten/issues/TODO
-    warn!(
-        "Mithril STM certificate chain verification is NOT implemented. \
-         Snapshot digest is trusted from the aggregator API without cryptographic \
-         proof of the full certificate chain. Do not use for production trust \
-         decisions until STM verification is implemented."
-    );
+    // This cryptographically proves that ≥ 2/3 of Cardano stake signed this
+    // snapshot by walking the certificate chain back to the genesis certificate
+    // and verifying each STM multi-signature.
+    if skip_verification {
+        warn!(
+            "Mithril STM certificate chain verification SKIPPED (--skip-certificate-verification). \
+             The snapshot is trusted without cryptographic proof. \
+             Do NOT use this in production."
+        );
+    } else {
+        let genesis_vkey = genesis_vkey_override
+            .or_else(|| genesis_verification_key(network_magic))
+            .context(
+                "No Mithril genesis verification key for this network. \
+                 Use --mithril-genesis-vkey to provide one for private networks.",
+            )?;
+
+        info!("Verifying Mithril STM certificate chain...");
+
+        let mithril = mithril_client::ClientBuilder::new(
+            mithril_client::AggregatorDiscoveryType::Url(aggregator.to_string()),
+        )
+        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
+            genesis_vkey.to_string(),
+        ))
+        .build()
+        .context("Failed to build Mithril client")?;
+
+        // Verify the full certificate chain from the snapshot's certificate
+        // back to the genesis certificate. Each certificate's STM multi-signature
+        // is verified against the aggregate verification key, and the genesis
+        // certificate's Ed25519 signature is verified against the hardcoded key.
+        let certificate = mithril
+            .certificate()
+            .verify_chain(&latest.certificate_hash)
+            .await
+            .context("Mithril certificate chain verification FAILED — snapshot rejected")?;
+
+        info!(
+            certificate_hash = %latest.certificate_hash,
+            epoch = %certificate.epoch,
+            "Certificate chain verified"
+        );
+
+        // Verify that the extracted snapshot content matches what the Mithril
+        // signers actually certified. This re-hashes all immutable files and
+        // checks the digest against the certificate's signed message.
+        let message = mithril_client::MessageBuilder::new()
+            .compute_snapshot_message(&certificate, &extract_dir)
+            .await
+            .context("Failed to compute snapshot message from extracted files")?;
+
+        if !certificate.match_message(&message) {
+            anyhow::bail!(
+                "Mithril snapshot content does not match the certified message. \
+                 The snapshot may have been tampered with after signing."
+            );
+        }
+
+        info!("Snapshot content verified against certificate");
+    }
 
     // Step 6: Skip ChainDB import — chunk files are the optimal format for sequential
     // replay. The old LSM import (parse → write 5 KV pairs per block → compaction) was
@@ -1570,6 +1631,109 @@ mod tests {
         // Now verify using our function
         let result = verify_snapshot_digest(dir.path(), network_name, &beacon, &expected_digest);
         assert!(result.is_ok(), "Digest verification failed: {result:?}");
+    }
+
+    #[test]
+    fn test_genesis_verification_key_known_networks() {
+        // Mainnet has a distinct key
+        assert!(genesis_verification_key(764824073).is_some());
+        let mainnet_key = genesis_verification_key(764824073).unwrap();
+        assert!(mainnet_key.starts_with("5b31393"));
+        assert_ne!(
+            mainnet_key,
+            genesis_verification_key(2).unwrap(),
+            "mainnet key should differ from preview"
+        );
+
+        // Preview
+        assert!(genesis_verification_key(2).is_some());
+
+        // Preprod (same key as preview)
+        assert!(genesis_verification_key(1).is_some());
+        assert_eq!(
+            genesis_verification_key(2).unwrap(),
+            genesis_verification_key(1).unwrap(),
+            "preview and preprod share the same genesis key"
+        );
+    }
+
+    #[test]
+    fn test_genesis_verification_key_unknown_network() {
+        assert!(genesis_verification_key(999).is_none());
+        assert!(genesis_verification_key(0).is_none());
+    }
+
+    #[test]
+    fn test_genesis_keys_are_valid_hex() {
+        // Each genesis key should be a valid hex string that decodes to a JSON array
+        for magic in [764824073, 2, 1] {
+            let key = genesis_verification_key(magic).unwrap();
+            let decoded = hex::decode(key)
+                .unwrap_or_else(|_| panic!("genesis key for magic {magic} is not valid hex"));
+            let json_str = std::str::from_utf8(&decoded)
+                .unwrap_or_else(|_| panic!("genesis key for magic {magic} is not valid UTF-8"));
+            assert!(
+                json_str.starts_with('[') && json_str.ends_with(']'),
+                "genesis key for magic {magic} should decode to a JSON array, got: {json_str}"
+            );
+        }
+    }
+
+    /// Integration test: verify a real Mithril preview certificate chain.
+    ///
+    /// This test hits the real Mithril aggregator API and verifies that we can
+    /// successfully build a client, fetch a snapshot, and verify its certificate
+    /// chain back to genesis. Run manually with:
+    ///   cargo nextest run -p torsten-node -E 'test(verify_preview_certificate_chain)' -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn test_verify_preview_certificate_chain() {
+        let aggregator = aggregator_url(2); // preview
+        let genesis_vkey = genesis_verification_key(2).unwrap();
+
+        // Build the Mithril client
+        let client = mithril_client::ClientBuilder::new(
+            mithril_client::AggregatorDiscoveryType::Url(aggregator.to_string()),
+        )
+        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
+            genesis_vkey.to_string(),
+        ))
+        .build()
+        .expect("Failed to build Mithril client");
+
+        // Fetch latest snapshot to get its certificate_hash
+        let http = reqwest::Client::builder()
+            .user_agent("torsten-test/0.1")
+            .build()
+            .unwrap();
+
+        let snapshots: Vec<serde_json::Value> = http
+            .get(format!("{aggregator}/artifact/snapshots"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let cert_hash = snapshots[0]["certificate_hash"]
+            .as_str()
+            .expect("No certificate_hash in snapshot");
+
+        // Verify the certificate chain — this is the core test
+        let certificate = client
+            .certificate()
+            .verify_chain(cert_hash)
+            .await
+            .expect("Certificate chain verification failed");
+
+        // Epoch implements Display, so just verify it's not the default
+        let epoch_str = format!("{}", certificate.epoch);
+        assert!(epoch_str != "0", "certificate epoch should be positive");
+        println!(
+            "Certificate chain verified: epoch={}, hash={}",
+            certificate.epoch, cert_hash
+        );
     }
 
     #[test]

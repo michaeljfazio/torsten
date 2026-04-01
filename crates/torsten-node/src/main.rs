@@ -230,6 +230,17 @@ struct MithrilImportArgs {
     #[arg(long)]
     temp_dir: Option<PathBuf>,
 
+    /// Override the Mithril genesis verification key (for private networks).
+    /// The key must be a JSON hex-encoded Ed25519 verification key string.
+    #[arg(long)]
+    mithril_genesis_vkey: Option<String>,
+
+    /// Skip Mithril STM certificate chain verification (UNSAFE — for testing only).
+    /// When set, the snapshot digest is trusted from the aggregator without
+    /// cryptographic proof of the certificate chain.
+    #[arg(long)]
+    skip_certificate_verification: bool,
+
     #[command(flatten)]
     log: LogArgs,
 }
@@ -1199,6 +1210,8 @@ async fn run_mithril_import(args: MithrilImportArgs) -> Result<()> {
         args.network_magic,
         &args.database_path,
         args.temp_dir.as_deref(),
+        args.mithril_genesis_vkey.as_deref(),
+        args.skip_certificate_verification,
     )
     .await
 }
