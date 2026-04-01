@@ -978,6 +978,10 @@ impl Node {
                                 apply_count = apply.len(),
                                 "Chain selection: fork switch during sync (Phase 3 pending)"
                             );
+                            // Count fork switches for observability.
+                            self.metrics
+                                .rollback_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Block is stored; continue to the ledger apply below.
                         }
                         Some(torsten_storage::AddBlockResult::Invalid(reason)) => {
@@ -2587,6 +2591,7 @@ pub async fn chainsync_client_task(
     // Used to scale the rollback depth threshold from blocks to slots:
     // with coeff=0.05, ~20 slots per block, so k blocks ≈ k*20 slots.
     active_slots_coeff: f64,
+    metrics: Arc<crate::metrics::NodeMetrics>,
     cancel: CancellationToken,
 ) -> Result<()> {
     // ═══════════════════════════════════════════════════════════════════════
@@ -3092,6 +3097,15 @@ pub async fn chainsync_client_task(
                             tip_block_number,
                             "ChainSync rollback",
                         );
+
+                        // Count non-initial rollbacks for observability.
+                        // The first MsgRollBackward after intersection is
+                        // expected protocol behavior — not a real fork.
+                        if !initial_rollback {
+                            metrics
+                                .rollback_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
 
                         // Remove headers after the rollback point.
                         {

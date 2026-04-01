@@ -828,6 +828,7 @@ impl ConnectionLifecycleManager {
         let byron_epoch_length = self.byron_epoch_length;
         let security_param = self.security_param;
         let active_slots_coeff = self.active_slots_coeff;
+        let metrics = self.metrics.clone();
 
         Box::new(move |channel, cancel| {
             Box::pin(async move {
@@ -841,6 +842,7 @@ impl ConnectionLifecycleManager {
                     byron_epoch_length,
                     security_param,
                     active_slots_coeff,
+                    metrics,
                     cancel,
                 )
                 .await
