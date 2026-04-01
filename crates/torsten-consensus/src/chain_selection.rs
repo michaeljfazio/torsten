@@ -1,6 +1,6 @@
 use torsten_primitives::block::{BlockHeader, Point, Tip};
 use torsten_primitives::era::Era;
-use torsten_primitives::hash::{blake2b_224, BlockHeaderHash};
+use torsten_primitives::hash::blake2b_224;
 
 /// Chain selection rule implementing Ouroboros chain preference.
 ///
@@ -14,7 +14,7 @@ use torsten_primitives::hash::{blake2b_224, BlockHeaderHash};
 ///   Longer chains are always preferred because Praos is a longest-chain
 ///   protocol.
 ///
-/// ## Tiebreaker (Praos only)
+/// ## Tiebreaker (Praos only, via `prefer_chain_with_headers`)
 ///
 /// When chains are equal length, the Cardano Blueprint specifies a structured
 /// tiebreaker to prevent geographic centralization incentives:
@@ -27,9 +27,10 @@ use torsten_primitives::hash::{blake2b_224, BlockHeaderHash};
 ///    wins. In Conway (protocol ≥ 9), this comparison is only applied when the
 ///    two tip blocks are within `slot_window` slots of each other — this
 ///    prevents very late blocks from winning against already-adopted chains.
+///    This slot window corresponds to Haskell's `RestrictedVRFTiebreaker`.
 ///
-/// For Byron, when density is equal, we fall back to comparing block header
-/// hashes (lower hash wins), since Byron has no VRF or opcert concept.
+/// For Byron (PBFT) and the simplified `prefer_chain` API: on tie, the
+/// incumbent wins (no switch occurs), matching Haskell's `ShouldNotSwitch EQ`.
 pub struct ChainSelection {
     pub current_tip: Tip,
 }
@@ -70,16 +71,19 @@ impl ChainSelection {
     /// This is the authoritative comparison implementing the Cardano Blueprint
     /// tiebreaker rules:
     ///
-    /// - **Byron**: density comparison; equal-density falls back to lower
-    ///   block header hash.
+    /// - **Byron**: density comparison; on equal density the incumbent wins
+    ///   (no switch). Byron (PBFT) has no VRF/opcert tiebreaker. Haskell's
+    ///   PBFT SelectView uses BlockNo only -- on tie, the incumbent wins
+    ///   (ShouldNotSwitch EQ).
     /// - **Shelley–Babbage**: length comparison; equal-length tiebreaker is
     ///   same-pool (higher opcert wins) or different-pool (lower VRF wins),
     ///   with no slot-distance restriction.
     /// - **Conway+**: same as Shelley–Babbage but the cross-pool VRF comparison
     ///   is only applied when the two tip slots are within `slot_window` of
-    ///   each other. When the slot difference exceeds `slot_window`, the
-    ///   existing (already-selected) chain is preferred, preventing very late
-    ///   blocks from displacing the current selection.
+    ///   each other (Haskell's `RestrictedVRFTiebreaker`). When the slot
+    ///   difference exceeds `slot_window`, the existing (already-selected)
+    ///   chain is preferred, preventing very late blocks from displacing the
+    ///   current selection.
     ///
     /// `slot_window` should be set to `3k/f` (the stability window). Pass `u64::MAX`
     /// to disable the Conway slot-distance constraint (matches pre-Conway behavior).
@@ -105,12 +109,10 @@ impl ChainSelection {
                 match primary {
                     ChainPreference::Equal => {
                         if era == Era::Byron {
-                            // Byron has no VRF/opcert — use header hash as a
-                            // deterministic tiebreaker.
-                            hash_tiebreak(
-                                &current_header.header_hash,
-                                &candidate_header.header_hash,
-                            )
+                            // Byron (PBFT) has no VRF/opcert tiebreaker. Haskell's
+                            // PBFT SelectView uses BlockNo only — on tie, the
+                            // incumbent wins (ShouldNotSwitch EQ).
+                            ChainPreference::Equal
                         } else {
                             praos_tiebreak(current_header, candidate_header, era, slot_window)
                         }
@@ -121,41 +123,27 @@ impl ChainSelection {
         }
     }
 
-    /// Full chain preference with era-aware comparison and deterministic
-    /// tie-breaking.
+    /// Full chain preference with era-aware comparison.
     ///
     /// - In **Byron** era: compares chain density (blocks / slots). A chain
     ///   covering fewer slots with the same number of blocks is denser.
     /// - In **Praos** eras (Shelley+): compares chain length (block number).
-    /// - **Tiebreaker** (both eras): lower block header hash wins.
     ///
-    /// This method uses only header hashes for tiebreaking, which is a
-    /// simplified rule. For full spec compliance, use
-    /// [`prefer_chain_with_headers`] which applies the proper opcert/VRF rules.
+    /// Haskell has no hash-based tiebreaking. On equal block number (Praos) or
+    /// equal density (Byron), the incumbent wins — no switch occurs.
     ///
-    /// `current_hash` and `candidate_hash` are the header hashes of the tip
-    /// blocks of the current and candidate chains respectively.
-    pub fn prefer_chain(
-        &self,
-        candidate: &Tip,
-        era: Era,
-        current_hash: &BlockHeaderHash,
-        candidate_hash: &BlockHeaderHash,
-    ) -> ChainPreference {
+    /// For full spec compliance with VRF/opcert tiebreaking, use
+    /// [`prefer_chain_with_headers`].
+    pub fn prefer_chain(&self, candidate: &Tip, era: Era) -> ChainPreference {
         match (&self.current_tip.point, &candidate.point) {
             (Point::Origin, Point::Origin) => ChainPreference::Equal,
             (Point::Origin, _) => ChainPreference::PreferCandidate,
             (_, Point::Origin) => ChainPreference::PreferCurrent,
             _ => {
-                let primary = if era == Era::Byron {
+                if era == Era::Byron {
                     self.compare_density(candidate)
                 } else {
                     self.compare_length(candidate)
-                };
-
-                match primary {
-                    ChainPreference::Equal => hash_tiebreak(current_hash, candidate_hash),
-                    other => other,
                 }
             }
         }
@@ -167,16 +155,10 @@ impl ChainSelection {
     }
 
     /// Check if a candidate chain would trigger a switch using full
-    /// era-aware comparison with deterministic tiebreaking.
-    pub fn should_switch_chain(
-        &self,
-        candidate: &Tip,
-        era: Era,
-        current_hash: &BlockHeaderHash,
-        candidate_hash: &BlockHeaderHash,
-    ) -> bool {
+    /// era-aware comparison.
+    pub fn should_switch_chain(&self, candidate: &Tip, era: Era) -> bool {
         matches!(
-            self.prefer_chain(candidate, era, current_hash, candidate_hash),
+            self.prefer_chain(candidate, era),
             ChainPreference::PreferCandidate
         )
     }
@@ -377,26 +359,6 @@ fn vrf_tiebreak(current_vrf: &[u8], candidate_vrf: &[u8]) -> ChainPreference {
         std::cmp::Ordering::Less => ChainPreference::PreferCandidate,
         std::cmp::Ordering::Greater => ChainPreference::PreferCurrent,
         std::cmp::Ordering::Equal => ChainPreference::Equal,
-    }
-}
-
-/// Deterministic fork tiebreaker: the chain with the **lower** block header
-/// hash is preferred. This matches the Haskell cardano-node behavior where
-/// `compare` on `HeaderHash` is used as the ultimate tiebreaker.
-///
-/// This is used for Byron chains (no VRF/opcert) and as a fallback in the
-/// hash-based `prefer_chain` API.
-fn hash_tiebreak(
-    current_hash: &BlockHeaderHash,
-    candidate_hash: &BlockHeaderHash,
-) -> ChainPreference {
-    if candidate_hash < current_hash {
-        ChainPreference::PreferCandidate
-    } else if candidate_hash > current_hash {
-        ChainPreference::PreferCurrent
-    } else {
-        // Identical hashes — truly equal (same block)
-        ChainPreference::Equal
     }
 }
 
@@ -1039,30 +1001,24 @@ mod tests {
 
     #[test]
     fn test_praos_longer_chain_preferred() {
-        let current_hash = Hash32::from_bytes([0xAA; 32]);
-        let candidate_hash = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 200, current_hash));
+        cs.set_tip(make_tip(10, 200));
 
-        let candidate = make_tip_with_hash(12, 240, candidate_hash);
+        let candidate = make_tip(12, 240);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Shelley, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Shelley),
             ChainPreference::PreferCandidate
         );
     }
 
     #[test]
     fn test_praos_shorter_chain_not_preferred() {
-        let current_hash = Hash32::from_bytes([0xBB; 32]);
-        let candidate_hash = Hash32::from_bytes([0xAA; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(15, 300, current_hash));
+        cs.set_tip(make_tip(15, 300));
 
-        let candidate = make_tip_with_hash(12, 240, candidate_hash);
+        let candidate = make_tip(12, 240);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Babbage, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Babbage),
             ChainPreference::PreferCurrent
         );
     }
@@ -1078,15 +1034,12 @@ mod tests {
             Era::Babbage,
             Era::Conway,
         ] {
-            let current_hash = Hash32::from_bytes([0xCC; 32]);
-            let candidate_hash = Hash32::from_bytes([0xDD; 32]);
-
             let mut cs = ChainSelection::new();
-            cs.set_tip(make_tip_with_hash(10, 200, current_hash));
+            cs.set_tip(make_tip(10, 200));
 
-            let candidate = make_tip_with_hash(11, 220, candidate_hash);
+            let candidate = make_tip(11, 220);
             assert_eq!(
-                cs.prefer_chain(&candidate, era, &current_hash, &candidate_hash),
+                cs.prefer_chain(&candidate, era),
                 ChainPreference::PreferCandidate,
                 "Era {:?} should prefer longer chain",
                 era
@@ -1103,15 +1056,12 @@ mod tests {
         // Chain A (current): 8 blocks in 100 slots → density 0.08
         // Chain B (candidate): 8 blocks in 80 slots → density 0.10
         // Candidate is denser, should be preferred
-        let current_hash = Hash32::from_bytes([0xAA; 32]);
-        let candidate_hash = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(8, 100, current_hash));
+        cs.set_tip(make_tip(8, 100));
 
-        let candidate = make_tip_with_hash(8, 80, candidate_hash);
+        let candidate = make_tip(8, 80);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
         );
     }
@@ -1121,15 +1071,12 @@ mod tests {
         // Chain A (current): 10 blocks in 100 slots → density 0.10
         // Chain B (candidate): 8 blocks in 100 slots → density 0.08
         // Current is denser
-        let current_hash = Hash32::from_bytes([0xAA; 32]);
-        let candidate_hash = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 100, current_hash));
+        cs.set_tip(make_tip(10, 100));
 
-        let candidate = make_tip_with_hash(8, 100, candidate_hash);
+        let candidate = make_tip(8, 100);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCurrent
         );
     }
@@ -1139,15 +1086,12 @@ mod tests {
         // Chain A (current): 5 blocks in 50 slots → density 0.10
         // Chain B (candidate): 7 blocks in 50 slots → density 0.14
         // Candidate has more blocks in same slot range
-        let current_hash = Hash32::from_bytes([0x11; 32]);
-        let candidate_hash = Hash32::from_bytes([0x22; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(5, 50, current_hash));
+        cs.set_tip(make_tip(5, 50));
 
-        let candidate = make_tip_with_hash(7, 50, candidate_hash);
+        let candidate = make_tip(7, 50);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
         );
     }
@@ -1157,34 +1101,28 @@ mod tests {
         // Test with large slot/block numbers to verify u128 overflow protection
         // Chain A: 1,000,000 blocks in 10,000,000 slots → density 0.1
         // Chain B: 1,000,001 blocks in 10,000,000 slots → density ~0.1000001
-        let current_hash = Hash32::from_bytes([0x01; 32]);
-        let candidate_hash = Hash32::from_bytes([0x02; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(1_000_000, 10_000_000, current_hash));
+        cs.set_tip(make_tip(1_000_000, 10_000_000));
 
-        let candidate = make_tip_with_hash(1_000_001, 10_000_000, candidate_hash);
+        let candidate = make_tip(1_000_001, 10_000_000);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
         );
     }
 
     #[test]
-    fn test_byron_same_density_uses_tiebreak() {
+    fn test_byron_same_density_incumbent_wins() {
         // Chain A: 10 blocks in 100 slots → density 0.10
         // Chain B: 20 blocks in 200 slots → density 0.10
-        // Same density → tiebreaker by hash
-        let current_hash = Hash32::from_bytes([0xFF; 32]); // higher hash
-        let candidate_hash = Hash32::from_bytes([0x01; 32]); // lower hash
-
+        // Same density → incumbent wins (no hash-based tiebreak)
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 100, current_hash));
+        cs.set_tip(make_tip(10, 100));
 
-        let candidate = make_tip_with_hash(20, 200, candidate_hash);
+        let candidate = make_tip(20, 200);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
-            ChainPreference::PreferCandidate, // lower hash wins
+            cs.prefer_chain(&candidate, Era::Byron),
+            ChainPreference::Equal,
         );
     }
 
@@ -1196,211 +1134,130 @@ mod tests {
         // Chain B (candidate): 9 blocks in 80 slots (density 0.1125, length 9)
         //
         // Byron prefers B (denser), Praos prefers A (longer).
-        let current_hash = Hash32::from_bytes([0xAA; 32]);
-        let candidate_hash = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 100, current_hash));
+        cs.set_tip(make_tip(10, 100));
 
-        let candidate = make_tip_with_hash(9, 80, candidate_hash);
+        let candidate = make_tip(9, 80);
 
         // Byron: candidate is denser (9/80 > 10/100 → 900 > 800)
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
         );
 
         // Praos: current is longer (10 > 9)
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Shelley, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Shelley),
             ChainPreference::PreferCurrent
         );
     }
 
     // -----------------------------------------------------------------------
-    // Deterministic fork tie-breaking (hash-based legacy API)
+    // Equal-length: incumbent wins (no hash-based tiebreak)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_tiebreak_lower_hash_wins() {
-        let low_hash = Hash32::from_bytes([0x01; 32]);
-        let high_hash = Hash32::from_bytes([0xFF; 32]);
-
+    fn test_equal_length_incumbent_wins() {
+        // Same length chains — incumbent wins (no switch), matching Haskell
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 200, high_hash));
+        cs.set_tip(make_tip(10, 200));
 
-        let candidate = make_tip_with_hash(10, 200, low_hash);
+        let candidate = make_tip(10, 200);
 
-        // Same length, lower hash candidate wins
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &high_hash, &low_hash),
-            ChainPreference::PreferCandidate
-        );
-    }
-
-    #[test]
-    fn test_tiebreak_higher_hash_loses() {
-        let low_hash = Hash32::from_bytes([0x01; 32]);
-        let high_hash = Hash32::from_bytes([0xFF; 32]);
-
-        let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 200, low_hash));
-
-        let candidate = make_tip_with_hash(10, 200, high_hash);
-
-        // Same length, higher hash candidate loses
-        assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &low_hash, &high_hash),
-            ChainPreference::PreferCurrent
-        );
-    }
-
-    #[test]
-    fn test_tiebreak_identical_hashes() {
-        let same_hash = Hash32::from_bytes([0x42; 32]);
-
-        let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 200, same_hash));
-
-        let candidate = make_tip_with_hash(10, 200, same_hash);
-
-        // Identical tips → Equal
-        assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &same_hash, &same_hash),
+            cs.prefer_chain(&candidate, Era::Conway),
             ChainPreference::Equal
         );
     }
 
     #[test]
-    fn test_tiebreak_only_first_byte_differs() {
-        let mut hash_a_bytes = [0x00; 32];
-        let mut hash_b_bytes = [0x00; 32];
-        hash_a_bytes[0] = 0x01;
-        hash_b_bytes[0] = 0x02;
-        let hash_a = Hash32::from_bytes(hash_a_bytes);
-        let hash_b = Hash32::from_bytes(hash_b_bytes);
-
+    fn test_equal_length_incumbent_wins_shelley() {
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(5, 100, hash_b));
-
-        let candidate = make_tip_with_hash(5, 100, hash_a);
+        cs.set_tip(make_tip(10, 200));
+        let candidate = make_tip(10, 200);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Babbage, &hash_b, &hash_a),
-            ChainPreference::PreferCandidate, // hash_a < hash_b
+            cs.prefer_chain(&candidate, Era::Shelley),
+            ChainPreference::Equal
         );
     }
 
     #[test]
-    fn test_tiebreak_only_last_byte_differs() {
-        let mut hash_a_bytes = [0x00; 32];
-        let mut hash_b_bytes = [0x00; 32];
-        hash_a_bytes[31] = 0x01;
-        hash_b_bytes[31] = 0x02;
-        let hash_a = Hash32::from_bytes(hash_a_bytes);
-        let hash_b = Hash32::from_bytes(hash_b_bytes);
-
+    fn test_length_takes_priority() {
+        // Length difference should always determine the result
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(5, 100, hash_b));
+        cs.set_tip(make_tip(11, 220)); // longer chain
 
-        let candidate = make_tip_with_hash(5, 100, hash_a);
+        let candidate = make_tip(10, 200); // shorter
+
+        // Current is longer → PreferCurrent
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Shelley, &hash_b, &hash_a),
-            ChainPreference::PreferCandidate, // hash_a < hash_b
-        );
-    }
-
-    #[test]
-    fn test_tiebreak_does_not_override_length() {
-        // Length difference should take priority over hash comparison
-        let low_hash = Hash32::from_bytes([0x01; 32]);
-        let high_hash = Hash32::from_bytes([0xFF; 32]);
-
-        let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(11, 220, low_hash)); // longer chain, lower hash
-
-        let candidate = make_tip_with_hash(10, 200, high_hash); // shorter, higher hash
-
-        // Current is longer → PreferCurrent, even though candidate hash is irrelevant
-        assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &low_hash, &high_hash),
+            cs.prefer_chain(&candidate, Era::Conway),
             ChainPreference::PreferCurrent
         );
     }
 
     // -----------------------------------------------------------------------
-    // Edge cases (hash-based API)
+    // Edge cases
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_origin_vs_candidate_with_era() {
-        let candidate_hash = Hash32::from_bytes([0xAB; 32]);
-        let current_hash = Hash32::ZERO;
-
         let cs = ChainSelection::new(); // origin
-        let candidate = make_tip_with_hash(1, 10, candidate_hash);
+        let candidate = make_tip(1, 10);
 
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
         );
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &current_hash, &candidate_hash),
+            cs.prefer_chain(&candidate, Era::Conway),
             ChainPreference::PreferCandidate
         );
     }
 
     #[test]
     fn test_candidate_origin_with_era() {
-        let current_hash = Hash32::from_bytes([0xAB; 32]);
-        let candidate_hash = Hash32::ZERO;
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(5, 100, current_hash));
+        cs.set_tip(make_tip(5, 100));
 
         assert_eq!(
-            cs.prefer_chain(&Tip::origin(), Era::Byron, &current_hash, &candidate_hash),
+            cs.prefer_chain(&Tip::origin(), Era::Byron),
             ChainPreference::PreferCurrent
         );
     }
 
     #[test]
     fn test_both_origin_with_era() {
-        let hash = Hash32::ZERO;
         let cs = ChainSelection::new();
         assert_eq!(
-            cs.prefer_chain(&Tip::origin(), Era::Byron, &hash, &hash),
+            cs.prefer_chain(&Tip::origin(), Era::Byron),
             ChainPreference::Equal
         );
     }
 
     #[test]
     fn test_single_block_chain_vs_origin() {
-        let hash = Hash32::from_bytes([0x42; 32]);
         let cs = ChainSelection::new();
-        let single_block = make_tip_with_hash(1, 1, hash);
+        let single_block = make_tip(1, 1);
 
         assert_eq!(
-            cs.prefer_chain(&single_block, Era::Byron, &Hash32::ZERO, &hash),
+            cs.prefer_chain(&single_block, Era::Byron),
             ChainPreference::PreferCandidate
         );
     }
 
     #[test]
-    fn test_should_switch_chain_with_tiebreak() {
-        let low_hash = Hash32::from_bytes([0x01; 32]);
-        let high_hash = Hash32::from_bytes([0xFF; 32]);
-
+    fn test_should_switch_chain_equal_no_switch() {
+        // Equal-length chains: should NOT switch (incumbent wins)
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(10, 200, high_hash));
+        cs.set_tip(make_tip(10, 200));
 
-        let candidate = make_tip_with_hash(10, 200, low_hash);
-        assert!(cs.should_switch_chain(&candidate, Era::Conway, &high_hash, &low_hash));
+        let candidate = make_tip(10, 200);
+        assert!(!cs.should_switch_chain(&candidate, Era::Conway));
 
-        // Reverse: candidate has higher hash, should NOT switch
-        let mut cs2 = ChainSelection::new();
-        cs2.set_tip(make_tip_with_hash(10, 200, low_hash));
-        let candidate2 = make_tip_with_hash(10, 200, high_hash);
-        assert!(!cs2.should_switch_chain(&candidate2, Era::Conway, &low_hash, &high_hash));
+        // Longer chain: should switch
+        let longer = make_tip(11, 210);
+        assert!(cs.should_switch_chain(&longer, Era::Conway));
     }
 
     #[test]
@@ -1408,63 +1265,14 @@ mod tests {
         // Single-block chains at slot 1
         // Chain A: 1 block at slot 1 → density 1.0
         // Chain B: 1 block at slot 2 → density 0.5
-        let hash_a = Hash32::from_bytes([0xAA; 32]);
-        let hash_b = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(1, 2, hash_a));
+        cs.set_tip(make_tip(1, 2));
 
-        let candidate = make_tip_with_hash(1, 1, hash_b);
+        let candidate = make_tip(1, 1);
         // candidate density (1/1 = 1.0) > current density (1/2 = 0.5)
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Byron, &hash_a, &hash_b),
+            cs.prefer_chain(&candidate, Era::Byron),
             ChainPreference::PreferCandidate
-        );
-    }
-
-    #[test]
-    fn test_hash_tiebreak_function() {
-        let low = Hash32::from_bytes([0x00; 32]);
-        let high = Hash32::from_bytes([0xFF; 32]);
-        let mid = Hash32::from_bytes([0x80; 32]);
-
-        assert_eq!(hash_tiebreak(&high, &low), ChainPreference::PreferCandidate);
-        assert_eq!(hash_tiebreak(&low, &high), ChainPreference::PreferCurrent);
-        assert_eq!(hash_tiebreak(&low, &low), ChainPreference::Equal);
-        assert_eq!(hash_tiebreak(&high, &mid), ChainPreference::PreferCandidate);
-        assert_eq!(hash_tiebreak(&mid, &high), ChainPreference::PreferCurrent);
-    }
-
-    // -----------------------------------------------------------------------
-    // Chain Selection Edge Cases (hash-based API)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_equal_length_different_hashes_tiebreaker() {
-        // Two chains of equal length but different tip hashes
-        let low_hash = Hash32::from_bytes([0x10; 32]);
-        let high_hash = Hash32::from_bytes([0x90; 32]);
-
-        let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(100, 2000, high_hash));
-
-        let candidate = make_tip_with_hash(100, 2000, low_hash);
-
-        // Lower hash should win the tiebreak
-        assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &high_hash, &low_hash),
-            ChainPreference::PreferCandidate,
-            "Lower hash candidate should win on equal-length tiebreak"
-        );
-
-        // Reverse: higher hash candidate should lose
-        let mut cs2 = ChainSelection::new();
-        cs2.set_tip(make_tip_with_hash(100, 2000, low_hash));
-        let candidate2 = make_tip_with_hash(100, 2000, high_hash);
-        assert_eq!(
-            cs2.prefer_chain(&candidate2, Era::Conway, &low_hash, &high_hash),
-            ChainPreference::PreferCurrent,
-            "Higher hash candidate should lose on equal-length tiebreak"
         );
     }
 
@@ -1473,15 +1281,12 @@ mod tests {
         // Praos uses block number (length), not slot
         // Chain A: 50 blocks at slot 1000
         // Chain B: 51 blocks at slot 900 (higher block count, lower slot)
-        let hash_a = Hash32::from_bytes([0xAA; 32]);
-        let hash_b = Hash32::from_bytes([0xBB; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(50, 1000, hash_a));
+        cs.set_tip(make_tip(50, 1000));
 
-        let candidate = make_tip_with_hash(51, 900, hash_b);
+        let candidate = make_tip(51, 900);
         assert_eq!(
-            cs.prefer_chain(&candidate, Era::Conway, &hash_a, &hash_b),
+            cs.prefer_chain(&candidate, Era::Conway),
             ChainPreference::PreferCandidate,
             "Praos should prefer higher block number regardless of slot"
         );
@@ -1490,16 +1295,13 @@ mod tests {
     #[test]
     fn test_byron_density_max_slot_values_no_overflow() {
         // Test with near-maximum u64 slot values to check u128 overflow protection
-        let hash_a = Hash32::from_bytes([0x11; 32]);
-        let hash_b = Hash32::from_bytes([0x22; 32]);
-
         let max_slot = u64::MAX / 2;
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(1_000_000, max_slot, hash_a));
+        cs.set_tip(make_tip(1_000_000, max_slot));
 
         // Candidate has same blocks in fewer slots (higher density)
-        let candidate = make_tip_with_hash(1_000_000, max_slot - 1000, hash_b);
-        let result = cs.prefer_chain(&candidate, Era::Byron, &hash_a, &hash_b);
+        let candidate = make_tip(1_000_000, max_slot - 1000);
+        let result = cs.prefer_chain(&candidate, Era::Byron);
         assert_eq!(
             result,
             ChainPreference::PreferCandidate,
@@ -1510,17 +1312,33 @@ mod tests {
     #[test]
     fn test_praos_block_number_zero_chains() {
         // Two chains both at block 0 but different slots
-        let hash_a = Hash32::from_bytes([0x55; 32]);
-        let hash_b = Hash32::from_bytes([0x33; 32]);
-
         let mut cs = ChainSelection::new();
-        cs.set_tip(make_tip_with_hash(0, 0, hash_a));
+        cs.set_tip(make_tip(0, 0));
 
         // Block 0, slot 0 vs block 0, slot 5 — equal block number
-        let candidate = make_tip_with_hash(0, 5, hash_b);
-        let result = cs.prefer_chain(&candidate, Era::Shelley, &hash_a, &hash_b);
-        // Equal block numbers → tiebreak by hash: 0x33 < 0x55
-        assert_eq!(result, ChainPreference::PreferCandidate);
+        let candidate = make_tip(0, 5);
+        let result = cs.prefer_chain(&candidate, Era::Shelley);
+        // Equal block numbers → incumbent wins (Equal)
+        assert_eq!(result, ChainPreference::Equal);
+    }
+
+    #[test]
+    fn test_praos_equal_length_no_hash_tiebreak() {
+        let mut cs = ChainSelection::new();
+        cs.set_tip(make_tip(10, 200));
+        let candidate = make_tip(10, 200);
+        assert_eq!(
+            cs.prefer_chain(&candidate, Era::Shelley),
+            ChainPreference::Equal
+        );
+        assert_eq!(
+            cs.prefer_chain(&candidate, Era::Conway),
+            ChainPreference::Equal
+        );
+        assert_eq!(
+            cs.prefer_chain(&candidate, Era::Byron),
+            ChainPreference::Equal
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2256,16 +2074,15 @@ mod tests {
 
         /// Generate a Praos-style tip with arbitrary block number and slot.
         /// Slot is always >= block_no (at least one slot per block).
-        fn arb_praos_tip() -> impl Strategy<Value = (Tip, Hash32)> {
+        fn arb_praos_tip() -> impl Strategy<Value = Tip> {
             (1u64..10_000, 1u64..100_000).prop_flat_map(|(block_no, extra_slot)| {
                 let slot = block_no.saturating_add(extra_slot);
                 prop::array::uniform32(any::<u8>()).prop_map(move |hash_bytes| {
                     let hash = Hash32::from_bytes(hash_bytes);
-                    let tip = Tip {
+                    Tip {
                         point: Point::Specific(SlotNo(slot), hash),
                         block_number: BlockNo(block_no),
-                    };
-                    (tip, hash)
+                    }
                 })
             })
         }
@@ -2276,23 +2093,24 @@ mod tests {
             /// Transitivity: if A > B and B > C then A > C.
             ///
             /// For the Praos longest-chain rule, "prefer" is a total order on
-            /// block numbers with hash-based tiebreaking. This property verifies
-            /// that the `prefer_chain` comparison is transitive for Shelley+ eras.
+            /// block numbers. On equal block number the result is Equal (incumbent
+            /// wins), so transitivity holds trivially for ties. This property
+            /// verifies transitivity for Shelley+ eras.
             #[test]
             fn prop_chain_selection_transitivity(
-                (tip_a, hash_a) in arb_praos_tip(),
-                (tip_b, hash_b) in arb_praos_tip(),
-                (tip_c, hash_c) in arb_praos_tip(),
+                tip_a in arb_praos_tip(),
+                tip_b in arb_praos_tip(),
+                tip_c in arb_praos_tip(),
             ) {
                 // Compare A vs B (with B as current)
                 let mut cs_b = ChainSelection::new();
                 cs_b.set_tip(tip_b.clone());
-                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage, &hash_b, &hash_a);
+                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage);
 
                 // Compare B vs C (with C as current)
                 let mut cs_c = ChainSelection::new();
                 cs_c.set_tip(tip_c.clone());
-                let b_vs_c = cs_c.prefer_chain(&tip_b, Era::Babbage, &hash_c, &hash_b);
+                let b_vs_c = cs_c.prefer_chain(&tip_b, Era::Babbage);
 
                 // If A preferred over B, and B preferred over C, then A must be preferred over C.
                 if a_vs_b == ChainPreference::PreferCandidate
@@ -2300,7 +2118,7 @@ mod tests {
                 {
                     let mut cs_c2 = ChainSelection::new();
                     cs_c2.set_tip(tip_c.clone());
-                    let a_vs_c = cs_c2.prefer_chain(&tip_a, Era::Babbage, &hash_c, &hash_a);
+                    let a_vs_c = cs_c2.prefer_chain(&tip_a, Era::Babbage);
                     prop_assert_eq!(
                         a_vs_c,
                         ChainPreference::PreferCandidate,
@@ -2315,16 +2133,16 @@ mod tests {
             /// then we must not also prefer B over A.
             #[test]
             fn prop_chain_selection_antisymmetry(
-                (tip_a, hash_a) in arb_praos_tip(),
-                (tip_b, hash_b) in arb_praos_tip(),
+                tip_a in arb_praos_tip(),
+                tip_b in arb_praos_tip(),
             ) {
                 let mut cs_b = ChainSelection::new();
                 cs_b.set_tip(tip_b.clone());
-                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage, &hash_b, &hash_a);
+                let a_vs_b = cs_b.prefer_chain(&tip_a, Era::Babbage);
 
                 let mut cs_a = ChainSelection::new();
                 cs_a.set_tip(tip_a.clone());
-                let b_vs_a = cs_a.prefer_chain(&tip_b, Era::Babbage, &hash_a, &hash_b);
+                let b_vs_a = cs_a.prefer_chain(&tip_b, Era::Babbage);
 
                 match a_vs_b {
                     ChainPreference::PreferCandidate => {
@@ -2357,10 +2175,10 @@ mod tests {
             /// Longer chain always wins in Praos (Shelley+).
             ///
             /// When block numbers differ, the chain with the higher block number
-            /// must always be preferred, regardless of slot numbers or hashes.
+            /// must always be preferred, regardless of slot numbers.
             #[test]
             fn prop_longer_chain_always_preferred(
-                (tip_long, hash_long) in arb_praos_tip(),
+                tip_long in arb_praos_tip(),
                 delta in 1u64..1000,
                 slot_short in 1u64..100_000,
                 hash_bytes_short in prop::array::uniform32(any::<u8>()),
@@ -2376,7 +2194,7 @@ mod tests {
                 // With the shorter chain as current, the longer must be preferred
                 let mut cs = ChainSelection::new();
                 cs.set_tip(tip_short);
-                let result = cs.prefer_chain(&tip_long, Era::Babbage, &hash_short, &hash_long);
+                let result = cs.prefer_chain(&tip_long, Era::Babbage);
                 prop_assert_eq!(
                     result,
                     ChainPreference::PreferCandidate,
