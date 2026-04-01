@@ -398,19 +398,27 @@ fn compute_body_size(transactions: &[Transaction]) -> u64 {
         encode_auxiliary_data, encode_transaction_body, encode_witness_set,
     };
 
-    // 1. tx_bodies array
+    // 1. tx_bodies array — use preserved raw CBOR for byte-exact size
     let mut bodies_len = encode_array_header(transactions.len()).len();
     for tx in transactions {
-        bodies_len += encode_transaction_body(&tx.body).len();
+        if let Some(raw) = &tx.raw_body_cbor {
+            bodies_len += raw.len();
+        } else {
+            bodies_len += encode_transaction_body(&tx.body).len();
+        }
     }
 
-    // 2. witness_sets array
+    // 2. witness_sets array — use preserved raw CBOR for byte-exact size
     let mut wits_len = encode_array_header(transactions.len()).len();
     for tx in transactions {
-        wits_len += encode_witness_set(&tx.witness_set).len();
+        if let Some(raw) = &tx.raw_witness_cbor {
+            wits_len += raw.len();
+        } else {
+            wits_len += encode_witness_set(&tx.witness_set).len();
+        }
     }
 
-    // 3. aux_data map
+    // 3. aux_data map — use preserved raw CBOR for byte-exact size
     let aux_entries: Vec<_> = transactions
         .iter()
         .enumerate()
@@ -419,7 +427,11 @@ fn compute_body_size(transactions: &[Transaction]) -> u64 {
     let mut aux_len = encode_map_header(aux_entries.len()).len();
     for (idx, aux) in &aux_entries {
         aux_len += encode_uint(*idx as u64).len();
-        aux_len += encode_auxiliary_data(aux).len();
+        if let Some(raw) = &aux.raw_cbor {
+            aux_len += raw.len();
+        } else {
+            aux_len += encode_auxiliary_data(aux).len();
+        }
     }
 
     // 4. invalid_tx_indices array
@@ -587,6 +599,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let (block, _cbor) = forge_block(

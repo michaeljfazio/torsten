@@ -469,6 +469,8 @@ mod tests {
             auxiliary_data: None,
             // 200-byte dummy raw_cbor so the fee size calculation is deterministic in tests
             raw_cbor: Some(vec![0u8; 200]),
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 

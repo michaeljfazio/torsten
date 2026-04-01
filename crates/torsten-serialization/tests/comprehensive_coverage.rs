@@ -132,6 +132,8 @@ fn minimal_tx() -> Transaction {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 

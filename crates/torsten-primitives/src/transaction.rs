@@ -600,6 +600,24 @@ pub struct Transaction {
     /// Raw CBOR encoding of this transaction (for Plutus script evaluation)
     #[serde(skip)]
     pub raw_cbor: Option<Vec<u8>>,
+    /// Raw CBOR encoding of the transaction body as received on the wire.
+    ///
+    /// Preserves the exact byte-level encoding of the body map so that the
+    /// transaction hash (blake2b-256 of body CBOR) remains valid when the
+    /// transaction is included in a forged block.  Without this, re-encoding
+    /// from parsed fields may produce different CBOR (different map key
+    /// ordering, definite vs indefinite lengths, etc.), invalidating witness
+    /// signatures.
+    #[serde(skip)]
+    pub raw_body_cbor: Option<Vec<u8>>,
+    /// Raw CBOR encoding of the transaction witness set as received on the wire.
+    ///
+    /// Preserves the exact byte-level encoding of the witness set so that it
+    /// can be included verbatim in forged blocks.  Re-encoding witnesses from
+    /// parsed fields risks producing different CBOR, which would change the
+    /// block body hash and cause downstream validation failures.
+    #[serde(skip)]
+    pub raw_witness_cbor: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -647,6 +665,8 @@ impl Transaction {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 }

@@ -237,6 +237,8 @@ fn test_apply_block_with_transaction() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -320,6 +322,8 @@ fn test_apply_block_skips_invalid_tx() {
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -616,6 +620,8 @@ fn test_fee_accumulation() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -1900,6 +1906,8 @@ fn test_treasury_donation() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -3859,6 +3867,8 @@ fn test_utxo_stake_distribution_tracking() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -4508,6 +4518,8 @@ fn test_invalid_tx_uses_collateral_for_fees_not_declared_fee() {
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -4598,6 +4610,8 @@ fn test_invalid_tx_collateral_with_return() {
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -4676,6 +4690,8 @@ fn test_invalid_tx_total_collateral_field() {
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -10077,6 +10093,8 @@ fn make_delegation_block(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
     make_test_block(slot, block_no, prev_hash, vec![tx])
 }
@@ -10152,6 +10170,8 @@ fn make_pool_registration_block(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
     make_test_block(slot, block_no, prev_hash, vec![tx])
 }
@@ -11051,6 +11071,8 @@ fn make_invalid_tx_with_collateral(
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -12159,6 +12181,8 @@ fn make_simple_tx(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -12620,6 +12644,8 @@ fn make_tx_with_treasury(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -12677,6 +12703,8 @@ fn make_tx_with_committee_hot_auth(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -12989,6 +13017,8 @@ fn make_tx_with_redeemers(tx_hash_byte: u8, mem: u64, steps: u64) -> Transaction
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -13275,6 +13305,8 @@ fn make_invalid_tx_with_col_return(
         is_valid: false,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -13746,6 +13778,8 @@ fn test_treasury_donation_accumulates_correctly() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
@@ -14394,6 +14428,8 @@ fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 

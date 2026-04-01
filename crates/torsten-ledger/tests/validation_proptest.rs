@@ -93,6 +93,8 @@ fn make_tx(input: TransactionInput, output_value: u64, fee: u64) -> Transaction 
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -778,6 +780,8 @@ fn make_mint_tx(
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     }
 }
 
@@ -997,6 +1001,8 @@ proptest! {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &p, 100, 300, None);
@@ -1120,6 +1126,8 @@ proptest! {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &p, 100, 300, None);
@@ -1268,6 +1276,8 @@ proptest! {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &p, 100, 300, None);
@@ -1407,6 +1417,8 @@ proptest! {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let result = validate_transaction(&tx, &utxo_set, &p, 100, 300, None);
@@ -1505,6 +1517,8 @@ fn minting_without_policy_script_rejected() {
         is_valid: true,
         auxiliary_data: None,
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     };
 
     let result = validate_transaction(&tx, &utxo_set, &p, 100, 300, None);

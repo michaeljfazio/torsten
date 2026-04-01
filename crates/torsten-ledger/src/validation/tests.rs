@@ -103,6 +103,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 
@@ -501,6 +503,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_ok());
@@ -592,6 +596,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
@@ -1764,6 +1770,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
@@ -1919,6 +1927,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         assert!(result.is_err());
@@ -2030,6 +2040,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
         match result {
@@ -2553,6 +2565,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         (utxo_set, tx)
     }
@@ -4206,6 +4220,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4311,6 +4327,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4415,6 +4433,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4521,6 +4541,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4643,6 +4665,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4796,6 +4820,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -4906,6 +4932,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let map = plutus_script_version_map(&tx, &utxo_set);
@@ -5011,6 +5039,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let map = plutus_script_version_map(&tx, &utxo_set);
@@ -5148,6 +5178,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5280,6 +5312,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5396,6 +5430,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5502,6 +5538,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5598,6 +5636,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5695,6 +5735,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5792,6 +5834,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -5915,6 +5959,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6034,6 +6080,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut reg_errors: Vec<ValidationError> = Vec::new();
@@ -6104,6 +6152,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut unreg_errors: Vec<ValidationError> = Vec::new();
@@ -6200,6 +6250,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6317,6 +6369,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6435,6 +6489,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6554,6 +6610,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6670,6 +6728,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6778,6 +6838,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6890,6 +6952,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -6998,6 +7062,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -7102,6 +7168,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -7204,6 +7272,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -7318,6 +7388,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors: Vec<ValidationError> = Vec::new();
@@ -7437,6 +7509,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7518,6 +7592,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7596,6 +7672,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7676,6 +7754,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7756,6 +7836,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7855,6 +7937,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -7944,6 +8028,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -8019,6 +8105,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         let mut errors = Vec::new();
@@ -11753,6 +11841,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
 
         (utxo_set, input, tx, params)

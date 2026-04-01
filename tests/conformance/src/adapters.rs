@@ -471,6 +471,8 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
             None
         },
         raw_cbor: None,
+        raw_body_cbor: None,
+        raw_witness_cbor: None,
     })
 }
 

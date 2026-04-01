@@ -102,19 +102,33 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
     // Header
     buf.extend(encode_block_header(&block.header, kes_signature));
 
-    // Transaction bodies — use per-tx era for correct set encoding
+    // Transaction bodies — prefer preserved raw CBOR from the original
+    // transaction to avoid re-serialization mismatches that would invalidate
+    // witness signatures (the tx hash is blake2b-256 of the body CBOR).
     buf.extend(encode_array_header(block.transactions.len()));
     for tx in &block.transactions {
-        buf.extend(encode_transaction_body_for_era(&tx.body, tx.era));
+        if let Some(raw) = &tx.raw_body_cbor {
+            buf.extend_from_slice(raw);
+        } else {
+            buf.extend(encode_transaction_body_for_era(&tx.body, tx.era));
+        }
     }
 
-    // Transaction witness sets — use per-tx era for correct redeemer encoding
+    // Transaction witness sets — prefer preserved raw CBOR to avoid encoding
+    // differences (map vs array redeemers, definite vs indefinite lengths).
     buf.extend(encode_array_header(block.transactions.len()));
     for tx in &block.transactions {
-        buf.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
+        if let Some(raw) = &tx.raw_witness_cbor {
+            buf.extend_from_slice(raw);
+        } else {
+            buf.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
+        }
     }
 
     // Auxiliary data map: {tx_index: aux_data}
+    // Prefer preserved raw CBOR to avoid re-encoding mismatches that would
+    // cause ConflictingMetadataHash failures (the auxiliary_data_hash in the
+    // body was computed from the original CBOR).
     let aux_entries: Vec<_> = block
         .transactions
         .iter()
@@ -124,7 +138,11 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
     buf.extend(encode_map_header(aux_entries.len()));
     for (idx, aux) in &aux_entries {
         buf.extend(encode_uint(*idx as u64));
-        buf.extend(encode_auxiliary_data(aux));
+        if let Some(raw) = &aux.raw_cbor {
+            buf.extend_from_slice(raw);
+        } else {
+            buf.extend(encode_auxiliary_data(aux));
+        }
     }
 
     // Invalid transactions (indices of txs with is_valid=false)
@@ -153,21 +171,31 @@ pub fn encode_block(block: &Block, kes_signature: &[u8]) -> Vec<u8> {
 ///   h3 = blake2b_256(CBOR map of {tx_index: auxiliary_data})
 ///   h4 = blake2b_256(CBOR array of invalid tx indices)
 pub fn compute_block_body_hash(transactions: &[Transaction]) -> Hash32 {
-    // 1. Transaction bodies — use per-tx era for correct set encoding
+    // 1. Transaction bodies — prefer preserved raw CBOR from the original
+    // transaction to ensure the body hash matches what the witnesses signed.
     let mut bodies_cbor = encode_array_header(transactions.len());
     for tx in transactions {
-        bodies_cbor.extend(encode_transaction_body_for_era(&tx.body, tx.era));
+        if let Some(raw) = &tx.raw_body_cbor {
+            bodies_cbor.extend_from_slice(raw);
+        } else {
+            bodies_cbor.extend(encode_transaction_body_for_era(&tx.body, tx.era));
+        }
     }
     let h1 = blake2b_256(&bodies_cbor);
 
-    // 2. Transaction witness sets — use per-tx era for correct redeemer encoding
+    // 2. Transaction witness sets — prefer preserved raw CBOR.
     let mut wits_cbor = encode_array_header(transactions.len());
     for tx in transactions {
-        wits_cbor.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
+        if let Some(raw) = &tx.raw_witness_cbor {
+            wits_cbor.extend_from_slice(raw);
+        } else {
+            wits_cbor.extend(encode_witness_set_for_era(&tx.witness_set, tx.era));
+        }
     }
     let h2 = blake2b_256(&wits_cbor);
 
-    // 3. Auxiliary data map: {tx_index: aux_data} for txs that have auxiliary data
+    // 3. Auxiliary data map: {tx_index: aux_data} — prefer preserved raw CBOR
+    // to avoid ConflictingMetadataHash from re-encoding differences.
     let aux_entries: Vec<_> = transactions
         .iter()
         .enumerate()
@@ -176,7 +204,11 @@ pub fn compute_block_body_hash(transactions: &[Transaction]) -> Hash32 {
     let mut aux_cbor = encode_map_header(aux_entries.len());
     for (idx, aux) in &aux_entries {
         aux_cbor.extend(encode_uint(*idx as u64));
-        aux_cbor.extend(encode_auxiliary_data(aux));
+        if let Some(raw) = &aux.raw_cbor {
+            aux_cbor.extend_from_slice(raw);
+        } else {
+            aux_cbor.extend(encode_auxiliary_data(aux));
+        }
     }
     let h3 = blake2b_256(&aux_cbor);
 

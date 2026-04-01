@@ -518,21 +518,47 @@ fn decode_transaction_from_pallas_with_mode(
     //
     // Pallas represents Shelley/Allegra/Mary/Alonzo as AlonzoCompatible(_,
     // pallas_traverse::Era) — we map each inner Era tag to our own Era type.
-    let era = match tx {
-        PallasTx::Byron(_) => torsten_primitives::era::Era::Byron,
-        PallasTx::AlonzoCompatible(_, pallas_era) => match pallas_era {
-            pallas_traverse::Era::Shelley => torsten_primitives::era::Era::Shelley,
-            pallas_traverse::Era::Allegra => torsten_primitives::era::Era::Allegra,
-            pallas_traverse::Era::Mary => torsten_primitives::era::Era::Mary,
-            pallas_traverse::Era::Alonzo => torsten_primitives::era::Era::Alonzo,
-            // AlonzoCompatible should only carry Shelley-Alonzo era tags; fall
-            // through to Conway for any unexpected value.
-            _ => torsten_primitives::era::Era::Conway,
-        },
-        PallasTx::Babbage(_) => torsten_primitives::era::Era::Babbage,
-        PallasTx::Conway(_) => torsten_primitives::era::Era::Conway,
+    //
+    // While determining the era, also extract raw CBOR bytes for the
+    // transaction body and witness set from pallas's KeepRaw wrappers.
+    // These preserved bytes are critical for block forging: re-encoding
+    // from parsed fields may produce different CBOR (map key ordering,
+    // definite/indefinite-length, etc.), which would invalidate witness
+    // signatures and auxiliary data hashes.
+    let (era, raw_body_cbor, raw_witness_cbor) = match tx {
+        PallasTx::Byron(_) => (torsten_primitives::era::Era::Byron, None, None),
+        PallasTx::AlonzoCompatible(cow_tx, pallas_era) => {
+            let era = match pallas_era {
+                pallas_traverse::Era::Shelley => torsten_primitives::era::Era::Shelley,
+                pallas_traverse::Era::Allegra => torsten_primitives::era::Era::Allegra,
+                pallas_traverse::Era::Mary => torsten_primitives::era::Era::Mary,
+                pallas_traverse::Era::Alonzo => torsten_primitives::era::Era::Alonzo,
+                _ => torsten_primitives::era::Era::Conway,
+            };
+            let body_cbor = Some(cow_tx.transaction_body.raw_cbor().to_vec());
+            let witness_cbor = Some(cow_tx.transaction_witness_set.raw_cbor().to_vec());
+            (era, body_cbor, witness_cbor)
+        }
+        PallasTx::Babbage(cow_tx) => {
+            let body_cbor = Some(cow_tx.transaction_body.raw_cbor().to_vec());
+            let witness_cbor = Some(cow_tx.transaction_witness_set.raw_cbor().to_vec());
+            (
+                torsten_primitives::era::Era::Babbage,
+                body_cbor,
+                witness_cbor,
+            )
+        }
+        PallasTx::Conway(cow_tx) => {
+            let body_cbor = Some(cow_tx.transaction_body.raw_cbor().to_vec());
+            let witness_cbor = Some(cow_tx.transaction_witness_set.raw_cbor().to_vec());
+            (
+                torsten_primitives::era::Era::Conway,
+                body_cbor,
+                witness_cbor,
+            )
+        }
         // MultiEraTx is #[non_exhaustive]; treat any future variant as Conway.
-        _ => torsten_primitives::era::Era::Conway,
+        _ => (torsten_primitives::era::Era::Conway, None, None),
     };
 
     Ok(Transaction {
@@ -543,6 +569,8 @@ fn decode_transaction_from_pallas_with_mode(
         is_valid: tx.is_valid(),
         auxiliary_data,
         raw_cbor,
+        raw_body_cbor,
+        raw_witness_cbor,
     })
 }
 

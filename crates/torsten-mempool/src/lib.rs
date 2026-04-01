@@ -1346,6 +1346,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 
@@ -3617,6 +3619,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         };
         (tx, tx_hash)
     }
@@ -3683,6 +3687,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 
@@ -4157,6 +4163,8 @@ mod tests {
             is_valid: true,
             auxiliary_data: None,
             raw_cbor: Some(raw),
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
         }
     }
 
