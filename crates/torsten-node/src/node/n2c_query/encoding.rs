@@ -68,6 +68,34 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     buf
 }
 
+/// Encode a `QueryResult` as the MsgResult payload (no `[4, ...]` envelope).
+///
+/// Returns the result with proper HFC wrapping:
+/// - BlockQuery QueryIfCurrent results: `[1, result]` (EitherMismatch Right)
+/// - Top-level / QueryAnytime / QueryHardFork results: `result` (no wrapping)
+pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut buf);
+
+    let needs_either_mismatch = !matches!(
+        result,
+        QueryResult::SystemStart(_)
+            | QueryResult::ChainBlockNo(_)
+            | QueryResult::ChainTip { .. }
+            | QueryResult::ChainPoint { .. }
+            | QueryResult::CurrentEra(_)
+            | QueryResult::HardForkCurrentEra(_)
+            | QueryResult::EraHistory(_)
+    );
+
+    if needs_either_mismatch {
+        enc.array(1).ok();
+    }
+
+    encode_query_result_value(&mut enc, result);
+    buf
+}
+
 /// Encode just the query result value (no MsgResult wrapper, no HFC wrapper).
 ///
 /// Used by `encode_query_result` for normal encoding and by `WrappedCbor` for

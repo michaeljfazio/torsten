@@ -14,14 +14,28 @@ use crate::codec;
 use crate::error::ProtocolError;
 use crate::mux::channel::MuxChannel;
 
-use super::{AcquireFailure, AcquireTarget, TAG_ACQUIRED, TAG_DONE, TAG_FAILURE, TAG_RESULT};
+use super::{
+    AcquireFailure, AcquireTarget, TAG_ACQUIRED, TAG_ACQUIRE_IMMUTABLE, TAG_ACQUIRE_SPECIFIC,
+    TAG_ACQUIRE_VOLATILE, TAG_DONE, TAG_FAILURE, TAG_QUERY, TAG_REACQUIRE_SPECIFIC,
+    TAG_REACQUIRE_VOLATILE, TAG_RELEASE, TAG_RESULT,
+};
 
 /// Trait for handling LocalStateQuery queries.
 ///
 /// Implemented by the node integration layer, which has access to the ledger state.
-/// The handler receives the raw query tag and CBOR, and returns pre-encoded
-/// CBOR response bytes.
 pub trait QueryHandler: Send + Sync {
+    /// Handle a raw query from the MsgQuery payload.
+    ///
+    /// `query_cbor` is the raw CBOR after the MsgQuery tag (i.e. the consensus-level
+    /// query structure). The handler is responsible for parsing the full query
+    /// hierarchy: consensus-level (BlockQuery/GetSystemStart/GetChainBlockNo/GetChainPoint),
+    /// HFC-level (QueryIfCurrent/QueryAnytime/QueryHardFork), and era-level dispatch.
+    ///
+    /// Returns the fully-encoded MsgResult payload bytes (WITHOUT the `[4, ...]`
+    /// envelope — the server adds that). For BlockQuery QueryIfCurrent results,
+    /// wrap in HFC success `[1, result]`. For other query types, return unwrapped.
+    fn handle_query(&self, query_cbor: &[u8], n2c_version: u16) -> Result<Vec<u8>, String>;
+
     /// Handle a Shelley BlockQuery by tag number.
     ///
     /// - `tag`: Shelley BlockQuery tag (0-38)
@@ -49,9 +63,13 @@ pub struct LocalStateQueryServer;
 
 impl LocalStateQueryServer {
     /// Run the LocalStateQuery server loop.
+    ///
+    /// `n2c_version` is the negotiated N2C protocol version (16-23) from the
+    /// handshake phase, used for version-gated query dispatch.
     pub async fn run<H: QueryHandler>(
         channel: &mut MuxChannel,
         handler: &H,
+        n2c_version: u16,
     ) -> Result<(), ProtocolError> {
         let mut acquired = false;
 
@@ -69,18 +87,19 @@ impl LocalStateQueryServer {
             })?;
 
             match tag {
+                // MsgDone = [7]
                 TAG_DONE => {
                     tracing::debug!("local state query: client done");
                     return Ok(());
                 }
 
-                // MsgAcquire: [8, target]
-                8 => {
-                    let target = decode_acquire_target(&mut dec)?;
+                // MsgAcquire: [0, point] / [8] / [10]
+                TAG_ACQUIRE_SPECIFIC | TAG_ACQUIRE_VOLATILE | TAG_ACQUIRE_IMMUTABLE => {
+                    let target = decode_acquire_target(tag, &mut dec)?;
                     match handler.validate_acquire(&target) {
                         Ok(()) => {
                             acquired = true;
-                            // MsgAcquired = [4]
+                            // MsgAcquired = [1]
                             let mut buf = Vec::new();
                             let mut enc = Encoder::new(&mut buf);
                             enc.array(1).expect("infallible");
@@ -88,7 +107,7 @@ impl LocalStateQueryServer {
                             channel.send(buf).await.map_err(ProtocolError::from)?;
                         }
                         Err(failure) => {
-                            // MsgFailure = [5, [tag]]
+                            // MsgFailure = [2, [tag]]
                             let mut buf = Vec::new();
                             let mut enc = Encoder::new(&mut buf);
                             enc.array(2).expect("infallible");
@@ -108,10 +127,11 @@ impl LocalStateQueryServer {
                     }
                 }
 
-                // MsgReAcquire: [9, target] or [11, target]
-                9 | 11 => {
+                // MsgReAcquire: [6, point] / [9] / [11]
+                TAG_REACQUIRE_SPECIFIC | TAG_REACQUIRE_VOLATILE
+                | super::TAG_REACQUIRE_IMMUTABLE => {
                     // Release old state, acquire new
-                    let target = decode_acquire_target(&mut dec)?;
+                    let target = decode_acquire_target(tag, &mut dec)?;
                     match handler.validate_acquire(&target) {
                         Ok(()) => {
                             acquired = true;
@@ -142,13 +162,13 @@ impl LocalStateQueryServer {
                     }
                 }
 
-                // MsgRelease: [7]
-                7 => {
+                // MsgRelease = [5]
+                TAG_RELEASE => {
                     acquired = false;
                 }
 
-                // MsgQuery: [3, query]
-                3 => {
+                // MsgQuery = [3, query]
+                TAG_QUERY => {
                     if !acquired {
                         return Err(ProtocolError::StateViolation {
                             protocol: "LocalStateQuery",
@@ -157,20 +177,26 @@ impl LocalStateQueryServer {
                         });
                     }
 
-                    // The remaining bytes are the query CBOR
+                    // Pass the full consensus-level query CBOR to the handler.
+                    // The handler dispatches BlockQuery/GetSystemStart/GetChainBlockNo/
+                    // GetChainPoint and returns the result with proper HFC wrapping.
                     let query_start = dec.position();
                     let query_cbor = &msg_bytes[query_start..];
 
-                    let result_cbor = dispatch_query(handler, query_cbor)?;
+                    let result_cbor = handler.handle_query(query_cbor, n2c_version).map_err(
+                        |e| ProtocolError::CborDecode {
+                            protocol: "LocalStateQuery",
+                            reason: format!("query dispatch: {e}"),
+                        },
+                    )?;
 
-                    // MsgResult = [6, result]
+                    // MsgResult = [4, result]
                     let mut buf = Vec::new();
                     {
                         let mut enc = Encoder::new(&mut buf);
                         enc.array(2).expect("infallible");
                         enc.u64(TAG_RESULT).expect("infallible");
                     }
-                    // Write pre-encoded result directly
                     buf.extend_from_slice(&result_cbor);
 
                     channel.send(buf).await.map_err(ProtocolError::from)?;
@@ -188,115 +214,33 @@ impl LocalStateQueryServer {
     }
 }
 
-/// Decode an acquire target from the remaining CBOR in the message.
-fn decode_acquire_target(dec: &mut Decoder<'_>) -> Result<AcquireTarget, ProtocolError> {
-    // The target encoding varies:
-    // SpecificPoint: [0, point]  — but may also just be a bare point
-    // VolatileTip: no additional data (tag 8 alone means volatile tip)
-    // ImmutableTip: tag 10 alone
-
-    // Check if there's more data after the tag
-    if dec.position() >= dec.input().len() {
-        // No additional data — VolatileTip (from tag 8)
-        return Ok(AcquireTarget::VolatileTip);
-    }
-
-    // Try to decode a point
-    match codec::decode_point(dec) {
-        Ok(point) => Ok(AcquireTarget::SpecificPoint(point)),
-        Err(_) => {
-            // If point decode fails, it might be VolatileTip or ImmutableTip
-            Ok(AcquireTarget::VolatileTip)
-        }
-    }
-}
-
-/// Dispatch a query to the appropriate handler method.
+/// Decode an acquire target from the message tag and remaining CBOR.
 ///
-/// Parses the HFC query structure:
-/// - `[0, [tag, ...]]` → BlockQuery (Shelley query by tag)
-/// - `[1, query]` → QueryAnytime
-/// - `[2, query]` → QueryHardFork
-fn dispatch_query<H: QueryHandler>(
-    handler: &H,
-    query_cbor: &[u8],
-) -> Result<Vec<u8>, ProtocolError> {
-    let mut dec = Decoder::new(query_cbor);
-
-    // HFC outer query: array [query_type, inner_query]
-    let _arr = dec.array().map_err(|e| ProtocolError::CborDecode {
-        protocol: "LocalStateQuery",
-        reason: format!("query outer array: {e}"),
-    })?;
-    let query_type = dec.u64().map_err(|e| ProtocolError::CborDecode {
-        protocol: "LocalStateQuery",
-        reason: format!("query type: {e}"),
-    })?;
-
-    match query_type {
-        0 => {
-            // QueryIfCurrent → BlockQuery
-            // Inner: [tag, ...params]
-            let inner_start = dec.position();
-            let inner_cbor = &query_cbor[inner_start..];
-
-            // Parse the BlockQuery tag
-            let mut inner_dec = Decoder::new(inner_cbor);
-            let _inner_arr = inner_dec.array().map_err(|e| ProtocolError::CborDecode {
+/// The target is determined by the message tag:
+/// - Tag 0/6: SpecificPoint — remaining CBOR is the point
+/// - Tag 8/9: VolatileTip — no additional data
+/// - Tag 10/11: ImmutableTip — no additional data
+fn decode_acquire_target(
+    tag: u64,
+    dec: &mut Decoder<'_>,
+) -> Result<AcquireTarget, ProtocolError> {
+    match tag {
+        // SpecificPoint: tag 0 (Acquire) or tag 6 (ReAcquire) — point follows
+        0 | 6 => {
+            let point = codec::decode_point(dec).map_err(|e| ProtocolError::CborDecode {
                 protocol: "LocalStateQuery",
-                reason: format!("block query array: {e}"),
+                reason: format!("acquire point: {e}"),
             })?;
-            let block_query_tag = inner_dec.u64().map_err(|e| ProtocolError::CborDecode {
-                protocol: "LocalStateQuery",
-                reason: format!("block query tag: {e}"),
-            })?;
-
-            let param_start = inner_dec.position();
-            let param_cbor = &inner_cbor[param_start..];
-
-            let result = handler
-                .handle_block_query(block_query_tag, param_cbor)
-                .map_err(|e| ProtocolError::CborDecode {
-                    protocol: "LocalStateQuery",
-                    reason: format!("block query {block_query_tag}: {e}"),
-                })?;
-
-            // Wrap in HFC success envelope: [1, result]
-            let mut wrapped = Vec::new();
-            {
-                let mut enc = Encoder::new(&mut wrapped);
-                enc.array(2).expect("infallible");
-                enc.u64(1).expect("infallible"); // success tag
-            }
-            wrapped.extend_from_slice(&result);
-            Ok(wrapped)
+            Ok(AcquireTarget::SpecificPoint(point))
         }
-        1 => {
-            // QueryAnytime — result is unwrapped
-            let inner_start = dec.position();
-            let inner_cbor = &query_cbor[inner_start..];
-            handler
-                .handle_query_anytime(inner_cbor)
-                .map_err(|e| ProtocolError::CborDecode {
-                    protocol: "LocalStateQuery",
-                    reason: format!("query anytime: {e}"),
-                })
-        }
-        2 => {
-            // QueryHardFork — result is unwrapped
-            let inner_start = dec.position();
-            let inner_cbor = &query_cbor[inner_start..];
-            handler
-                .handle_query_hard_fork(inner_cbor)
-                .map_err(|e| ProtocolError::CborDecode {
-                    protocol: "LocalStateQuery",
-                    reason: format!("query hard fork: {e}"),
-                })
-        }
+        // VolatileTip: tag 8 (Acquire) or tag 9 (ReAcquire) — no additional data
+        8 | 9 => Ok(AcquireTarget::VolatileTip),
+        // ImmutableTip: tag 10 (Acquire) or tag 11 (ReAcquire) — no additional data
+        10 | 11 => Ok(AcquireTarget::ImmutableTip),
         _ => Err(ProtocolError::InvalidMessage {
             protocol: "LocalStateQuery",
-            tag: query_type as u8,
-            reason: format!("unknown HFC query type: {query_type}"),
+            tag: tag as u8,
+            reason: format!("unexpected acquire/reacquire tag: {tag}"),
         }),
     }
 }
@@ -311,6 +255,47 @@ mod tests {
     struct MockQueryHandler;
 
     impl QueryHandler for MockQueryHandler {
+        fn handle_query(&self, query_cbor: &[u8], _n2c_version: u16) -> Result<Vec<u8>, String> {
+            // Simple mock: decode the consensus-level query and return a
+            // canned response. For BlockQuery(QueryIfCurrent), return the
+            // shelley tag wrapped in HFC success [1, tag].
+            let mut dec = Decoder::new(query_cbor);
+            let _ = dec.array();
+            let outer_tag = dec.u64().unwrap_or(999);
+            match outer_tag {
+                0 => {
+                    // BlockQuery → parse HFC inner
+                    let _ = dec.array();
+                    let hfc_tag = dec.u64().unwrap_or(999);
+                    match hfc_tag {
+                        0 => {
+                            // QueryIfCurrent → parse shelley tag
+                            let _ = dec.array();
+                            let shelley_tag = dec.u64().unwrap_or(999);
+                            let result = self.handle_block_query(shelley_tag, &[])?;
+                            // Wrap in HFC success: [1, result]
+                            let mut buf = Vec::new();
+                            let mut enc = Encoder::new(&mut buf);
+                            enc.array(2).expect("infallible");
+                            enc.u64(1).expect("infallible");
+                            buf.extend_from_slice(&result);
+                            Ok(buf)
+                        }
+                        _ => {
+                            let mut buf = Vec::new();
+                            Encoder::new(&mut buf).str("hfc-other").expect("infallible");
+                            Ok(buf)
+                        }
+                    }
+                }
+                _ => {
+                    let mut buf = Vec::new();
+                    Encoder::new(&mut buf).str("top-level").expect("infallible");
+                    Ok(buf)
+                }
+            }
+        }
+
         fn handle_block_query(&self, tag: u64, _query_cbor: &[u8]) -> Result<Vec<u8>, String> {
             // Return a simple response: the tag as a CBOR integer
             let mut buf = Vec::new();
@@ -375,35 +360,40 @@ mod tests {
         buf
     }
 
-    /// Encode MsgRelease: [7]
+    /// Encode MsgRelease: [5]
     fn encode_release() -> Vec<u8> {
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
         enc.array(1).expect("infallible");
-        enc.u64(7).expect("infallible");
+        enc.u64(TAG_RELEASE).expect("infallible");
         buf
     }
 
-    /// Encode MsgDone: [0]
+    /// Encode MsgDone: [7]
     fn encode_done() -> Vec<u8> {
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
         enc.array(1).expect("infallible");
-        enc.u64(0).expect("infallible");
+        enc.u64(TAG_DONE).expect("infallible");
         buf
     }
 
-    /// Encode MsgQuery with a BlockQuery(tag=1): [3, [0, [1]]]
-    fn encode_block_query(block_tag: u64) -> Vec<u8> {
+    /// Encode MsgQuery with a BlockQuery > QueryIfCurrent > Shelley tag:
+    /// [3, [0, [0, [shelley_tag]]]]
+    fn encode_block_query(shelley_tag: u64) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut enc = Encoder::new(&mut buf);
         enc.array(2).expect("infallible");
-        enc.u64(3).expect("infallible"); // MsgQuery tag
-                                         // HFC QueryIfCurrent: [0, [block_tag]]
+        enc.u64(TAG_QUERY).expect("infallible"); // MsgQuery
+        // Consensus-level BlockQuery: [0, hfc_query]
+        enc.array(2).expect("infallible");
+        enc.u64(0).expect("infallible"); // BlockQuery
+        // HFC QueryIfCurrent: [0, shelley_query]
         enc.array(2).expect("infallible");
         enc.u64(0).expect("infallible"); // QueryIfCurrent
+        // Shelley query: [shelley_tag]
         enc.array(1).expect("infallible");
-        enc.u64(block_tag).expect("infallible");
+        enc.u64(shelley_tag).expect("infallible");
         buf
     }
 
@@ -413,7 +403,7 @@ mod tests {
         let handler = MockQueryHandler;
 
         let handle =
-            tokio::spawn(async move { LocalStateQueryServer::run(&mut channel, &handler).await });
+            tokio::spawn(async move { LocalStateQueryServer::run(&mut channel, &handler, 16).await });
 
         // Acquire volatile tip
         ingress_tx
@@ -442,7 +432,7 @@ mod tests {
         let handler = MockQueryHandler;
 
         let handle =
-            tokio::spawn(async move { LocalStateQueryServer::run(&mut channel, &handler).await });
+            tokio::spawn(async move { LocalStateQueryServer::run(&mut channel, &handler, 16).await });
 
         // Acquire
         ingress_tx

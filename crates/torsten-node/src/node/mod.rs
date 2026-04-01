@@ -508,6 +508,38 @@ impl Node {
                         );
                         state.protocol_params = protocol_params.clone();
                     }
+
+                    // Fix protocol version if it doesn't match the era.
+                    //
+                    // When a Mithril snapshot starts mid-chain, the initial protocol
+                    // params come from Shelley genesis (protocol 6.0 for preview). The
+                    // PPUpdate proposals that upgraded 6→7→8→9→10 happened in earlier
+                    // blocks we never replayed. Detect this mismatch and correct it
+                    // using the era→protocolVersion mapping from the Haskell spec.
+                    {
+                        let expected_major = match state.era {
+                            torsten_primitives::era::Era::Byron => 1,
+                            torsten_primitives::era::Era::Shelley => 2,
+                            torsten_primitives::era::Era::Allegra => 3,
+                            torsten_primitives::era::Era::Mary => 4,
+                            torsten_primitives::era::Era::Alonzo => 6,
+                            torsten_primitives::era::Era::Babbage => 8,
+                            torsten_primitives::era::Era::Conway => 10,
+                        };
+                        if state.protocol_params.protocol_version_major < expected_major {
+                            warn!(
+                                era = ?state.era,
+                                current_major = state.protocol_params.protocol_version_major,
+                                corrected_major = expected_major,
+                                "Protocol version is behind era — correcting \
+                                 (Mithril snapshot skipped PPUpdate proposals)"
+                            );
+                            state.protocol_params.protocol_version_major = expected_major;
+                            state.protocol_params.protocol_version_minor = 0;
+                            state.prev_protocol_version_major = expected_major;
+                        }
+                    }
+
                     {
                         // Validate snapshot tip canonicality.
                         //
@@ -3081,16 +3113,17 @@ impl Node {
         let our_data = torsten_network::N2CVersionData::new(network_magic);
         let hs_result =
             torsten_network::handshake::run_n2c_handshake_server(&mut hs_ch, &our_data).await;
-        match hs_result {
+        let n2c_version = match hs_result {
             Ok(r) => {
                 debug!(version = r.version, "N2C handshake accepted");
+                r.version
             }
             Err(e) => {
                 debug!("N2C handshake failed: {e}");
                 mux_handle.abort();
                 return Ok(());
             }
-        }
+        };
 
         // Spawn protocol tasks — each runs until the client disconnects
         // or an error occurs. The mux handle keeps the transport alive.
@@ -3172,7 +3205,9 @@ impl Node {
         let lsq_task = tokio::spawn(async move {
             let handler = lsq_handler.read().await;
             if let Err(e) = protocol::local_state_query::server::LocalStateQueryServer::run(
-                &mut sq_ch, &*handler,
+                &mut sq_ch,
+                &*handler,
+                n2c_version,
             )
             .await
             {

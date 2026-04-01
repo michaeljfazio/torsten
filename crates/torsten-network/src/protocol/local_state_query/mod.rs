@@ -62,21 +62,48 @@ pub enum StateQueryState {
     StDone,
 }
 
-// ─── Wire format message tags ───
+// ─── Wire format message tags (matching Haskell ouroboros-network) ───
+//
+// Tags 0-7 are the base LocalStateQuery protocol messages.
+// Tags 8-11 are V16+ extensions for VolatileTip/ImmutableTip acquire targets.
+//
+// Base protocol:
+//   0: MsgAcquire (SpecificPoint)  [0, point]
+//   1: MsgAcquired                 [1]
+//   2: MsgFailure                  [2, failure_code]
+//   3: MsgQuery                    [3, query]
+//   4: MsgResult                   [4, result]
+//   5: MsgRelease                  [5]
+//   6: MsgReAcquire (SpecificPoint) [6, point]
+//   7: MsgDone                     [7]
+//
+// V16+ extensions:
+//   8:  MsgAcquire (VolatileTip)    [8]
+//   9:  MsgReAcquire (VolatileTip)  [9]
+//   10: MsgAcquire (ImmutableTip)   [10]
+//   11: MsgReAcquire (ImmutableTip) [11]
 
-/// MsgAcquire = [8, target] (V16+: specific, volatile, immutable)
-pub const TAG_ACQUIRE: u64 = 8;
-/// MsgAcquired = [4]
-pub const TAG_ACQUIRED: u64 = 4;
-/// MsgFailure = [5, reason]
-pub const TAG_FAILURE: u64 = 5;
+/// MsgAcquire (SpecificPoint) = [0, point]
+pub const TAG_ACQUIRE_SPECIFIC: u64 = 0;
+/// MsgAcquired = [1]
+pub const TAG_ACQUIRED: u64 = 1;
+/// MsgFailure = [2, reason]
+pub const TAG_FAILURE: u64 = 2;
 /// MsgQuery = [3, query]
 pub const TAG_QUERY: u64 = 3;
-/// MsgResult = [6, result]
-pub const TAG_RESULT: u64 = 6;
-/// MsgRelease = [7]
-pub const TAG_RELEASE: u64 = 7;
-/// MsgReAcquire = [9, target] / [11, target]
-pub const TAG_REACQUIRE: u64 = 9;
-/// MsgDone = [0]
-pub const TAG_DONE: u64 = 0;
+/// MsgResult = [4, result]
+pub const TAG_RESULT: u64 = 4;
+/// MsgRelease = [5]
+pub const TAG_RELEASE: u64 = 5;
+/// MsgReAcquire (SpecificPoint) = [6, point]
+pub const TAG_REACQUIRE_SPECIFIC: u64 = 6;
+/// MsgDone = [7]
+pub const TAG_DONE: u64 = 7;
+/// MsgAcquire (VolatileTip) = [8]
+pub const TAG_ACQUIRE_VOLATILE: u64 = 8;
+/// MsgReAcquire (VolatileTip) = [9]
+pub const TAG_REACQUIRE_VOLATILE: u64 = 9;
+/// MsgAcquire (ImmutableTip) = [10]
+pub const TAG_ACQUIRE_IMMUTABLE: u64 = 10;
+/// MsgReAcquire (ImmutableTip) = [11]
+pub const TAG_REACQUIRE_IMMUTABLE: u64 = 11;

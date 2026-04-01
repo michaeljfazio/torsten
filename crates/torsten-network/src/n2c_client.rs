@@ -136,13 +136,13 @@ impl N2CClient {
     /// Acquire the ledger state at the volatile tip for subsequent queries.
     ///
     /// Sends `MsgAcquire` (tag 8) with VolatileTip target on the
-    /// LocalStateQuery channel and waits for `MsgAcquired` (tag 4).
+    /// LocalStateQuery channel and waits for `MsgAcquired` (tag 1).
     pub async fn acquire(&mut self) -> Result<(), NetworkError> {
         // MsgAcquire VolatileTip = [8] (just the tag, no target payload)
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(8).map_err(cbor_err)?; // TAG_ACQUIRE (VolatileTip)
+        enc.u32(8).map_err(cbor_err)?; // MsgAcquire VolatileTip
         self.send_query(buf).await?;
 
         let resp = self.recv_query().await?;
@@ -151,9 +151,9 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad acquire response: {e}")))?;
-        if tag != 4 {
-            // tag 4 = MsgAcquired, tag 5 = MsgFailure
-            return Err(protocol_err(format!("expected MsgAcquired(4), got {tag}")));
+        if tag != 1 {
+            // tag 1 = MsgAcquired, tag 2 = MsgFailure
+            return Err(protocol_err(format!("expected MsgAcquired(1), got {tag}")));
         }
         debug!("State acquired");
         Ok(())
@@ -161,21 +161,21 @@ impl N2CClient {
 
     /// Release the acquired ledger state.
     ///
-    /// Sends `MsgRelease` (tag 7) on the LocalStateQuery channel.
+    /// Sends `MsgRelease` (tag 5) on the LocalStateQuery channel.
     pub async fn release(&mut self) -> Result<(), NetworkError> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(7).map_err(cbor_err)?; // TAG_RELEASE
+        enc.u32(5).map_err(cbor_err)?; // MsgRelease
         self.send_query(buf).await
     }
 
-    /// Send `MsgDone` (tag 0) to end the LocalStateQuery protocol.
+    /// Send `MsgDone` (tag 7) to end the LocalStateQuery protocol.
     pub async fn done(&mut self) -> Result<(), NetworkError> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(1).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?; // TAG_DONE
+        enc.u32(7).map_err(cbor_err)?; // MsgDone
         self.send_query(buf).await
     }
 
@@ -211,8 +211,8 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad MsgResult tag: {e}")))?;
-        if tag != 6 {
-            return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
+        if tag != 4 {
+            return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
         }
         let era = dec
             .u32()
@@ -234,8 +234,8 @@ impl N2CClient {
         let tag = dec
             .u32()
             .map_err(|e| protocol_err(format!("bad MsgResult tag: {e}")))?;
-        if tag != 6 {
-            return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
+        if tag != 4 {
+            return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
         }
         // SystemStart encoded as UTCTime: [year, day_of_year, pico_of_day]
         let _ = dec.array();
@@ -761,12 +761,12 @@ fn encode_hard_fork_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
     Ok(buf)
 }
 
-/// Strip the `MsgResult [6, ...]` envelope from a response payload.
+/// Strip the `MsgResult [4, ...]` envelope from a response payload.
 fn strip_msg_result(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError> {
     let _ = decoder.array();
     let tag = decoder.u32().unwrap_or(999);
-    if tag != 6 {
-        return Err(protocol_err(format!("expected MsgResult(6), got {tag}")));
+    if tag != 4 {
+        return Err(protocol_err(format!("expected MsgResult(4), got {tag}")));
     }
     Ok(())
 }
@@ -1392,7 +1392,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
+        enc.u32(4).unwrap(); // MsgResult tag
         enc.array(2).unwrap(); // HFC wrapper [1, result]
         enc.u64(1).unwrap(); // HFC success tag
         enc.array(2).unwrap(); // [[slot, hash], block_no]
@@ -1412,7 +1412,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
+        enc.u32(4).unwrap(); // MsgResult tag
                              // No HFC wrapper — parser should handle unwrapped responses
         enc.array(2).unwrap(); // [[slot, hash], block_no]
         enc.array(2).unwrap();
@@ -1431,7 +1431,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
+        enc.u32(4).unwrap(); // MsgResult tag
         enc.array(2).unwrap(); // HFC wrapper [1, result]
         enc.u64(1).unwrap(); // HFC success tag
         enc.u64(42).unwrap();
@@ -1451,7 +1451,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
+        enc.u32(4).unwrap(); // MsgResult tag
         enc.array(2).unwrap(); // HFC wrapper [1, result]
         enc.u64(1).unwrap(); // HFC success tag
         enc.u64(999).unwrap();

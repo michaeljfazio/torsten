@@ -562,6 +562,15 @@ fn encode_result_value(result: &QueryResult) -> Vec<u8> {
 }
 
 impl torsten_network::QueryHandler for QueryHandler {
+    fn handle_query(&self, query_cbor: &[u8], n2c_version: u16) -> Result<Vec<u8>, String> {
+        let mut decoder = minicbor::Decoder::new(query_cbor);
+        let result = self.dispatch_query_with_version(&mut decoder, n2c_version);
+        match result {
+            QueryResult::Error(msg) => Err(msg),
+            _ => Ok(encoding::encode_query_result_payload(&result)),
+        }
+    }
+
     fn handle_block_query(&self, tag: u64, query_cbor: &[u8]) -> Result<Vec<u8>, String> {
         let mut decoder = minicbor::Decoder::new(query_cbor);
         let result = self.handle_shelley_query(tag as u32, &mut decoder);
