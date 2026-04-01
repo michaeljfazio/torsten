@@ -576,7 +576,10 @@ mod tests {
             let (new_sk, new_period) = kes_update(&current_sk).unwrap();
             assert_eq!(new_period, period);
             let derived_pk = kes_sk_to_pk(&new_sk).unwrap();
-            assert_eq!(derived_pk, pk, "Public key must be stable at period {period}");
+            assert_eq!(
+                derived_pk, pk,
+                "Public key must be stable at period {period}"
+            );
             current_sk = new_sk;
         }
     }
