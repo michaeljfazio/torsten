@@ -531,9 +531,7 @@ mod tests {
         assert_eq!(count_d_half, 50, "d=1/2: expected 50/100 overlay slots");
 
         // d=0: no overlay slots
-        let count_d0 = range100
-            .filter(|&s| is_overlay_slot(0, 0, 1, s))
-            .count();
+        let count_d0 = range100.filter(|&s| is_overlay_slot(0, 0, 1, s)).count();
         assert_eq!(count_d0, 0, "d=0: expected 0/100 overlay slots");
 
         // --- Active BFT slot counts over 1000 slots (f=1/20) ---
@@ -582,10 +580,7 @@ mod tests {
                     )
             })
             .count();
-        assert_eq!(
-            active_count_d0, 0,
-            "d=0: expected 0/1000 active BFT slots"
-        );
+        assert_eq!(active_count_d0, 0, "d=0: expected 0/1000 active BFT slots");
     }
 
     #[test]

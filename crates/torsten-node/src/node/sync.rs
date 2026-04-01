@@ -789,16 +789,17 @@ impl Node {
                 && ls.protocol_params.d.numerator > 0
                 && !ls.genesis_delegates.is_empty()
             {
-                let epoch = ls.epoch_of_slot(
-                    blocks.first().map(|b| b.slot().0).unwrap_or(0),
-                );
+                let epoch = ls.epoch_of_slot(blocks.first().map(|b| b.slot().0).unwrap_or(0));
                 let first_slot = ls.first_slot_of_epoch(epoch);
                 let genesis_keys: std::collections::BTreeSet<torsten_primitives::hash::Hash28> =
                     ls.genesis_delegates.keys().copied().collect();
                 Some(torsten_consensus::overlay::OverlayContext {
                     genesis_delegates: ls.genesis_delegates.clone(),
                     genesis_keys,
-                    d: (ls.protocol_params.d.numerator, ls.protocol_params.d.denominator),
+                    d: (
+                        ls.protocol_params.d.numerator,
+                        ls.protocol_params.d.denominator,
+                    ),
                     first_slot_of_epoch: first_slot,
                 })
             } else {

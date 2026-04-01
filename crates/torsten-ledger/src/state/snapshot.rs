@@ -46,7 +46,7 @@ impl LedgerState {
     ///
     /// Increment when `GovernanceState`/`LedgerState` fields change.
     /// Bincode is positional — any field addition/reorder breaks old snapshots.
-    pub(crate) const SNAPSHOT_VERSION: u8 = 13;
+    pub(crate) const SNAPSHOT_VERSION: u8 = 14;
 
     /// Save ledger state snapshot to disk using bincode serialization.
     ///

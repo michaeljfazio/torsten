@@ -90,17 +90,11 @@ pub enum ConsensusError {
     #[error("Not an active overlay slot: slot {slot} is in the overlay schedule but has no assigned signer")]
     NotActiveOverlaySlot { slot: u64 },
     #[error("Wrong genesis delegate for overlay slot: expected delegate for genesis key {genesis_key}, got issuer {issuer}")]
-    WrongGenesisDelegate {
-        genesis_key: Hash28,
-        issuer: Hash28,
-    },
+    WrongGenesisDelegate { genesis_key: Hash28, issuer: Hash28 },
     #[error("Unknown genesis key in overlay schedule: {0}")]
     UnknownGenesisKey(Hash28),
     #[error("Genesis delegate VRF key mismatch: expected {expected}, got {got}")]
-    GenesisVrfKeyMismatch {
-        expected: Hash32,
-        got: Hash32,
-    },
+    GenesisVrfKeyMismatch { expected: Hash32, got: Hash32 },
 }
 
 /// Information about a registered pool needed for full block validation.
@@ -1938,7 +1932,14 @@ mod tests {
         let mut praos = OuroborosPraos::new();
         let header = make_valid_header(100);
         assert!(praos
-            .validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
     }
 
@@ -2033,21 +2034,42 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header1,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Second block from same pool with seq=6 (forward, OK)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header2,
+                SlotNo(300),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Third block from same pool with seq=4 (regression, non-strict: OK)
         let mut header3 = make_valid_header(300);
         header3.operational_cert.sequence_number = 4;
         assert!(praos
-            .validate_header_full(&header3, SlotNo(400), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header3,
+                SlotNo(400),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
     }
 
@@ -2106,14 +2128,28 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header1,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Same seq=5 is allowed (not a regression, same cert can sign multiple blocks)
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header2,
+                SlotNo(300),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Verify counter was tracked
@@ -2131,7 +2167,14 @@ mod tests {
         header_a.issuer_vkey = vec![1u8; 32];
         header_a.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header_a, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header_a,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Pool B (different issuer key) with seq=2 — should be fine (different pool)
@@ -2139,7 +2182,14 @@ mod tests {
         header_b.issuer_vkey = vec![2u8; 32];
         header_b.operational_cert.sequence_number = 2;
         assert!(praos
-            .validate_header_full(&header_b, SlotNo(300), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header_b,
+                SlotNo(300),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Verify each pool tracked separately
@@ -2201,14 +2251,28 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header1,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         // Jump from 5 to 10 (over-increment by 5) — non-fatal during sync
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 10;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header2,
+                SlotNo(300),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
     }
 
@@ -2267,13 +2331,27 @@ mod tests {
         let mut header1 = make_valid_header(100);
         header1.operational_cert.sequence_number = 5;
         assert!(praos
-            .validate_header_full(&header1, SlotNo(200), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header1,
+                SlotNo(200),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         let mut header2 = make_valid_header(200);
         header2.operational_cert.sequence_number = 6;
         assert!(praos
-            .validate_header_full(&header2, SlotNo(300), None, None, ValidationMode::Full, Some(9))
+            .validate_header_full(
+                &header2,
+                SlotNo(300),
+                None,
+                None,
+                ValidationMode::Full,
+                Some(9)
+            )
             .is_ok());
 
         let pool_id = torsten_primitives::hash::blake2b_224(&header1.issuer_vkey);
@@ -2414,8 +2492,14 @@ mod tests {
         header.operational_cert.sequence_number = 99;
         // No issuer_info → unknown pool
 
-        let result =
-            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
+        let result = praos.validate_header_full(
+            &header,
+            SlotNo(200),
+            None,
+            None,
+            ValidationMode::Full,
+            Some(9),
+        );
         assert!(
             result.is_ok(),
             "Unknown pool during sync should be non-fatal regardless of counter, got: {result:?}"
@@ -2671,8 +2755,14 @@ mod tests {
         let expected_pool_id = torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
 
         // No issuer info = unregistered pool
-        let result =
-            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
+        let result = praos.validate_header_full(
+            &header,
+            SlotNo(200),
+            None,
+            None,
+            ValidationMode::Full,
+            Some(9),
+        );
         match result {
             Err(ConsensusError::UnregisteredPool { pool_id }) => {
                 assert_eq!(pool_id, expected_pool_id);
@@ -2689,8 +2779,14 @@ mod tests {
         assert!(!praos.strict_verification);
 
         let header = make_valid_header(100);
-        let result =
-            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
+        let result = praos.validate_header_full(
+            &header,
+            SlotNo(200),
+            None,
+            None,
+            ValidationMode::Full,
+            Some(9),
+        );
         assert!(
             result.is_ok(),
             "Unregistered pool should be non-fatal during sync, got: {result:?}"
@@ -2730,8 +2826,14 @@ mod tests {
         praos.set_strict_verification(true);
 
         let header = make_valid_header(100);
-        let result =
-            praos.validate_header_full(&header, SlotNo(200), None, None, ValidationMode::Full, Some(9));
+        let result = praos.validate_header_full(
+            &header,
+            SlotNo(200),
+            None,
+            None,
+            ValidationMode::Full,
+            Some(9),
+        );
         assert!(result.is_err());
 
         let err_msg = format!("{}", result.unwrap_err());
