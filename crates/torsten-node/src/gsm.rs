@@ -182,7 +182,6 @@ impl Default for GsmConfig {
 /// This struct combines the sliding `DensityWindow` (which records block slots)
 /// with the peer's reported tip, idling state, and latest observed block slot.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields read by GSM/GDD internals and future wiring
 pub struct PeerChainInfo {
     /// Density window tracking blocks in the genesis window for this peer.
     pub density_window: DensityWindow,
@@ -197,7 +196,6 @@ pub struct PeerChainInfo {
     pub latest_slot: Option<u64>,
 }
 
-#[allow(dead_code)] // methods used by GSM internals and tests
 impl PeerChainInfo {
     /// Create a new info record with a fresh density window.
     pub fn new(intersection_slot: u64, window_size: u64, tip_slot: u64) -> Self {
@@ -211,6 +209,7 @@ impl PeerChainInfo {
     }
 
     /// Number of blocks this peer has within the genesis window.
+    #[allow(dead_code)] // public API for diagnostics and tests
     pub fn blocks_in_window(&self) -> u64 {
         self.density_window.block_count()
     }
@@ -245,7 +244,6 @@ impl PeerChainInfo {
 /// and tip freshness. The GSM also manages:
 /// - **LoE (Limit on Eagerness)**: constrains block application during sync
 /// - **GDD (Genesis Density Disconnector)**: disconnects sparse-chain peers
-#[allow(dead_code)] // fields used by GSM methods, fully wired in Task 5/6
 pub struct GenesisStateMachine {
     config: GsmConfig,
     state: GenesisSyncState,
@@ -264,7 +262,6 @@ pub struct GenesisStateMachine {
     anti_thundering_herd_jitter_secs: u64,
 }
 
-#[allow(dead_code)] // methods used internally and wired in Task 5/6
 impl GenesisStateMachine {
     /// Create a new GSM. If not enabled, it immediately enters CaughtUp
     /// and all constraints are disabled.
@@ -281,18 +278,18 @@ impl GenesisStateMachine {
             GenesisSyncState::CaughtUp
         };
 
-        // Compute anti-thundering-herd jitter using a simple hash of the
-        // marker path (deterministic per node, but different across nodes).
+        // Compute anti-thundering-herd jitter using PID + high-resolution
+        // timestamp. This provides good per-node uniqueness without needing
+        // an RNG dependency. Different from Haskell's randomRIO but achieves
+        // the same goal: preventing a fleet of nodes from regressing simultaneously.
         let jitter = if config.anti_thundering_herd_max_secs > 0 {
-            let hash_seed = {
-                let path_bytes = config.marker_path.to_string_lossy();
-                let mut h: u64 = 0;
-                for b in path_bytes.as_bytes() {
-                    h = h.wrapping_mul(31).wrapping_add(*b as u64);
-                }
-                h
-            };
-            hash_seed % config.anti_thundering_herd_max_secs
+            let pid = std::process::id() as u64;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as u64;
+            let seed = pid.wrapping_mul(6364136223846793005).wrapping_add(nanos);
+            seed % (config.anti_thundering_herd_max_secs + 1)
         } else {
             0
         };
@@ -319,6 +316,7 @@ impl GenesisStateMachine {
     }
 
     /// Whether genesis mode is enabled.
+    #[allow(dead_code)] // public API for diagnostics
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -381,6 +379,7 @@ impl GenesisStateMachine {
     }
 
     /// Read-only view of the peer density map (for metrics / tests).
+    #[allow(dead_code)] // public API for diagnostics and tests
     pub fn peer_info(&self) -> &HashMap<SocketAddr, PeerChainInfo> {
         &self.peer_info
     }
@@ -433,13 +432,15 @@ impl GenesisStateMachine {
                         "Genesis: HAA lost, regressing to PreSyncing"
                     );
                 } else if all_chainsync_idle
+                    && self.all_peers_idling()
                     && tip_age_secs < self.config.max_caught_up_age_secs
                     && self.all_peers_within_window(immutable_tip_slot)
                 {
                     // Transition to CaughtUp when:
-                    // 1. All ChainSync clients are idle
+                    // 1. All ChainSync clients are idle (both external heuristic
+                    //    AND per-peer MsgAwaitReply tracking)
                     // 2. Our tip is fresh
-                    // 3. All peers' density windows are within the genesis window
+                    // 3. All peers' tips are within the genesis window
                     self.state = GenesisSyncState::CaughtUp;
                     self.caught_up_since = Some(Instant::now());
                     self.write_marker();
@@ -451,24 +452,23 @@ impl GenesisStateMachine {
             }
             GenesisSyncState::CaughtUp => {
                 // Regress to PreSyncing if tip becomes stale, but only after
-                // the minimum dwell time + anti-thundering-herd jitter has elapsed.
-                if tip_age_secs > self.config.max_caught_up_age_secs {
-                    let dwell_elapsed = self
-                        .caught_up_since
-                        .map(|t| t.elapsed().as_secs())
-                        .unwrap_or(0);
-                    let required_dwell = self.config.min_caught_up_dwell_secs
-                        + self.anti_thundering_herd_jitter_secs;
+                // the minimum dwell time has elapsed. Jitter is added to the
+                // tip-age threshold (not dwell) matching Haskell's antiThunderingHerd.
+                let dwell_ok = self
+                    .caught_up_since
+                    .map(|t| t.elapsed().as_secs() >= self.config.min_caught_up_dwell_secs)
+                    .unwrap_or(true);
 
-                    if dwell_elapsed >= required_dwell {
+                if dwell_ok {
+                    let threshold =
+                        self.config.max_caught_up_age_secs + self.anti_thundering_herd_jitter_secs;
+                    if tip_age_secs > threshold {
                         self.state = GenesisSyncState::PreSyncing;
                         self.caught_up_since = None;
                         self.remove_marker();
                         warn!(
                             tip_age_secs,
-                            dwell_elapsed,
-                            required_dwell,
-                            "Genesis: tip stale after dwell, regressing to PreSyncing"
+                            threshold, "Genesis: tip stale, regressing to PreSyncing"
                         );
                     }
                 }
@@ -480,6 +480,14 @@ impl GenesisStateMachine {
         } else {
             None
         }
+    }
+
+    /// Check whether all tracked peers have reported idling (MsgAwaitReply).
+    /// Returns `true` if there are no peers or if every peer's `idling` flag
+    /// is set. This provides a more accurate CaughtUp signal than the external
+    /// time-based heuristic, matching Haskell's `csIdling` per-peer check.
+    fn all_peers_idling(&self) -> bool {
+        self.peer_info.is_empty() || self.peer_info.values().all(|info| info.idling)
     }
 
     /// Check whether all tracked peers have density windows that are within

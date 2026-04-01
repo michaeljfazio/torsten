@@ -1,5 +1,8 @@
 # Cardano Haskell Oracle - Agent Memory
 
+## GDD — Genesis Density Disconnector
+- [gdd-genesis-density-disconnector.md](gdd-genesis-density-disconnector.md) — Complete GDD algorithm: genesis window=3k/f slots, integer density bounds (lower/upper), 4 disconnection guards, 1s rate limit, LoE enforcement in ChainSel (+k blocks), GSM state gating (only runs in Syncing)
+
 ## DRep Pulser & Ratification
 - [drep-pulser-ratification.md](drep-pulser-ratification.md) — Complete pulser lifecycle: snapshot timing (end of EPOCH rule, post-transition state), pulse spreading (4k blocks, pulseSize=numAccounts/(4k)), RATIFY runs once at finishDRepPulser, results applied at NEXT epoch boundary
 

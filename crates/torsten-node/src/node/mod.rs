@@ -2292,7 +2292,9 @@ impl Node {
                         active_blp_count: active_blp,
                         all_chainsync_idle: all_idle,
                         tip_age_secs,
-                        immutable_tip_slot: 0,
+                        immutable_tip_slot: status_metrics
+                            .slot_number
+                            .load(std::sync::atomic::Ordering::Relaxed),
                     };
                     if let Err(e) = status_event_tx.try_send(event) {
                         debug!("GSM SyncStatus event dropped: {e}");
