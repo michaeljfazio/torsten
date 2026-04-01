@@ -252,3 +252,59 @@ fn test_indef_array_encoding_difference_documented() {
     // Ours:     d8 18 46 85 00 00 00 00 00     (tag 24, bytes(6), 6 datum bytes)
     //                ^^ different length prefix!
 }
+
+/// Verifies that `collateral_return` outputs also get `raw_cbor` populated during
+/// deserialization. TX_5DEA2B has a collateral_return (body key 16) which is a
+/// plain ADA output. After our fix, `convert_output_with_cbor` is used for
+/// collateral_return so `raw_cbor` is set and re-encoding is byte-exact.
+#[test]
+fn test_collateral_return_raw_cbor_preserved() {
+    let cbor = hex::decode(TX_5DEA2B).expect("hex decode");
+    let tx = decode_transaction(6, &cbor).expect("decode_transaction");
+
+    // TX_5DEA2B has a collateral_return (body key 16 = 0x10)
+    let cr = tx
+        .body
+        .collateral_return
+        .as_ref()
+        .expect("TX_5DEA2B must have collateral_return");
+
+    // raw_cbor must be populated after deserialization
+    assert!(
+        cr.raw_cbor.is_some(),
+        "collateral_return.raw_cbor must be Some after deserialization"
+    );
+
+    // Decode with pallas to get reference collateral_return bytes
+    let pallas_tx =
+        MultiEraTx::decode_for_era(pallas_traverse::Era::Conway, &cbor).expect("pallas decode");
+    let pallas_cr_bytes = pallas_tx
+        .collateral_return()
+        .expect("pallas collateral_return")
+        .encode();
+
+    // Direct re-encode must match pallas
+    let direct = encode_transaction_output(cr);
+    assert_eq!(
+        direct,
+        pallas_cr_bytes,
+        "collateral_return direct re-encode differs from pallas\n\
+         expected: {}\n\
+         got:      {}",
+        hex::encode(&pallas_cr_bytes),
+        hex::encode(&direct),
+    );
+
+    // After LSM round-trip, re-encode must still match
+    let restored = lsm_round_trip(cr);
+    let after_lsm = encode_transaction_output(&restored);
+    assert_eq!(
+        after_lsm,
+        pallas_cr_bytes,
+        "collateral_return post-LSM re-encode differs from pallas\n\
+         expected: {}\n\
+         got:      {}",
+        hex::encode(&pallas_cr_bytes),
+        hex::encode(&after_lsm),
+    );
+}

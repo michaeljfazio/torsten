@@ -389,7 +389,9 @@ fn decode_transaction_from_pallas_with_mode(
             pallas_primitives::NetworkId::Testnet => 0,
             pallas_primitives::NetworkId::Mainnet => 1,
         }),
-        collateral_return: tx.collateral_return().and_then(|o| convert_output(&o).ok()),
+        collateral_return: tx
+            .collateral_return()
+            .and_then(|o| convert_output_with_cbor(&o).ok()),
         total_collateral: tx.total_collateral().map(Lovelace),
         reference_inputs,
         update: convert_update_proposal(tx),
@@ -566,10 +568,6 @@ fn convert_input(input: &PallasInput) -> TransactionInput {
         transaction_id: pallas_hash_to_torsten32(input.hash()),
         index: input.index() as u32,
     }
-}
-
-fn convert_output(output: &PallasOutput) -> Result<TransactionOutput, SerializationError> {
-    convert_output_inner(output, None)
 }
 
 fn convert_output_with_cbor(
