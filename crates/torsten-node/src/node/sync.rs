@@ -782,6 +782,29 @@ impl Node {
                 0
             };
 
+            // Build overlay context for BFT schedule validation.
+            // Only needed when d > 0 and protocol version < 7 (pre-Babbage).
+            // For Babbage+ (proto >= 7), d is always 0 and overlay is skipped.
+            let overlay_ctx = if ls.protocol_params.protocol_version_major < 7
+                && ls.protocol_params.d.numerator > 0
+                && !ls.genesis_delegates.is_empty()
+            {
+                let epoch = ls.epoch_of_slot(
+                    blocks.first().map(|b| b.slot().0).unwrap_or(0),
+                );
+                let first_slot = ls.first_slot_of_epoch(epoch);
+                let genesis_keys: std::collections::BTreeSet<torsten_primitives::hash::Hash28> =
+                    ls.genesis_delegates.keys().copied().collect();
+                Some(torsten_consensus::overlay::OverlayContext {
+                    genesis_delegates: ls.genesis_delegates.clone(),
+                    genesis_keys,
+                    d: (ls.protocol_params.d.numerator, ls.protocol_params.d.denominator),
+                    first_slot_of_epoch: first_slot,
+                })
+            } else {
+                None
+            };
+
             // Phase 1: Sequential structural validation + state updates.
             // Uses Replay mode during sync (skip crypto) or Full mode at tip.
             // Opcert counter tracking and structural checks always run.
@@ -866,7 +889,7 @@ impl Node {
                     &header_with_nonce,
                     block.slot(),
                     issuer_info.as_ref(),
-                    None,
+                    overlay_ctx.as_ref(),
                     mode,
                     Some(ls.protocol_params.protocol_version_major),
                 ) {
