@@ -1929,7 +1929,7 @@ impl Node {
                                     let handle = tokio::spawn(async move {
                                         if let Err(e) = Self::handle_n2n_connection(
                                             stream, magic, ps, bp, mp, pm.clone(),
-                                            peer_addr, ann_rx, rb_rx,
+                                            peer_addr, ann_rx, rb_rx, metrics.clone(),
                                         )
                                         .await
                                         {
@@ -3237,6 +3237,7 @@ impl Node {
         peer_addr: std::net::SocketAddr,
         announcement_rx: tokio::sync::broadcast::Receiver<torsten_network::BlockAnnouncement>,
         rollback_rx: tokio::sync::broadcast::Receiver<RollbackAnnouncement>,
+        metrics: Arc<crate::metrics::NodeMetrics>,
     ) -> Result<()> {
         use torsten_network::protocol;
 
@@ -3343,17 +3344,38 @@ impl Node {
 
         // TxSubmission2 server
         let tx_mempool = mempool;
+        let tx_metrics = metrics.clone();
         let tx_task = tokio::spawn(async move {
             let on_tx = |tx_hash: [u8; 32], tx_bytes: Vec<u8>| -> bool {
+                // Track every transaction received from peers in real-time
+                // so the monitor and Prometheus reflect activity immediately.
+                tx_metrics
+                    .transactions_received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Best-effort mempool admission for peer-submitted txs.
                 // Try all supported eras for decoding (Conway=6, Babbage=5, Alonzo=4, etc.)
                 let size_bytes = tx_bytes.len();
                 for era_id in [6u16, 5, 4, 3, 2] {
                     if let Ok(tx) = torsten_serialization::decode_transaction(era_id, &tx_bytes) {
                         let hash = torsten_primitives::hash::Hash32::from_bytes(tx_hash);
-                        return tx_mempool.add_tx(hash, tx, size_bytes).is_ok();
+                        if tx_mempool.add_tx(hash, tx, size_bytes).is_ok() {
+                            tx_metrics
+                                .transactions_validated
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return true;
+                        } else {
+                            tx_metrics
+                                .transactions_rejected
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return false;
+                        }
                     }
                 }
+                // Failed to decode in any era — count as rejected
+                tx_metrics
+                    .transactions_rejected
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 false
             };
             match torsten_network::TxSubmissionServer::run(&mut tx_ch, on_tx).await {

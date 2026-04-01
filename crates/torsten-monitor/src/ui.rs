@@ -522,7 +522,6 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let tx_received = app.metrics.get_u64("torsten_transactions_received_total");
     let tx_validated = app.metrics.get_u64("torsten_transactions_validated_total");
     let tx_rejected = app.metrics.get_u64("torsten_transactions_rejected_total");
-    let total_tx = tx_received + tx_validated; // received from peers + validated via N2C
     let pending_tx = app.metrics.get_u64("torsten_mempool_tx_count");
     let utxo_count = app.metrics.get_u64("torsten_utxo_count");
     // Prefer the dedicated density gauge; fall back to block_number / slot_number
@@ -593,14 +592,21 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             col_w,
         ),
         kv_aligned(
-            "Total Tx",
-            App::format_number(total_tx),
+            "Tx Received",
+            App::format_number(tx_received),
             theme.muted,
             theme,
             col_w,
         ),
         kv_aligned(
-            "Rejected Tx",
+            "Tx Validated",
+            App::format_number(tx_validated),
+            theme.muted,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Tx Rejected",
             App::format_number(tx_rejected),
             if tx_rejected > 0 {
                 theme.warning
