@@ -1199,6 +1199,14 @@ impl LedgerState {
                     true
                 };
                 let cc_met = cc_met_fn(action_id);
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    bootstrap,
+                    drep_yes, drep_total, drep_met,
+                    spo_yes, spo_denom, spo_met,
+                    cc_met,
+                    "ParameterChange ratification check"
+                );
                 drep_met && spo_met && cc_met
             }
             GovAction::HardForkInitiation {

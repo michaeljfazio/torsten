@@ -1021,6 +1021,16 @@ fn build_epoch_snapshot(
         "totalPools": pool_distribution.len(),
         "poolDistribution": pool_distribution,
         "snapshotEraName": format!("{}", ledger.era),
+        "enactedRoots": {
+            "PParamUpdate": ledger.governance.enacted_pparam_update.as_ref()
+                .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            "HardFork": ledger.governance.enacted_hard_fork.as_ref()
+                .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            "Committee": ledger.governance.enacted_committee.as_ref()
+                .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            "Constitution": ledger.governance.enacted_constitution.as_ref()
+                .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+        },
         "epochNonce": hex::encode(ledger.epoch_nonce.0),
         "deposits": {
             "stakeKey": deposit_stake_key,
