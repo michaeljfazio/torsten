@@ -823,7 +823,7 @@ impl ConnectionLifecycleManager {
                 });
 
                 let client = torsten_network::KeepAliveClient::new(
-                    std::time::Duration::from_secs(30),
+                    torsten_network::DEFAULT_KEEPALIVE_INTERVAL,
                     cancel,
                 )
                 .with_rtt_sender(rtt_tx);

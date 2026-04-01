@@ -13,7 +13,12 @@ use crate::mux::channel::MuxChannel;
 use super::{decode_message, encode_message, KeepAliveMessage};
 
 /// Default keepalive ping interval.
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+///
+/// Must be well under the 30-second `SDU_READ_TIMEOUT` to ensure pings (and
+/// their pong responses) keep the bearer alive on both sides of the connection
+/// when the node is at tip and no ChainSync/BlockFetch data is flowing.
+/// Haskell cardano-node uses ~10 seconds.
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Timeout for waiting for a pong response after sending a ping.
 ///
