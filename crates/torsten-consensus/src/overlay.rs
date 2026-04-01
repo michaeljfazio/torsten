@@ -48,7 +48,10 @@ pub struct OverlayContext {
 ///
 /// Panics if `denominator` is zero.
 fn ceiling_mul(x: i128, numerator: i128, denominator: i128) -> i128 {
-    assert!(denominator != 0, "ceiling_mul: denominator must not be zero");
+    assert!(
+        denominator != 0,
+        "ceiling_mul: denominator must not be zero"
+    );
     let product = x * numerator;
     // ceil(a / b) for positive a, b = (a + b - 1) / b
     // For general case, we use: ceil(a/b) = floor(a/b) + if a % b != 0 { 1 } else { 0 }
@@ -404,22 +407,32 @@ mod tests {
 
     #[test]
     fn test_overlay_context_full_workflow() {
-        // Create an OverlayContext and verify delegate lookup through it
-        let key_a = make_key(0x0A);
-        let key_b = make_key(0x0B);
+        // Create an OverlayContext with 3 genesis keys, d=1, f=1/20.
+        // Verify:
+        //   - Slot 0:  active overlay slot, assigned to genesis key 0 (first in BTreeSet order)
+        //   - Slot 1:  non-active overlay slot (position=1, 1%20!=0)
+        //   - Slot 20: active overlay slot, assigned to genesis key 1
+        let key_0 = make_key(0x00);
+        let key_1 = make_key(0x01);
+        let key_2 = make_key(0x02);
 
-        let delegate_a = make_key(0xDA);
-        let delegate_b = make_key(0xDB);
-        let vrf_a = Hash32::from_bytes([0xA0; 32]);
-        let vrf_b = Hash32::from_bytes([0xB0; 32]);
+        let delegate_0 = make_key(0xD0);
+        let delegate_1 = make_key(0xD1);
+        let delegate_2 = make_key(0xD2);
+        let vrf_0 = Hash32::from_bytes([0x10; 32]);
+        let vrf_1 = Hash32::from_bytes([0x11; 32]);
+        let vrf_2 = Hash32::from_bytes([0x12; 32]);
 
         let mut genesis_delegates = HashMap::new();
-        genesis_delegates.insert(key_a, (delegate_a, vrf_a));
-        genesis_delegates.insert(key_b, (delegate_b, vrf_b));
+        genesis_delegates.insert(key_0, (delegate_0, vrf_0));
+        genesis_delegates.insert(key_1, (delegate_1, vrf_1));
+        genesis_delegates.insert(key_2, (delegate_2, vrf_2));
 
+        // BTreeSet sorts by byte value: 0x00 < 0x01 < 0x02
         let mut genesis_keys = BTreeSet::new();
-        genesis_keys.insert(key_a);
-        genesis_keys.insert(key_b);
+        genesis_keys.insert(key_0);
+        genesis_keys.insert(key_1);
+        genesis_keys.insert(key_2);
 
         let ctx = OverlayContext {
             genesis_delegates,
@@ -428,8 +441,8 @@ mod tests {
             first_slot_of_epoch: 0,
         };
 
-        // Slot 0 should be active with first key in sorted order
-        let result = lookup_in_overlay_schedule(
+        // Slot 0: overlay slot, active, position=0, index=(0/20)%3=0 => key_0
+        let slot0 = lookup_in_overlay_schedule(
             ctx.first_slot_of_epoch,
             &ctx.genesis_keys,
             ctx.d.0,
@@ -438,60 +451,184 @@ mod tests {
             20,
             0,
         );
+        assert_eq!(
+            slot0,
+            Some(OBftSlot::ActiveSlot(key_0)),
+            "Slot 0 must be ActiveSlot assigned to genesis key 0"
+        );
+        // Verify delegate lookup works for the assigned key
+        let (del, vrf) = ctx.genesis_delegates.get(&key_0).unwrap();
+        assert_eq!(*del, delegate_0);
+        assert_eq!(*vrf, vrf_0);
 
-        if let Some(OBftSlot::ActiveSlot(gkey)) = result {
-            // Verify we can look up the delegate
-            let (delegate, vrf) = ctx.genesis_delegates.get(&gkey).unwrap();
-            assert_ne!(*delegate, gkey); // delegate differs from genesis key
-            assert_ne!(*vrf, Hash32::ZERO);
-        } else {
-            panic!("Expected ActiveSlot at slot 0");
-        }
+        // Slot 1: overlay slot (d=1 makes every slot an overlay slot), but non-active
+        // position=1, 1%20!=0 => NonActiveSlot
+        let slot1 = lookup_in_overlay_schedule(
+            ctx.first_slot_of_epoch,
+            &ctx.genesis_keys,
+            ctx.d.0,
+            ctx.d.1,
+            1,
+            20,
+            1,
+        );
+        assert_eq!(
+            slot1,
+            Some(OBftSlot::NonActiveSlot),
+            "Slot 1 must be NonActiveSlot"
+        );
+
+        // Slot 20: overlay slot, active, position=20, index=(20/20)%3=1 => key_1
+        let slot20 = lookup_in_overlay_schedule(
+            ctx.first_slot_of_epoch,
+            &ctx.genesis_keys,
+            ctx.d.0,
+            ctx.d.1,
+            1,
+            20,
+            20,
+        );
+        assert_eq!(
+            slot20,
+            Some(OBftSlot::ActiveSlot(key_1)),
+            "Slot 20 must be ActiveSlot assigned to genesis key 1"
+        );
+        let (del1, vrf1) = ctx.genesis_delegates.get(&key_1).unwrap();
+        assert_eq!(*del1, delegate_1);
+        assert_eq!(*vrf1, vrf_1);
     }
 
     #[test]
     fn test_overlay_d_transition() {
-        // Verify overlay slot counts at different d values
-        let range = 0..100u64;
+        // Verify overlay slot counts and active BFT slot counts at different d values.
+        //
+        // Overlay slot count (is_overlay_slot) over 100 slots:
+        //   d=1   => 100 overlay slots
+        //   d=1/2 =>  50 overlay slots
+        //   d=0   =>   0 overlay slots
+        //
+        // Active BFT slot count (classify_overlay_slot with f=1/20) over 1000 slots:
+        //   d=1   => 50 active BFT slots  (every 20th overlay slot is active)
+        //   d=1/2 => 25 active BFT slots  (half the slots are overlay, every 20th is active)
+        //   d=0   =>  0 active BFT slots
+        let keys = make_keys(&[0, 1, 2]);
+
+        // --- Overlay slot counts over 100 slots ---
+        let range100 = 0..100u64;
 
         // d=1: all 100 slots are overlay
-        let count_d1 = range.clone().filter(|&s| is_overlay_slot(0, 1, 1, s)).count();
-        assert_eq!(count_d1, 100);
+        let count_d1 = range100
+            .clone()
+            .filter(|&s| is_overlay_slot(0, 1, 1, s))
+            .count();
+        assert_eq!(count_d1, 100, "d=1: expected 100/100 overlay slots");
 
-        // d=1/2: 50 overlay slots
-        let count_d_half = range.clone().filter(|&s| is_overlay_slot(0, 1, 2, s)).count();
-        assert_eq!(count_d_half, 50);
+        // d=1/2: 50 overlay slots (even offsets)
+        let count_d_half = range100
+            .clone()
+            .filter(|&s| is_overlay_slot(0, 1, 2, s))
+            .count();
+        assert_eq!(count_d_half, 50, "d=1/2: expected 50/100 overlay slots");
 
         // d=0: no overlay slots
-        let count_d0 = range.filter(|&s| is_overlay_slot(0, 0, 1, s)).count();
-        assert_eq!(count_d0, 0);
+        let count_d0 = range100
+            .filter(|&s| is_overlay_slot(0, 0, 1, s))
+            .count();
+        assert_eq!(count_d0, 0, "d=0: expected 0/100 overlay slots");
+
+        // --- Active BFT slot counts over 1000 slots (f=1/20) ---
+        //
+        // With d=1 and f=1/20, asc_inv=20.  Every overlay slot at position%20==0 is active.
+        // Positions 0..1000 that are multiples of 20 = 1000/20 = 50.
+        let active_count_d1: usize = (0..1000u64)
+            .filter(|&s| {
+                is_overlay_slot(0, 1, 1, s)
+                    && matches!(
+                        classify_overlay_slot(0, &keys, 1, 1, 1, 20, s),
+                        OBftSlot::ActiveSlot(_)
+                    )
+            })
+            .count();
+        assert_eq!(
+            active_count_d1, 50,
+            "d=1, f=1/20: expected 50/1000 active BFT slots"
+        );
+
+        // With d=1/2 and f=1/20, asc_inv=20.  Overlay slots occur at even offsets;
+        // their positions are ceil(offset * 1/2) = 0,1,2,...  An overlay slot at offset s
+        // (s even) has position = s/2.  Active when (s/2) % 20 == 0, i.e. s ∈ {0,40,80,...}.
+        // Over 1000 slots: 1000/40 = 25 active slots.
+        let active_count_d_half: usize = (0..1000u64)
+            .filter(|&s| {
+                is_overlay_slot(0, 1, 2, s)
+                    && matches!(
+                        classify_overlay_slot(0, &keys, 1, 2, 1, 20, s),
+                        OBftSlot::ActiveSlot(_)
+                    )
+            })
+            .count();
+        assert_eq!(
+            active_count_d_half, 25,
+            "d=1/2, f=1/20: expected 25/1000 active BFT slots"
+        );
+
+        // With d=0 there are no overlay slots, so no active BFT slots either.
+        let active_count_d0: usize = (0..1000u64)
+            .filter(|&s| {
+                is_overlay_slot(0, 0, 1, s)
+                    && matches!(
+                        classify_overlay_slot(0, &keys, 0, 1, 1, 20, s),
+                        OBftSlot::ActiveSlot(_)
+                    )
+            })
+            .count();
+        assert_eq!(
+            active_count_d0, 0,
+            "d=0: expected 0/1000 active BFT slots"
+        );
     }
 
     #[test]
     fn test_overlay_genesis_key_round_robin() {
-        // Verify that genesis keys are assigned in sorted (BTreeSet) order
-        let keys = make_keys(&[0x30, 0x10, 0x20]); // BTreeSet sorts: 0x10, 0x20, 0x30
+        // Verify that genesis keys are assigned in sorted (BTreeSet) order.
+        //
+        // Setup: 3 genesis keys (0x00, 0x01, 0x02), d=1, f=1/20.
+        // Active BFT slots occur at positions that are multiples of asc_inv=20,
+        // i.e. slots 0, 20, 40, 60, 80, 100.
+        //
+        // Key assignment round-robin by sorted order (BTreeSet: 0x00 < 0x01 < 0x02):
+        //   Slot  0: position=0,   index=(0/20)%3=0 => key 0x00
+        //   Slot 20: position=20,  index=(20/20)%3=1 => key 0x01
+        //   Slot 40: position=40,  index=(40/20)%3=2 => key 0x02
+        //   Slot 60: position=60,  index=(60/20)%3=0 => key 0x00 (wraps)
+        //   Slot 80: position=80,  index=(80/20)%3=1 => key 0x01
+        //   Slot 100: position=100, index=(100/20)%3=2 => key 0x02
+        let keys = make_keys(&[0x00, 0x01, 0x02]); // BTreeSet order: 0x00, 0x01, 0x02
 
-        // d=1, f=1/1 (asc_inv=1, every slot is active)
-        // Slot 0: index=0%3=0 => 0x10
+        let active_slots: Vec<u64> = (0..=100u64)
+            .filter(|&s| {
+                is_overlay_slot(0, 1, 1, s)
+                    && matches!(
+                        classify_overlay_slot(0, &keys, 1, 1, 1, 20, s),
+                        OBftSlot::ActiveSlot(_)
+                    )
+            })
+            .collect();
         assert_eq!(
-            classify_overlay_slot(0, &keys, 1, 1, 1, 1, 0),
-            OBftSlot::ActiveSlot(make_key(0x10))
+            active_slots,
+            vec![0, 20, 40, 60, 80, 100],
+            "Active BFT slots with d=1, f=1/20 should be 0,20,40,60,80,100"
         );
-        // Slot 1: index=1%3=1 => 0x20
-        assert_eq!(
-            classify_overlay_slot(0, &keys, 1, 1, 1, 1, 1),
-            OBftSlot::ActiveSlot(make_key(0x20))
-        );
-        // Slot 2: index=2%3=2 => 0x30
-        assert_eq!(
-            classify_overlay_slot(0, &keys, 1, 1, 1, 1, 2),
-            OBftSlot::ActiveSlot(make_key(0x30))
-        );
-        // Slot 3: index=3%3=0 => 0x10 (wraps)
-        assert_eq!(
-            classify_overlay_slot(0, &keys, 1, 1, 1, 1, 3),
-            OBftSlot::ActiveSlot(make_key(0x10))
-        );
+
+        // Verify the exact key assigned at each active slot matches the round-robin pattern
+        let expected_keys = [0x00u8, 0x01, 0x02, 0x00, 0x01, 0x02];
+        for (&slot, &expected_byte) in active_slots.iter().zip(expected_keys.iter()) {
+            let result = classify_overlay_slot(0, &keys, 1, 1, 1, 20, slot);
+            assert_eq!(
+                result,
+                OBftSlot::ActiveSlot(make_key(expected_byte)),
+                "Slot {slot}: expected genesis key 0x{expected_byte:02X}"
+            );
+        }
     }
 }
