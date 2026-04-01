@@ -1600,8 +1600,18 @@ impl LedgerState {
     /// submitted governance proposals have their deposited ADA counted toward
     /// DRep/SPO voting power.
     fn proposal_deposits_by_credential(&self) -> HashMap<Hash32, u64> {
+        Self::proposal_deposits_from(&self.governance.proposals)
+    }
+
+    /// Compute proposal deposits per credential from a given proposals map.
+    ///
+    /// Used by both `proposal_deposits_by_credential` (live proposals) and
+    /// `build_drep_power_cache` (ratification snapshot proposals).
+    fn proposal_deposits_from(
+        proposals: &std::collections::BTreeMap<GovActionId, ProposalState>,
+    ) -> HashMap<Hash32, u64> {
         let mut deposits: HashMap<Hash32, u64> = HashMap::new();
-        for proposal in self.governance.proposals.values() {
+        for proposal in proposals.values() {
             let cred = Self::reward_account_to_hash(&proposal.procedure.return_addr);
             *deposits.entry(cred).or_default() += proposal.procedure.deposit.0;
         }
@@ -1623,11 +1633,49 @@ impl LedgerState {
             || self.governance.drep_snapshot_no_confidence > 0
             || self.governance.drep_snapshot_abstain > 0
         {
-            return (
-                self.governance.drep_distribution_snapshot.clone(),
-                self.governance.drep_snapshot_no_confidence,
-                self.governance.drep_snapshot_abstain,
-            );
+            // The stored snapshot is the BASE distribution (without proposal deposits),
+            // matching Haskell's `computeDRepDistr`.  Add proposal deposits from the
+            // ratification snapshot's proposals (= `dpProposalDeposits` in Haskell's
+            // DRep pulser), so that proposal submitters' deposits count toward their
+            // DRep's voting power.
+            let mut cache = self.governance.drep_distribution_snapshot.clone();
+            let mut no_confidence = self.governance.drep_snapshot_no_confidence;
+            let mut abstain = self.governance.drep_snapshot_abstain;
+
+            // Add proposal deposits from the ratification snapshot's proposals,
+            // matching Haskell's `dpProposalDeposits` added during DRep pulsing.
+            // Fall back to live proposals if no ratification snapshot exists.
+            let proposals = if let Some(ref snap) = self.governance.ratification_snapshot {
+                &snap.proposals
+            } else {
+                &self.governance.proposals
+            };
+            let prop_deposits = Self::proposal_deposits_from(proposals);
+            for (cred, deposit) in &prop_deposits {
+                if let Some(drep) = self.governance.vote_delegations.get(cred) {
+                    match drep {
+                        DRep::KeyHash(h) => {
+                            if cache.contains_key(h) {
+                                *cache.entry(*h).or_default() += deposit;
+                            }
+                        }
+                        DRep::ScriptHash(h) => {
+                            let hash32 = h.to_hash32_padded();
+                            if cache.contains_key(&hash32) {
+                                *cache.entry(hash32).or_default() += deposit;
+                            }
+                        }
+                        DRep::NoConfidence => {
+                            no_confidence += deposit;
+                        }
+                        DRep::Abstain => {
+                            abstain += deposit;
+                        }
+                    }
+                }
+            }
+
+            return (cache, no_confidence, abstain);
         }
 
         // Fallback: compute from live state.  This path runs during the first epoch
@@ -1688,14 +1736,39 @@ impl LedgerState {
     /// the one-epoch-lagged DRep voting power that matches Haskell's pulser
     /// lifecycle.
     pub(crate) fn capture_drep_distribution_snapshot(&mut self) {
-        // Build DRep voting power from live state, matching Haskell's
-        // `setFreshDRepPulsingState` which uses `dsUnified` (live DState) for
-        // reward balances and delegation info, combined with the mark snapshot's
-        // `IStake` for UTxO-based stake.  Since UTxOs don't change during epoch
-        // transitions, live `credential_stake()` returns the same UTxO component
-        // as the mark snapshot, plus post-reward-distribution reward balances —
-        // matching the Haskell pulser's combined view.
-        let (cache, no_confidence, abstain) = self.build_drep_power_cache_live();
+        // Build the BASE DRep distribution (without proposal deposits), matching
+        // Haskell's `computeDRepDistr` which does NOT include proposal deposits.
+        // Proposal deposits are added separately during ratification via the
+        // `dpProposalDeposits` mechanism in the DRep pulser.
+        //
+        // Using live `credential_stake()` for UTxO + reward balances (UTxOs don't
+        // change during epoch transitions, and rewards are post-distribution).
+        let mut cache: HashMap<Hash32, u64> = HashMap::new();
+        let mut no_confidence = 0u64;
+        let mut abstain = 0u64;
+        // No proposal deposits — matches Haskell's computeDRepDistr
+        for (stake_cred, drep) in &self.governance.vote_delegations {
+            let stake = self.credential_stake(stake_cred);
+            match drep {
+                DRep::KeyHash(h) => {
+                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                        *cache.entry(*h).or_default() += stake;
+                    }
+                }
+                DRep::ScriptHash(h) => {
+                    let hash32 = h.to_hash32_padded();
+                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                        *cache.entry(hash32).or_default() += stake;
+                    }
+                }
+                DRep::NoConfidence => {
+                    no_confidence += stake;
+                }
+                DRep::Abstain => {
+                    abstain += stake;
+                }
+            }
+        }
         let gov = Arc::make_mut(&mut self.governance);
         gov.drep_distribution_snapshot = cache;
         gov.drep_snapshot_no_confidence = no_confidence;
