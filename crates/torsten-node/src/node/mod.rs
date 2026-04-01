@@ -167,14 +167,24 @@ pub struct Node {
     pub(crate) validate_all_blocks: bool,
     /// Watch receiver for current disk space level, updated by disk monitor
     pub(crate) disk_space_rx: watch::Receiver<crate::disk_monitor::DiskSpaceLevel>,
-    /// Genesis State Machine — drives LoE enforcement and GDD.
+    /// GSM event sender — produces events for the GSM actor.
     ///
-    /// When genesis mode is disabled the GSM immediately enters CaughtUp
-    /// and `loe_limit()` always returns `None`, so there is no overhead on
-    /// the normal (Praos) sync path.  Stored as an `Arc<RwLock<…>>` so that
-    /// the background GSM evaluation task can write state transitions while
-    /// the sync pipeline holds a read lock to query `loe_limit()`.
-    pub(crate) gsm: Arc<RwLock<crate::gsm::GenesisStateMachine>>,
+    /// All GsmEvent emissions use `try_send` (non-blocking). If the channel
+    /// is full, the event is dropped with a debug log — acceptable because
+    /// the GSM actor processes events asynchronously and the periodic
+    /// SyncStatus event ensures state convergence.
+    pub(crate) gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
+    /// GSM snapshot receiver — latest GSM state (watch channel, synchronous borrow).
+    ///
+    /// Consumers call `self.gsm_snapshot_rx.borrow()` to read the latest
+    /// `GsmSnapshot` without any async overhead. In Praos mode the snapshot
+    /// is always `{ state: CaughtUp, loe_slot: None }`.
+    pub(crate) gsm_snapshot_rx: tokio::sync::watch::Receiver<crate::gsm::GsmSnapshot>,
+    /// Pre-built actor pieces, consumed by `run()` to spawn the GSM actor task.
+    ///
+    /// `Option` so `run()` can `.take()` the parts once — the actor is spawned
+    /// exactly once and owns all receiver/sender handles from that point.
+    pub(crate) gsm_actor_parts: Option<GsmActorParts>,
     /// Anchored chain fragment representing the volatile portion of the
     /// selected chain (the last k block headers not yet in ImmutableDB).
     ///
@@ -225,6 +235,21 @@ pub struct Node {
     /// Triggers at epoch boundaries, every N blocks, and on graceful
     /// shutdown.  Matches Haskell's snapshot policy in Background.hs.
     pub(crate) bg_snapshot_scheduler: SnapshotScheduler,
+}
+
+// ─── GsmActorParts ──────────────────────────────────────────────────────────
+
+/// Pre-built channel handles for spawning the GSM actor in `Node::run()`.
+///
+/// Created in `Node::new()` and consumed (`.take()`) in `run()`. This avoids
+/// passing individual channel handles through multiple layers of plumbing.
+pub(crate) struct GsmActorParts {
+    pub config: crate::gsm::GsmConfig,
+    pub enabled: bool,
+    pub event_rx: tokio::sync::mpsc::Receiver<crate::gsm::GsmEvent>,
+    pub snapshot_tx: tokio::sync::watch::Sender<crate::gsm::GsmSnapshot>,
+    pub action_tx: tokio::sync::mpsc::Sender<crate::gsm::GddAction>,
+    pub action_rx: tokio::sync::mpsc::Receiver<crate::gsm::GddAction>,
 }
 
 // ─── Node impl: new() ────────────────────────────────────────────────────────
@@ -1061,19 +1086,50 @@ impl Node {
             debug!("Expected Shelley genesis hash: {}", h.to_hex());
         }
 
-        // Build the GSM here so it is owned by the Node struct. This lets
-        // `process_forward_blocks` query `loe_limit()` without needing to
-        // pass the Arc through every call site.  When genesis mode is off the
-        // GSM starts in CaughtUp and `loe_limit()` always returns None.
+        // Build GSM channels and actor parts. The actor itself is spawned in
+        // `run()` — here we only create channels and compute the initial
+        // snapshot so that `gsm_snapshot_rx.borrow()` returns correct values
+        // from the moment the Node struct is constructed.
+        //
+        // When genesis mode is off the initial snapshot is `CaughtUp` with
+        // `loe_slot: None`, and all events sent to `gsm_event_tx` are no-ops
+        // inside the actor.
         let genesis_enabled = args.consensus_mode == "genesis";
         let gsm_config = crate::gsm::GsmConfig {
             marker_path: args.database_path.join("caught_up.marker"),
             ..Default::default()
         };
-        let gsm = Arc::new(RwLock::new(crate::gsm::GenesisStateMachine::new(
-            gsm_config,
-            genesis_enabled,
-        )));
+        let (gsm_event_tx, gsm_event_rx) = tokio::sync::mpsc::channel(1024);
+        // Compute the initial snapshot so consumers have the right state
+        // before the actor has even started.
+        let initial_gsm_state = if genesis_enabled {
+            if gsm_config.marker_path.exists() {
+                crate::gsm::GenesisSyncState::CaughtUp
+            } else {
+                crate::gsm::GenesisSyncState::PreSyncing
+            }
+        } else {
+            crate::gsm::GenesisSyncState::CaughtUp
+        };
+        let initial_loe = match initial_gsm_state {
+            crate::gsm::GenesisSyncState::PreSyncing => Some(0),
+            crate::gsm::GenesisSyncState::Syncing => Some(0),
+            crate::gsm::GenesisSyncState::CaughtUp => None,
+        };
+        let initial_snapshot = crate::gsm::GsmSnapshot {
+            state: initial_gsm_state,
+            loe_slot: initial_loe,
+        };
+        let (gsm_snapshot_tx, gsm_snapshot_rx) = tokio::sync::watch::channel(initial_snapshot);
+        let (gdd_action_tx, gdd_action_rx) = tokio::sync::mpsc::channel(64);
+        let gsm_actor_parts = Some(GsmActorParts {
+            config: gsm_config,
+            enabled: genesis_enabled,
+            event_rx: gsm_event_rx,
+            snapshot_tx: gsm_snapshot_tx,
+            action_tx: gdd_action_tx,
+            action_rx: gdd_action_rx,
+        });
 
         // Build and configure metrics before assembling the node struct so we
         // can set the network magic immediately (the TUI reads it on first scrape).
@@ -1170,9 +1226,11 @@ impl Node {
             fetched_blocks_rx: None,
             peer_failure_rx: None,
             query_handler,
-            peer_manager: Arc::new(RwLock::new(NodePeerManager::new(
-                PeerManagerConfig::default(),
-            ))),
+            peer_manager: Arc::new(RwLock::new({
+                let mut pm = NodePeerManager::new(PeerManagerConfig::default());
+                pm.set_gsm_event_tx(gsm_event_tx.clone());
+                pm
+            })),
             socket_path,
             database_path: args.database_path,
             listen_addr,
@@ -1208,7 +1266,9 @@ impl Node {
             consensus_mode: args.consensus_mode,
             validate_all_blocks: args.validate_all_blocks,
             disk_space_rx: watch::channel(crate::disk_monitor::DiskSpaceLevel::Ok).1,
-            gsm,
+            gsm_event_tx,
+            gsm_snapshot_rx,
+            gsm_actor_parts,
             chain_fragment: Arc::new(RwLock::new(chain_fragment)),
             chain_sel_handle: Some(chain_sel_handle),
 
@@ -1602,6 +1662,8 @@ impl Node {
             // Register our own listen address to prevent self-connections
             // (peers may share our address back to us via peer sharing)
             pm.set_local_addr(self.listen_addr);
+            // Wire GSM event sender so peer_disconnected() emits events
+            pm.set_gsm_event_tx(self.gsm_event_tx.clone());
             *self.peer_manager.write().await = pm;
         }
         let peer_manager = self.peer_manager.clone();
@@ -2104,6 +2166,7 @@ impl Node {
             self.metrics.clone(),
             self.mempool.clone(),
             peer_failure_tx,
+            self.gsm_event_tx.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
@@ -2139,7 +2202,7 @@ impl Node {
         // ─── GSM (Genesis State Machine) ─────────────────────────────────
         let genesis_enabled = self.consensus_mode == "genesis";
         if genesis_enabled {
-            let gsm_state = self.gsm.read().await.state();
+            let gsm_state = self.gsm_snapshot_rx.borrow().state;
             info!(
                 state = %gsm_state,
                 "Genesis mode enabled — note: lightweight checkpointing and Genesis-specific \
@@ -2148,16 +2211,65 @@ impl Node {
             );
         }
 
-        // Spawn GSM evaluation task
-        if genesis_enabled {
-            let gsm_ref = self.gsm.clone();
-            let gsm_pm = peer_manager.clone();
-            let gsm_metrics = self.metrics.clone();
-            let gsm_shutdown = shutdown_rx.clone();
+        // Spawn GSM actor task, GDD action consumer, and SyncStatus emitter.
+        if let Some(parts) = self.gsm_actor_parts.take() {
+            // 1. Spawn the GSM actor — owns the GenesisStateMachine and
+            //    processes GsmEvent messages, publishing GsmSnapshot via watch.
+            let gsm_actor_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut shutdown = gsm_actor_shutdown;
+                tokio::select! {
+                    _ = crate::gsm::run_gsm_actor(
+                        parts.config,
+                        parts.enabled,
+                        parts.event_rx,
+                        parts.snapshot_tx,
+                        parts.action_tx,
+                    ) => {}
+                    _ = shutdown.changed() => {
+                        debug!("GSM actor shutting down");
+                    }
+                }
+            });
+
+            // 2. Spawn GDD action consumer — reads disconnect commands from
+            //    the GSM actor and applies them via the peer manager.
+            let gdd_pm = peer_manager.clone();
+            let gdd_shutdown = shutdown_rx.clone();
+            let mut gdd_action_rx = parts.action_rx;
+            tokio::spawn(async move {
+                let mut shutdown = gdd_shutdown;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => { break; }
+                        action = gdd_action_rx.recv() => {
+                            match action {
+                                Some(crate::gsm::GddAction::DisconnectPeer(addr)) => {
+                                    info!(%addr, "GDD: disconnecting sparse-chain peer");
+                                    let mut pm = gdd_pm.write().await;
+                                    pm.peer_disconnected(&addr);
+                                }
+                                None => {
+                                    debug!("GDD action channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 3. Spawn SyncStatus emitter — every 10 seconds, gathers sync
+            //    metrics and sends a SyncStatus event to the GSM actor.
+            let status_event_tx = self.gsm_event_tx.clone();
+            let status_pm = peer_manager.clone();
+            let status_metrics = self.metrics.clone();
+            let status_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(10));
-                interval.tick().await;
-                let mut shutdown = gsm_shutdown;
+                interval.tick().await; // skip first immediate tick
+                let mut shutdown = status_shutdown;
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {}
@@ -2165,19 +2277,26 @@ impl Node {
                     }
 
                     let active_blp = {
-                        let pm = gsm_pm.read().await;
+                        let pm = status_pm.read().await;
                         pm.active_big_ledger_peer_count()
                     };
-
-                    let mut gsm_w = gsm_ref.write().await;
-                    let tip_age_secs = gsm_metrics
+                    let tip_age_secs = status_metrics
                         .tip_age_secs
                         .load(std::sync::atomic::Ordering::Relaxed);
-                    let chainsync_idle = gsm_metrics
+                    let chainsync_idle = status_metrics
                         .chainsync_idle_secs
                         .load(std::sync::atomic::Ordering::Relaxed);
                     let all_idle = chainsync_idle > 30;
-                    gsm_w.evaluate(active_blp, all_idle, tip_age_secs, 0);
+
+                    let event = crate::gsm::GsmEvent::SyncStatus {
+                        active_blp_count: active_blp,
+                        all_chainsync_idle: all_idle,
+                        tip_age_secs,
+                        immutable_tip_slot: 0,
+                    };
+                    if let Err(e) = status_event_tx.try_send(event) {
+                        debug!("GSM SyncStatus event dropped: {e}");
+                    }
                 }
             });
         }

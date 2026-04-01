@@ -261,6 +261,10 @@ pub struct NodePeerManager {
     local_root_groups: Vec<LocalRootGroupInfo>,
     /// Set of big ledger peer addresses.
     big_ledger_peers: std::collections::HashSet<SocketAddr>,
+    /// Optional GSM event sender — when set, `peer_disconnected()` emits
+    /// `GsmEvent::PeerDisconnected` so the GSM actor can update its peer
+    /// tracking (LoE, GDD). `None` when GSM is not wired (e.g. in tests).
+    gsm_event_tx: Option<tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>>,
 }
 
 impl NodePeerManager {
@@ -273,7 +277,13 @@ impl NodePeerManager {
             local_addr: None,
             local_root_groups: Vec::new(),
             big_ledger_peers: std::collections::HashSet::new(),
+            gsm_event_tx: None,
         }
+    }
+
+    /// Set the GSM event sender so `peer_disconnected()` emits events.
+    pub fn set_gsm_event_tx(&mut self, tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>) {
+        self.gsm_event_tx = Some(tx);
     }
 
     /// Set our own listen address.
@@ -354,9 +364,19 @@ impl NodePeerManager {
     }
 
     /// Mark a peer as disconnected.
+    ///
+    /// Demotes the peer to cold and removes connection state. Also emits
+    /// `GsmEvent::PeerDisconnected` to the GSM actor (if wired) so that
+    /// the LoE and GDD peer tracking are updated.
     pub fn peer_disconnected(&mut self, addr: &SocketAddr) {
         self.inner.demote_to_cold(addr);
         self.conn_states.remove(addr);
+        // Notify the GSM actor so it can deregister the peer from density tracking.
+        if let Some(ref tx) = self.gsm_event_tx {
+            if let Err(e) = tx.try_send(crate::gsm::GsmEvent::PeerDisconnected { addr: *addr }) {
+                tracing::debug!(%addr, "GSM PeerDisconnected event dropped: {e}");
+            }
+        }
     }
 
     /// Record a connection failure.

@@ -82,7 +82,6 @@ impl std::fmt::Display for GenesisSyncState {
 
 /// Event sent to the GSM actor from producers (ChainSync, BlockFetch, networking).
 #[derive(Debug)]
-#[allow(dead_code)] // wired in Task 5/6
 pub enum GsmEvent {
     /// A new peer has been registered with known intersection and tip.
     PeerRegistered {
@@ -113,7 +112,6 @@ pub enum GsmEvent {
 ///
 /// Published via a `watch` channel so consumers always see the latest value.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // wired in Task 5/6
 pub struct GsmSnapshot {
     /// Current sync state.
     pub state: GenesisSyncState,
@@ -123,7 +121,6 @@ pub struct GsmSnapshot {
 
 /// Actions the GSM actor emits for the peer manager to execute.
 #[derive(Debug)]
-#[allow(dead_code)] // wired in Task 5/6
 pub enum GddAction {
     /// Disconnect this peer — GDD determined it is on a sparse chain.
     DisconnectPeer(SocketAddr),
@@ -133,7 +130,6 @@ pub enum GddAction {
 
 /// Configuration for the Genesis State Machine.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used in actor (Task 5/6)
 pub struct GsmConfig {
     /// Minimum active big ledger peers to transition PreSyncing → Syncing.
     pub min_active_blp: usize,
@@ -756,7 +752,6 @@ impl GenesisStateMachine {
 /// - `event_rx`: incoming events from sync pipeline producers
 /// - `snapshot_tx`: outgoing state snapshots (watch channel)
 /// - `action_tx`: outgoing GDD disconnect actions
-#[allow(dead_code)] // wired in Task 5
 pub async fn run_gsm_actor(
     config: GsmConfig,
     enabled: bool,

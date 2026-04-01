@@ -1035,10 +1035,7 @@ impl Node {
         // In Praos mode (genesis disabled) the GSM starts in CaughtUp and
         // loe_limit() always returns None, so both paths take the fast branch
         // with zero overhead.
-        let loe_limit: Option<u64> = {
-            let gsm = self.gsm.read().await;
-            gsm.compute_loe_slot()
-        };
+        let loe_limit: Option<u64> = self.gsm_snapshot_rx.borrow().loe_slot;
 
         // Now apply blocks to ledger — storage is confirmed
         let mut applied_count: u64 = 0;
@@ -2593,6 +2590,9 @@ pub async fn chainsync_client_task(
     active_slots_coeff: f64,
     metrics: Arc<crate::metrics::NodeMetrics>,
     cancel: CancellationToken,
+    // GSM event sender — emits PeerRegistered, BlockReceived, PeerTipUpdated,
+    // PeerActive, PeerIdling events to the GSM actor. Uses try_send (non-blocking).
+    gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
 ) -> Result<()> {
     // ═══════════════════════════════════════════════════════════════════════
     // Phase 1: Build known points for intersection
@@ -2843,18 +2843,19 @@ pub async fn chainsync_client_task(
     }
 
     // Initialize candidate chain state for this peer.
+    let intersection_slot = intersection
+        .as_ref()
+        .map(|p| match p {
+            CodecPoint::Specific(s, _) => *s,
+            CodecPoint::Origin => 0,
+        })
+        .unwrap_or(0);
     {
         let mut chains = candidate_chains.write().await;
         chains.insert(
             peer_addr,
             CandidateChainState {
-                tip_slot: intersection
-                    .as_ref()
-                    .map(|p| match p {
-                        CodecPoint::Specific(s, _) => *s,
-                        CodecPoint::Origin => 0,
-                    })
-                    .unwrap_or(0),
+                tip_slot: intersection_slot,
                 tip_hash: intersection
                     .as_ref()
                     .map(|p| match p {
@@ -2866,6 +2867,17 @@ pub async fn chainsync_client_task(
                 pending_headers: Vec::new(),
             },
         );
+    }
+
+    // Emit PeerRegistered to the GSM actor after successful intersection.
+    // The tip_slot here is 0 (we haven't received any headers yet); the
+    // GSM will update it as PeerTipUpdated events arrive.
+    if let Err(e) = gsm_event_tx.try_send(crate::gsm::GsmEvent::PeerRegistered {
+        addr: peer_addr,
+        intersection_slot,
+        tip_slot: intersection_slot,
+    }) {
+        debug!(%peer_addr, "GSM PeerRegistered event dropped: {e}");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2978,6 +2990,27 @@ pub async fn chainsync_client_task(
                                 let excess = entry.pending_headers.len() - MAX_PENDING_HEADERS;
                                 entry.pending_headers.drain(..excess);
                             }
+                        }
+
+                        // Emit GSM events: BlockReceived, PeerTipUpdated, PeerActive.
+                        // All use try_send — if the channel is full, the event is
+                        // dropped silently (the periodic SyncStatus ensures convergence).
+                        if let Err(e) = gsm_event_tx.try_send(crate::gsm::GsmEvent::BlockReceived {
+                            addr: peer_addr,
+                            slot,
+                        }) {
+                            debug!(%peer_addr, "GSM BlockReceived event dropped: {e}");
+                        }
+                        if let Err(e) = gsm_event_tx.try_send(crate::gsm::GsmEvent::PeerTipUpdated {
+                            addr: peer_addr,
+                            tip_slot,
+                        }) {
+                            debug!(%peer_addr, "GSM PeerTipUpdated event dropped: {e}");
+                        }
+                        if let Err(e) = gsm_event_tx.try_send(crate::gsm::GsmEvent::PeerActive {
+                            addr: peer_addr,
+                        }) {
+                            debug!(%peer_addr, "GSM PeerActive event dropped: {e}");
                         }
 
                         // Log progress periodically.
@@ -3152,6 +3185,14 @@ pub async fn chainsync_client_task(
                         // Do NOT decrement outstanding — MsgAwaitReply doesn't
                         // consume a request. The server will eventually respond
                         // with MsgRollForward or MsgRollBackward.
+                        //
+                        // Emit PeerIdling to the GSM actor so the GDD knows
+                        // this peer has stopped sending blocks.
+                        if let Err(e) = gsm_event_tx.try_send(crate::gsm::GsmEvent::PeerIdling {
+                            addr: peer_addr,
+                        }) {
+                            debug!(%peer_addr, "GSM PeerIdling event dropped: {e}");
+                        }
                         if !at_tip {
                             at_tip = true;
                             // Rate-limit "at tip" logging to at most once per

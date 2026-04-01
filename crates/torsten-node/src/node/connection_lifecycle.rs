@@ -218,6 +218,11 @@ pub struct ConnectionLifecycleManager {
     /// exponential backoff. This provides faster failure detection than waiting
     /// for the mux to die via `cleanup_dead_connections()`.
     peer_failure_tx: mpsc::Sender<SocketAddr>,
+
+    /// GSM event sender — passed to ChainSync tasks so they can emit
+    /// PeerRegistered, BlockReceived, PeerTipUpdated, PeerActive, PeerIdling
+    /// events to the GSM actor.
+    gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
 }
 
 /// Errors from lifecycle management operations.
@@ -268,6 +273,7 @@ impl ConnectionLifecycleManager {
     /// * `metrics` — Prometheus metrics handle for recording peer latencies
     /// * `mempool` — Shared mempool for TxSubmission2 tx relay
     /// * `peer_failure_tx` — Channel for protocol tasks to report peer failures
+    /// * `gsm_event_tx` — GSM event sender for ChainSync tasks
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
@@ -285,6 +291,7 @@ impl ConnectionLifecycleManager {
         metrics: Arc<NodeMetrics>,
         mempool: Arc<Mempool>,
         peer_failure_tx: mpsc::Sender<SocketAddr>,
+        gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -305,6 +312,7 @@ impl ConnectionLifecycleManager {
             metrics,
             mempool,
             peer_failure_tx,
+            gsm_event_tx,
         }
     }
 
@@ -829,6 +837,7 @@ impl ConnectionLifecycleManager {
         let security_param = self.security_param;
         let active_slots_coeff = self.active_slots_coeff;
         let metrics = self.metrics.clone();
+        let gsm_event_tx = self.gsm_event_tx.clone();
 
         Box::new(move |channel, cancel| {
             Box::pin(async move {
@@ -844,6 +853,7 @@ impl ConnectionLifecycleManager {
                     active_slots_coeff,
                     metrics,
                     cancel,
+                    gsm_event_tx,
                 )
                 .await
                 {
