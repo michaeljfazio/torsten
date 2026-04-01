@@ -2090,12 +2090,34 @@ impl Node {
                         "Replay       complete ({} blocks in {}s, {} applied, {} skipped, {} blk/s)",
                         total, elapsed as u64, replayed, skipped, speed as u64,
                     );
-                    // Update metrics with final replay state
+                    // Update metrics with final replay state — include all
+                    // counters so governance/state metrics are available
+                    // immediately without requiring a node restart (#329).
                     let ls = ledger_state.blocking_read();
                     let slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
                     metrics.set_slot(slot);
                     metrics.set_block_number(ls.tip.block_number.0);
                     metrics.set_epoch(ls.epoch.0);
+                    metrics.set_utxo_count(ls.utxo_set.len() as u64);
+                    metrics.delegation_count.store(
+                        ls.delegations.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    metrics
+                        .treasury_lovelace
+                        .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+                    metrics.pool_count.store(
+                        ls.pool_params.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    metrics.drep_count.store(
+                        ls.governance.active_drep_count() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    metrics.proposal_count.store(
+                        ls.governance.proposals.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 Err(e) => {
                     // "shutdown requested" is not an error — it's a normal
