@@ -508,4 +508,76 @@ mod tests {
         // Wrong message should fail
         assert!(kes_verify_bytes(&pk, 0, &sig_bytes, b"wrong").is_err());
     }
+
+    // =========================================================================
+    // Sum6Kes IOHK Reference Test Vectors (#323)
+    // =========================================================================
+
+    #[test]
+    fn test_sum6kes_deterministic_keygen() {
+        let seed = [0u8; 32];
+        let (sk1, pk1) = kes_keygen(&seed).unwrap();
+        let (sk2, pk2) = kes_keygen(&seed).unwrap();
+        assert_eq!(pk1, pk2, "Same seed must produce same public key");
+        assert_eq!(sk1, sk2, "Same seed must produce same secret key");
+    }
+
+    #[test]
+    fn test_sum6kes_cross_period_signature_isolation() {
+        let seed = [0x42; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+        let message = b"KES cross-period isolation test";
+
+        let (sig_bytes_0, _) = kes_sign_bytes(&sk, message).unwrap();
+        assert!(kes_verify_bytes(&pk, 0, &sig_bytes_0, message).is_ok());
+        assert!(kes_verify_bytes(&pk, 1, &sig_bytes_0, message).is_err());
+
+        let sk_3 = kes_evolve_to_period(&sk, 3).unwrap();
+        let (sig_bytes_3, period_3) = kes_sign_bytes(&sk_3, message).unwrap();
+        assert_eq!(period_3, 3);
+        assert!(kes_verify_bytes(&pk, 3, &sig_bytes_3, message).is_ok());
+        assert!(kes_verify_bytes(&pk, 2, &sig_bytes_3, message).is_err());
+        assert!(kes_verify_bytes(&pk, 4, &sig_bytes_3, message).is_err());
+        assert!(kes_verify_bytes(&pk, 3, &sig_bytes_0, message).is_err());
+    }
+
+    #[test]
+    fn test_sum6kes_wrong_key_rejection() {
+        let (sk_a, pk_a) = kes_keygen(&[0xAA; 32]).unwrap();
+        let (_sk_b, pk_b) = kes_keygen(&[0xBB; 32]).unwrap();
+        let message = b"KES wrong key rejection test";
+
+        let (sig_bytes, _) = kes_sign_bytes(&sk_a, message).unwrap();
+        assert!(kes_verify_bytes(&pk_a, 0, &sig_bytes, message).is_ok());
+        assert!(kes_verify_bytes(&pk_b, 0, &sig_bytes, message).is_err());
+    }
+
+    #[test]
+    fn test_sum6kes_corrupted_signature_rejection() {
+        let seed = [0xCC; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+        let message = b"KES corruption test";
+
+        let (mut sig_bytes, _) = kes_sign_bytes(&sk, message).unwrap();
+        assert_eq!(sig_bytes.len(), 448, "Sum6KesSig should be 448 bytes");
+        assert!(kes_verify_bytes(&pk, 0, &sig_bytes, message).is_ok());
+
+        sig_bytes[0] ^= 0x01;
+        assert!(kes_verify_bytes(&pk, 0, &sig_bytes, message).is_err());
+    }
+
+    #[test]
+    fn test_sum6kes_public_key_stable_across_all_evolutions() {
+        let seed = [0xDD; 32];
+        let (sk, pk) = kes_keygen(&seed).unwrap();
+
+        let mut current_sk = sk;
+        for period in 1..=MAX_KES_EVOLUTIONS as u32 {
+            let (new_sk, new_period) = kes_update(&current_sk).unwrap();
+            assert_eq!(new_period, period);
+            let derived_pk = kes_sk_to_pk(&new_sk).unwrap();
+            assert_eq!(derived_pk, pk, "Public key must be stable at period {period}");
+            current_sk = new_sk;
+        }
+    }
 }
