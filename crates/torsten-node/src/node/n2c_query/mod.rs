@@ -524,6 +524,8 @@ impl QueryHandler {
             }
             38 => {
                 // Tag 38: GetMaxMajorProtocolVersion (V21+)
+                // The hardcoded 10 matches the consensus config's max_major_prot_ver
+                // (OuroborosPraos.max_major_prot_ver). Both must be updated together.
                 debug!("Query: GetMaxMajorProtocolVersion");
                 QueryResult::MaxMajorProtocolVersion(10)
             }

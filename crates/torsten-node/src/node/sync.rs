@@ -867,6 +867,7 @@ impl Node {
                     block.slot(),
                     issuer_info.as_ref(),
                     mode,
+                    Some(ls.protocol_params.protocol_version_major),
                 ) {
                     if strict {
                         error!(

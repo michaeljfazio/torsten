@@ -424,6 +424,7 @@ fn test_opcert_counter_tracking() {
             current_slot,
             Some(&issuer_info),
             ValidationMode::Replay,
+            Some(9),
         )
     };
 
