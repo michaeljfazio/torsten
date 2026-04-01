@@ -458,6 +458,45 @@ impl DensityWindow {
         self.intersection_slot = intersection_slot;
         self.slots.clear();
     }
+
+    /// Count of blocks with slot strictly less than `slot`.
+    ///
+    /// Used by the Genesis Density Disconnector (GDD) to clip the observed
+    /// density to the genesis window boundary: only blocks whose slot falls
+    /// before the window end (or some other boundary) are counted.
+    #[inline]
+    pub fn blocks_before(&self, slot: u64) -> u64 {
+        self.slots.partition_point(|&s| s < slot) as u64
+    }
+
+    /// Returns `true` if any recorded block has slot `>= slot`.
+    ///
+    /// Used by GDD to detect whether a peer's suffix has progressed past
+    /// the genesis window — once a block exists at or beyond the boundary,
+    /// the window is effectively "heard from" for that peer.
+    #[inline]
+    pub fn has_block_at_or_after(&self, slot: u64) -> bool {
+        self.slots.partition_point(|&s| s < slot) < self.slots.len()
+    }
+
+    /// Highest slot recorded in the window, or `None` if the window is empty.
+    ///
+    /// Used by GDD to compute *potential slots* — the number of unknown
+    /// trailing slots between the last observed block and the window end.
+    #[inline]
+    pub fn head_slot(&self) -> Option<u64> {
+        self.slots.last().copied()
+    }
+
+    /// Total number of blocks recorded in the window.
+    ///
+    /// An alias for [`block_count`](Self::block_count) provided for clarity
+    /// in GDD contexts where the value represents the full suffix length
+    /// rather than just the clipped count up to a boundary slot.
+    #[inline]
+    pub fn total_block_count(&self) -> u64 {
+        self.slots.len() as u64
+    }
 }
 
 /// Density-based chain selection for Ouroboros Genesis.
@@ -2258,6 +2297,52 @@ mod tests {
         // intersection near u64::MAX should not panic
         let w = DensityWindow::new(u64::MAX - 10, 100);
         assert_eq!(w.end_slot(), u64::MAX); // saturating_add caps at MAX
+    }
+
+    #[test]
+    fn test_density_window_blocks_before() {
+        let mut dw = DensityWindow::new(0, 100);
+        dw.record_block(10);
+        dw.record_block(20);
+        dw.record_block(30);
+        dw.record_block(40);
+        assert_eq!(dw.blocks_before(25), 2);
+        assert_eq!(dw.blocks_before(10), 0);
+        assert_eq!(dw.blocks_before(11), 1);
+        assert_eq!(dw.blocks_before(100), 4);
+        assert_eq!(dw.blocks_before(0), 0);
+    }
+
+    #[test]
+    fn test_density_window_has_block_at_or_after() {
+        let mut dw = DensityWindow::new(0, 100);
+        dw.record_block(10);
+        dw.record_block(20);
+        assert!(dw.has_block_at_or_after(15));
+        assert!(dw.has_block_at_or_after(20));
+        assert!(!dw.has_block_at_or_after(21));
+        assert!(dw.has_block_at_or_after(1));
+    }
+
+    #[test]
+    fn test_density_window_head_slot() {
+        let mut dw = DensityWindow::new(0, 100);
+        assert_eq!(dw.head_slot(), None);
+        dw.record_block(10);
+        dw.record_block(5);
+        dw.record_block(20);
+        assert_eq!(dw.head_slot(), Some(20));
+    }
+
+    #[test]
+    fn test_density_window_total_block_count() {
+        let mut dw = DensityWindow::new(0, 50);
+        assert_eq!(dw.total_block_count(), 0);
+        dw.record_block(10);
+        dw.record_block(20);
+        dw.record_block(30);
+        dw.record_block(60); // outside window, rejected
+        assert_eq!(dw.total_block_count(), 3);
     }
 
     // -----------------------------------------------------------------------
