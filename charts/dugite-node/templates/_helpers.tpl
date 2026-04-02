@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "torsten-node.name" -}}
+{{- define "dugite-node.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "torsten-node.fullname" -}}
+{{- define "dugite-node.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -24,16 +24,16 @@ Create a default fully qualified app name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "torsten-node.chart" -}}
+{{- define "dugite-node.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "torsten-node.labels" -}}
-helm.sh/chart: {{ include "torsten-node.chart" . }}
-{{ include "torsten-node.selectorLabels" . }}
+{{- define "dugite-node.labels" -}}
+helm.sh/chart: {{ include "dugite-node.chart" . }}
+{{ include "dugite-node.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/component: {{ .Values.role }}
@@ -42,17 +42,17 @@ app.kubernetes.io/component: {{ .Values.role }}
 {{/*
 Selector labels
 */}}
-{{- define "torsten-node.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "torsten-node.name" . }}
+{{- define "dugite-node.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "dugite-node.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "torsten-node.serviceAccountName" -}}
+{{- define "dugite-node.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "torsten-node.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "dugite-node.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
@@ -61,7 +61,7 @@ Create the name of the service account to use
 {{/*
 Network magic value
 */}}
-{{- define "torsten-node.networkMagic" -}}
+{{- define "dugite-node.networkMagic" -}}
 {{- if .Values.network.magic }}
 {{- .Values.network.magic }}
 {{- else if eq .Values.network.name "mainnet" }}
@@ -78,13 +78,13 @@ Network magic value
 {{/*
 Config file name for network
 */}}
-{{- define "torsten-node.configFile" -}}
+{{- define "dugite-node.configFile" -}}
 {{- printf "%s-config.json" .Values.network.name }}
 {{- end }}
 
 {{/*
 Topology file name for network
 */}}
-{{- define "torsten-node.topologyFile" -}}
+{{- define "dugite-node.topologyFile" -}}
 {{- printf "%s-topology.json" .Values.network.name }}
 {{- end }}
