@@ -290,10 +290,38 @@ pub async fn import_snapshot(
         // Verify that the extracted snapshot content matches what the Mithril
         // signers actually certified. This re-hashes all immutable files and
         // checks the digest against the certificate's signed message.
+        // On mainnet this can take 10-30+ minutes depending on disk speed.
+        let file_count = find_immutable_dir(&extract_dir)
+            .and_then(|d| fs::read_dir(d).ok())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        info!(
+            files = file_count,
+            "Verifying snapshot content against certificate (hashing all immutable files)..."
+        );
+
+        // Spawn a periodic heartbeat so the user knows the process isn't stuck.
+        let heartbeat = tokio::spawn(async {
+            let start = std::time::Instant::now();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.tick().await; // consume the immediate first tick
+            loop {
+                interval.tick().await;
+                let elapsed = start.elapsed();
+                info!(
+                    elapsed_secs = elapsed.as_secs(),
+                    "Still hashing immutable files ({:.0}s elapsed)...",
+                    elapsed.as_secs() as f64
+                );
+            }
+        });
+
         let message = mithril_client::MessageBuilder::new()
             .compute_snapshot_message(&certificate, &extract_dir)
             .await
             .context("Failed to compute snapshot message from extracted files")?;
+
+        heartbeat.abort();
 
         if !certificate.match_message(&message) {
             anyhow::bail!(
